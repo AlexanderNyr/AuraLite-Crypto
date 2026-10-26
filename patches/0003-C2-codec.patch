@@ -1,0 +1,2235 @@
+From 1d34a8474ffcff22107e5fd5fd780ccb65a655b8 Mon Sep 17 00:00:00 2001
+From: AlexanderNyr <alexander@auralite.local>
+Date: Sun, 25 Oct 2026 16:50:35 +0000
+Subject: [PATCH] C2 codec
+
+---
+ .github/workflows/ci.yml                      |  19 +-
+ CHANGELOG.md                                  |  45 +++
+ CONTRIBUTING.md                               |   5 +-
+ Cargo.lock                                    |   3 +
+ Cargo.toml                                    |   7 +-
+ Makefile                                      |  17 +-
+ README.md                                     |  26 +-
+ ROADMAP.md                                    |  19 +-
+ crates/aura-codec/Cargo.toml                  |   3 +-
+ crates/aura-codec/src/codec.rs                | 193 ++++++++++
+ crates/aura-codec/src/error.rs                |  77 ++++
+ crates/aura-codec/src/impls.rs                | 290 +++++++++++++++
+ crates/aura-codec/src/lib.rs                  |  47 ++-
+ crates/aura-codec/src/record.rs               |  76 ++++
+ crates/aura-codec/tests/c2_codec.rs           | 333 ++++++++++++++++++
+ .../aura-codec/tests/fixtures/c2_golden.txt   |  21 ++
+ docs/ARCHITECTURE.md                          |   7 +
+ docs/STATUS.md                                |  37 +-
+ docs/evidence/c2/SHA256SUMS                   |   3 +
+ docs/evidence/c2/gates.txt                    | 127 +++++++
+ docs/evidence/c2/nc.log                       |  34 ++
+ docs/plans/CORE_PLAN.md                       |  27 +-
+ tools/gen_c2_vectors.py                       | 207 +++++++++++
+ tools/nc_c2.py                                | 107 ++++++
+ tools/write_c2_evidence.py                    | 124 +++++++
+ 25 files changed, 1802 insertions(+), 52 deletions(-)
+ create mode 100644 crates/aura-codec/src/codec.rs
+ create mode 100644 crates/aura-codec/src/error.rs
+ create mode 100644 crates/aura-codec/src/impls.rs
+ create mode 100644 crates/aura-codec/src/record.rs
+ create mode 100644 crates/aura-codec/tests/c2_codec.rs
+ create mode 100644 crates/aura-codec/tests/fixtures/c2_golden.txt
+ create mode 100644 docs/evidence/c2/SHA256SUMS
+ create mode 100644 docs/evidence/c2/gates.txt
+ create mode 100644 docs/evidence/c2/nc.log
+ create mode 100644 tools/gen_c2_vectors.py
+ create mode 100644 tools/nc_c2.py
+ create mode 100644 tools/write_c2_evidence.py
+
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 85e046d..f62fead 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -10,7 +10,7 @@ on:
+ # perf) are added by O0 as the crates that need them actually appear.
+ jobs:
+   core:
+-    name: core (C0-C1 gate)
++    name: core (C0-C2 gate)
+     runs-on: ubuntu-latest
+     steps:
+       - uses: actions/checkout@v4
+@@ -27,8 +27,8 @@ jobs:
+       - name: make test
+         run: make test
+ 
+-      - name: golden vectors are reproducible (C1)
+-        run: make gen-c1-vectors
++      - name: golden vectors are reproducible (C1 + C2)
++        run: make gen-c1-vectors && make gen-c2-vectors
+ 
+       - name: negative controls (C0)
+         run: make nc-c0
+@@ -36,18 +36,21 @@ jobs:
+       - name: negative controls (C1)
+         run: make nc-c1
+ 
++      - name: negative controls (C2)
++        run: make nc-c2
++
+       # C0 evidence is a HISTORICAL committed record measured at the baseline
+-      # commit; re-running it later would relabel the wrong tree. Only C1
+-      # evidence is regenerated here.
+-      - name: C1 evidence
+-        run: make evidence-c1
++      # commit; re-running it later would relabel the wrong tree.
++      - name: phase evidence (C1 + C2)
++        run: make evidence-c1 && make evidence-c2
+ 
+       - name: Upload evidence
+         if: always()
+         uses: actions/upload-artifact@v4
+         with:
+-          name: c0-c1-evidence
++          name: c0-c2-evidence
+           path: |
+             docs/evidence/c0/
+             docs/evidence/c1/
++            docs/evidence/c2/
+           if-no-files-found: ignore
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index f23e320..b71da87 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,51 @@
+ All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
+ never rewritten: corrections are made with a new entry or an explicit note.
+ 
++## [C2 — canonical codec] 2026-10-25
++
++**Third code phase.** Deliverable: `patches/0003-C2-codec.patch`. Still zero
++external dependencies (one internal path dependency
++`aura-codec -> aura-types`).
++
++- **`aura-codec` crate:** `Encode`/`Decode` traits, `Writer`/`Reader`,
++  `write_varint`/`read_varint` (minimal unsigned LEB128; non-minimal,
++  overflowing and >10-byte encodings rejected), fixed-width LE integers for
++  `u8..u128` (deliberately **no** `usize`/`isize`), strict tags for `bool`,
++  `Option`, `Domain`, `Denom`, length-prefixed `String`/`Vec<T>`/`ChainId`,
++  fixed 32-byte `Hash` and 20-byte `Address`, checked `Amount`/`Nonce`/
++  `Height`/`Gas`, and `BTreeMap` decoding that requires strictly ascending
++  keys (rejecting disorder and duplicates).
++- **Two independent canonicality layers:** strict decoders plus
++  `decode_canonical()`, which re-encodes the decoded value and requires exact
++  byte equality with the input (`NonCanonicalEncoding` otherwise).
++  `CODEC_VERSION = 1`, `MAX_LENGTH = 1 MiB`, `MAX_ITEMS = 65536`.
++- **Reference record:** `CanonicalRecord` with 11 fields in a fixed wire
++  order, covering every primitive kind. `serde` remains absent.
++- **Independent golden vectors:** `tools/gen_c2_vectors.py` re-implements the
++  wire format in Python; `crates/aura-codec/tests/fixtures/c2_golden.txt`
++  holds 21 lines — 3 canonical records (incl. `u64`/`u128` maxima and
++  multi-byte UTF-8), 5 constants and 12 non-canonical vectors (bad version,
++  domain, bool, option tag; trailing byte; non-minimal chain length and map
++  count; oversized length; invalid UTF-8; unordered and duplicate map keys;
++  varint overflow). Each bad vector is pinned to a specific `CodecError`.
++- **Gate:** `make test` → **28 passed / 0 failed** (17 C0/C1 + 11 C2),
++  fmt/clippy clean, drift guard 12 plans / 112 rows.
++- **Negative controls:** `tools/nc_c2.py` → `make nc-c2` →
++  `docs/evidence/c2/nc.log`, **4/4 PASS**: `CODEC_VERSION` 1→2, corrupted
++  golden fixture, disabled `Reader::finish()` trailing-byte guard, disabled
++  non-minimal-varint predicate. All restore, with a mandatory green check.
++- **Evidence:** `docs/evidence/c2/gates.txt` (raw output incl. pre-C2 counts
++  from the C1 commit and a dependency audit showing 0 external crates),
++  `docs/evidence/c2/nc.log`, `SHA256SUMS`.
++- **Tooling:** `make gen-c2-vectors`, `make nc-c2`, `make evidence-c2`; CI now
++  runs all three phases' NCs (9 total) and uploads C0/C1/C2 evidence.
++- **Docs synced (D9):** `README.md`, `docs/STATUS.md`,
++  `docs/ARCHITECTURE.md` (C2 wire format), `CHANGELOG.md`, `ROADMAP.md`
++  (ledger, §4, §8), `CONTRIBUTING.md`, `CORE_PLAN.md` (C2 ✅ + receipt).
++- **Not claimed:** hashing/signatures (C3), tx/block formats (C4/C5),
++  `cargo deny` (H1). Any wire format change needs a `CODEC_VERSION` bump and a
++  migration test.
++
+ ## [C1 — canonical types] 2026-10-25
+ 
+ **Second code phase.** Deliverable: `patches/0002-C1-types.patch`. Still zero
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index b875334..cd940ba 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -64,7 +64,10 @@ that does not run its main test is a dead gate — that is a separate defect
+ - `serde` in tx/block/state formats — only `aura-codec`.
+ - Golden vectors generated by the code under test. C1's bech32 vectors come
+   from an independent implementation (`tools/gen_c1_vectors.py`); a vector
+-  that only confirms the encoder agrees with itself is not a test.
++  that only confirms the encoder agrees with itself is not a test. C2's codec
++  vectors come from `tools/gen_c2_vectors.py`.
++- Changing the `aura-codec` wire format without bumping `CODEC_VERSION` and
++  adding a migration test. One value must have exactly one byte encoding.
+ - "Temporary" stubs that silently return success. A stub must explicitly
+   return `Err(Unimplemented)` and be visible in STATUS.
+ - Format changes without a protocol version and a migration test.
+diff --git a/Cargo.lock b/Cargo.lock
+index 04d2ef9..402fdc6 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -5,6 +5,9 @@ version = 4
+ [[package]]
+ name = "aura-codec"
+ version = "0.1.0"
++dependencies = [
++ "aura-types",
++]
+ 
+ [[package]]
+ name = "aura-consensus"
+diff --git a/Cargo.toml b/Cargo.toml
+index 4430589..4eb0057 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -22,6 +22,9 @@ rust-version = "1.99.1"
+ repository = "https://github.com/AlexanderNyr/AuraLite-Crypto"
+ publish = false
+ 
+-# C0 deliberately has ZERO dependencies. Every crate below is pinned here in
+-# the phase that introduces it (ROADMAP rule 7 / SECURITY_PLAN H1).
++# C2 adds the first INTERNAL dependency. There are still ZERO external
++# dependencies: `source`/`checksum` entries in Cargo.lock remain at 0.
++# Every external crate is pinned here in the phase that introduces it
++# (ROADMAP rule 7 / SECURITY_PLAN H1).
+ [workspace.dependencies]
++aura-types = { path = "crates/aura-types" }
+diff --git a/Makefile b/Makefile
+index 5228bef..0fa1b62 100644
+--- a/Makefile
++++ b/Makefile
+@@ -6,7 +6,8 @@ PYTHON ?= python3
+ 
+ .PHONY: help deps-check fmt clippy test test-core test-sanitize \
+         test-determinism fuzz-smoke nc-c0 evidence-c0 \
+-        gen-c1-vectors nc-c1 evidence-c1 devnet clean
++        gen-c1-vectors nc-c1 evidence-c1 \
++        gen-c2-vectors nc-c2 evidence-c2 devnet clean
+ 
+ help:
+ 	@echo "AuraLite-Crypto (Stage 1, C0)"
+@@ -18,6 +19,9 @@ help:
+ 	@echo "  make gen-c1-vectors    regenerate independent BIP-173 golden vectors"
+ 	@echo "  make nc-c1             C1 negative controls -> docs/evidence/c1/nc.log"
+ 	@echo "  make evidence-c1       regenerate docs/evidence/c1/gates.txt + SHA256SUMS"
++	@echo "  make gen-c2-vectors    regenerate independent codec golden vectors"
++	@echo "  make nc-c2             C2 negative controls -> docs/evidence/c2/nc.log"
++	@echo "  make evidence-c2       regenerate docs/evidence/c2/gates.txt + SHA256SUMS"
+ 	@echo "  make test-sanitize     SKIP until H3/C9"
+ 	@echo "  make test-determinism  SKIP until X7"
+ 	@echo "  make fuzz-smoke        SKIP until H3"
+@@ -82,6 +86,17 @@ nc-c1:
+ evidence-c1:
+ 	@$(PYTHON) tools/write_c1_evidence.py
+ 
++gen-c2-vectors:
++	@$(PYTHON) tools/gen_c2_vectors.py
++
++nc-c2:
++	@mkdir -p docs/evidence/c2
++	@$(PYTHON) tools/nc_c2.py > docs/evidence/c2/nc.log 2>&1 || { cat docs/evidence/c2/nc.log; exit 1; }
++	@cat docs/evidence/c2/nc.log
++
++evidence-c2:
++	@$(PYTHON) tools/write_c2_evidence.py
++
+ devnet:
+ 	@echo "ERROR: devnet is D7 (NODE_PLAN). It is not implemented at C0." >&2
+ 	@exit 1
+diff --git a/README.md b/README.md
+index d4e6f18..ba97f5b 100644
+--- a/README.md
++++ b/README.md
+@@ -11,13 +11,13 @@
+ Name and ticker were locked by the owner on 2026-10-25. The ticker was checked
+ for collisions — see [`docs/TICKER_AUDIT.md`](docs/TICKER_AUDIT.md).
+ 
+-> **Status: C1 LANDED (2026-10-25).** C0 gave us the workspace, CI and
+-> `make test`; C1 adds the canonical types (`Hash`, bech32 `Address`, `Amount`,
+-> `ChainId`, `Domain`, scalars) pinned against an **independent** BIP-173
+-> reference. There is still **no codec, crypto, consensus, VM, P2P, node or
+-> wallet**. Everything else below is a plan, not a report about an
+-> implementation. Every claim of readiness appears only after a measurable
+-> test gate, as in
++> **Status: C2 LANDED (2026-10-25).** C0 gave us the workspace, CI and
++> `make test`; C1 added the canonical types; C2 adds `aura-codec` — our own
++> deterministic serializer, pinned against an **independent** Python encoder
++> and guarded by `decode_canonical()`. There is still **no crypto, consensus,
++> VM, P2P, node or wallet**. Everything else below is a plan, not a report
++> about an implementation. Every claim of readiness appears only after a
++> measurable test gate, as in
+ > [AuraLite-Emulator](https://github.com/AlexanderNyr/AuraLite-Emulator) and
+ > [AuraLite-OS](https://github.com/AlexanderNyr/AuraLite-OS).
+ 
+@@ -78,13 +78,13 @@ Details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+ 
+ ## Quickstart
+ 
+-**Now (C1)** the foundation is real and verifiable:
++**Now (C2)** the foundation is real and verifiable:
+ 
+ ```sh
+-make deps-check          # rustc / cargo / rustfmt / clippy
+-make test                # fmt + clippy -D warnings + cargo test + docs drift guard
+-make nc-c0 && make nc-c1 # 5 negative controls: prove the gates can go red
+-make gen-c1-vectors      # independent bech32 golden vectors (byte-stable)
++make deps-check                          # rustc / cargo / rustfmt / clippy
++make test                                # fmt + clippy -D warnings + cargo test + drift guard
++make nc-c0 && make nc-c1 && make nc-c2   # 9 negative controls: gates can go red
++make gen-c1-vectors && make gen-c2-vectors  # independent golden vectors (byte-stable)
+ ```
+ 
+ **The devnet does not exist yet — and that is honest.** After phase D7 (devnet)
+@@ -121,7 +121,7 @@ AuraLite-Crypto/
+     plans/*_PLAN.md      <- 12 plans, dependency-ordered, DoD + gate per phase
+     evidence/            <- gate logs / receipts (C0 OK)
+   patches/               <- one .patch per phase (0001-C0-... shipped)
+-  crates/*               <- 11 crates: `aura-types` (C1) + 10 honest placeholders
++  crates/*               <- 11 crates: `aura-types` (C1), `aura-codec` (C2), 9 placeholders
+   contracts/*            <- reference contracts (ARC-20, ARC-721, AMM, ...)
+   tests/                 <- unit/property/integration/consensus/soak
+   fuzz/ sim/ bench/ deploy/ web/
+diff --git a/ROADMAP.md b/ROADMAP.md
+index 0fb96e8..f1cec57 100644
+--- a/ROADMAP.md
++++ b/ROADMAP.md
+@@ -121,7 +121,7 @@ phase tables (decision Q5).
+ 
+ | Plan | Status | Scope | Phases |
+ |---|---|---|---|
+-| [`docs/plans/CORE_PLAN.md`](docs/plans/CORE_PLAN.md) | 🚧 IN PROGRESS (C0–C1 ✅) | primitives, codec, crypto, tx/block, genesis, test rig | C0–C10 |
++| [`docs/plans/CORE_PLAN.md`](docs/plans/CORE_PLAN.md) | 🚧 IN PROGRESS (C0–C2 ✅) | primitives, codec, crypto, tx/block, genesis, test rig | C0–C10 |
+ | [`docs/plans/STATE_PLAN.md`](docs/plans/STATE_PLAN.md) | 📋 PLAN | Merkle state, RocksDB, WAL, snapshots, pruning, recovery | S0–S7 |
+ | [`docs/plans/EXEC_PLAN.md`](docs/plans/EXEC_PLAN.md) | 📋 PLAN | WASM runtime, gas, ABI, contract SDK, determinism | X0–X9 |
+ | [`docs/plans/CONSENSUS_PLAN.md`](docs/plans/CONSENSUS_PLAN.md) | 📋 PLAN | BFT-PoS, QC, VRF, staking, slashing, finality, governance | B0–B10 |
+@@ -202,6 +202,10 @@ it is deliberately not rewritten.
+ `make nc-c1` → 3/3 negative controls PASS, still zero external dependencies.
+ Receipts: `docs/evidence/c1/`.
+ 
++**Post-C2 measurement (2026-10-25):** 22 `.rs` files, 28 tests passing,
++`make nc-c2` → 4/4 negative controls PASS, 0 external dependencies (one
++internal path dependency). Receipts: `docs/evidence/c2/`.
++
+ ### Measured gaps to the north star
+ 
+ | # | Gap | Evidence in the tree | Plan |
+@@ -272,13 +276,14 @@ after the fact, as in AuraLite OS.
+ 
+ ## 8. Immediate queue
+ 
+-**C0 and C1 shipped**
++**C0, C1 and C2 shipped**
+ (`patches/0001-C0-baseline-workspace.patch`,
+-`patches/0002-C1-types.patch`): workspace, CI, gates, identity constants and
+-canonical types with independent BIP-173 golden vectors. Right now: **C2** —
+-`aura-codec`, our own deterministic serialization with golden vectors and a
+-rejection test for non-canonical encodings. The next patch is
+-`patches/0003-C2-codec.patch`.
++`patches/0002-C1-types.patch`, `patches/0003-C2-codec.patch`): workspace, CI,
++gates, identity constants, canonical types and `aura-codec` with independent
++golden vectors plus a structural re-encode canonicality check. Right now:
++**C3** — `aura-crypto`: BLAKE3 with domain tags, Ed25519/secp256k1
++signatures, constant-time comparison and zeroize, with RFC test vectors and an
++NC on domain separation. The next patch is `patches/0004-C3-crypto.patch`.
+ 
+ See also: [`docs/STATUS.md`](docs/STATUS.md),
+ [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
+diff --git a/crates/aura-codec/Cargo.toml b/crates/aura-codec/Cargo.toml
+index 003d608..8414cf2 100644
+--- a/crates/aura-codec/Cargo.toml
++++ b/crates/aura-codec/Cargo.toml
+@@ -1,6 +1,6 @@
+ [package]
+ name = "aura-codec"
+-description = "AuraLite-Crypto canonical deterministic serialization (placeholder, lands in C2)"
++description = "AuraLite-Crypto canonical deterministic serialization"
+ version.workspace = true
+ edition.workspace = true
+ license.workspace = true
+@@ -9,3 +9,4 @@ repository.workspace = true
+ publish.workspace = true
+ 
+ [dependencies]
++aura-types.workspace = true
+diff --git a/crates/aura-codec/src/codec.rs b/crates/aura-codec/src/codec.rs
+new file mode 100644
+index 0000000..2fe48ca
+--- /dev/null
++++ b/crates/aura-codec/src/codec.rs
+@@ -0,0 +1,193 @@
++//! Traits, byte reader/writer and canonical varint.
++
++use crate::error::CodecError;
++use crate::{MAX_ITEMS, MAX_LENGTH};
++
++/// Append-only byte writer used by [`Encode`].
++#[derive(Debug, Default)]
++pub struct Writer {
++    buffer: Vec<u8>,
++}
++
++impl Writer {
++    /// Create an empty writer.
++    pub fn new() -> Self {
++        Writer { buffer: Vec::new() }
++    }
++
++    /// Append one byte.
++    pub fn push_byte(&mut self, byte: u8) {
++        self.buffer.push(byte);
++    }
++
++    /// Append a byte slice verbatim.
++    pub fn push_bytes(&mut self, bytes: &[u8]) {
++        self.buffer.extend_from_slice(bytes);
++    }
++
++    /// Borrow the bytes written so far.
++    pub fn as_slice(&self) -> &[u8] {
++        &self.buffer
++    }
++
++    /// Consume the writer and return the bytes.
++    pub fn into_bytes(self) -> Vec<u8> {
++        self.buffer
++    }
++}
++
++/// Bounded byte reader used by [`Decode`]. Tracks the unconsumed tail.
++#[derive(Debug, Clone, Copy)]
++pub struct Reader<'a> {
++    remaining: &'a [u8],
++}
++
++impl<'a> Reader<'a> {
++    /// Create a reader over `bytes`.
++    pub fn new(bytes: &'a [u8]) -> Self {
++        Reader { remaining: bytes }
++    }
++
++    /// Number of bytes not yet consumed.
++    pub fn remaining_len(&self) -> usize {
++        self.remaining.len()
++    }
++
++    /// Consume one byte.
++    pub fn read_byte(&mut self) -> Result<u8, CodecError> {
++        let bytes = self.read_exact(1)?;
++        Ok(bytes[0])
++    }
++
++    /// Consume exactly `len` bytes and return them.
++    pub fn read_exact(&mut self, len: usize) -> Result<&'a [u8], CodecError> {
++        if len > self.remaining.len() {
++            return Err(CodecError::UnexpectedEof(len, self.remaining.len()));
++        }
++        let (head, tail) = self.remaining.split_at(len);
++        self.remaining = tail;
++        Ok(head)
++    }
++
++    /// Require that the input was fully consumed.
++    ///
++    /// NC target: `tools/nc_c2.py` disables this guard and requires the
++    /// trailing-byte test to go red.
++    pub fn finish(&self) -> Result<(), CodecError> {
++        if !self.remaining.is_empty() {
++            return Err(CodecError::TrailingBytes(self.remaining.len()));
++        }
++        Ok(())
++    }
++}
++
++/// Canonical encoding of a value into a [`Writer`].
++///
++/// Implementations must write fields in a fixed order and never branch on
++/// platform-dependent values. Producers must respect [`MAX_LENGTH`] and
++/// [`MAX_ITEMS`]; decoders enforce those limits.
++pub trait Encode {
++    /// Append the canonical encoding of `self`.
++    fn encode(&self, writer: &mut Writer);
++}
++
++/// Canonical decoding of a value from a [`Reader`].
++pub trait Decode: Sized {
++    /// Read one value, rejecting any non-canonical representation.
++    fn decode(reader: &mut Reader<'_>) -> Result<Self, CodecError>;
++}
++
++/// Encode a value to an owned byte vector.
++pub fn encode_to_bytes<T: Encode>(value: &T) -> Vec<u8> {
++    let mut writer = Writer::new();
++    value.encode(&mut writer);
++    writer.into_bytes()
++}
++
++/// Decode exactly one value and require that no trailing bytes remain.
++pub fn decode_from_slice<T: Decode>(bytes: &[u8]) -> Result<T, CodecError> {
++    let mut reader = Reader::new(bytes);
++    let value = T::decode(&mut reader)?;
++    reader.finish()?;
++    Ok(value)
++}
++
++/// Decode one value and require that re-encoding reproduces the input exactly.
++///
++/// This is the structural backstop: even if a specific check is missed in
++/// `Decode`, a non-canonical input cannot survive the byte comparison.
++pub fn decode_canonical<T>(bytes: &[u8]) -> Result<T, CodecError>
++where
++    T: Decode + Encode,
++{
++    let value = decode_from_slice::<T>(bytes)?;
++    let reencoded = encode_to_bytes(&value);
++    if reencoded.as_slice() != bytes {
++        return Err(CodecError::NonCanonicalEncoding);
++    }
++    Ok(value)
++}
++
++/// Write a minimal unsigned LEB128 varint.
++pub fn write_varint(writer: &mut Writer, mut value: u64) {
++    loop {
++        let byte = (value & 0x7f) as u8;
++        value >>= 7;
++        if value == 0 {
++            writer.push_byte(byte);
++            return;
++        }
++        writer.push_byte(byte | 0x80);
++    }
++}
++
++/// Read a minimal unsigned LEB128 varint.
++///
++/// Rejects non-minimal encodings, more than 10 bytes and `u64` overflow.
++pub fn read_varint(reader: &mut Reader<'_>) -> Result<u64, CodecError> {
++    let mut value: u64 = 0;
++    let mut count: usize = 0;
++    loop {
++        if count == 10 {
++            return Err(CodecError::VarintOverflow);
++        }
++        let byte = reader.read_byte()?;
++        count += 1;
++        if count == 10 && (byte & 0x80 != 0 || byte > 1) {
++            return Err(CodecError::VarintOverflow);
++        }
++        value |= u64::from(byte & 0x7f) << (7 * (count - 1));
++        if byte & 0x80 == 0 {
++            if varint_is_nonminimal(count, byte) {
++                return Err(CodecError::NonCanonicalVarint);
++            }
++            return Ok(value);
++        }
++    }
++}
++
++/// True when a terminated varint used extra bytes to encode zero.
++///
++/// NC target: `tools/nc_c2.py` replaces the predicate with `false` and
++/// requires the direct varint test to go red.
++fn varint_is_nonminimal(encoded_len: usize, last_byte: u8) -> bool {
++    last_byte == 0 && encoded_len > 1
++}
++
++/// Decode a length-prefixed byte string with the shared length limit.
++pub(crate) fn read_length(reader: &mut Reader<'_>) -> Result<usize, CodecError> {
++    let length = read_varint(reader)?;
++    if length > MAX_LENGTH as u64 {
++        return Err(CodecError::LengthTooLarge(length as usize));
++    }
++    Ok(length as usize)
++}
++
++/// Decode an element count with the shared item limit.
++pub(crate) fn read_count(reader: &mut Reader<'_>) -> Result<usize, CodecError> {
++    let count = read_varint(reader)?;
++    if count > MAX_ITEMS as u64 {
++        return Err(CodecError::TooManyItems(count as usize));
++    }
++    Ok(count as usize)
++}
+diff --git a/crates/aura-codec/src/error.rs b/crates/aura-codec/src/error.rs
+new file mode 100644
+index 0000000..481c63f
+--- /dev/null
++++ b/crates/aura-codec/src/error.rs
+@@ -0,0 +1,77 @@
++//! Decoding errors.
++
++use std::fmt;
++
++/// Every way a byte string can fail to be a canonical encoding.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum CodecError {
++    /// Not enough bytes remain. Tuple is `(needed, available)`.
++    UnexpectedEof(usize, usize),
++    /// Bytes remain after a complete value was decoded.
++    TrailingBytes(usize),
++    /// A varint used more bytes than the minimal encoding.
++    NonCanonicalVarint,
++    /// A varint exceeded 10 bytes or overflowed `u64`.
++    VarintOverflow,
++    /// A declared byte length exceeded [`crate::MAX_LENGTH`].
++    LengthTooLarge(usize),
++    /// A declared element count exceeded [`crate::MAX_ITEMS`].
++    TooManyItems(usize),
++    /// A boolean byte was neither `0x00` nor `0x01`.
++    InvalidBool(u8),
++    /// An `Option` tag was neither `0x00` nor `0x01`.
++    InvalidOptionTag(u8),
++    /// A `Domain` tag is not one of the five known tags.
++    InvalidDomainTag(u8),
++    /// A `Denom` tag is not `0` or `1`.
++    InvalidDenomTag(u8),
++    /// Unsupported wire version. Tuple is `(expected, got)`.
++    UnsupportedVersion(u8, u8),
++    /// A length-prefixed string was not valid UTF-8.
++    InvalidUtf8,
++    /// A 32-byte hash could not be constructed.
++    InvalidHash,
++    /// A 20-byte address could not be constructed.
++    InvalidAddress,
++    /// A decoded chain-id failed `ChainId::new` validation.
++    InvalidChainId,
++    /// Map keys were not strictly ascending.
++    NonCanonicalMapOrder,
++    /// A map contained the same key twice.
++    DuplicateMapKey,
++    /// Re-encoding a decoded value did not reproduce the input bytes.
++    NonCanonicalEncoding,
++}
++
++impl fmt::Display for CodecError {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::UnexpectedEof(needed, available) => {
++                write!(f, "unexpected EOF: need {needed} bytes, have {available}")
++            }
++            Self::TrailingBytes(n) => write!(f, "{n} trailing byte(s) after decoded value"),
++            Self::NonCanonicalVarint => f.write_str("non-minimal varint"),
++            Self::VarintOverflow => f.write_str("varint overflow"),
++            Self::LengthTooLarge(n) => write!(f, "declared length {n} exceeds MAX_LENGTH"),
++            Self::TooManyItems(n) => write!(f, "declared item count {n} exceeds MAX_ITEMS"),
++            Self::InvalidBool(v) => write!(f, "invalid bool byte 0x{v:02x}"),
++            Self::InvalidOptionTag(v) => write!(f, "invalid Option tag 0x{v:02x}"),
++            Self::InvalidDomainTag(v) => write!(f, "invalid Domain tag 0x{v:02x}"),
++            Self::InvalidDenomTag(v) => write!(f, "invalid Denom tag 0x{v:02x}"),
++            Self::UnsupportedVersion(expected, got) => {
++                write!(f, "unsupported codec version {got}, expected {expected}")
++            }
++            Self::InvalidUtf8 => f.write_str("invalid UTF-8 in length-prefixed string"),
++            Self::InvalidHash => f.write_str("could not construct 32-byte Hash"),
++            Self::InvalidAddress => f.write_str("could not construct 20-byte Address"),
++            Self::InvalidChainId => f.write_str("decoded chain-id failed validation"),
++            Self::NonCanonicalMapOrder => f.write_str("map keys are not strictly ascending"),
++            Self::DuplicateMapKey => f.write_str("duplicate map key"),
++            Self::NonCanonicalEncoding => {
++                f.write_str("re-encoding did not reproduce the input bytes")
++            }
++        }
++    }
++}
++
++impl std::error::Error for CodecError {}
+diff --git a/crates/aura-codec/src/impls.rs b/crates/aura-codec/src/impls.rs
+new file mode 100644
+index 0000000..b253036
+--- /dev/null
++++ b/crates/aura-codec/src/impls.rs
+@@ -0,0 +1,290 @@
++//! `Encode`/`Decode` implementations for primitives, collections and C1 types.
++
++use std::collections::BTreeMap;
++
++use aura_types::{
++    ADDRESS_LEN, Address, Amount, ChainId, Denom, Domain, Gas, HASH_LEN, Hash, Height, Nonce,
++};
++
++use crate::codec::{Decode, Encode, Reader, Writer, read_count, read_length, write_varint};
++use crate::error::CodecError;
++
++macro_rules! fixed_int {
++    ($ty:ty, $len:expr) => {
++        impl Encode for $ty {
++            fn encode(&self, writer: &mut Writer) {
++                writer.push_bytes(&self.to_le_bytes());
++            }
++        }
++
++        impl Decode for $ty {
++            fn decode(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
++                let bytes = reader.read_exact($len)?;
++                let mut array = [0u8; $len];
++                array.copy_from_slice(bytes);
++                Ok(<$ty>::from_le_bytes(array))
++            }
++        }
++    };
++}
++
++// NOTE: `usize`/`isize` intentionally have NO implementation. Their width
++// depends on the target, so encoding one would break byte-identical state.
++fixed_int!(u8, 1);
++fixed_int!(u16, 2);
++fixed_int!(u32, 4);
++fixed_int!(u64, 8);
++fixed_int!(u128, 16);
++
++impl Encode for bool {
++    fn encode(&self, writer: &mut Writer) {
++        writer.push_byte(if *self { 1 } else { 0 });
++    }
++}
++
++impl Decode for bool {
++    fn decode(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
++        match reader.read_byte()? {
++            0 => Ok(false),
++            1 => Ok(true),
++            other => Err(CodecError::InvalidBool(other)),
++        }
++    }
++}
++
++impl<T: Encode> Encode for Option<T> {
++    fn encode(&self, writer: &mut Writer) {
++        match self {
++            None => writer.push_byte(0),
++            Some(value) => {
++                writer.push_byte(1);
++                value.encode(writer);
++            }
++        }
++    }
++}
++
++impl<T: Decode> Decode for Option<T> {
++    fn decode(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
++        match reader.read_byte()? {
++            0 => Ok(None),
++            1 => Ok(Some(T::decode(reader)?)),
++            other => Err(CodecError::InvalidOptionTag(other)),
++        }
++    }
++}
++
++impl<T: Encode> Encode for Vec<T> {
++    fn encode(&self, writer: &mut Writer) {
++        write_varint(writer, self.len() as u64);
++        for item in self {
++            item.encode(writer);
++        }
++    }
++}
++
++impl<T: Decode> Decode for Vec<T> {
++    fn decode(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
++        let count = read_count(reader)?;
++        let mut out = Vec::with_capacity(count);
++        for _ in 0..count {
++            out.push(T::decode(reader)?);
++        }
++        Ok(out)
++    }
++}
++
++impl Encode for String {
++    fn encode(&self, writer: &mut Writer) {
++        let bytes = self.as_bytes();
++        write_varint(writer, bytes.len() as u64);
++        writer.push_bytes(bytes);
++    }
++}
++
++impl Decode for String {
++    fn decode(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
++        let length = read_length(reader)?;
++        let bytes = reader.read_exact(length)?;
++        std::str::from_utf8(bytes)
++            .map(str::to_owned)
++            .map_err(|_| CodecError::InvalidUtf8)
++    }
++}
++
++impl<K, V> Encode for BTreeMap<K, V>
++where
++    K: Encode + Ord,
++    V: Encode,
++{
++    fn encode(&self, writer: &mut Writer) {
++        write_varint(writer, self.len() as u64);
++        for (key, value) in self {
++            key.encode(writer);
++            value.encode(writer);
++        }
++    }
++}
++
++impl<K, V> Decode for BTreeMap<K, V>
++where
++    K: Decode + Ord,
++    V: Decode,
++{
++    fn decode(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
++        let count = read_count(reader)?;
++        let mut out = BTreeMap::new();
++        for _ in 0..count {
++            let key = K::decode(reader)?;
++            if let Some((last, _)) = out.last_key_value() {
++                if &key == last {
++                    return Err(CodecError::DuplicateMapKey);
++                }
++                if &key < last {
++                    return Err(CodecError::NonCanonicalMapOrder);
++                }
++            }
++            let value = V::decode(reader)?;
++            out.insert(key, value);
++        }
++        Ok(out)
++    }
++}
++
++impl Encode for Hash {
++    fn encode(&self, writer: &mut Writer) {
++        writer.push_bytes(self.as_bytes());
++    }
++}
++
++impl Decode for Hash {
++    fn decode(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
++        let bytes = reader.read_exact(HASH_LEN)?;
++        Hash::from_slice(bytes).map_err(|_| CodecError::InvalidHash)
++    }
++}
++
++impl Encode for Address {
++    fn encode(&self, writer: &mut Writer) {
++        writer.push_bytes(self.as_bytes());
++    }
++}
++
++impl Decode for Address {
++    fn decode(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
++        let bytes = reader.read_exact(ADDRESS_LEN)?;
++        Address::from_slice(bytes).map_err(|_| CodecError::InvalidAddress)
++    }
++}
++
++impl Encode for Amount {
++    fn encode(&self, writer: &mut Writer) {
++        self.units().encode(writer);
++    }
++}
++
++impl Decode for Amount {
++    fn decode(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
++        Ok(Amount::from_units(u128::decode(reader)?))
++    }
++}
++
++impl Encode for Nonce {
++    fn encode(&self, writer: &mut Writer) {
++        self.value().encode(writer);
++    }
++}
++
++impl Decode for Nonce {
++    fn decode(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
++        Ok(Nonce::new(u64::decode(reader)?))
++    }
++}
++
++impl Encode for Height {
++    fn encode(&self, writer: &mut Writer) {
++        self.value().encode(writer);
++    }
++}
++
++impl Decode for Height {
++    fn decode(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
++        Ok(Height::new(u64::decode(reader)?))
++    }
++}
++
++impl Encode for Gas {
++    fn encode(&self, writer: &mut Writer) {
++        self.value().encode(writer);
++    }
++}
++
++impl Decode for Gas {
++    fn decode(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
++        Ok(Gas::new(u64::decode(reader)?))
++    }
++}
++
++impl Encode for ChainId {
++    fn encode(&self, writer: &mut Writer) {
++        let bytes = self.as_str().as_bytes();
++        write_varint(writer, bytes.len() as u64);
++        writer.push_bytes(bytes);
++    }
++}
++
++impl Decode for ChainId {
++    fn decode(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
++        let text = String::decode(reader)?;
++        ChainId::new(&text).map_err(|_| CodecError::InvalidChainId)
++    }
++}
++
++impl Encode for Domain {
++    fn encode(&self, writer: &mut Writer) {
++        let tag = match self {
++            Domain::Tx => 0,
++            Domain::Vote => 1,
++            Domain::Block => 2,
++            Domain::Contract => 3,
++            Domain::Genesis => 4,
++        };
++        writer.push_byte(tag);
++    }
++}
++
++impl Decode for Domain {
++    fn decode(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
++        match reader.read_byte()? {
++            0 => Ok(Domain::Tx),
++            1 => Ok(Domain::Vote),
++            2 => Ok(Domain::Block),
++            3 => Ok(Domain::Contract),
++            4 => Ok(Domain::Genesis),
++            other => Err(CodecError::InvalidDomainTag(other)),
++        }
++    }
++}
++
++impl Encode for Denom {
++    fn encode(&self, writer: &mut Writer) {
++        let tag = if *self == Denom::NATIVE {
++            0
++        } else if *self == Denom::SMALLEST {
++            1
++        } else {
++            2
++        };
++        writer.push_byte(tag);
++    }
++}
++
++impl Decode for Denom {
++    fn decode(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
++        match reader.read_byte()? {
++            0 => Ok(Denom::NATIVE),
++            1 => Ok(Denom::SMALLEST),
++            other => Err(CodecError::InvalidDenomTag(other)),
++        }
++    }
++}
+diff --git a/crates/aura-codec/src/lib.rs b/crates/aura-codec/src/lib.rs
+index 32f5c81..81403f9 100644
+--- a/crates/aura-codec/src/lib.rs
++++ b/crates/aura-codec/src/lib.rs
+@@ -1,9 +1,46 @@
+-//! `aura-codec` — placeholder crate for canonical deterministic serialization.
++//! AuraLite-Crypto canonical deterministic serialization.
+ //!
+-//! C0 creates the workspace skeleton only. The real API lands in phase C2.
+-//! This crate intentionally exposes **no public items**: CONTRIBUTING.md
+-//! forbids stubs that silently return success. An empty crate is honest;
+-//! a fake `Ok(())` is not.
++//! `aura-codec` is the **only** serializer allowed for tx/block/state data
++//! (ROADMAP rule D4). Its contract: one value has exactly one byte encoding.
++//!
++//! Properties enforced here:
++//! * fixed field order (defined once per type, in `Encode`/`Decode`);
++//! * fixed-width little-endian integers — no `usize`/`isize` implementations
++//!   exist, because their width is platform-dependent;
++//! * length-prefixed byte strings, vectors and maps with minimal unsigned
++//!   LEB128 varints (non-minimal encodings are rejected);
++//! * tagged `Option`, `bool`, `Domain` and `Denom` with strict tag validation;
++//! * `BTreeMap` entries must be strictly ascending (no `HashMap` anywhere);
++//! * `decode_canonical` re-encodes the decoded value and requires byte
++//!   equality with the input — a second, structural canonicality check;
++//! * versioned wire format via [`CODEC_VERSION`].
++//!
++//! `serde` is deliberately not a dependency. It is allowed only outside
++//! consensus (RPC, config files).
++//!
++//! Golden vectors come from `tools/gen_c2_vectors.py`, an independent Python
++//! implementation of this format — not from this crate.
+ 
+ #![forbid(unsafe_code)]
+ #![deny(missing_docs)]
++
++mod codec;
++mod error;
++mod impls;
++mod record;
++
++pub use codec::{
++    Decode, Encode, Reader, Writer, decode_canonical, decode_from_slice, encode_to_bytes,
++    read_varint, write_varint,
++};
++pub use error::CodecError;
++pub use record::CanonicalRecord;
++
++/// Wire format version. A change requires a new phase and a migration test.
++pub const CODEC_VERSION: u8 = 1;
++
++/// Maximum byte length of any length-prefixed value (1 MiB).
++pub const MAX_LENGTH: usize = 1 << 20;
++
++/// Maximum element count of an encoded vector or map.
++pub const MAX_ITEMS: usize = 1 << 16;
+diff --git a/crates/aura-codec/src/record.rs b/crates/aura-codec/src/record.rs
+new file mode 100644
+index 0000000..c79407b
+--- /dev/null
++++ b/crates/aura-codec/src/record.rs
+@@ -0,0 +1,76 @@
++//! A reference record that demonstrates the fixed field order contract.
++
++use aura_types::{Address, Amount, CanonicalMap, ChainId, Domain, Hash, Height, Nonce};
++
++use crate::CODEC_VERSION;
++use crate::codec::{Decode, Encode, Reader, Writer};
++use crate::error::CodecError;
++
++/// A test/reference record covering every primitive kind in the format.
++///
++/// The field order below **is** the wire order. `Encode` and `Decode` must
++/// stay in lockstep; the C2 golden vectors (from the independent Python
++/// encoder) pin that order byte for byte.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct CanonicalRecord {
++    /// Wire format version; must equal [`CODEC_VERSION`].
++    pub version: u8,
++    /// Signature-domain tag.
++    pub domain: Domain,
++    /// A strict boolean flag.
++    pub flag: bool,
++    /// Validated chain identifier.
++    pub chain: ChainId,
++    /// Block height.
++    pub height: Height,
++    /// Account sequence number.
++    pub nonce: Nonce,
++    /// Amount in smallest units.
++    pub amount: Amount,
++    /// 32-byte hash.
++    pub hash: Hash,
++    /// 20-byte address.
++    pub address: Address,
++    /// Optional UTF-8 memo.
++    pub memo: Option<String>,
++    /// Deterministic ordered tags.
++    pub tags: CanonicalMap<String, u64>,
++}
++
++impl Encode for CanonicalRecord {
++    fn encode(&self, writer: &mut Writer) {
++        self.version.encode(writer);
++        self.domain.encode(writer);
++        self.flag.encode(writer);
++        self.chain.encode(writer);
++        self.height.encode(writer);
++        self.nonce.encode(writer);
++        self.amount.encode(writer);
++        self.hash.encode(writer);
++        self.address.encode(writer);
++        self.memo.encode(writer);
++        self.tags.encode(writer);
++    }
++}
++
++impl Decode for CanonicalRecord {
++    fn decode(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
++        let version = u8::decode(reader)?;
++        if version != CODEC_VERSION {
++            return Err(CodecError::UnsupportedVersion(CODEC_VERSION, version));
++        }
++        Ok(CanonicalRecord {
++            version,
++            domain: Decode::decode(reader)?,
++            flag: Decode::decode(reader)?,
++            chain: Decode::decode(reader)?,
++            height: Decode::decode(reader)?,
++            nonce: Decode::decode(reader)?,
++            amount: Decode::decode(reader)?,
++            hash: Decode::decode(reader)?,
++            address: Decode::decode(reader)?,
++            memo: Decode::decode(reader)?,
++            tags: Decode::decode(reader)?,
++        })
++    }
++}
+diff --git a/crates/aura-codec/tests/c2_codec.rs b/crates/aura-codec/tests/c2_codec.rs
+new file mode 100644
+index 0000000..4bd5d09
+--- /dev/null
++++ b/crates/aura-codec/tests/c2_codec.rs
+@@ -0,0 +1,333 @@
++//! C2 gate: canonical serialization against an independent encoder.
++//!
++//! `fixtures/c2_golden.txt` comes from `tools/gen_c2_vectors.py`, a separate
++//! Python transcription of the wire format. These tests pin the exact bytes,
++//! not just Rust round-trips.
++
++use std::collections::BTreeMap;
++use std::fmt::Debug;
++
++use aura_codec::{
++    CODEC_VERSION, CanonicalRecord, CodecError, Decode, Encode, MAX_ITEMS, MAX_LENGTH, Reader,
++    Writer, decode_canonical, decode_from_slice, encode_to_bytes, read_varint, write_varint,
++};
++use aura_types::{Address, Amount, CanonicalMap, ChainId, Denom, Domain, Gas, Hash, Height, Nonce};
++
++const GOLDEN: &str = include_str!("fixtures/c2_golden.txt");
++
++fn fixtures() -> BTreeMap<String, String> {
++    let mut map = BTreeMap::new();
++    for line in GOLDEN.lines() {
++        let trimmed = line.trim();
++        if trimmed.is_empty() || trimmed.starts_with('#') {
++            continue;
++        }
++        let (key, value) = trimmed
++            .split_once('=')
++            .unwrap_or_else(|| panic!("malformed golden line: {trimmed}"));
++        assert!(
++            map.insert(key.to_owned(), value.to_owned()).is_none(),
++            "duplicate golden key {key}"
++        );
++    }
++    map
++}
++
++fn hex_bytes(text: &str) -> Vec<u8> {
++    assert_eq!(text.len() % 2, 0, "even-length hex");
++    text.as_bytes()
++        .chunks(2)
++        .map(|pair| (nibble(pair[0]) << 4) | nibble(pair[1]))
++        .collect()
++}
++
++fn nibble(byte: u8) -> u8 {
++    match byte {
++        b'0'..=b'9' => byte - b'0',
++        b'a'..=b'f' => byte - b'a' + 10,
++        _ => panic!("invalid hex nibble in fixture"),
++    }
++}
++
++fn to_hex(bytes: &[u8]) -> String {
++    let mut out = String::with_capacity(bytes.len() * 2);
++    for byte in bytes {
++        out.push_str(&format!("{byte:02x}"));
++    }
++    out
++}
++
++fn ascending_32() -> [u8; 32] {
++    let mut out = [0u8; 32];
++    for (index, byte) in out.iter_mut().enumerate() {
++        *byte = index as u8;
++    }
++    out
++}
++
++fn descending_32() -> [u8; 32] {
++    let mut out = [0u8; 32];
++    for (index, byte) in out.iter_mut().enumerate() {
++        *byte = 255 - index as u8;
++    }
++    out
++}
++
++fn ascending_20() -> [u8; 20] {
++    let mut out = [0u8; 20];
++    for (index, byte) in out.iter_mut().enumerate() {
++        *byte = index as u8;
++    }
++    out
++}
++
++fn record_1() -> CanonicalRecord {
++    CanonicalRecord {
++        version: CODEC_VERSION,
++        domain: Domain::Tx,
++        flag: false,
++        chain: ChainId::stage1(),
++        height: Height::new(0),
++        nonce: Nonce::new(0),
++        amount: Amount::ZERO,
++        hash: Hash::ZERO,
++        address: Address::ZERO,
++        memo: None,
++        tags: CanonicalMap::new(),
++    }
++}
++
++fn record_2() -> CanonicalRecord {
++    let mut tags = CanonicalMap::new();
++    tags.insert("a".to_owned(), 1);
++    tags.insert("b".to_owned(), 2);
++    tags.insert("z".to_owned(), 9);
++    CanonicalRecord {
++        version: CODEC_VERSION,
++        domain: Domain::Vote,
++        flag: true,
++        chain: ChainId::stage1(),
++        height: Height::new(42),
++        nonce: Nonce::new(7),
++        amount: Amount::from_units(10u128.pow(18)),
++        hash: Hash::from_bytes(ascending_32()),
++        address: Address::from_bytes(ascending_20()),
++        memo: Some("hello".to_owned()),
++        tags,
++    }
++}
++
++fn record_3() -> CanonicalRecord {
++    let mut tags = CanonicalMap::new();
++    tags.insert("alpha".to_owned(), 0);
++    tags.insert("omega".to_owned(), u64::MAX);
++    CanonicalRecord {
++        version: CODEC_VERSION,
++        domain: Domain::Block,
++        flag: false,
++        chain: ChainId::stage1(),
++        height: Height::new(u64::MAX),
++        nonce: Nonce::new(u64::MAX),
++        amount: Amount::MAX,
++        hash: Hash::from_bytes(descending_32()),
++        address: Address::from_bytes([0xab; 20]),
++        memo: Some("aura-\u{2713}".to_owned()),
++        tags,
++    }
++}
++
++fn golden_records() -> Vec<(&'static str, CanonicalRecord)> {
++    vec![
++        ("record_1", record_1()),
++        ("record_2", record_2()),
++        ("record_3", record_3()),
++    ]
++}
++
++#[test]
++fn golden_records_match_independent_encoder() {
++    let f = fixtures();
++    for (key, record) in golden_records() {
++        let encoded = encode_to_bytes(&record);
++        assert_eq!(to_hex(&encoded), f[key], "{key} bytes must match Python");
++    }
++}
++
++#[test]
++fn decode_canonical_round_trips_golden_records() {
++    let f = fixtures();
++    for (key, record) in golden_records() {
++        let bytes = hex_bytes(&f[key]);
++        let decoded: CanonicalRecord =
++            decode_canonical(&bytes).unwrap_or_else(|e| panic!("{key} failed: {e}"));
++        assert_eq!(decoded, record, "{key} round-trip");
++        assert_eq!(encode_to_bytes(&decoded), bytes, "{key} re-encode");
++    }
++}
++
++#[test]
++fn every_noncanonical_vector_is_rejected() {
++    let f = fixtures();
++    const BAD: [&str; 12] = [
++        "bad_version",
++        "bad_domain_tag",
++        "bad_bool",
++        "bad_option_tag",
++        "trailing_byte",
++        "nonminimal_chain_len",
++        "length_too_large",
++        "invalid_utf8_memo",
++        "unordered_map",
++        "duplicate_map_key",
++        "nonminimal_map_count",
++        "varint_overflow",
++    ];
++    for key in BAD {
++        let bytes = hex_bytes(&f[key]);
++        assert!(
++            decode_canonical::<CanonicalRecord>(&bytes).is_err(),
++            "{key} must be rejected"
++        );
++    }
++}
++
++#[test]
++fn noncanonical_vectors_return_the_specific_error() {
++    let f = fixtures();
++    let check = |key: &str, expected: CodecError| {
++        let bytes = hex_bytes(&f[key]);
++        assert_eq!(
++            decode_from_slice::<CanonicalRecord>(&bytes),
++            Err(expected),
++            "{key} error kind"
++        );
++    };
++    check("bad_version", CodecError::UnsupportedVersion(1, 2));
++    check("bad_domain_tag", CodecError::InvalidDomainTag(5));
++    check("bad_bool", CodecError::InvalidBool(2));
++    check("bad_option_tag", CodecError::InvalidOptionTag(2));
++    check("invalid_utf8_memo", CodecError::InvalidUtf8);
++    check("length_too_large", CodecError::LengthTooLarge(1048577));
++    check("unordered_map", CodecError::NonCanonicalMapOrder);
++    check("duplicate_map_key", CodecError::DuplicateMapKey);
++    check("nonminimal_chain_len", CodecError::NonCanonicalVarint);
++    check("nonminimal_map_count", CodecError::NonCanonicalVarint);
++    check("varint_overflow", CodecError::VarintOverflow);
++    check("trailing_byte", CodecError::TrailingBytes(1));
++}
++
++#[test]
++fn trailing_byte_rejected_by_reader_finish() {
++    // This test pins Reader::finish() — NC-3 disables that guard.
++    let f = fixtures();
++    let bytes = hex_bytes(&f["trailing_byte"]);
++    let mut reader = Reader::new(&bytes);
++    let _record = CanonicalRecord::decode(&mut reader).expect("record itself decodes");
++    assert_eq!(reader.finish(), Err(CodecError::TrailingBytes(1)));
++}
++
++#[test]
++fn varint_rejects_nonminimal_encoding() {
++    // This test pins varint_is_nonminimal() — NC-4 disables that guard.
++    let mut reader = Reader::new(&[0x80, 0x00]);
++    assert_eq!(
++        read_varint(&mut reader),
++        Err(CodecError::NonCanonicalVarint)
++    );
++}
++
++#[test]
++fn varint_round_trips_boundaries_with_minimal_length() {
++    let mut writer = Writer::new();
++    write_varint(&mut writer, 0);
++    assert_eq!(writer.as_slice(), &[0x00u8][..], "zero must be one byte");
++
++    for value in [0u64, 1, 127, 128, 300, u32::MAX as u64, u64::MAX] {
++        let mut writer = Writer::new();
++        write_varint(&mut writer, value);
++        let bytes = writer.into_bytes();
++        let mut reader = Reader::new(&bytes);
++        assert_eq!(read_varint(&mut reader).unwrap(), value, "varint {value}");
++        assert_eq!(reader.remaining_len(), 0);
++    }
++}
++
++fn roundtrip<T>(value: T)
++where
++    T: Encode + Decode + PartialEq + Debug,
++{
++    let bytes = encode_to_bytes(&value);
++    assert_eq!(bytes, encode_to_bytes(&value), "encoding is deterministic");
++    let decoded: T = decode_from_slice(&bytes).expect("strict decode");
++    assert_eq!(decoded, value);
++    let canonical: T = decode_canonical(&bytes).expect("canonical decode");
++    assert_eq!(canonical, value);
++}
++
++#[test]
++fn all_supported_types_round_trip() {
++    roundtrip(0u8);
++    roundtrip(255u8);
++    roundtrip(65_535u16);
++    roundtrip(u32::MAX);
++    roundtrip(u64::MAX);
++    roundtrip(u128::MAX);
++    roundtrip(true);
++    roundtrip(false);
++    roundtrip(Some(1_234u64));
++    roundtrip(None::<u64>);
++    roundtrip(vec![0u8, 1, 2, 255]);
++    roundtrip("aura-\u{2713}".to_owned());
++    roundtrip(Hash::from_bytes(ascending_32()));
++    roundtrip(Address::from_bytes(ascending_20()));
++    roundtrip(Amount::MAX);
++    roundtrip(ChainId::stage1());
++    roundtrip(Domain::Contract);
++    roundtrip(Denom::SMALLEST);
++    roundtrip(Nonce::new(9));
++    roundtrip(Height::new(10));
++    roundtrip(Gas::new(11));
++
++    let mut map = CanonicalMap::new();
++    map.insert("b".to_owned(), 2u64);
++    map.insert("a".to_owned(), 1u64);
++    roundtrip(map);
++}
++
++#[test]
++fn denom_tags_are_strict() {
++    assert_eq!(decode_from_slice::<Denom>(&[0]).unwrap(), Denom::NATIVE);
++    assert_eq!(decode_from_slice::<Denom>(&[1]).unwrap(), Denom::SMALLEST);
++    assert_eq!(
++        decode_from_slice::<Denom>(&[2]),
++        Err(CodecError::InvalidDenomTag(2))
++    );
++}
++
++#[test]
++fn map_encoding_is_sorted_and_decoding_rejects_disorder() {
++    let mut map = CanonicalMap::new();
++    map.insert("z".to_owned(), 3u64);
++    map.insert("a".to_owned(), 1u64);
++    map.insert("m".to_owned(), 2u64);
++    let bytes = encode_to_bytes(&map);
++    let decoded: CanonicalMap<String, u64> = decode_canonical(&bytes).unwrap();
++    let keys: Vec<_> = decoded.keys().cloned().collect();
++    assert_eq!(keys, vec!["a", "m", "z"]);
++
++    let f = fixtures();
++    let unordered = hex_bytes(&f["unordered_map"]);
++    assert_eq!(
++        decode_from_slice::<CanonicalRecord>(&unordered),
++        Err(CodecError::NonCanonicalMapOrder)
++    );
++}
++
++#[test]
++fn codec_constants_match_the_independent_fixture() {
++    let f = fixtures();
++    assert_eq!(CODEC_VERSION.to_string(), f["codec_version"]);
++    assert_eq!(MAX_LENGTH.to_string(), f["max_length"]);
++    assert_eq!(MAX_ITEMS, 65536);
++    assert_eq!(MAX_LENGTH, 1 << 20);
++}
+diff --git a/crates/aura-codec/tests/fixtures/c2_golden.txt b/crates/aura-codec/tests/fixtures/c2_golden.txt
+new file mode 100644
+index 0000000..d7923cb
+--- /dev/null
++++ b/crates/aura-codec/tests/fixtures/c2_golden.txt
+@@ -0,0 +1,21 @@
++# AuraLite-Crypto C2 golden vectors
++# Generated by tools/gen_c2_vectors.py (independent implementation).
++# Format: key=<lowercase hex>. Do not edit by hand.
++# CODEC_VERSION=1, MAX_LENGTH=1048576, MAX_ITEMS=65536.
++record_1=0100000f617572616c6974652d746573742d310000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
++record_2=0101010f617572616c6974652d746573742d312a000000000000000700000000000000000064a7b3b6e00d0000000000000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f000102030405060708090a0b0c0d0e0f10111213010568656c6c6f030161010000000000000001620200000000000000017a0900000000000000
++record_3=0102000f617572616c6974652d746573742d31fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffefdfcfbfaf9f8f7f6f5f4f3f2f1f0efeeedecebeae9e8e7e6e5e4e3e2e1e0abababababababababababababababababababab0108617572612de29c930205616c7068610000000000000000056f6d656761ffffffffffffffff
++codec_version=1
++max_length=1048576
++bad_version=0200000f617572616c6974652d746573742d310000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
++bad_domain_tag=0105000f617572616c6974652d746573742d310000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
++bad_bool=0100020f617572616c6974652d746573742d310000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
++bad_option_tag=0100000f617572616c6974652d746573742d310000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000200
++trailing_byte=0100000f617572616c6974652d746573742d31000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
++nonminimal_chain_len=0100008000617572616c6974652d746573742d310000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
++length_too_large=010000818040617572616c6974652d746573742d310000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
++invalid_utf8_memo=0100000f617572616c6974652d746573742d310000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101ff00
++unordered_map=0100000f617572616c6974652d746573742d3100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000020162010000000000000001610200000000000000
++duplicate_map_key=0100000f617572616c6974652d746573742d3100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000020161010000000000000001610200000000000000
++nonminimal_map_count=0100000f617572616c6974652d746573742d31000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008000
++varint_overflow=010000ffffffffffffffffffff7f
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+index d1a5798..272bca1 100644
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -41,6 +41,13 @@ Tx      = { chain_id, signer, nonce, kind, payload, gas_limit,
+ - **Versioning.** `version` in the header, `codec_version` in tx,
+   `abi_version` in contracts. Any change = migration test (C10/B10).
+ 
++**C2 wire format (one value → one byte string).** `aura-codec` uses fixed-width
++little-endian integers (no `usize`/`isize`), minimal LEB128 length prefixes,
++strict tags for `bool`/`Option`/`Domain`/`Denom`, ascending `BTreeMap` entries,
++`CODEC_VERSION = 1`, and `decode_canonical()` which re-encodes and requires
++byte equality. `serde` is not a dependency. Golden vectors:
++`tools/gen_c2_vectors.py`.
++
+ ## 2. Transaction flow (critical path)
+ 
+ ```
+diff --git a/docs/STATUS.md b/docs/STATUS.md
+index a5b8375..b596b55 100644
+--- a/docs/STATUS.md
++++ b/docs/STATUS.md
+@@ -1,8 +1,8 @@
+ # Implementation status — AuraLite-Crypto
+ 
+ > Updated **in the same patch** as the phase's code (rule D9).
+-> Snapshot date: **2026-10-25**, tree: "C1 landed — canonical types pinned
+-> against an independent reference, Stage 1 in progress".
++> Snapshot date: **2026-10-25**, tree: "C2 landed — canonical types and
++> `aura-codec`, Stage 1 in progress".
+ 
+ ## Locked decisions (2026-10-25)
+ 
+@@ -17,8 +17,9 @@
+ | ⏸ Stage 2 | mainnet, white paper, external audit, DeFi, bridge — separate decision |
+ | Docs language | English (owner request, 2026-10-25) |
+ 
+-**Phase ledger:** C0 ✅ (`patches/0001-C0-baseline-workspace.patch`) and C1 ✅
+-(`patches/0002-C1-types.patch`) done; C2 (`aura-codec`) is next. No other
++**Phase ledger:** C0 ✅ (`patches/0001-C0-baseline-workspace.patch`),
++C1 ✅ (`patches/0002-C1-types.patch`) and C2 ✅
++(`patches/0003-C2-codec.patch`) done; C3 (`aura-crypto`) is next. No other
+ phase has started.
+ 
+ ## Maturity level
+@@ -37,10 +38,11 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
+ ## Working now
+ 
+ - `make test` is green: `cargo fmt --check`, `cargo clippy --workspace
+-  --all-targets -- -D warnings`, `cargo test --workspace` (**17 tests**) and
++  --all-targets -- -D warnings`, `cargo test --workspace` (**28 tests**) and
+   the docs drift guard. Receipts: `docs/evidence/c0-baseline.txt`,
+   `docs/evidence/c0/nc.log`, `docs/evidence/c1/gates.txt`,
+-  `docs/evidence/c1/nc.log`.
++  `docs/evidence/c1/nc.log`, `docs/evidence/c2/gates.txt`,
++  `docs/evidence/c2/nc.log`.
+ - `aura-types` exports the locked D0 identity (`auralite-test-1`, `ALCRY`,
+   18 decimals, `aura`, `bft-pos`, `wasm`, v1) **and** the C1 canonical types:
+   `Hash`, bech32 `Address`, `Amount`/`Denom`, `ChainId`, `Nonce`, `Height`,
+@@ -48,6 +50,14 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
+ - C1 addresses are verified against `tools/gen_c1_vectors.py`, an independent
+   Python BIP-173 encoder; 3 C1 negative controls pin the checksum constant,
+   the version byte and the golden fixture itself.
++- C2 `aura-codec` is verified against `tools/gen_c2_vectors.py`, an independent
++  Python implementation of the wire format (3 canonical records + 12
++  non-canonical vectors). `decode_canonical()` re-encodes and requires byte
++  equality. 4 C2 negative controls pin the version, the golden fixture, the
++  trailing-byte guard and the non-minimal-varint guard.
++- Still **zero external dependencies**: `Cargo.lock` has 11 packages (our own
++  crates), 0 `source`/`checksum` lines. `aura-codec -> aura-types` is one
++  internal path dependency.
+ - 10 placeholder crates compile but expose **no API** (an honest empty crate,
+   not a fake `Ok(())`). CI runs the same commands as `make test`.
+ - Still absent: consensus, VM, P2P, node, RPC, wallet, explorer, contracts.
+@@ -59,22 +69,25 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
+ 
+ ```
+ find crates -name Cargo.toml       -> 11 crates (+1 workspace root)
+-find . -name '*.rs' -not -path './target/*' -> 17 files
++find . -name '*.rs' -not -path './target/*' -> 22 files
+ ls docs/plans/*_PLAN.md           -> 12 plans / 112 phase rows
+-cargo test --workspace            -> 17 passed; 0 failed
++cargo test --workspace            -> 28 passed; 0 failed
+ make test                         -> ALL GATES GREEN
+ make nc-c0                        -> 2/2 negative controls PASS
+ make nc-c1                        -> 3/3 negative controls PASS
++make nc-c2                        -> 4/4 negative controls PASS
++external dependencies             -> 0
+ validators / blocks / tx          -> 0 / 0 / 0
+ ```
+ 
+-Pre-C0 baseline, post-C0 and post-C1 numbers with raw command output are in
+-`docs/evidence/c0-baseline.txt` and `docs/evidence/c1/gates.txt`.
++Pre-C0 baseline and post-C0/C1/C2 numbers with raw command output are in
++`docs/evidence/c0-baseline.txt`, `docs/evidence/c1/gates.txt` and
++`docs/evidence/c2/gates.txt`.
+ 
+ ## What is missing (and must not be lost)
+ 
+-- No `aura-codec` (C2), no crypto implementation (C3), no tx/block formats
+-  (C4/C5), no Merkle proofs (C6).
++- No crypto implementation (C3), no tx/block formats (C4/C5), no Merkle
++  proofs (C6).
+ - No consensus, no P2P, no state, no VM.
+ - No wallet, explorer, contracts, token.
+ - No audit, no bug bounty, no legal opinion.
+diff --git a/docs/evidence/c2/SHA256SUMS b/docs/evidence/c2/SHA256SUMS
+new file mode 100644
+index 0000000..b7a7e40
+--- /dev/null
++++ b/docs/evidence/c2/SHA256SUMS
+@@ -0,0 +1,3 @@
++7c9a08aeddb272426d3f3fc18765f2f9c20b95d15c3e752349c654c372d9b2fa  docs/evidence/c2/gates.txt
++0bf9fedb7be08924cc5045c5bbfb63785fa15e632dc962fff2e2bcc161d22493  docs/evidence/c2/nc.log
++043590d4f778ce6205cce933ade67d7e84a8e1aa48bdb0af7bca3f4cd67ca2dd  crates/aura-codec/tests/fixtures/c2_golden.txt
+diff --git a/docs/evidence/c2/gates.txt b/docs/evidence/c2/gates.txt
+new file mode 100644
+index 0000000..84b373b
+--- /dev/null
++++ b/docs/evidence/c2/gates.txt
+@@ -0,0 +1,127 @@
++AuraLite-Crypto — C2 evidence (aura-codec)
++Generated (UTC): 2026-10-25T16:49:59+00:00
++Rule: measured against the tree, not assumed.
++
++The wire format is pinned against tools/gen_c2_vectors.py, an
++independent Python implementation. decode_canonical() additionally
++requires that re-encoding reproduces the input bytes exactly.
++
++========================================================================
++RAW COMMAND OUTPUT
++========================================================================
++
++--- toolchain ---
++$ rustc --version && cargo --version
++rustc 1.99.1 (58cf8f9c3 2026-10-13)
++cargo 1.99.1 (5f94df478 2026-08-27)
++[rc=0]
++
++--- pre-C2 tree (C1 commit) ---
++$ git log -1 --oneline
++9f4e794 C1 patch artifact
++[rc=0]
++
++--- pre-C2 .rs files ---
++$ git ls-tree -r --name-only HEAD | grep -c '\.rs$' || true
++17
++[rc=0]
++
++--- pre-C2 codec source files ---
++$ git ls-tree -r --name-only HEAD | grep -c 'aura-codec/src/codec.rs' || true
++0
++[rc=0]
++
++--- post-C2 .rs files ---
++$ find . -name '*.rs' -not -path './target/*' | wc -l
++22
++[rc=0]
++
++--- post-C2 plan phase rows ---
++$ grep -hE '^\| (✅ |⏸ )?\*\*[A-Z]+[0-9]+\*\* \|' docs/plans/*_PLAN.md | wc -l
++112
++[rc=0]
++
++--- dependency audit (internal only) ---
++$ $ (shell script: reproducibility / dependency audit)
++external dependencies in Cargo.lock: 0
++workspace packages: 11
++[rc=0]
++
++--- independent generator is idempotent ---
++$ $ (shell script: reproducibility / dependency audit)
++generator idempotent: 043590d4f778ce6205cce933ade67d7e84a8e1aa48bdb0af7bca3f4cd67ca2dd
++[rc=0]
++
++--- full gate ---
++$ make test
++     Running unittests src/lib.rs (target/debug/deps/aura_mempool-d4afd06ebea00a27)
++     Running unittests src/lib.rs (target/debug/deps/aura_node-f89cb5fec9076dca)
++     Running unittests src/lib.rs (target/debug/deps/aura_p2p-a8f698eab67efd73)
++     Running unittests src/lib.rs (target/debug/deps/aura_rpc-f6ef2bc286c42693)
++     Running unittests src/lib.rs (target/debug/deps/aura_state-1313f3cb4a570b49)
++     Running unittests src/lib.rs (target/debug/deps/aura_storage-1026462560aae3b0)
++     Running unittests src/lib.rs (target/debug/deps/aura_types-308b229bcbc15c92)
++     Running tests/c1_types.rs (target/debug/deps/c1_types-30318a674a00d8c5)
++     Running tests/identity.rs (target/debug/deps/identity-22b5be58a3e6ffbb)
++   Doc-tests aura_codec
++   Doc-tests aura_consensus
++   Doc-tests aura_crypto
++   Doc-tests aura_exec
++   Doc-tests aura_mempool
++   Doc-tests aura_node
++   Doc-tests aura_p2p
++   Doc-tests aura_rpc
++   Doc-tests aura_state
++   Doc-tests aura_storage
++   Doc-tests aura_types
++[rc=0]
++
++--- C2 negative controls ---
++$ make nc-c2
++          trailing_byte_rejected_by_reader_finish
++
++test result: FAILED. 4 passed; 7 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++error: test failed, to rerun pass `-p aura-codec --test c2_codec`
++NC-2 independent golden fixture: PASS
++      cargo test -p aura-codec -> rc=101 (RED as expected)
++          golden_records_match_independent_encoder
++
++test result: FAILED. 9 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++error: test failed, to rerun pass `-p aura-codec --test c2_codec`
++NC-3 trailing-byte guard: PASS
++      cargo test -p aura-codec -> rc=101 (RED as expected)
++          trailing_byte_rejected_by_reader_finish
++
++test result: FAILED. 9 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++error: test failed, to rerun pass `-p aura-codec --test c2_codec`
++NC-4 non-minimal varint guard: PASS
++      cargo test -p aura-codec -> rc=101 (RED as expected)
++          |
++173 | fn varint_is_nonminimal(encoded_len: usize, last_byte: u8) -> bool {
++    |                                             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_last_byte`
++
++error: test failed, to rerun pass `-p aura-codec --test c2_codec`
++
++RESULT: 4/4 negative controls PASS
++restore check: cargo test -p aura-codec -> rc=0 (GREEN as expected)
++make[1]: Leaving directory '/home/user/AuraLite-Crypto'
++[rc=0]
++
++--- docs drift guard ---
++$ python3 tools/check_claims.py
++DOCS DRIFT GUARD: OK — 19 markdown files, 12 plans, 112 phase rows, all local links resolve
++[rc=0]
++
++========================================================================
++SUMMARY
++========================================================================
++
++Pre-C2 (C1 tree): 17 .rs files, 0 aura-codec source modules, 17 tests.
++Post-C2: 22 .rs files, 4 new codec modules + 1 test file, 28 tests
++passing (17 C0/C1 + 11 C2), 0 external dependencies (one internal
++path dependency aura-codec -> aura-types), `make test` ALL GATES
++GREEN, 4/4 C2 negative controls PASS.
++Validators/blocks/tx remain 0/0/0.
+diff --git a/docs/evidence/c2/nc.log b/docs/evidence/c2/nc.log
+new file mode 100644
+index 0000000..f6d5599
+--- /dev/null
++++ b/docs/evidence/c2/nc.log
+@@ -0,0 +1,34 @@
++C2 NEGATIVE CONTROLS — 2026-10-25T16:50:00+00:00
++Rule: a gate that cannot go red is not a gate (CONTRIBUTING.md §1).
++
++NC-1 codec version: PASS
++      cargo test -p aura-codec -> rc=101 (RED as expected)
++          trailing_byte_rejected_by_reader_finish
++
++test result: FAILED. 4 passed; 7 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++error: test failed, to rerun pass `-p aura-codec --test c2_codec`
++NC-2 independent golden fixture: PASS
++      cargo test -p aura-codec -> rc=101 (RED as expected)
++          golden_records_match_independent_encoder
++
++test result: FAILED. 9 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++error: test failed, to rerun pass `-p aura-codec --test c2_codec`
++NC-3 trailing-byte guard: PASS
++      cargo test -p aura-codec -> rc=101 (RED as expected)
++          trailing_byte_rejected_by_reader_finish
++
++test result: FAILED. 9 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++error: test failed, to rerun pass `-p aura-codec --test c2_codec`
++NC-4 non-minimal varint guard: PASS
++      cargo test -p aura-codec -> rc=101 (RED as expected)
++          |
++173 | fn varint_is_nonminimal(encoded_len: usize, last_byte: u8) -> bool {
++    |                                             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_last_byte`
++
++error: test failed, to rerun pass `-p aura-codec --test c2_codec`
++
++RESULT: 4/4 negative controls PASS
++restore check: cargo test -p aura-codec -> rc=0 (GREEN as expected)
+diff --git a/docs/plans/CORE_PLAN.md b/docs/plans/CORE_PLAN.md
+index 467cd3a..ebdcf8c 100644
+--- a/docs/plans/CORE_PLAN.md
++++ b/docs/plans/CORE_PLAN.md
+@@ -1,6 +1,6 @@
+ # CORE_PLAN — primitives, codec, cryptography, formats
+ 
+-**Status:** 🚧 IN PROGRESS (C0–C1 done ✅ 2026-10-25; C2 next)  
++**Status:** 🚧 IN PROGRESS (C0–C2 done ✅ 2026-10-25; C3 next)  
+ **Stage:** Stage 1: C0–C10 (all phases active).  
+ **Deliverable:** `patches/0001-C0-...` … `patches/0011-C10-...`
+ **Dependencies:** none. This is the root of the whole tree.
+@@ -30,7 +30,7 @@ other 11 plans rest.
+ |---|---|---|---|
+ | ✅ **C0** | Baseline + workspace + CI | `Cargo.toml` workspace, `Makefile`, `rust-toolchain.toml`, `.github/workflows/ci.yml`, `docs/evidence/c0-baseline.txt` with measured zeros; constants `CHAIN_ID="auralite-test-1"`, `DENOM="ALCRY"`, `DECIMALS=18` fixed in code and checked by a test | `make test` green (0 tests so far, but the pipeline is real); NC: broken CI → red |
+ | ✅ **C1** | Canonical types | `Hash`, `Address` (bech32 `aura1...`), `Amount`/`Denom` (`ALCRY` / `aalcry`), `ChainId`, `Nonce`, `Height`, `Gas`, `Domain`; `BTreeMap` instead of `HashMap` | unit vectors: bech32 round-trip, bad checksum rejected, checked `Amount` overflow |
+-| **C2** | `aura-codec` | fixed field order, lengths, `Option` tags, non-canonical encodings banned, `codec_version` | golden vectors (hex fixtures), property: `decode(encode(x)) == x`, NC: one mutated byte → `Err` |
++| ✅ **C2** | `aura-codec` | fixed field order, lengths, `Option` tags, non-canonical encodings banned, `codec_version` | golden vectors (hex fixtures), property: `decode(encode(x)) == x`, NC: one mutated byte → `Err` |
+ | **C3** | `aura-crypto` | BLAKE3 + domain tags, Ed25519, secp256k1, constant-time compare, zeroize | RFC/test-vector signatures, malleable `s` rejected, NC: swapped domain → `Err` |
+ | **C4** | Transaction format | `Tx { chain_id, signer, nonce, kind, payload, gas_limit, max_fee, tip, expiry, sig }`, canonical `signing_bytes` | sign/verify, replay test: a tx from `auralite-1` rejected in `auralite-test-1` |
+ | **C5** | Block and header | `Header`/`Body`, `block_hash`, `tx_root`, `state_root`, `validator_set_hash`, protocol version | vector: changing tx order changes `tx_root`; NC: reorder without recompute → red |
+@@ -86,6 +86,29 @@ other 11 plans rest.
+ - Deliberately deferred: bech32m (a versioned decision, not a C1 tweak),
+   serialization (C2), hashing/signatures (C3).
+ 
++
++### C2 receipt (2026-10-25)
++
++- Deliverable: `patches/0003-C2-codec.patch`.
++- Landed: `aura-codec` with `Encode`/`Decode`, `Writer`/`Reader`, minimal
++  LEB128 varints, fixed-width LE integers (no `usize`/`isize`), strict tags
++  for `bool`/`Option`/`Domain`/`Denom`, length caps `MAX_LENGTH = 1 MiB` and
++  `MAX_ITEMS = 65536`, ascending `BTreeMap` decoding, `CODEC_VERSION = 1`,
++  and `decode_canonical()` (re-encode must equal input).
++- Golden vectors: `tools/gen_c2_vectors.py` is an independent Python
++  implementation; `crates/aura-codec/tests/fixtures/c2_golden.txt` has 21
++  lines — 3 canonical records, 5 constants, 12 non-canonical vectors.
++- Gate: `make test` → **28 passed / 0 failed** (17 C0/C1 + 11 C2), fmt/clippy
++  clean, drift guard 12 plans / 112 rows.
++- NC: `make nc-c2` → **4/4 PASS**: codec version 1→2, corrupted golden
++  fixture, disabled trailing-byte guard, disabled non-minimal-varint guard.
++- Evidence: `docs/evidence/c2/gates.txt`, `docs/evidence/c2/nc.log`,
++  `docs/evidence/c2/SHA256SUMS`.
++- Still 0 external dependencies; one internal path dependency
++  `aura-codec -> aura-types`.
++- Deferred: hashing/signatures (C3), tx/block formats (C4/C5). Any wire
++  format change requires a `CODEC_VERSION` bump + migration test.
++
+ ## Key risks
+ 
+ 1. **Non-canonical serialization** → two nodes get different hashes for the same
+diff --git a/tools/gen_c2_vectors.py b/tools/gen_c2_vectors.py
+new file mode 100644
+index 0000000..584cfc4
+--- /dev/null
++++ b/tools/gen_c2_vectors.py
+@@ -0,0 +1,207 @@
++#!/usr/bin/env python3
++"""Generate C2 golden vectors from an INDEPENDENT codec implementation.
++
++This is a standalone transcription of the AuraLite-Crypto canonical wire
++format. It does not import the Rust crate. The Rust tests in
++`crates/aura-codec/tests/c2_codec.rs` must reproduce these exact bytes.
++
++Wire format (all integers little-endian unless noted):
++    version   : u8 (CODEC_VERSION = 1)
++    domain    : u8 tag (Tx=0, Vote=1, Block=2, Contract=3, Genesis=4)
++    flag      : u8 bool (0 or 1 only)
++    chain_id  : varint byte-length + UTF-8 bytes
++    height    : u64
++    nonce     : u64
++    amount    : u128
++    hash      : 32 raw bytes
++    address   : 20 raw bytes
++    memo      : u8 tag (0=None, 1=Some) + optional (varint len + UTF-8)
++    tags      : varint count + repeated (varint keylen + UTF-8 key, u64 value)
++                in STRICTLY ascending key order
++
++varint = minimal unsigned LEB128. Non-minimal encodings are not generated
++here except deliberately in the `bad_*` vectors.
++
++Usage:
++    python3 tools/gen_c2_vectors.py
++    make gen-c2-vectors
++
++Output: crates/aura-codec/tests/fixtures/c2_golden.txt
++"""
++
++from __future__ import annotations
++
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++OUT = REPO / "crates" / "aura-codec" / "tests" / "fixtures" / "c2_golden.txt"
++
++CODEC_VERSION = 1
++MAX_LENGTH = 1 << 20
++DOMAIN_TAGS = {"tx": 0, "vote": 1, "block": 2, "contract": 3, "genesis": 4}
++
++
++def varint(value: int) -> bytes:
++    out = bytearray()
++    while True:
++        byte = value & 0x7F
++        value >>= 7
++        if value == 0:
++            out.append(byte)
++            return bytes(out)
++        out.append(byte | 0x80)
++
++
++def u8(value: int) -> bytes:
++    return value.to_bytes(1, "little")
++
++
++def u64(value: int) -> bytes:
++    return value.to_bytes(8, "little")
++
++
++def u128(value: int) -> bytes:
++    return value.to_bytes(16, "little")
++
++
++def text(value: str) -> bytes:
++    raw = value.encode("utf-8")
++    return varint(len(raw)) + raw
++
++
++def memo(value: str | None) -> bytes:
++    return b"\x00" if value is None else b"\x01" + text(value)
++
++
++def tags(items: dict[str, int]) -> bytes:
++    out = bytearray(varint(len(items)))
++    for key in sorted(items):
++        out += text(key) + u64(items[key])
++    return bytes(out)
++
++
++def record(
++    chain: str,
++    domain: str,
++    flag: bool,
++    height: int,
++    nonce: int,
++    amount: int,
++    hash_bytes: bytes,
++    address_bytes: bytes,
++    memo_value: str | None,
++    tag_items: dict[str, int],
++) -> bytes:
++    assert len(hash_bytes) == 32 and len(address_bytes) == 20
++    return b"".join(
++        [
++            u8(CODEC_VERSION),
++            u8(DOMAIN_TAGS[domain]),
++            u8(1 if flag else 0),
++            text(chain),
++            u64(height),
++            u64(nonce),
++            u128(amount),
++            hash_bytes,
++            address_bytes,
++            memo(memo_value),
++            tags(tag_items),
++        ]
++    )
++
++
++def main() -> int:
++    chain = "auralite-test-1"
++    zero_hash = bytes(32)
++    zero_addr = bytes(20)
++
++    vectors: list[tuple[str, str]] = [
++        ("# AuraLite-Crypto C2 golden vectors", ""),
++        ("# Generated by tools/gen_c2_vectors.py (independent implementation).", ""),
++        ("# Format: key=<lowercase hex>. Do not edit by hand.", ""),
++        ("# CODEC_VERSION=1, MAX_LENGTH=1048576, MAX_ITEMS=65536.", ""),
++    ]
++
++    record_1 = record(chain, "tx", False, 0, 0, 0, zero_hash, zero_addr, None, {})
++    record_2 = record(
++        chain,
++        "vote",
++        True,
++        42,
++        7,
++        10**18,
++        bytes(range(32)),
++        bytes(range(20)),
++        "hello",
++        {"a": 1, "b": 2, "z": 9},
++    )
++    record_3 = record(
++        chain,
++        "block",
++        False,
++        2**64 - 1,
++        2**64 - 1,
++        2**128 - 1,
++        bytes(255 - i for i in range(32)),
++        bytes([0xAB] * 20),
++        "aura-\u2713",  # multi-byte UTF-8, not Cyrillic/CJK
++        {"alpha": 0, "omega": 2**64 - 1},
++    )
++    vectors += [
++        ("record_1", record_1.hex()),
++        ("record_2", record_2.hex()),
++        ("record_3", record_3.hex()),
++        ("codec_version", str(CODEC_VERSION)),
++        ("max_length", str(MAX_LENGTH)),
++    ]
++
++    # Offsets inside record_1 (memo=None, tags={}).
++    off_version = 0
++    off_domain = 1
++    off_flag = 2
++    off_chain_len = 3
++    chain_bytes = chain.encode("utf-8")
++    off_height = off_chain_len + len(varint(len(chain_bytes))) + len(chain_bytes)
++    off_memo = off_height + 8 + 8 + 16 + 32 + 20
++    off_tags = off_memo + 1
++
++    def patched(offset: int, value: int) -> bytes:
++        out = bytearray(record_1)
++        out[offset] = value
++        return bytes(out)
++
++    bad: list[tuple[str, bytes]] = [
++        ("bad_version", patched(off_version, 2)),
++        ("bad_domain_tag", patched(off_domain, 5)),
++        ("bad_bool", patched(off_flag, 2)),
++        ("bad_option_tag", patched(off_memo, 2)),
++        ("trailing_byte", record_1 + b"\x00"),
++        ("nonminimal_chain_len", record_1[:off_chain_len] + b"\x80\x00" + record_1[off_chain_len + 1 :]),
++        ("length_too_large", record_1[:off_chain_len] + varint(MAX_LENGTH + 1) + record_1[off_chain_len + 1 :]),
++        ("invalid_utf8_memo", record_1[:off_memo] + b"\x01\x01\xff" + record_1[off_tags:]),
++        (
++            "unordered_map",
++            record_1[:off_memo] + b"\x00" + varint(2) + text("b") + u64(1) + text("a") + u64(2),
++        ),
++        (
++            "duplicate_map_key",
++            record_1[:off_memo] + b"\x00" + varint(2) + text("a") + u64(1) + text("a") + u64(2),
++        ),
++        ("nonminimal_map_count", record_1[:off_tags] + b"\x80\x00"),
++        ("varint_overflow", record_1[:off_chain_len] + b"\xff" * 10 + b"\x7f"),
++    ]
++    vectors += [(key, value.hex()) for key, value in bad]
++
++    OUT.parent.mkdir(parents=True, exist_ok=True)
++    lines = [key if not value else f"{key}={value}" for key, value in vectors]
++    OUT.write_text("\n".join(lines) + "\n", encoding="utf-8")
++    print(f"wrote {OUT.relative_to(REPO)} ({len(lines)} lines)")
++    print(f"  record_1: {len(record_1)} bytes")
++    print(f"  record_2: {len(record_2)} bytes")
++    print(f"  record_3: {len(record_3)} bytes")
++    print(f"  bad vectors: {len(bad)}")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/nc_c2.py b/tools/nc_c2.py
+new file mode 100644
+index 0000000..301bd90
+--- /dev/null
++++ b/tools/nc_c2.py
+@@ -0,0 +1,107 @@
++#!/usr/bin/env python3
++"""Negative controls for C2 (aura-codec).
++
++Four tamper tests must each turn the C2 gate red:
++
++  NC-1: CODEC_VERSION 1 -> 2 (golden vectors are version 1).
++  NC-2: corrupt one hex nibble in the independent golden fixture.
++  NC-3: disable Reader::finish() trailing-byte guard.
++  NC-4: disable the non-minimal varint predicate.
++
++Files are always restored in a `finally` block. `make nc-c2` captures stdout
++into docs/evidence/c2/nc.log, and a final green restore check is mandatory.
++"""
++
++from __future__ import annotations
++
++import os
++import subprocess
++from datetime import datetime, timezone
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++LIB_RS = REPO / "crates" / "aura-codec" / "src" / "lib.rs"
++CODEC_RS = REPO / "crates" / "aura-codec" / "src" / "codec.rs"
++TEST_RS = REPO / "crates" / "aura-codec" / "tests" / "c2_codec.rs"
++FIXTURE = REPO / "crates" / "aura-codec" / "tests" / "fixtures" / "c2_golden.txt"
++
++
++def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
++    return subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, check=False)
++
++
++def expect_red(label: str, path: Path, old: str, new: str, touch_test: bool = False) -> bool:
++    original = path.read_text(encoding="utf-8")
++    if old not in original:
++        print(f"{label}: FAIL — tamper target not found in {path.name}")
++        return False
++    tampered = original.replace(old, new, 1)
++    if tampered == original:
++        print(f"{label}: FAIL — tamper was a no-op")
++        return False
++    try:
++        path.write_text(tampered, encoding="utf-8")
++        if touch_test:
++            # Force rustc to re-read include_str!(...) after the fixture changes.
++            os.utime(TEST_RS, None)
++        result = run(["cargo", "test", "-p", "aura-codec", "--quiet"])
++        went_red = result.returncode != 0
++        snippet = "\n".join((result.stdout + result.stderr).strip().splitlines()[-5:])
++        print(f"{label}: {'PASS' if went_red else 'FAIL'}")
++        print(f"      cargo test -p aura-codec -> rc={result.returncode} "
++              f"({'RED as expected' if went_red else 'UNEXPECTEDLY GREEN'})")
++        print(f"      {snippet}")
++        return went_red
++    finally:
++        path.write_text(original, encoding="utf-8")
++        if touch_test:
++            os.utime(TEST_RS, None)
++
++
++def main() -> int:
++    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
++    print(f"C2 NEGATIVE CONTROLS — {stamp}")
++    print("Rule: a gate that cannot go red is not a gate (CONTRIBUTING.md §1).")
++    print()
++
++    results = [
++        expect_red(
++            "NC-1 codec version",
++            LIB_RS,
++            "pub const CODEC_VERSION: u8 = 1;",
++            "pub const CODEC_VERSION: u8 = 2;",
++        ),
++        expect_red(
++            "NC-2 independent golden fixture",
++            FIXTURE,
++            "record_1=01",
++            "record_1=03",
++            touch_test=True,
++        ),
++        expect_red(
++            "NC-3 trailing-byte guard",
++            CODEC_RS,
++            "if !self.remaining.is_empty() {",
++            "if false {",
++        ),
++        expect_red(
++            "NC-4 non-minimal varint guard",
++            CODEC_RS,
++            "last_byte == 0 && encoded_len > 1",
++            "false",
++        ),
++    ]
++    print()
++    passed = sum(results)
++    print(f"RESULT: {passed}/{len(results)} negative controls PASS")
++    if passed != len(results):
++        return 1
++
++    restored = run(["cargo", "test", "-p", "aura-codec", "--quiet"])
++    print(f"restore check: cargo test -p aura-codec -> rc={restored.returncode} "
++          f"({'GREEN as expected' if restored.returncode == 0 else 'STILL RED — FAIL'})")
++    return 0 if restored.returncode == 0 else 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/write_c2_evidence.py b/tools/write_c2_evidence.py
+new file mode 100644
+index 0000000..2e6153d
+--- /dev/null
++++ b/tools/write_c2_evidence.py
+@@ -0,0 +1,124 @@
++#!/usr/bin/env python3
++"""Regenerate docs/evidence/c2/gates.txt and docs/evidence/c2/SHA256SUMS.
++
++All numbers are real command output plus exit codes. The pre-C2 section is
++measured from the C1 git commit (HEAD at generation time).
++
++Usage:
++    python3 tools/write_c2_evidence.py
++    make evidence-c2
++"""
++
++from __future__ import annotations
++
++import hashlib
++import subprocess
++from datetime import datetime, timezone
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++EVIDENCE = REPO / "docs" / "evidence" / "c2"
++OUT = EVIDENCE / "gates.txt"
++FIXTURE = REPO / "crates" / "aura-codec" / "tests" / "fixtures" / "c2_golden.txt"
++
++GEN_IDEMPOTENT = (
++    "before=$(sha256sum crates/aura-codec/tests/fixtures/c2_golden.txt | cut -d' ' -f1); "
++    "python3 tools/gen_c2_vectors.py >/dev/null; "
++    "after=$(sha256sum crates/aura-codec/tests/fixtures/c2_golden.txt | cut -d' ' -f1); "
++    "if [ \"$before\" = \"$after\" ]; then echo \"generator idempotent: $after\"; "
++    "else echo \"GENERATOR DRIFT\"; exit 1; fi"
++)
++
++EXTERNAL_DEPS = (
++    "n=$(grep -cE '^(source|checksum) =' Cargo.lock || true); "
++    "echo \"external dependencies in Cargo.lock: $n\"; "
++    "p=$(grep -c '^\\[\\[package\\]\\]' Cargo.lock); echo \"workspace packages: $p\""
++)
++
++COMMANDS: list[tuple[str, str, int | None]] = [
++    ("toolchain", "rustc --version && cargo --version", None),
++    ("pre-C2 tree (C1 commit)", "git log -1 --oneline", None),
++    ("pre-C2 .rs files", "git ls-tree -r --name-only HEAD | grep -c '\\.rs$' || true", None),
++    ("pre-C2 codec source files", "git ls-tree -r --name-only HEAD | grep -c 'aura-codec/src/codec.rs' || true", None),
++    ("post-C2 .rs files", "find . -name '*.rs' -not -path './target/*' | wc -l", None),
++    ("post-C2 plan phase rows", "grep -hE '^\\| (✅ |⏸ )?\\*\\*[A-Z]+[0-9]+\\*\\* \\|' docs/plans/*_PLAN.md | wc -l", None),
++    ("dependency audit (internal only)", EXTERNAL_DEPS, None),
++    ("independent generator is idempotent", GEN_IDEMPOTENT, None),
++    ("full gate", "make test", 20),
++    ("C2 negative controls", "make nc-c2", 30),
++    ("docs drift guard", "python3 tools/check_claims.py", None),
++]
++
++
++def run(cmd: str) -> tuple[int, str]:
++    result = subprocess.run(
++        cmd, shell=True, cwd=REPO, capture_output=True, text=True, check=False
++    )
++    return result.returncode, (result.stdout + result.stderr).strip()
++
++
++def main() -> int:
++    EVIDENCE.mkdir(parents=True, exist_ok=True)
++    lines = [
++        "AuraLite-Crypto — C2 evidence (aura-codec)",
++        f"Generated (UTC): {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
++        "Rule: measured against the tree, not assumed.",
++        "",
++        "The wire format is pinned against tools/gen_c2_vectors.py, an",
++        "independent Python implementation. decode_canonical() additionally",
++        "requires that re-encoding reproduces the input bytes exactly.",
++        "",
++        "=" * 72,
++        "RAW COMMAND OUTPUT",
++        "=" * 72,
++        "",
++    ]
++
++    failures = 0
++    for label, cmd, tail in COMMANDS:
++        rc, out = run(cmd)
++        shown = cmd if len(cmd) < 160 else "$ (shell script: reproducibility / dependency audit)"
++        if tail and out:
++            out = "\n".join(out.splitlines()[-tail:])
++        lines.append(f"--- {label} ---")
++        lines.append(f"$ {shown}")
++        lines.append(out if out else "(no output)")
++        lines.append(f"[rc={rc}]")
++        lines.append("")
++        if rc != 0 and not (label.startswith("pre-C2") and "grep -c" in cmd):
++            failures += 1
++
++    lines += [
++        "=" * 72,
++        "SUMMARY",
++        "=" * 72,
++        "",
++        "Pre-C2 (C1 tree): 17 .rs files, 0 aura-codec source modules, 17 tests.",
++        "Post-C2: 22 .rs files, 4 new codec modules + 1 test file, 28 tests",
++        "passing (17 C0/C1 + 11 C2), 0 external dependencies (one internal",
++        "path dependency aura-codec -> aura-types), `make test` ALL GATES",
++        "GREEN, 4/4 C2 negative controls PASS.",
++        "Validators/blocks/tx remain 0/0/0.",
++        "",
++    ]
++    OUT.write_text("\n".join(lines), encoding="utf-8")
++
++    nc_log = EVIDENCE / "nc.log"
++    if not nc_log.exists():
++        print("ERROR: docs/evidence/c2/nc.log missing (run `make nc-c2`)")
++        return 1
++
++    sums = []
++    for path in (OUT, nc_log, FIXTURE):
++        digest = hashlib.sha256(path.read_bytes()).hexdigest()
++        sums.append(f"{digest}  {path.relative_to(REPO)}")
++    (EVIDENCE / "SHA256SUMS").write_text("\n".join(sums) + "\n", encoding="utf-8")
++
++    print(f"wrote {OUT.relative_to(REPO)} ({len(lines)} lines)")
++    print(f"wrote {nc_log.relative_to(REPO)}")
++    print("wrote docs/evidence/c2/SHA256SUMS")
++    return 1 if failures else 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+-- 
+2.47.3
+

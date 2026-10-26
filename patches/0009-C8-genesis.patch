@@ -1,0 +1,3276 @@
+From a9d8854a7cae2b63ccf3da7d170ed418cbef486a Mon Sep 17 00:00:00 2001
+From: AlexanderNyr <alexander@auralite.local>
+Date: Mon, 26 Oct 2026 14:27:17 +0000
+Subject: [PATCH] C8 genesis
+
+---
+ .github/workflows/ci.yml                      |  19 +-
+ CHANGELOG.md                                  |  79 ++++
+ CONTRIBUTING.md                               |   4 +
+ Cargo.lock                                    |  43 ++
+ Cargo.toml                                    |   7 +
+ Makefile                                      |  32 +-
+ README.md                                     |  34 +-
+ ROADMAP.md                                    |  27 +-
+ crates/aura-genesis/Cargo.toml                |  21 +
+ crates/aura-genesis/src/bin/aura.rs           |  74 ++++
+ crates/aura-genesis/src/error.rs              |  81 ++++
+ crates/aura-genesis/src/json.rs               | 211 +++++++++
+ crates/aura-genesis/src/lib.rs                |  34 ++
+ crates/aura-genesis/src/types.rs              | 258 +++++++++++
+ crates/aura-genesis/tests/c8_genesis.rs       | 322 ++++++++++++++
+ .../aura-genesis/tests/fixtures/c8_golden.txt |  44 ++
+ crates/aura-genesis/tests/genesis_cli.rs      | 101 +++++
+ docs/ARCHITECTURE.md                          |  11 +
+ docs/STATUS.md                                |  48 +-
+ docs/evidence/c8/SHA256SUMS                   |   6 +
+ docs/evidence/c8/gates.txt                    | 179 ++++++++
+ docs/evidence/c8/nc.log                       |  48 ++
+ docs/plans/CORE_PLAN.md                       |  69 ++-
+ docs/plans/NODE_PLAN.md                       |   6 +
+ docs/spec/c8-dependency-addendum.txt          |  11 +
+ docs/spec/genesis-format.md                   | 143 ++++++
+ docs/spec/genesis-testnet.json                |  41 ++
+ tools/check_deps.py                           |  20 +-
+ tools/gen_c8_vectors.py                       | 412 ++++++++++++++++++
+ tools/nc_c8.py                                | 129 ++++++
+ tools/record_c8_deps.py                       |  73 ++++
+ tools/write_c8_evidence.py                    | 137 ++++++
+ 32 files changed, 2659 insertions(+), 65 deletions(-)
+ create mode 100644 crates/aura-genesis/Cargo.toml
+ create mode 100644 crates/aura-genesis/src/bin/aura.rs
+ create mode 100644 crates/aura-genesis/src/error.rs
+ create mode 100644 crates/aura-genesis/src/json.rs
+ create mode 100644 crates/aura-genesis/src/lib.rs
+ create mode 100644 crates/aura-genesis/src/types.rs
+ create mode 100644 crates/aura-genesis/tests/c8_genesis.rs
+ create mode 100644 crates/aura-genesis/tests/fixtures/c8_golden.txt
+ create mode 100644 crates/aura-genesis/tests/genesis_cli.rs
+ create mode 100644 docs/evidence/c8/SHA256SUMS
+ create mode 100644 docs/evidence/c8/gates.txt
+ create mode 100644 docs/evidence/c8/nc.log
+ create mode 100644 docs/spec/c8-dependency-addendum.txt
+ create mode 100644 docs/spec/genesis-format.md
+ create mode 100644 docs/spec/genesis-testnet.json
+ create mode 100644 tools/gen_c8_vectors.py
+ create mode 100644 tools/nc_c8.py
+ create mode 100644 tools/record_c8_deps.py
+ create mode 100644 tools/write_c8_evidence.py
+
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index d7fdf71..b715c3c 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -10,7 +10,7 @@ on:
+ # perf) are added by O0 as the crates that need them actually appear.
+ jobs:
+   core:
+-    name: core (C0-C7 gate)
++    name: core (C0-C8 gate)
+     runs-on: ubuntu-latest
+     steps:
+       - uses: actions/checkout@v4
+@@ -27,25 +27,25 @@ jobs:
+       - name: make test
+         run: make test
+ 
+-      - name: golden vectors are reproducible (C1-C7)
+-        run: make gen-c1-vectors && make gen-c2-vectors && make gen-c3-vectors && make gen-c4-vectors && make gen-c5-vectors && make gen-c6-vectors && make gen-c7-vectors
++      - name: golden vectors are reproducible (C1-C8)
++        run: make gen-c1-vectors && make gen-c2-vectors && make gen-c3-vectors && make gen-c4-vectors && make gen-c5-vectors && make gen-c6-vectors && make gen-c7-vectors && make gen-c8-vectors
+ 
+-      # nc-all runs all 38 NCs without rewriting the historical C0-C6 logs,
++      # nc-all runs all 44 NCs without rewriting the historical C0-C7 logs,
+       # so those committed SHA256SUMS remain valid in the uploaded artifact.
+-      - name: negative controls (C0-C7, 38 total)
++      - name: negative controls (C0-C8, 44 total)
+         run: make nc-all
+ 
+-      # Only the CURRENT phase's evidence is regenerated. C0-C6 evidence is a
++      # Only the CURRENT phase's evidence is regenerated. C0-C7 evidence is a
+       # HISTORICAL committed record measured at its own commit; regenerating
+       # it later would relabel the wrong tree.
+-      - name: current phase evidence (C7)
+-        run: make evidence-c7
++      - name: current phase evidence (C8)
++        run: make evidence-c8
+ 
+       - name: Upload evidence
+         if: always()
+         uses: actions/upload-artifact@v4
+         with:
+-          name: c0-c7-evidence
++          name: c0-c8-evidence
+           path: |
+             docs/evidence/c0/
+             docs/evidence/c1/
+@@ -55,4 +55,5 @@ jobs:
+             docs/evidence/c5/
+             docs/evidence/c6/
+             docs/evidence/c7/
++            docs/evidence/c8/
+           if-no-files-found: ignore
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 3f5eb72..99bfacf 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,85 @@
+ All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
+ never rewritten: corrections are made with a new entry or an explicit note.
+ 
++## [C8 — genesis] 2026-10-26
++
++**Ninth code phase.** Deliverable: `patches/0009-C8-genesis.patch`.
++Adds the **14th crate**, `aura-genesis`, and the **first new external
++dependency since C3**: `serde_json =1.0.154` (config parsing only).
++
++- **Genesis document:** `Genesis { chain_id, protocol_version,
++  genesis_time_ms, validators, allocations }` with `Validator`
++  (`address`, `power`, `public_key[32]`) and `Allocation` (`address`,
++  `balance`). A strict JSON schema with exactly five top-level keys; unknown
++  or missing keys, wrong types, invalid bech32/hex, float balances, zero
++  power, zero allocations, duplicate addresses, empty validator sets and
++  `u128` supply overflow are all rejected. Balances are **decimal strings** —
++  `u128` amounts never round-trip through `f64`.
++- **Canonical binary:** C2 encoding (`varint(len) ‖ chain_id`, `u32`, `u64`,
++  validator and allocation vectors). `from_canonical_bytes` uses
++  `decode_canonical()` and then re-runs every structural check. JSON is
++  never hashed directly — `serde_json` is used only to read the config,
++  exactly the exception allowed by `ARCHITECTURE.md`.
++- **Commitments:** `genesis_hash` = C3 `hash_domain(chain_id,
++  Domain::Genesis, GENESIS_CONTEXT ‖ canonical_bytes)`; `validator_set_hash`
++  is now actually computed (C5 left the header field caller-supplied);
++  `allocation_root` is a C6 Merkle root over C7 `StateKey::account` digests
++  and `Account` values, sorted by address. It is an allocation commitment,
++  **not** the JMT `state_root` (S1).
++- **Determinism:** object key order and whitespace do not change any
++  commitment; validator array order **does** (C8 NC); allocation array order
++  does not change `allocation_root` because state is a set.
++  `genesis_time_ms` is explicit — no local clock.
++- **CLI:** the `aura` binary gains `genesis hash --file`, `genesis verify
++  --file --expect` and `genesis show --file`. `verify` exits 1 on mismatch,
++  bad arguments exit 2. `make genesis-hash` is a convenience wrapper.
++  D8 owns the rest of the CLI.
++- **Spec / sample:** `docs/spec/genesis-format.md` and
++  `docs/spec/genesis-testnet.json` (the sample's hash is pinned by a test).
++- **Independent golden vectors:** `tools/gen_c8_vectors.py` — pure-Python
++  BLAKE3 (7 official vectors), an independent BIP-173 bech32 encoder, C3
++  domain framing, C5/C6 tree rules, C7 key/account encodings. 44 fixture
++  lines: **19 JSON documents** (3 equivalent, 2 order variants, 13 invalid)
++  and **2 full commitment sets**. The generator self-checks every
++  determinism property. Offline and byte-stable.
++- **DoD gates:** three independent JSON representations of the same config
++  give one hash and one canonical byte string; reordering validators changes
++  both `genesis_hash` and `validator_set_hash`. Four CLI integration tests
++  pin `hash`, `verify` (accept + reject), `show` and usage.
++- **Dependency governance:** the C3 allowlist is **frozen** historical
++  evidence (pinned by `docs/evidence/c3/SHA256SUMS`). C8 records its +4
++  delta (`serde_json`, `itoa`, `memchr`, `zmij`) in
++  `docs/spec/c8-dependency-addendum.txt`; `tools/check_deps.py` compares
++  `Cargo.lock` against the union of baseline + addenda.
++  `tools/record_c8_deps.py` / `make record-c8-deps` is the reviewed action.
++- **Gate:** `make test` → **96 passed / 0 failed** (82 C0–C7 + 14 C8),
++  fmt/clippy clean, drift guard 12 plans / 112 rows / 24 markdown files,
++  dependency gate 58 external crates allowlisted.
++- **Negative controls:** `tools/nc_c8.py` → `make nc-c8` →
++  `docs/evidence/c8/nc.log`, **6/6 PASS**: genesis context, validator-set
++  context, golden hash, validator-order sorting, unknown-field rejection,
++  Stage 1 chain-id check. Total C0–C8: **44 NC**.
++- **Fixes found by the gate itself:** a CLI test used a path relative to the
++  test file instead of `CARGO_MANIFEST_DIR`; a JSON string helper needed an
++  explicit lifetime; an unused import was removed. All fixed in code.
++- **Tooling / CI:** `make nc-all` covers C0–C8 (44 NC) without rewriting
++  historical logs; CI regenerates only `make evidence-c8`. New targets:
++  `make gen-c8-vectors`, `make nc-c8`, `make evidence-c8`,
++  `make record-c8-deps`, `make genesis-hash`; `make test-core` covers all
++  eight implemented crates.
++- **Evidence:** `docs/evidence/c8/gates.txt` (pre-C8 counts from the C7
++  commit, dependency delta, CLI hash, raw gates), `docs/evidence/c8/nc.log`,
++  `SHA256SUMS` (also pins fixture, spec, sample config, addendum).
++- **Docs synced (D9):** `README.md`, `docs/STATUS.md`,
++  `docs/ARCHITECTURE.md` (C8 block + crate graph), `CHANGELOG.md`,
++  `ROADMAP.md` (ledger, §4, §8), `CONTRIBUTING.md`, `CORE_PLAN.md` (C8 ✅,
++  decision D-C10 + receipt), `NODE_PLAN.md` (C8 note), and the new
++  `docs/spec/genesis-format.md`.
++- **Not claimed:** genesis **block** / execution (B/D phases), JMT
++  `state_root` (S1), validator key ceremony (W7/O5), BLS aggregation (B2),
++  Stage 2 mainnet genesis, `cargo deny` (H1). Validators/blocks/tx remain
++  **0/0/0**.
++
+ ## [C7 — account model] 2026-10-26
+ 
+ **Eighth code phase.** Deliverable: `patches/0008-C7-account-model.patch`.
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index dc32b81..76b299b 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -112,5 +112,9 @@ that does not run its main test is a dead gate — that is a separate defect
+ - [ ] State key layout unchanged, or `PROTOCOL_VERSION` bumped and
+       `docs/spec/account-model.md` + `tools/gen_c7_vectors.py` updated in the
+       same patch (reserved prefixes must stay unreachable from contracts).
++- [ ] Genesis schema unchanged, or `docs/spec/genesis-format.md`,
++      `genesis-testnet.json` and `tools/gen_c8_vectors.py` updated together.
++- [ ] New external dependency? `make record-deps` + a reviewed addendum;
++      never rewrite the frozen C3 baseline allowlist.
+ - [ ] No new `unsafe` without justification.
+ - [ ] The north star was not pushed aside by a "temporary" solution.
+diff --git a/Cargo.lock b/Cargo.lock
+index 25c5410..b6a6317 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -45,6 +45,18 @@ dependencies = [
+ name = "aura-exec"
+ version = "0.1.0"
+ 
++[[package]]
++name = "aura-genesis"
++version = "0.1.0"
++dependencies = [
++ "aura-block",
++ "aura-codec",
++ "aura-crypto",
++ "aura-state",
++ "aura-types",
++ "serde_json",
++]
++
+ [[package]]
+ name = "aura-mempool"
+ version = "0.1.0"
+@@ -357,6 +369,12 @@ dependencies = [
+  "digest",
+ ]
+ 
++[[package]]
++name = "itoa"
++version = "1.0.18"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
++
+ [[package]]
+ name = "k256"
+ version = "0.13.4"
+@@ -375,6 +393,12 @@ version = "0.2.191"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
+ 
++[[package]]
++name = "memchr"
++version = "2.8.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
++
+ [[package]]
+ name = "pkcs8"
+ version = "0.10.2"
+@@ -479,6 +503,19 @@ dependencies = [
+  "syn 3.0.9",
+ ]
+ 
++[[package]]
++name = "serde_json"
++version = "1.0.154"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e7e9cc8b1b85264074fbcc02a88680c4096b1e47df8f739dceb03bf482f04bd6"
++dependencies = [
++ "itoa",
++ "memchr",
++ "serde",
++ "serde_core",
++ "zmij",
++]
++
+ [[package]]
+ name = "sha2"
+ version = "0.10.9"
+@@ -587,3 +624,9 @@ dependencies = [
+  "quote",
+  "syn 2.0.119",
+ ]
++
++[[package]]
++name = "zmij"
++version = "1.0.23"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+diff --git a/Cargo.toml b/Cargo.toml
+index 7e426ef..5335bf2 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -7,6 +7,7 @@ members = [
+     "crates/aura-tx",
+     "crates/aura-block",
+     "crates/aura-state",
++    "crates/aura-genesis",
+     "crates/aura-storage",
+     "crates/aura-exec",
+     "crates/aura-consensus",
+@@ -24,6 +25,8 @@ rust-version = "1.99.1"
+ repository = "https://github.com/AlexanderNyr/AuraLite-Crypto"
+ publish = false
+ 
++# C8 adds the 14th crate, `aura-genesis`, and the first new external
++# dependency since C3 (serde_json, config parsing only).
+ # C7 gives `aura-state` its first real API (no new crate or dependency).
+ # C5 added the 13th crate, `aura-block`, with no new external dependencies.
+ # C4 added the 12th crate, `aura-tx`.
+@@ -40,8 +43,12 @@ aura-crypto = { path = "crates/aura-crypto" }
+ aura-tx = { path = "crates/aura-tx" }
+ aura-block = { path = "crates/aura-block" }
+ aura-state = { path = "crates/aura-state" }
++aura-genesis = { path = "crates/aura-genesis" }
+ blake3 = { version = "=1.8.7", default-features = false, features = ["pure", "std"] }
+ ed25519-dalek = { version = "=2.2.0" }
+ k256 = { version = "=0.13.4", default-features = false, features = ["ecdsa"] }
+ zeroize = { version = "=1.8.2", features = ["zeroize_derive"] }
+ subtle = { version = "=2.6.1", default-features = false }
++# C8: serde_json is used ONLY to parse the genesis CONFIG file.
++# Consensus encoding stays aura-codec; no serde derive in any crate.
++serde_json = { version = "=1.0.154", default-features = false, features = ["std"] }
+diff --git a/Makefile b/Makefile
+index 6c3d12a..fb3c6ea 100644
+--- a/Makefile
++++ b/Makefile
+@@ -12,7 +12,8 @@ PYTHON ?= python3
+         nc-all gen-c4-vectors nc-c4 evidence-c4 \
+         gen-c5-vectors nc-c5 evidence-c5 \
+         gen-c6-vectors nc-c6 evidence-c6 \
+-        gen-c7-vectors nc-c7 evidence-c7 devnet clean
++        gen-c7-vectors nc-c7 evidence-c7 \
++        record-c8-deps record-deps gen-c8-vectors nc-c8 evidence-c8 devnet clean
+ 
+ help:
+ 	@echo "AuraLite-Crypto (Stage 1, C0)"
+@@ -45,6 +46,11 @@ help:
+ 	@echo "  make gen-c7-vectors    regenerate independent account/state-key vectors"
+ 	@echo "  make nc-c7             C7 negative controls -> docs/evidence/c7/nc.log"
+ 	@echo "  make evidence-c7       regenerate docs/evidence/c7/gates.txt + SHA256SUMS"
++	@echo "  make record-c8-deps    re-record the C8 dependency addendum"
++	@echo "  make gen-c8-vectors    regenerate independent genesis vectors"
++	@echo "  make nc-c8             C8 negative controls -> docs/evidence/c8/nc.log"
++	@echo "  make evidence-c8       regenerate docs/evidence/c8/gates.txt + SHA256SUMS"
++	@echo "  make genesis-hash      print the shipped testnet genesis hash"
+ 	@echo "  make test-sanitize     SKIP until H3/C9"
+ 	@echo "  make test-determinism  SKIP until X7"
+ 	@echo "  make fuzz-smoke        SKIP until H3"
+@@ -79,7 +85,7 @@ test: deps-check
+ 	@echo "ALL GATES GREEN"
+ 
+ test-core:
+-	@$(CARGO) test -p aura-types -p aura-codec -p aura-crypto -p aura-tx -p aura-block -p aura-state
++	@$(CARGO) test -p aura-types -p aura-codec -p aura-crypto -p aura-tx -p aura-block -p aura-state -p aura-genesis
+ 	@$(PYTHON) tools/check_claims.py
+ 	@$(PYTHON) tools/check_deps.py
+ 
+@@ -143,7 +149,7 @@ evidence-c3:
+ # Runs every NC script WITHOUT rewriting the historical C0-C3 evidence logs,
+ # so their committed SHA256SUMS stay valid. CI uses this instead of nc-cX.
+ nc-all:
+-	@for phase in 0 1 2 3 4 5 6 7; do \
++	@for phase in 0 1 2 3 4 5 6 7 8; do \
+ 	    $(PYTHON) tools/nc_c$$phase.py > /tmp/aura-nc-c$$phase.log 2>&1 || \
+ 	      { echo "C$$phase NEGATIVE CONTROLS FAILED"; tail -30 /tmp/aura-nc-c$$phase.log; exit 1; }; \
+ 	    grep '^RESULT:' /tmp/aura-nc-c$$phase.log; \
+@@ -193,6 +199,26 @@ nc-c7:
+ evidence-c7:
+ 	@$(PYTHON) tools/write_c7_evidence.py
+ 
++record-c8-deps:
++	@$(PYTHON) tools/record_c8_deps.py
++
++# Generic alias for the current phase's dependency addendum.
++record-deps: record-c8-deps
++
++gen-c8-vectors:
++	@$(PYTHON) tools/gen_c8_vectors.py
++
++nc-c8:
++	@mkdir -p docs/evidence/c8
++	@$(PYTHON) tools/nc_c8.py > docs/evidence/c8/nc.log 2>&1 || { cat docs/evidence/c8/nc.log; exit 1; }
++	@cat docs/evidence/c8/nc.log
++
++evidence-c8:
++	@$(PYTHON) tools/write_c8_evidence.py
++
++genesis-hash:
++	@$(CARGO) run --quiet -p aura-genesis --bin aura -- genesis hash --file docs/spec/genesis-testnet.json
++
+ devnet:
+ 	@echo "ERROR: devnet is D7 (NODE_PLAN). It is not implemented at C0." >&2
+ 	@exit 1
+diff --git a/README.md b/README.md
+index 378d44e..8e469ae 100644
+--- a/README.md
++++ b/README.md
+@@ -11,16 +11,16 @@
+ Name and ticker were locked by the owner on 2026-10-25. The ticker was checked
+ for collisions — see [`docs/TICKER_AUDIT.md`](docs/TICKER_AUDIT.md).
+ 
+-> **Status: C7 LANDED (2026-10-26).** C0 gave us the workspace, CI and
++> **Status: C8 LANDED (2026-10-26).** C0 gave us the workspace, CI and
+ > `make test`; C1 the canonical types; C2 `aura-codec`; C3 `aura-crypto`; C4
+-> `aura-tx`; C5 `aura-block`; C6 Merkle proofs; C7 gives `aura-state` its
+-> first real API — the `Account` value and a state key layout with five
+-> protocol namespaces and **reserved prefixes unreachable from contracts**.
+-> 1000 distinct addresses produce 5000 keys/digests with zero collisions.
+-> There is still **no consensus, VM, P2P, node or wallet**, no state tree or
+-> `state_root` computation, and no genesis. Everything else below is a plan,
+-> not a report about an implementation. Every claim of readiness appears only
+-> after a measurable test gate, as in
++> `aura-tx`; C5 `aura-block`; C6 Merkle proofs; C7 the account/state-key
++> layout; C8 adds `aura-genesis` — a deterministic genesis config, its binary
++> hash, `validator_set_hash`, `allocation_root` and the `aura genesis` CLI.
++> Three independent JSON representations hash identically; reordering
++> validators changes the hash. There is still **no consensus, VM, P2P, node
++> or wallet**, no JMT `state_root`, and no network. Everything else below is
++> a plan, not a report about an implementation. Every claim of readiness
++> appears only after a measurable test gate, as in
+ > [AuraLite-Emulator](https://github.com/AlexanderNyr/AuraLite-Emulator) and
+ > [AuraLite-OS](https://github.com/AlexanderNyr/AuraLite-OS).
+ 
+@@ -81,14 +81,14 @@ Details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+ 
+ ## Quickstart
+ 
+-**Now (C7)** the foundation is real and verifiable:
++**Now (C8)** the foundation is real and verifiable:
+ 
+ ```sh
+ make deps-check          # rustc / cargo / rustfmt / clippy
+ make test                # fmt + clippy + cargo test + drift + dependency gate
+-make nc-all              # all 38 negative controls (C0-C7), no historical log churn
+-make gen-c7-vectors      # independent account/state-key vectors (self-checked BLAKE3)
+-make evidence-c7         # current phase gate + receipts
++make nc-all              # all 44 negative controls (C0-C8), no historical log churn
++make genesis-hash        # print the shipped testnet genesis hash
++make evidence-c8         # current phase gate + receipts
+ ```
+ 
+ **The devnet does not exist yet — and that is honest.** After phase D7 (devnet)
+@@ -115,7 +115,7 @@ AuraLite-Crypto/
+   CHANGELOG.md           <- what actually changed (ISO 8601 dates, Europe/Moscow)
+   CONTRIBUTING.md        <- how to land a phase: one patch, one gate, one NC
+   Makefile               <- single entry point (C0 OK)
+-  Cargo.toml             <- 13 crates (C7 activates aura-state), 54 pinned deps
++  Cargo.toml             <- 14 crates (C8), 58 pinned external deps
+   rust-toolchain.toml    <- pinned 1.99.1 + rustfmt/clippy (C0 OK)
+   tools/                 <- docs drift guard + negative-control drivers (C0 OK)
+   docs/
+@@ -123,10 +123,10 @@ AuraLite-Crypto/
+     ARCHITECTURE.md      <- invariants and data flow
+     TICKER_AUDIT.md      <- measured ticker collision audit
+     plans/*_PLAN.md      <- 12 plans, dependency-ordered, DoD + gate per phase
+-    evidence/            <- gate logs / receipts (C0-C7)
+-    spec/                <- tx/block/proof/account specs (C4-C7), allowlist
++    evidence/            <- gate logs / receipts (C0-C8)
++    spec/                <- C4-C8 specs, genesis-testnet.json, dep allowlists
+   patches/               <- one .patch per phase (0001-C0-... shipped)
+-  crates/*               <- 13 crates: 6 real APIs (C7) + 7 empty placeholders
++  crates/*               <- 14 crates: 7 real APIs (C8) + 7 empty placeholders
+   contracts/*            <- reference contracts (ARC-20, ARC-721, AMM, ...)
+   tests/                 <- unit/property/integration/consensus/soak
+   fuzz/ sim/ bench/ deploy/ web/
+diff --git a/ROADMAP.md b/ROADMAP.md
+index b586f50..c4177b4 100644
+--- a/ROADMAP.md
++++ b/ROADMAP.md
+@@ -121,7 +121,7 @@ phase tables (decision Q5).
+ 
+ | Plan | Status | Scope | Phases |
+ |---|---|---|---|
+-| [`docs/plans/CORE_PLAN.md`](docs/plans/CORE_PLAN.md) | 🚧 IN PROGRESS (C0–C7 ✅) | primitives, codec, crypto, tx/block, genesis, test rig | C0–C10 |
++| [`docs/plans/CORE_PLAN.md`](docs/plans/CORE_PLAN.md) | 🚧 IN PROGRESS (C0–C8 ✅) | primitives, codec, crypto, tx/block, genesis, test rig | C0–C10 |
+ | [`docs/plans/STATE_PLAN.md`](docs/plans/STATE_PLAN.md) | 📋 PLAN | Merkle state, RocksDB, WAL, snapshots, pruning, recovery | S0–S7 |
+ | [`docs/plans/EXEC_PLAN.md`](docs/plans/EXEC_PLAN.md) | 📋 PLAN | WASM runtime, gas, ABI, contract SDK, determinism | X0–X9 |
+ | [`docs/plans/CONSENSUS_PLAN.md`](docs/plans/CONSENSUS_PLAN.md) | 📋 PLAN | BFT-PoS, QC, VRF, staking, slashing, finality, governance | B0–B10 |
+@@ -237,6 +237,13 @@ external crates, drift guard now covers 23 markdown files. DoD gates: 1000
+ addresses → 5000 distinct keys/digests, all 256 prefixes checked with only 5
+ reachable. Receipts: `docs/evidence/c7/`.
+ 
++**Post-C8 measurement (2026-10-26):** 14 crates (new `aura-genesis`), 54 `.rs`
++files, 96 tests passing, `make nc-all` → **44/44 negative controls PASS**,
++6/6 new in C8, 58 external crates (+4 recorded in a reviewed addendum),
++drift guard now covers 24 markdown files. DoD: three JSON representations →
++one hash; validator order change → different hash; `aura genesis` CLI agrees
++with the library. Receipts: `docs/evidence/c8/`.
++
+ ### Measured gaps to the north star
+ 
+ | # | Gap | Evidence in the tree | Plan |
+@@ -311,19 +318,19 @@ after the fact, as in AuraLite OS.
+ 
+ ## 8. Immediate queue
+ 
+-**C0, C1, C2, C3, C4, C5, C6 and C7 shipped**
++**C0, C1, C2, C3, C4, C5, C6, C7 and C8 shipped**
+ (`patches/0001-C0-baseline-workspace.patch`,
+ `patches/0002-C1-types.patch`, `patches/0003-C2-codec.patch`,
+ `patches/0004-C3-crypto.patch`, `patches/0005-C4-tx-format.patch`,
+ `patches/0006-C5-block-header.patch`, `patches/0007-C6-merkle-proofs.patch`,
+-`patches/0008-C7-account-model.patch`): workspace, CI, gates, identity
+-constants, canonical types, codec, crypto, tx format, block format, Merkle
+-proofs and the account/state-key layout — all pinned against independent
+-references and guarded by 38 negative controls. Right now: **C8** — genesis:
+-genesis JSON → deterministic binary genesis hash, validator set, allocation
+-and chain-id, an `aura genesis` tool and a gate that the same genesis hashes
+-identically on 3 hosts (NC: validator order change → different hash). The
+-next patch is `patches/0009-C8-genesis.patch`.
++`patches/0008-C7-account-model.patch`, `patches/0009-C8-genesis.patch`):
++workspace, CI, gates, identity constants, canonical types, codec, crypto,
++tx format, block format, Merkle proofs, the account/state-key layout and a
++deterministic genesis with its CLI — all pinned against independent
++references and guarded by 44 negative controls. Right now: **C9** — test rig:
++`proptest`, golden fixtures, `cargo-fuzz` targets for codec/tx,
++`make test-core` and a CI `core` shard, with >= 200 vectors and 60 s of
++fuzzing without crashes. The next patch is `patches/0010-C9-test-rig.patch`.
+ 
+ See also: [`docs/STATUS.md`](docs/STATUS.md),
+ [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
+diff --git a/crates/aura-genesis/Cargo.toml b/crates/aura-genesis/Cargo.toml
+new file mode 100644
+index 0000000..e61f4b7
+--- /dev/null
++++ b/crates/aura-genesis/Cargo.toml
+@@ -0,0 +1,21 @@
++[package]
++name = "aura-genesis"
++description = "AuraLite-Crypto deterministic genesis document, hash and CLI"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++rust-version.workspace = true
++repository.workspace = true
++publish.workspace = true
++
++[[bin]]
++name = "aura"
++path = "src/bin/aura.rs"
++
++[dependencies]
++aura-types.workspace = true
++aura-codec.workspace = true
++aura-crypto.workspace = true
++aura-state.workspace = true
++aura-block.workspace = true
++serde_json.workspace = true
+diff --git a/crates/aura-genesis/src/bin/aura.rs b/crates/aura-genesis/src/bin/aura.rs
+new file mode 100644
+index 0000000..9f3e4d5
+--- /dev/null
++++ b/crates/aura-genesis/src/bin/aura.rs
+@@ -0,0 +1,74 @@
++//! `aura genesis` — the C8 slice of the future `aura` CLI (D8 owns the rest).
++
++use std::path::Path;
++
++use aura_genesis::from_json_file;
++
++const USAGE: &str = "\
++aura — AuraLite-Crypto CLI (C8 implements only the genesis subcommand)
++
++Usage:
++  aura genesis hash   --file <genesis.json>
++  aura genesis verify --file <genesis.json> --expect <64-hex>
++  aura genesis show   --file <genesis.json>
++";
++
++fn usage() -> ! {
++    eprint!("{USAGE}");
++    std::process::exit(2);
++}
++
++fn option(args: &[String], name: &str) -> Option<String> {
++    args.iter()
++        .position(|arg| arg == name)
++        .and_then(|index| args.get(index + 1))
++        .cloned()
++}
++
++fn load(args: &[String]) -> aura_genesis::Genesis {
++    let path = match option(args, "--file") {
++        Some(path) => path,
++        None => usage(),
++    };
++    match from_json_file(Path::new(&path)) {
++        Ok(genesis) => genesis,
++        Err(error) => {
++            eprintln!("genesis: {error}");
++            std::process::exit(1);
++        }
++    }
++}
++
++fn main() {
++    let args: Vec<String> = std::env::args().skip(1).collect();
++    if args.len() < 2 || args[0] != "genesis" {
++        usage();
++    }
++    match args[1].as_str() {
++        "hash" => {
++            let genesis = load(&args);
++            println!("{}", genesis.hash().to_hex());
++        }
++        "show" => {
++            let genesis = load(&args);
++            for (key, value) in genesis.summary() {
++                println!("{key}={value}");
++            }
++        }
++        "verify" => {
++            let expected = match option(&args, "--expect") {
++                Some(value) => value,
++                None => usage(),
++            };
++            let genesis = load(&args);
++            let actual = genesis.hash().to_hex();
++            if actual == expected.to_ascii_lowercase() {
++                println!("OK {actual}");
++            } else {
++                eprintln!("MISMATCH expected {expected} got {actual}");
++                std::process::exit(1);
++            }
++        }
++        _ => usage(),
++    }
++}
+diff --git a/crates/aura-genesis/src/error.rs b/crates/aura-genesis/src/error.rs
+new file mode 100644
+index 0000000..163c0c2
+--- /dev/null
++++ b/crates/aura-genesis/src/error.rs
+@@ -0,0 +1,81 @@
++//! Genesis parsing and validation errors.
++
++use std::fmt;
++
++use aura_codec::CodecError;
++
++/// Every reason a genesis document can be rejected.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum GenesisError {
++    /// The input is not valid JSON.
++    InvalidJson(String),
++    /// An unknown key was found in the top-level object.
++    UnknownField(String),
++    /// An unknown key was found in a validator/allocation object.
++    UnknownNestedField(String),
++    /// A required key is missing.
++    MissingField(&'static str),
++    /// A field has the wrong JSON type.
++    WrongType(&'static str),
++    /// `chain_id` is not a valid canonical chain identifier.
++    InvalidChainId(String),
++    /// Stage 1 only accepts the testnet chain-id.
++    WrongChain(String),
++    /// `protocol_version` is not the current protocol version.
++    UnsupportedProtocolVersion(u32),
++    /// An address is not valid bech32.
++    InvalidAddress(String),
++    /// A validator public key is not 32 bytes of hex.
++    InvalidPublicKey(String),
++    /// A balance is not a decimal `u128` string.
++    InvalidBalance(String),
++    /// The validator set is empty.
++    EmptyValidatorSet,
++    /// A validator has zero voting power.
++    ZeroValidatorPower,
++    /// Two validators share an address.
++    DuplicateValidator(String),
++    /// Two allocations share an address.
++    DuplicateAllocation(String),
++    /// An allocation has a zero balance.
++    ZeroAllocation,
++    /// The sum of all allocations overflows `u128`.
++    SupplyOverflow,
++    /// Canonical binary decoding failed.
++    Decode(CodecError),
++}
++
++impl fmt::Display for GenesisError {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::InvalidJson(e) => write!(f, "invalid genesis JSON: {e}"),
++            Self::UnknownField(k) => write!(f, "unknown genesis field '{k}'"),
++            Self::UnknownNestedField(k) => write!(f, "unknown nested field '{k}'"),
++            Self::MissingField(k) => write!(f, "missing genesis field '{k}'"),
++            Self::WrongType(k) => write!(f, "wrong type for '{k}'"),
++            Self::InvalidChainId(v) => write!(f, "invalid chain-id '{v}'"),
++            Self::WrongChain(v) => write!(f, "stage 1 rejects chain-id '{v}'"),
++            Self::UnsupportedProtocolVersion(v) => {
++                write!(f, "unsupported protocol version {v}")
++            }
++            Self::InvalidAddress(v) => write!(f, "invalid bech32 address '{v}'"),
++            Self::InvalidPublicKey(v) => write!(f, "invalid public key '{v}'"),
++            Self::InvalidBalance(v) => write!(f, "invalid balance '{v}'"),
++            Self::EmptyValidatorSet => f.write_str("genesis validator set is empty"),
++            Self::ZeroValidatorPower => f.write_str("validator has zero power"),
++            Self::DuplicateValidator(v) => write!(f, "duplicate validator '{v}'"),
++            Self::DuplicateAllocation(v) => write!(f, "duplicate allocation '{v}'"),
++            Self::ZeroAllocation => f.write_str("allocation has a zero balance"),
++            Self::SupplyOverflow => f.write_str("total allocation supply overflows u128"),
++            Self::Decode(e) => write!(f, "canonical decode failed: {e}"),
++        }
++    }
++}
++
++impl std::error::Error for GenesisError {}
++
++impl From<CodecError> for GenesisError {
++    fn from(error: CodecError) -> Self {
++        GenesisError::Decode(error)
++    }
++}
+diff --git a/crates/aura-genesis/src/json.rs b/crates/aura-genesis/src/json.rs
+new file mode 100644
+index 0000000..8fee99c
+--- /dev/null
++++ b/crates/aura-genesis/src/json.rs
+@@ -0,0 +1,211 @@
++//! Strict JSON config parsing for genesis.
++//!
++//! This is the **only** place `serde_json` is used. The parser accepts a
++//! small, fully specified schema and rejects everything else — unknown
++//! keys, wrong types, floats for balances, duplicate addresses, zero power
++//! and supply overflow. It never guesses or silently defaults.
++
++use std::collections::BTreeMap;
++
++use aura_types::{Address, Amount, ChainId, is_our_chain};
++use serde_json::{Map, Value};
++
++use crate::error::GenesisError;
++use crate::types::{Allocation, Genesis, Validator};
++
++const ALLOWED_FIELDS: [&str; 5] = [
++    "chain_id",
++    "protocol_version",
++    "genesis_time_ms",
++    "validators",
++    "allocations",
++];
++const ALLOWED_VALIDATOR_FIELDS: [&str; 3] = ["address", "power", "public_key"];
++const ALLOWED_ALLOCATION_FIELDS: [&str; 2] = ["address", "balance"];
++
++type Object<'a> = &'a Map<String, Value>;
++
++fn required<'a>(object: Object<'a>, key: &'static str) -> Result<&'a Value, GenesisError> {
++    object.get(key).ok_or(GenesisError::MissingField(key))
++}
++
++fn string_field<'a>(object: Object<'a>, key: &'static str) -> Result<&'a str, GenesisError> {
++    required(object, key)?
++        .as_str()
++        .ok_or(GenesisError::WrongType(key))
++}
++
++fn u64_field(object: Object<'_>, key: &'static str) -> Result<u64, GenesisError> {
++    required(object, key)?
++        .as_u64()
++        .ok_or(GenesisError::WrongType(key))
++}
++
++fn check_keys(object: Object<'_>, allowed: &[&str]) -> Result<(), GenesisError> {
++    for key in object.keys() {
++        if !allowed.contains(&key.as_str()) {
++            return Err(GenesisError::UnknownNestedField(key.clone()));
++        }
++    }
++    Ok(())
++}
++
++fn hex32(text: &str) -> Option<[u8; 32]> {
++    if text.len() != 64 {
++        return None;
++    }
++    let bytes = text.as_bytes();
++    let mut out = [0u8; 32];
++    for (index, pair) in bytes.chunks(2).enumerate() {
++        let hi = (pair[0] as char).to_digit(16)?;
++        let lo = (pair[1] as char).to_digit(16)?;
++        out[index] = ((hi << 4) | lo) as u8;
++    }
++    Some(out)
++}
++
++fn parse_validator(value: &Value) -> Result<Validator, GenesisError> {
++    let object = value
++        .as_object()
++        .ok_or(GenesisError::WrongType("validators[]"))?;
++    check_keys(object, &ALLOWED_VALIDATOR_FIELDS)?;
++    let address_text = string_field(object, "address")?;
++    let address = Address::from_bech32(address_text)
++        .map_err(|_| GenesisError::InvalidAddress(address_text.to_owned()))?;
++    let power = u64_field(object, "power")?;
++    if power == 0 {
++        return Err(GenesisError::ZeroValidatorPower);
++    }
++    let key_text = string_field(object, "public_key")?;
++    let public_key =
++        hex32(key_text).ok_or_else(|| GenesisError::InvalidPublicKey(key_text.to_owned()))?;
++    Ok(Validator {
++        address,
++        power,
++        public_key,
++    })
++}
++
++fn parse_validator_array(value: &Value) -> Result<Vec<Validator>, GenesisError> {
++    let array = value
++        .as_array()
++        .ok_or(GenesisError::WrongType("validators"))?;
++    array.iter().map(parse_validator).collect()
++}
++
++fn parse_allocation(value: &Value) -> Result<Allocation, GenesisError> {
++    let object = value
++        .as_object()
++        .ok_or(GenesisError::WrongType("allocations[]"))?;
++    check_keys(object, &ALLOWED_ALLOCATION_FIELDS)?;
++    let address_text = string_field(object, "address")?;
++    let address = Address::from_bech32(address_text)
++        .map_err(|_| GenesisError::InvalidAddress(address_text.to_owned()))?;
++    // Balances are decimal STRINGS: JSON numbers/floats are rejected because
++    // u128 amounts must never round-trip through f64.
++    let balance_text = string_field(object, "balance")?;
++    let units: u128 = balance_text
++        .parse()
++        .map_err(|_| GenesisError::InvalidBalance(balance_text.to_owned()))?;
++    let balance = Amount::from_units(units);
++    if balance == Amount::ZERO {
++        return Err(GenesisError::ZeroAllocation);
++    }
++    Ok(Allocation { address, balance })
++}
++
++fn parse_allocation_array(value: &Value) -> Result<Vec<Allocation>, GenesisError> {
++    let array = value
++        .as_array()
++        .ok_or(GenesisError::WrongType("allocations"))?;
++    array.iter().map(parse_allocation).collect()
++}
++
++/// Parse a genesis JSON config into a validated [`Genesis`].
++///
++/// Top-level object key order and whitespace are irrelevant; arrays keep
++/// their declared order. `validator` order therefore changes the hash.
++pub fn from_json_str(text: &str) -> Result<Genesis, GenesisError> {
++    let value: Value =
++        serde_json::from_str(text).map_err(|error| GenesisError::InvalidJson(error.to_string()))?;
++    let object = value
++        .as_object()
++        .ok_or(GenesisError::WrongType("genesis"))?;
++
++    // NC target: disabling this makes unknown fields silently accepted.
++    for key in object.keys() {
++        if !ALLOWED_FIELDS.contains(&key.as_str()) {
++            return Err(GenesisError::UnknownField(key.clone()));
++        }
++    }
++
++    let raw_chain = string_field(object, "chain_id")?;
++    let chain_id =
++        ChainId::new(raw_chain).map_err(|_| GenesisError::InvalidChainId(raw_chain.to_owned()))?;
++
++    // NC target: disabling this lets a Stage 2 mainnet genesis start here.
++    if !is_our_chain(raw_chain) {
++        return Err(GenesisError::WrongChain(raw_chain.to_owned()));
++    }
++
++    let version_raw = u64_field(object, "protocol_version")?;
++    let protocol_version =
++        u32::try_from(version_raw).map_err(|_| GenesisError::WrongType("protocol_version"))?;
++    let genesis_time_ms = u64_field(object, "genesis_time_ms")?;
++
++    // NC target: sorting here would erase the consensus-significant order.
++    let validators = parse_validator_array(required(object, "validators")?)?;
++    let allocations = parse_allocation_array(required(object, "allocations")?)?;
++
++    Genesis::new(
++        chain_id,
++        protocol_version,
++        genesis_time_ms,
++        validators,
++        allocations,
++    )
++}
++
++/// Parse a genesis JSON config from a file path.
++pub fn from_json_file(path: &std::path::Path) -> Result<Genesis, GenesisError> {
++    let text = std::fs::read_to_string(path)
++        .map_err(|error| GenesisError::InvalidJson(format!("{}: {error}", path.display())))?;
++    from_json_str(&text)
++}
++
++impl Genesis {
++    /// A short human-readable summary used by the CLI.
++    pub fn summary(&self) -> BTreeMap<String, String> {
++        let mut out = BTreeMap::new();
++        out.insert("chain_id".to_owned(), self.chain_id.as_str().to_owned());
++        out.insert(
++            "protocol_version".to_owned(),
++            self.protocol_version.to_string(),
++        );
++        out.insert(
++            "genesis_time_ms".to_owned(),
++            self.genesis_time_ms.to_string(),
++        );
++        out.insert("validators".to_owned(), self.validator_count().to_string());
++        out.insert(
++            "allocations".to_owned(),
++            self.allocation_count().to_string(),
++        );
++        out.insert(
++            "total_supply".to_owned(),
++            self.total_supply()
++                .map(|amount| amount.units().to_string())
++                .unwrap_or_else(|_| "overflow".to_owned()),
++        );
++        out.insert("genesis_hash".to_owned(), self.hash().to_hex());
++        out.insert(
++            "validator_set_hash".to_owned(),
++            self.validator_set_hash().to_hex(),
++        );
++        out.insert(
++            "allocation_root".to_owned(),
++            self.allocation_root().to_hex(),
++        );
++        out
++    }
++}
+diff --git a/crates/aura-genesis/src/lib.rs b/crates/aura-genesis/src/lib.rs
+new file mode 100644
+index 0000000..26a2efe
+--- /dev/null
++++ b/crates/aura-genesis/src/lib.rs
+@@ -0,0 +1,34 @@
++//! AuraLite-Crypto deterministic genesis document (C8).
++//!
++//! `aura-genesis` turns a genesis **config file** (JSON) into one canonical
++//! binary document and a set of deterministic commitments:
++//!
++//! * [`Genesis::hash`] — the genesis id, domain-separated with
++//!   [`aura_types::Domain::Genesis`] and the chain-id;
++//! * [`Genesis::validator_set_hash`] — the value that fills C5's
++//!   `validator_set_hash` header field (previously caller-supplied);
++//! * [`Genesis::allocation_root`] — a Merkle commitment over C7 account
++//!   state keys/values, using the C6 tree shape. This is **not** the JMT
++//!   `state_root` (S1), just a genesis allocation commitment.
++//!
++//! JSON is parsed with `serde_json` and used **only as a config format** —
++//! exactly the exception allowed by `ARCHITECTURE.md` ("serde is for
++//! RPC/configs only"). Consensus bytes always come from `aura-codec`.
++//! Object key order and whitespace never affect the hash; the validator
++//! array order is consensus-significant and does.
++//!
++//! Specification: `docs/spec/genesis-format.md`.
++//! Golden vectors: `tools/gen_c8_vectors.py` (independent Python).
++
++#![forbid(unsafe_code)]
++#![deny(missing_docs)]
++
++mod error;
++mod json;
++mod types;
++
++pub use error::GenesisError;
++pub use json::{from_json_file, from_json_str};
++pub use types::{
++    ALLOCATION_LEAF_CONTEXT, Allocation, GENESIS_CONTEXT, Genesis, VALIDATOR_SET_CONTEXT, Validator,
++};
+diff --git a/crates/aura-genesis/src/types.rs b/crates/aura-genesis/src/types.rs
+new file mode 100644
+index 0000000..3584459
+--- /dev/null
++++ b/crates/aura-genesis/src/types.rs
+@@ -0,0 +1,258 @@
++//! Genesis value types, canonical encoding and commitments.
++
++use aura_block::build_tree_from_leaf_hashes;
++use aura_codec::{CodecError, Decode, Encode, Reader, Writer, decode_canonical, encode_to_bytes};
++use aura_crypto::{blake3_hash, hash_domain};
++use aura_state::{Account, StateKey};
++use aura_types::{Address, Amount, ChainId, Domain, Hash, Nonce, PROTOCOL_VERSION};
++
++use crate::error::GenesisError;
++
++/// Context prefix inside the genesis hash payload.
++///
++/// NC target: `tools/nc_c8.py` changes this constant and requires the C8
++/// golden hash vectors to go red.
++pub const GENESIS_CONTEXT: &[u8] = b"AuraLite-Crypto/genesis-v1\x00";
++
++/// Context prefix for the validator-set commitment.
++///
++/// NC target: `tools/nc_c8.py` changes this constant and requires the C8
++/// validator-set vectors to go red.
++pub const VALIDATOR_SET_CONTEXT: &[u8] = b"AuraLite-Crypto/validator-set-v1\x00";
++
++/// Context prefix for one allocation leaf.
++pub const ALLOCATION_LEAF_CONTEXT: &[u8] = b"AuraLite-Crypto/allocation-leaf-v1\x00";
++
++/// One genesis validator.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct Validator {
++    /// 20-byte account address.
++    pub address: Address,
++    /// Voting power, must be non-zero.
++    pub power: u64,
++    /// 32-byte consensus public key (opaque at C8; BLS arrives in B2).
++    pub public_key: [u8; 32],
++}
++
++/// One genesis balance allocation.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct Allocation {
++    /// 20-byte account address.
++    pub address: Address,
++    /// Initial balance in smallest units.
++    pub balance: Amount,
++}
++
++/// A deterministic genesis document.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct Genesis {
++    /// Chain this genesis starts.
++    pub chain_id: ChainId,
++    /// Protocol version, must equal [`PROTOCOL_VERSION`].
++    pub protocol_version: u32,
++    /// Consensus timestamp in milliseconds — never a local clock.
++    pub genesis_time_ms: u64,
++    /// Validators in **declared order** (order is consensus-significant).
++    pub validators: Vec<Validator>,
++    /// Initial allocations in declared order.
++    pub allocations: Vec<Allocation>,
++}
++
++impl Genesis {
++    /// Build from already-parsed fields and validate all invariants.
++    pub fn new(
++        chain_id: ChainId,
++        protocol_version: u32,
++        genesis_time_ms: u64,
++        validators: Vec<Validator>,
++        allocations: Vec<Allocation>,
++    ) -> Result<Self, GenesisError> {
++        if protocol_version != PROTOCOL_VERSION {
++            return Err(GenesisError::UnsupportedProtocolVersion(protocol_version));
++        }
++        if validators.is_empty() {
++            return Err(GenesisError::EmptyValidatorSet);
++        }
++        let mut seen_validators = std::collections::BTreeSet::new();
++        for validator in &validators {
++            if validator.power == 0 {
++                return Err(GenesisError::ZeroValidatorPower);
++            }
++            if !seen_validators.insert(validator.address) {
++                return Err(GenesisError::DuplicateValidator(
++                    validator.address.to_bech32(),
++                ));
++            }
++        }
++        let mut seen_allocations = std::collections::BTreeSet::new();
++        for allocation in &allocations {
++            if allocation.balance == Amount::ZERO {
++                return Err(GenesisError::ZeroAllocation);
++            }
++            if !seen_allocations.insert(allocation.address) {
++                return Err(GenesisError::DuplicateAllocation(
++                    allocation.address.to_bech32(),
++                ));
++            }
++        }
++        let genesis = Genesis {
++            chain_id,
++            protocol_version,
++            genesis_time_ms,
++            validators,
++            allocations,
++        };
++        genesis.total_supply()?;
++        Ok(genesis)
++    }
++
++    /// Canonical binary bytes (C2 encoding, no JSON).
++    pub fn canonical_bytes(&self) -> Vec<u8> {
++        encode_to_bytes(self)
++    }
++
++    /// Decode canonical binary bytes with full C2 strictness, then re-check
++    /// every structural invariant (a canonical byte string is not
++    /// automatically a valid genesis).
++    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, GenesisError> {
++        let decoded = decode_canonical::<Genesis>(bytes)?;
++        Genesis::new(
++            decoded.chain_id,
++            decoded.protocol_version,
++            decoded.genesis_time_ms,
++            decoded.validators,
++            decoded.allocations,
++        )
++    }
++
++    /// The genesis id.
++    pub fn hash(&self) -> Hash {
++        let mut payload = Vec::with_capacity(GENESIS_CONTEXT.len() + 256);
++        payload.extend_from_slice(GENESIS_CONTEXT);
++        payload.extend_from_slice(&self.canonical_bytes());
++        hash_domain(self.chain_id.as_str(), Domain::Genesis, &payload)
++    }
++
++    /// Commitment to the ordered validator set (fills C5's header field).
++    pub fn validator_set_hash(&self) -> Hash {
++        let mut writer = Writer::new();
++        self.validators.encode(&mut writer);
++        let mut input = Vec::with_capacity(VALIDATOR_SET_CONTEXT.len() + writer.as_slice().len());
++        input.extend_from_slice(VALIDATOR_SET_CONTEXT);
++        input.extend_from_slice(writer.as_slice());
++        blake3_hash(&input)
++    }
++
++    /// Merkle commitment over initial accounts (C7 keys/values, C6 tree).
++    ///
++    /// State is a set, so allocations are sorted by address first — JSON
++    /// array order cannot change this root. This is **not** the JMT
++    /// `state_root` owed by S1.
++    pub fn allocation_root(&self) -> Hash {
++        let mut sorted: Vec<&Allocation> = self.allocations.iter().collect();
++        sorted.sort_by(|left, right| left.address.as_bytes().cmp(right.address.as_bytes()));
++        let leaves: Vec<Hash> = sorted
++            .iter()
++            .map(|allocation| {
++                let key = StateKey::account(&allocation.address);
++                let account = Account::new(
++                    Nonce::new(0),
++                    allocation.balance,
++                    Account::NO_CODE,
++                    Account::EMPTY_STORAGE_ROOT,
++                );
++                let value = account.to_bytes();
++                let mut input =
++                    Vec::with_capacity(ALLOCATION_LEAF_CONTEXT.len() + 32 + 8 + value.len());
++                input.extend_from_slice(ALLOCATION_LEAF_CONTEXT);
++                input.extend_from_slice(key.digest().as_bytes());
++                input.extend_from_slice(&(value.len() as u64).to_le_bytes());
++                input.extend_from_slice(&value);
++                blake3_hash(&input)
++            })
++            .collect();
++        build_tree_from_leaf_hashes(&leaves).root()
++    }
++
++    /// Sum of all allocations with checked `u128` arithmetic.
++    pub fn total_supply(&self) -> Result<Amount, GenesisError> {
++        let mut supply = Amount::ZERO;
++        for allocation in &self.allocations {
++            supply = supply
++                .checked_add(allocation.balance)
++                .ok_or(GenesisError::SupplyOverflow)?;
++        }
++        Ok(supply)
++    }
++
++    /// Number of validators.
++    pub fn validator_count(&self) -> usize {
++        self.validators.len()
++    }
++
++    /// Number of allocations.
++    pub fn allocation_count(&self) -> usize {
++        self.allocations.len()
++    }
++}
++
++impl Encode for Validator {
++    fn encode(&self, writer: &mut Writer) {
++        self.address.encode(writer);
++        self.power.encode(writer);
++        writer.push_bytes(&self.public_key);
++    }
++}
++
++impl Decode for Validator {
++    fn decode(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
++        let address = Address::decode(reader)?;
++        let power = u64::decode(reader)?;
++        let key_bytes = reader.read_exact(32)?;
++        let mut public_key = [0u8; 32];
++        public_key.copy_from_slice(key_bytes);
++        Ok(Validator {
++            address,
++            power,
++            public_key,
++        })
++    }
++}
++
++impl Encode for Allocation {
++    fn encode(&self, writer: &mut Writer) {
++        self.address.encode(writer);
++        self.balance.encode(writer);
++    }
++}
++
++impl Decode for Allocation {
++    fn decode(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
++        Ok(Allocation {
++            address: Address::decode(reader)?,
++            balance: Amount::decode(reader)?,
++        })
++    }
++}
++
++impl Encode for Genesis {
++    fn encode(&self, writer: &mut Writer) {
++        self.chain_id.encode(writer);
++        self.protocol_version.encode(writer);
++        self.genesis_time_ms.encode(writer);
++        self.validators.encode(writer);
++        self.allocations.encode(writer);
++    }
++}
++
++impl Decode for Genesis {
++    fn decode(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
++        Ok(Genesis {
++            chain_id: ChainId::decode(reader)?,
++            protocol_version: u32::decode(reader)?,
++            genesis_time_ms: u64::decode(reader)?,
++            validators: Vec::<Validator>::decode(reader)?,
++            allocations: Vec::<Allocation>::decode(reader)?,
++        })
++    }
++}
+diff --git a/crates/aura-genesis/tests/c8_genesis.rs b/crates/aura-genesis/tests/c8_genesis.rs
+new file mode 100644
+index 0000000..955553d
+--- /dev/null
++++ b/crates/aura-genesis/tests/c8_genesis.rs
+@@ -0,0 +1,322 @@
++//! C8 gate: deterministic genesis against an independent Python generator.
++//!
++//! `fixtures/c8_golden.txt` comes from `tools/gen_c8_vectors.py`: pure-Python
++//! BLAKE3 (official-vector self-check), independent bech32, and a C8 wire
++//! transcription. JSON documents are hex-encoded UTF-8.
++
++use std::collections::BTreeMap;
++
++use aura_codec::CodecError;
++use aura_genesis::{
++    ALLOCATION_LEAF_CONTEXT, GENESIS_CONTEXT, GenesisError, VALIDATOR_SET_CONTEXT, from_json_str,
++};
++use aura_types::{CHAIN_ID, PROTOCOL_VERSION};
++
++const GOLDEN: &str = include_str!("fixtures/c8_golden.txt");
++const SAMPLE_JSON: &str = include_str!("../../../docs/spec/genesis-testnet.json");
++
++fn parse(text: &str) -> BTreeMap<String, String> {
++    let mut map = BTreeMap::new();
++    for line in text.lines() {
++        let trimmed = line.trim();
++        if trimmed.is_empty() || trimmed.starts_with('#') {
++            continue;
++        }
++        let (key, value) = trimmed
++            .split_once('=')
++            .unwrap_or_else(|| panic!("malformed golden line: {trimmed}"));
++        assert!(
++            map.insert(key.to_owned(), value.to_owned()).is_none(),
++            "duplicate golden key {key}"
++        );
++    }
++    map
++}
++
++fn hx(text: &str) -> Vec<u8> {
++    assert_eq!(text.len() % 2, 0, "even-length hex");
++    text.as_bytes()
++        .chunks(2)
++        .map(|pair| (nibble(pair[0]) << 4) | nibble(pair[1]))
++        .collect()
++}
++
++fn nibble(byte: u8) -> u8 {
++    match byte {
++        b'0'..=b'9' => byte - b'0',
++        b'a'..=b'f' => byte - b'a' + 10,
++        b'A'..=b'F' => byte - b'A' + 10,
++        _ => panic!("invalid hex nibble in fixture"),
++    }
++}
++
++fn json_doc(f: &BTreeMap<String, String>, key: &str) -> String {
++    String::from_utf8(hx(&f[key])).unwrap_or_else(|e| panic!("{key} is not UTF-8: {e}"))
++}
++
++fn to_hex(bytes: &[u8]) -> String {
++    let mut out = String::with_capacity(bytes.len() * 2);
++    for byte in bytes {
++        out.push_str(&format!("{byte:02x}"));
++    }
++    out
++}
++
++fn genesis(f: &BTreeMap<String, String>, key: &str) -> aura_genesis::Genesis {
++    from_json_str(&json_doc(f, key)).unwrap_or_else(|e| panic!("{key} failed: {e}"))
++}
++
++#[test]
++fn constants_are_pinned_by_the_independent_fixture() {
++    let f = parse(GOLDEN);
++    assert_eq!(to_hex(GENESIS_CONTEXT), f["genesis_context"]);
++    assert_eq!(to_hex(VALIDATOR_SET_CONTEXT), f["validator_set_context"]);
++    assert_eq!(
++        to_hex(ALLOCATION_LEAF_CONTEXT),
++        f["allocation_leaf_context"]
++    );
++    assert_eq!(CHAIN_ID, f["chain_id"]);
++    assert_eq!(PROTOCOL_VERSION.to_string(), f["protocol_version"]);
++}
++
++#[test]
++fn same_genesis_same_hash_across_three_hosts() {
++    // C8 DoD: three independent textual representations of the SAME config
++    // (minified, reordered object keys, pretty-printed) must give one hash.
++    let f = parse(GOLDEN);
++    let hosts = ["json_min", "json_keys_reordered", "json_pretty"];
++    let mut hashes = Vec::new();
++    let mut canonical = Vec::new();
++    for key in hosts {
++        let genesis = genesis(&f, key);
++        assert_eq!(genesis.chain_id.as_str(), CHAIN_ID);
++        assert_eq!(
++            genesis.validator_count().to_string(),
++            f["validator_count_1"]
++        );
++        assert_eq!(
++            genesis.allocation_count().to_string(),
++            f["allocation_count_1"]
++        );
++        assert_eq!(
++            genesis.total_supply().unwrap().units().to_string(),
++            f["total_supply_1"]
++        );
++        canonical.push(to_hex(&genesis.canonical_bytes()));
++        hashes.push(genesis.hash().to_hex());
++        assert_eq!(
++            genesis.validator_set_hash().to_hex(),
++            f["validator_set_hash_1"],
++            "{key}"
++        );
++        assert_eq!(
++            genesis.allocation_root().to_hex(),
++            f["allocation_root_1"],
++            "{key}"
++        );
++    }
++    assert!(hashes.iter().all(|hash| hash == &hashes[0]));
++    assert!(canonical.iter().all(|bytes| bytes == &canonical[0]));
++    assert_eq!(hashes[0], f["genesis_1_hash"]);
++    assert_eq!(canonical[0], f["genesis_1_canonical"]);
++    assert_eq!(hashes.len(), 3, "three hosts measured");
++}
++
++#[test]
++fn validator_order_changes_the_hash() {
++    // C8 DoD / NC target: declared validator order is consensus-significant.
++    let f = parse(GOLDEN);
++    let base = genesis(&f, "json_min");
++    let reordered = genesis(&f, "json_validators_reordered");
++    assert_ne!(base.hash(), reordered.hash());
++    assert_ne!(base.validator_set_hash(), reordered.validator_set_hash());
++    assert_eq!(base.validator_count(), reordered.validator_count());
++    assert_eq!(base.allocation_root(), reordered.allocation_root());
++    assert_eq!(base.hash().to_hex(), f["genesis_1_hash"]);
++}
++
++#[test]
++fn canonical_bytes_and_commitments_match_independent_python() {
++    let f = parse(GOLDEN);
++    for (index, key) in [(1, "json_min"), (2, "json_second")] {
++        let genesis = genesis(&f, key);
++        assert_eq!(
++            to_hex(&genesis.canonical_bytes()),
++            f[&format!("genesis_{index}_canonical")]
++        );
++        assert_eq!(genesis.hash().to_hex(), f[&format!("genesis_{index}_hash")]);
++        assert_eq!(
++            genesis.validator_set_hash().to_hex(),
++            f[&format!("validator_set_hash_{index}")]
++        );
++        assert_eq!(
++            genesis.allocation_root().to_hex(),
++            f[&format!("allocation_root_{index}")]
++        );
++        assert_eq!(
++            genesis.total_supply().unwrap().units().to_string(),
++            f[&format!("total_supply_{index}")]
++        );
++        assert_eq!(
++            genesis.validator_count().to_string(),
++            f[&format!("validator_count_{index}")]
++        );
++        assert_eq!(
++            genesis.allocation_count().to_string(),
++            f[&format!("allocation_count_{index}")]
++        );
++
++        let bytes = genesis.canonical_bytes();
++        assert_eq!(
++            aura_genesis::Genesis::from_canonical_bytes(&bytes).unwrap(),
++            genesis
++        );
++    }
++}
++
++#[test]
++fn allocation_root_is_order_independent_but_genesis_hash_is_not() {
++    // State is a set: allocation_root cannot depend on JSON array order.
++    // The genesis document itself does preserve declared order.
++    let f = parse(GOLDEN);
++    let base = genesis(&f, "json_min");
++    let reordered = genesis(&f, "json_allocations_reordered");
++    assert_eq!(base.allocation_root(), reordered.allocation_root());
++    assert_ne!(base.hash(), reordered.hash());
++    assert_eq!(base.allocation_root().to_hex(), f["allocation_root_1"]);
++}
++
++#[test]
++fn shipped_genesis_config_matches_the_golden_hash() {
++    let f = parse(GOLDEN);
++    let genesis = from_json_str(SAMPLE_JSON).expect("shipped genesis config parses");
++    assert_eq!(genesis.hash().to_hex(), f["genesis_1_hash"]);
++    assert_eq!(
++        genesis.validator_set_hash().to_hex(),
++        f["validator_set_hash_1"]
++    );
++    assert_eq!(genesis.allocation_root().to_hex(), f["allocation_root_1"]);
++}
++
++#[test]
++fn every_bad_json_document_is_rejected() {
++    let f = parse(GOLDEN);
++    let bad: Vec<&str> = f
++        .keys()
++        .filter(|key| key.starts_with("json_bad_"))
++        .map(String::as_str)
++        .collect();
++    assert_eq!(bad.len(), 13);
++    for key in bad {
++        assert!(
++            from_json_str(&json_doc(&f, key)).is_err(),
++            "{key} must be rejected"
++        );
++    }
++}
++
++#[test]
++fn bad_json_documents_return_the_specific_error() {
++    let f = parse(GOLDEN);
++    let error = |key: &str| from_json_str(&json_doc(&f, key)).unwrap_err();
++
++    assert_eq!(
++        error("json_bad_unknown_field"),
++        GenesisError::UnknownField("network".to_owned())
++    );
++    assert_eq!(
++        error("json_bad_wrong_chain"),
++        GenesisError::WrongChain("auralite-1".to_owned())
++    );
++    assert_eq!(
++        error("json_bad_version"),
++        GenesisError::UnsupportedProtocolVersion(2)
++    );
++    assert!(matches!(
++        error("json_bad_duplicate_validator"),
++        GenesisError::DuplicateValidator(_)
++    ));
++    assert_eq!(
++        error("json_bad_zero_power"),
++        GenesisError::ZeroValidatorPower
++    );
++    assert_eq!(
++        error("json_bad_float_balance"),
++        GenesisError::WrongType("balance")
++    );
++    assert!(matches!(
++        error("json_bad_address"),
++        GenesisError::InvalidAddress(_)
++    ));
++    assert_eq!(
++        error("json_bad_empty_validators"),
++        GenesisError::EmptyValidatorSet
++    );
++    assert!(matches!(
++        error("json_bad_pubkey"),
++        GenesisError::InvalidPublicKey(_)
++    ));
++    assert_eq!(
++        error("json_bad_supply_overflow"),
++        GenesisError::SupplyOverflow
++    );
++    assert_eq!(
++        error("json_bad_missing_field"),
++        GenesisError::MissingField("chain_id")
++    );
++    assert_eq!(
++        error("json_bad_unknown_validator_field"),
++        GenesisError::UnknownNestedField("name".to_owned())
++    );
++    assert!(matches!(
++        error("json_bad_duplicate_allocation"),
++        GenesisError::DuplicateAllocation(_)
++    ));
++}
++
++#[test]
++fn binary_genesis_is_canonical() {
++    let f = parse(GOLDEN);
++    let bytes = hx(&f["genesis_1_canonical"]);
++    assert_eq!(
++        aura_genesis::Genesis::from_canonical_bytes(&bytes)
++            .unwrap()
++            .canonical_bytes(),
++        bytes
++    );
++    let mut trailing = bytes.clone();
++    trailing.push(0);
++    assert_eq!(
++        aura_genesis::Genesis::from_canonical_bytes(&trailing),
++        Err(GenesisError::Decode(CodecError::TrailingBytes(1)))
++    );
++    assert!(aura_genesis::Genesis::from_canonical_bytes(&bytes[..bytes.len() - 1]).is_err());
++    // Non-minimal chain-id length varint (0x0f -> 0x80 0x00 is a different
++    // value, so use a mutated first byte that keeps the length but adds a
++    // continuation bit).
++    let mut nonminimal = vec![0x8f, 0x00];
++    nonminimal.extend_from_slice(&bytes[1..]);
++    assert!(aura_genesis::Genesis::from_canonical_bytes(&nonminimal).is_err());
++}
++
++#[test]
++fn summary_is_complete_and_deterministic() {
++    let f = parse(GOLDEN);
++    let genesis = genesis(&f, "json_min");
++    let summary = genesis.summary();
++    for key in [
++        "chain_id",
++        "protocol_version",
++        "genesis_time_ms",
++        "validators",
++        "allocations",
++        "total_supply",
++        "genesis_hash",
++        "validator_set_hash",
++        "allocation_root",
++    ] {
++        assert!(summary.contains_key(key), "summary missing {key}");
++    }
++    assert_eq!(summary["genesis_hash"], f["genesis_1_hash"]);
++    assert_eq!(summary, genesis.summary());
++}
+diff --git a/crates/aura-genesis/tests/fixtures/c8_golden.txt b/crates/aura-genesis/tests/fixtures/c8_golden.txt
+new file mode 100644
+index 0000000..cbe5a46
+--- /dev/null
++++ b/crates/aura-genesis/tests/fixtures/c8_golden.txt
+@@ -0,0 +1,44 @@
++# AuraLite-Crypto C8 genesis golden vectors
++# Generated by tools/gen_c8_vectors.py (independent Python).
++# Self-checked against official BLAKE3 vectors + independent bech32.
++# JSON documents are hex-encoded UTF-8 to keep one key=value per line.
++chain_id=auralite-test-1
++protocol_version=1
++hash_context=417572614c6974652d43727970746f2f63727970746f2d763100
++genesis_context=417572614c6974652d43727970746f2f67656e657369732d763100
++validator_set_context=417572614c6974652d43727970746f2f76616c696461746f722d7365742d763100
++allocation_leaf_context=417572614c6974652d43727970746f2f616c6c6f636174696f6e2d6c6561662d763100
++state_key_context=417572614c6974652d43727970746f2f73746174652d6b65792d763100
++json_min=7b22636861696e5f6964223a22617572616c6974652d746573742d31222c2270726f746f636f6c5f76657273696f6e223a312c2267656e657369735f74696d655f6d73223a313730303030303030303030302c2276616c696461746f7273223a5b7b2261646472657373223a22617572613171717173717171717171717171717274333235753365637879347a78387134706371676b39386d72222c22706f776572223a3130302c227075626c69635f6b6579223a2234303437346535353563363336613731373837663836386439343962613261396230623762656335636364336461653165386566663666643034306231323139227d2c7b2261646472657373223a226175726131717170717171717171717171717172756e7761646e377168786532686679616a367967336674386b222c22706f776572223a3230302c227075626c69635f6b6579223a2235333561363136383666373637643834386239323939613061376165623562636333636164316438646665366564663466623032303931303137316532353263227d2c7b2261646472657373223a22617572613171717073717171717171717171717964346e3937357a666767616e6774667872756738656b72756b222c22706f776572223a3330302c227075626c69635f6b6579223a2236363664373437623832383939303937396561356163623362616331633863666436646465346562663266393030303730653135316332333261333133383366227d2c7b2261646472657373223a22617572613171717a71717171717171717171717937686877306b78336574706d65646477353776796377397367222c22706f776572223a3430302c227075626c69635f6b6579223a2237393830383738653935396361336161623162386266633663646434646265326539663066376665303530633133316132313238326633363364343434623532227d5d2c22616c6c6f636174696f6e73223a5b7b2261646472657373223a22617572613171717173717171717171717171717835377666727a35723033366b75653663323979346c6879777a222c2262616c616e6365223a2231303030303030303030303030303030303030227d2c7b2261646472657373223a2261757261317171707171717171717171717171383971733335796376716e376c646d6c716d3867613634337766222c2262616c616e6365223a2232353030303030303030303030303030303030227d2c7b2261646472657373223a2261757261317171707371717171717171717171386b7a353639787535336b72383775726676667677746b716e30222c2262616c616e6365223a22373530303030303030303030303030303030227d5d7d
++json_keys_reordered=7b22616c6c6f636174696f6e73223a5b7b2261646472657373223a22617572613171717173717171717171717171717835377666727a35723033366b75653663323979346c6879777a222c2262616c616e6365223a2231303030303030303030303030303030303030227d2c7b2261646472657373223a2261757261317171707171717171717171717171383971733335796376716e376c646d6c716d3867613634337766222c2262616c616e6365223a2232353030303030303030303030303030303030227d2c7b2261646472657373223a2261757261317171707371717171717171717171386b7a353639787535336b72383775726676667677746b716e30222c2262616c616e6365223a22373530303030303030303030303030303030227d5d2c2267656e657369735f74696d655f6d73223a313730303030303030303030302c2276616c696461746f7273223a5b7b2261646472657373223a22617572613171717173717171717171717171717274333235753365637879347a78387134706371676b39386d72222c22706f776572223a3130302c227075626c69635f6b6579223a2234303437346535353563363336613731373837663836386439343962613261396230623762656335636364336461653165386566663666643034306231323139227d2c7b2261646472657373223a226175726131717170717171717171717171717172756e7761646e377168786532686679616a367967336674386b222c22706f776572223a3230302c227075626c69635f6b6579223a2235333561363136383666373637643834386239323939613061376165623562636333636164316438646665366564663466623032303931303137316532353263227d2c7b2261646472657373223a22617572613171717073717171717171717171717964346e3937357a666767616e6774667872756738656b72756b222c22706f776572223a3330302c227075626c69635f6b6579223a2236363664373437623832383939303937396561356163623362616331633863666436646465346562663266393030303730653135316332333261333133383366227d2c7b2261646472657373223a22617572613171717a71717171717171717171717937686877306b78336574706d65646477353776796377397367222c22706f776572223a3430302c227075626c69635f6b6579223a2237393830383738653935396361336161623162386266633663646434646265326539663066376665303530633133316132313238326633363364343434623532227d5d2c22636861696e5f6964223a22617572616c6974652d746573742d31222c2270726f746f636f6c5f76657273696f6e223a317d
++json_pretty=7b0a202022636861696e5f6964223a2022617572616c6974652d746573742d31222c0a20202270726f746f636f6c5f76657273696f6e223a20312c0a20202267656e657369735f74696d655f6d73223a20313730303030303030303030302c0a20202276616c696461746f7273223a205b0a202020207b0a2020202020202261646472657373223a2022617572613171717173717171717171717171717274333235753365637879347a78387134706371676b39386d72222c0a20202020202022706f776572223a203130302c0a202020202020227075626c69635f6b6579223a202234303437346535353563363336613731373837663836386439343962613261396230623762656335636364336461653165386566663666643034306231323139220a202020207d2c0a202020207b0a2020202020202261646472657373223a20226175726131717170717171717171717171717172756e7761646e377168786532686679616a367967336674386b222c0a20202020202022706f776572223a203230302c0a202020202020227075626c69635f6b6579223a202235333561363136383666373637643834386239323939613061376165623562636333636164316438646665366564663466623032303931303137316532353263220a202020207d2c0a202020207b0a2020202020202261646472657373223a2022617572613171717073717171717171717171717964346e3937357a666767616e6774667872756738656b72756b222c0a20202020202022706f776572223a203330302c0a202020202020227075626c69635f6b6579223a202236363664373437623832383939303937396561356163623362616331633863666436646465346562663266393030303730653135316332333261333133383366220a202020207d2c0a202020207b0a2020202020202261646472657373223a2022617572613171717a71717171717171717171717937686877306b78336574706d65646477353776796377397367222c0a20202020202022706f776572223a203430302c0a202020202020227075626c69635f6b6579223a202237393830383738653935396361336161623162386266633663646434646265326539663066376665303530633133316132313238326633363364343434623532220a202020207d0a20205d2c0a202022616c6c6f636174696f6e73223a205b0a202020207b0a2020202020202261646472657373223a2022617572613171717173717171717171717171717835377666727a35723033366b75653663323979346c6879777a222c0a2020202020202262616c616e6365223a202231303030303030303030303030303030303030220a202020207d2c0a202020207b0a2020202020202261646472657373223a202261757261317171707171717171717171717171383971733335796376716e376c646d6c716d3867613634337766222c0a2020202020202262616c616e6365223a202232353030303030303030303030303030303030220a202020207d2c0a202020207b0a2020202020202261646472657373223a202261757261317171707371717171717171717171386b7a353639787535336b72383775726676667677746b716e30222c0a2020202020202262616c616e6365223a2022373530303030303030303030303030303030220a202020207d0a20205d0a7d0a
++json_validators_reordered=7b22636861696e5f6964223a22617572616c6974652d746573742d31222c2270726f746f636f6c5f76657273696f6e223a312c2267656e657369735f74696d655f6d73223a313730303030303030303030302c2276616c696461746f7273223a5b7b2261646472657373223a22617572613171717a71717171717171717171717937686877306b78336574706d65646477353776796377397367222c22706f776572223a3430302c227075626c69635f6b6579223a2237393830383738653935396361336161623162386266633663646434646265326539663066376665303530633133316132313238326633363364343434623532227d2c7b2261646472657373223a22617572613171717073717171717171717171717964346e3937357a666767616e6774667872756738656b72756b222c22706f776572223a3330302c227075626c69635f6b6579223a2236363664373437623832383939303937396561356163623362616331633863666436646465346562663266393030303730653135316332333261333133383366227d2c7b2261646472657373223a226175726131717170717171717171717171717172756e7761646e377168786532686679616a367967336674386b222c22706f776572223a3230302c227075626c69635f6b6579223a2235333561363136383666373637643834386239323939613061376165623562636333636164316438646665366564663466623032303931303137316532353263227d2c7b2261646472657373223a22617572613171717173717171717171717171717274333235753365637879347a78387134706371676b39386d72222c22706f776572223a3130302c227075626c69635f6b6579223a2234303437346535353563363336613731373837663836386439343962613261396230623762656335636364336461653165386566663666643034306231323139227d5d2c22616c6c6f636174696f6e73223a5b7b2261646472657373223a22617572613171717173717171717171717171717835377666727a35723033366b75653663323979346c6879777a222c2262616c616e6365223a2231303030303030303030303030303030303030227d2c7b2261646472657373223a2261757261317171707171717171717171717171383971733335796376716e376c646d6c716d3867613634337766222c2262616c616e6365223a2232353030303030303030303030303030303030227d2c7b2261646472657373223a2261757261317171707371717171717171717171386b7a353639787535336b72383775726676667677746b716e30222c2262616c616e6365223a22373530303030303030303030303030303030227d5d7d
++json_allocations_reordered=7b22636861696e5f6964223a22617572616c6974652d746573742d31222c2270726f746f636f6c5f76657273696f6e223a312c2267656e657369735f74696d655f6d73223a313730303030303030303030302c2276616c696461746f7273223a5b7b2261646472657373223a22617572613171717173717171717171717171717274333235753365637879347a78387134706371676b39386d72222c22706f776572223a3130302c227075626c69635f6b6579223a2234303437346535353563363336613731373837663836386439343962613261396230623762656335636364336461653165386566663666643034306231323139227d2c7b2261646472657373223a226175726131717170717171717171717171717172756e7761646e377168786532686679616a367967336674386b222c22706f776572223a3230302c227075626c69635f6b6579223a2235333561363136383666373637643834386239323939613061376165623562636333636164316438646665366564663466623032303931303137316532353263227d2c7b2261646472657373223a22617572613171717073717171717171717171717964346e3937357a666767616e6774667872756738656b72756b222c22706f776572223a3330302c227075626c69635f6b6579223a2236363664373437623832383939303937396561356163623362616331633863666436646465346562663266393030303730653135316332333261333133383366227d2c7b2261646472657373223a22617572613171717a71717171717171717171717937686877306b78336574706d65646477353776796377397367222c22706f776572223a3430302c227075626c69635f6b6579223a2237393830383738653935396361336161623162386266633663646434646265326539663066376665303530633133316132313238326633363364343434623532227d5d2c22616c6c6f636174696f6e73223a5b7b2261646472657373223a2261757261317171707371717171717171717171386b7a353639787535336b72383775726676667677746b716e30222c2262616c616e6365223a22373530303030303030303030303030303030227d2c7b2261646472657373223a2261757261317171707171717171717171717171383971733335796376716e376c646d6c716d3867613634337766222c2262616c616e6365223a2232353030303030303030303030303030303030227d2c7b2261646472657373223a22617572613171717173717171717171717171717835377666727a35723033366b75653663323979346c6879777a222c2262616c616e6365223a2231303030303030303030303030303030303030227d5d7d
++json_second=7b0a202022636861696e5f6964223a2022617572616c6974652d746573742d31222c0a20202270726f746f636f6c5f76657273696f6e223a20312c0a20202267656e657369735f74696d655f6d73223a20313830303030303030303030302c0a20202276616c696461746f7273223a205b0a202020207b0a2020202020202261646472657373223a20226175726131717172737171717171717171717178333771386a756e7476337734766e3671387963766d74397566222c0a20202020202022706f776572223a2031302c0a202020202020227075626c69635f6b6579223a202262326239633063376365643564636533656166316638666630363064313431623232323933303337336534353463353335613631363836663736376438343862220a202020207d2c0a202020207b0a2020202020202261646472657373223a202261757261317171797171717171717171717171387a7179737237686e616e6a6161343767637875766337366d30222c0a20202020202022706f776572223a2032302c0a202020202020227075626c69635f6b6579223a202263356363643364616531653865666636666430343062313231393230323732653335336334333461353135383566363636643734376238323839393039373965220a202020207d0a20205d2c0a202022616c6c6f636174696f6e73223a205b0a202020207b0a2020202020202261646472657373223a2022617572613171717973717171717171717171717a75307764746e6b38687a6336346775756a6b79323670617570222c0a2020202020202262616c616e6365223a20223432220a202020207d0a20205d0a7d0a
++json_bad_unknown_field=7b22636861696e5f6964223a22617572616c6974652d746573742d31222c2270726f746f636f6c5f76657273696f6e223a312c2267656e657369735f74696d655f6d73223a313730303030303030303030302c2276616c696461746f7273223a5b7b2261646472657373223a22617572613171717173717171717171717171717274333235753365637879347a78387134706371676b39386d72222c22706f776572223a3130302c227075626c69635f6b6579223a2234303437346535353563363336613731373837663836386439343962613261396230623762656335636364336461653165386566663666643034306231323139227d2c7b2261646472657373223a226175726131717170717171717171717171717172756e7761646e377168786532686679616a367967336674386b222c22706f776572223a3230302c227075626c69635f6b6579223a2235333561363136383666373637643834386239323939613061376165623562636333636164316438646665366564663466623032303931303137316532353263227d2c7b2261646472657373223a22617572613171717073717171717171717171717964346e3937357a666767616e6774667872756738656b72756b222c22706f776572223a3330302c227075626c69635f6b6579223a2236363664373437623832383939303937396561356163623362616331633863666436646465346562663266393030303730653135316332333261333133383366227d2c7b2261646472657373223a22617572613171717a71717171717171717171717937686877306b78336574706d65646477353776796377397367222c22706f776572223a3430302c227075626c69635f6b6579223a2237393830383738653935396361336161623162386266633663646434646265326539663066376665303530633133316132313238326633363364343434623532227d5d2c22616c6c6f636174696f6e73223a5b7b2261646472657373223a22617572613171717173717171717171717171717835377666727a35723033366b75653663323979346c6879777a222c2262616c616e6365223a2231303030303030303030303030303030303030227d2c7b2261646472657373223a2261757261317171707171717171717171717171383971733335796376716e376c646d6c716d3867613634337766222c2262616c616e6365223a2232353030303030303030303030303030303030227d2c7b2261646472657373223a2261757261317171707371717171717171717171386b7a353639787535336b72383775726676667677746b716e30222c2262616c616e6365223a22373530303030303030303030303030303030227d5d2c226e6574776f726b223a2278227d
++json_bad_wrong_chain=7b22636861696e5f6964223a22617572616c6974652d31222c2270726f746f636f6c5f76657273696f6e223a312c2267656e657369735f74696d655f6d73223a313730303030303030303030302c2276616c696461746f7273223a5b7b2261646472657373223a22617572613171717173717171717171717171717274333235753365637879347a78387134706371676b39386d72222c22706f776572223a3130302c227075626c69635f6b6579223a2234303437346535353563363336613731373837663836386439343962613261396230623762656335636364336461653165386566663666643034306231323139227d2c7b2261646472657373223a226175726131717170717171717171717171717172756e7761646e377168786532686679616a367967336674386b222c22706f776572223a3230302c227075626c69635f6b6579223a2235333561363136383666373637643834386239323939613061376165623562636333636164316438646665366564663466623032303931303137316532353263227d2c7b2261646472657373223a22617572613171717073717171717171717171717964346e3937357a666767616e6774667872756738656b72756b222c22706f776572223a3330302c227075626c69635f6b6579223a2236363664373437623832383939303937396561356163623362616331633863666436646465346562663266393030303730653135316332333261333133383366227d2c7b2261646472657373223a22617572613171717a71717171717171717171717937686877306b78336574706d65646477353776796377397367222c22706f776572223a3430302c227075626c69635f6b6579223a2237393830383738653935396361336161623162386266633663646434646265326539663066376665303530633133316132313238326633363364343434623532227d5d2c22616c6c6f636174696f6e73223a5b7b2261646472657373223a22617572613171717173717171717171717171717835377666727a35723033366b75653663323979346c6879777a222c2262616c616e6365223a2231303030303030303030303030303030303030227d2c7b2261646472657373223a2261757261317171707171717171717171717171383971733335796376716e376c646d6c716d3867613634337766222c2262616c616e6365223a2232353030303030303030303030303030303030227d2c7b2261646472657373223a2261757261317171707371717171717171717171386b7a353639787535336b72383775726676667677746b716e30222c2262616c616e6365223a22373530303030303030303030303030303030227d5d7d
++json_bad_version=7b22636861696e5f6964223a22617572616c6974652d746573742d31222c2270726f746f636f6c5f76657273696f6e223a322c2267656e657369735f74696d655f6d73223a313730303030303030303030302c2276616c696461746f7273223a5b7b2261646472657373223a22617572613171717173717171717171717171717274333235753365637879347a78387134706371676b39386d72222c22706f776572223a3130302c227075626c69635f6b6579223a2234303437346535353563363336613731373837663836386439343962613261396230623762656335636364336461653165386566663666643034306231323139227d2c7b2261646472657373223a226175726131717170717171717171717171717172756e7761646e377168786532686679616a367967336674386b222c22706f776572223a3230302c227075626c69635f6b6579223a2235333561363136383666373637643834386239323939613061376165623562636333636164316438646665366564663466623032303931303137316532353263227d2c7b2261646472657373223a22617572613171717073717171717171717171717964346e3937357a666767616e6774667872756738656b72756b222c22706f776572223a3330302c227075626c69635f6b6579223a2236363664373437623832383939303937396561356163623362616331633863666436646465346562663266393030303730653135316332333261333133383366227d2c7b2261646472657373223a22617572613171717a71717171717171717171717937686877306b78336574706d65646477353776796377397367222c22706f776572223a3430302c227075626c69635f6b6579223a2237393830383738653935396361336161623162386266633663646434646265326539663066376665303530633133316132313238326633363364343434623532227d5d2c22616c6c6f636174696f6e73223a5b7b2261646472657373223a22617572613171717173717171717171717171717835377666727a35723033366b75653663323979346c6879777a222c2262616c616e6365223a2231303030303030303030303030303030303030227d2c7b2261646472657373223a2261757261317171707171717171717171717171383971733335796376716e376c646d6c716d3867613634337766222c2262616c616e6365223a2232353030303030303030303030303030303030227d2c7b2261646472657373223a2261757261317171707371717171717171717171386b7a353639787535336b72383775726676667677746b716e30222c2262616c616e6365223a22373530303030303030303030303030303030227d5d7d
++json_bad_duplicate_validator=7b22636861696e5f6964223a22617572616c6974652d746573742d31222c2270726f746f636f6c5f76657273696f6e223a312c2267656e657369735f74696d655f6d73223a313730303030303030303030302c2276616c696461746f7273223a5b7b2261646472657373223a22617572613171717173717171717171717171717274333235753365637879347a78387134706371676b39386d72222c22706f776572223a3130302c227075626c69635f6b6579223a2234303437346535353563363336613731373837663836386439343962613261396230623762656335636364336461653165386566663666643034306231323139227d2c7b2261646472657373223a22617572613171717173717171717171717171717274333235753365637879347a78387134706371676b39386d72222c22706f776572223a3130302c227075626c69635f6b6579223a2234303437346535353563363336613731373837663836386439343962613261396230623762656335636364336461653165386566663666643034306231323139227d5d2c22616c6c6f636174696f6e73223a5b7b2261646472657373223a22617572613171717173717171717171717171717835377666727a35723033366b75653663323979346c6879777a222c2262616c616e6365223a2231303030303030303030303030303030303030227d2c7b2261646472657373223a2261757261317171707171717171717171717171383971733335796376716e376c646d6c716d3867613634337766222c2262616c616e6365223a2232353030303030303030303030303030303030227d2c7b2261646472657373223a2261757261317171707371717171717171717171386b7a353639787535336b72383775726676667677746b716e30222c2262616c616e6365223a22373530303030303030303030303030303030227d5d7d
++json_bad_zero_power=7b22636861696e5f6964223a22617572616c6974652d746573742d31222c2270726f746f636f6c5f76657273696f6e223a312c2267656e657369735f74696d655f6d73223a313730303030303030303030302c2276616c696461746f7273223a5b7b2261646472657373223a22617572613171717173717171717171717171717274333235753365637879347a78387134706371676b39386d72222c22706f776572223a302c227075626c69635f6b6579223a2234303437346535353563363336613731373837663836386439343962613261396230623762656335636364336461653165386566663666643034306231323139227d2c7b2261646472657373223a226175726131717170717171717171717171717172756e7761646e377168786532686679616a367967336674386b222c22706f776572223a3230302c227075626c69635f6b6579223a2235333561363136383666373637643834386239323939613061376165623562636333636164316438646665366564663466623032303931303137316532353263227d2c7b2261646472657373223a22617572613171717073717171717171717171717964346e3937357a666767616e6774667872756738656b72756b222c22706f776572223a3330302c227075626c69635f6b6579223a2236363664373437623832383939303937396561356163623362616331633863666436646465346562663266393030303730653135316332333261333133383366227d2c7b2261646472657373223a22617572613171717a71717171717171717171717937686877306b78336574706d65646477353776796377397367222c22706f776572223a3430302c227075626c69635f6b6579223a2237393830383738653935396361336161623162386266633663646434646265326539663066376665303530633133316132313238326633363364343434623532227d5d2c22616c6c6f636174696f6e73223a5b7b2261646472657373223a22617572613171717173717171717171717171717835377666727a35723033366b75653663323979346c6879777a222c2262616c616e6365223a2231303030303030303030303030303030303030227d2c7b2261646472657373223a2261757261317171707171717171717171717171383971733335796376716e376c646d6c716d3867613634337766222c2262616c616e6365223a2232353030303030303030303030303030303030227d2c7b2261646472657373223a2261757261317171707371717171717171717171386b7a353639787535336b72383775726676667677746b716e30222c2262616c616e6365223a22373530303030303030303030303030303030227d5d7d
++json_bad_float_balance=7b22636861696e5f6964223a22617572616c6974652d746573742d31222c2270726f746f636f6c5f76657273696f6e223a312c2267656e657369735f74696d655f6d73223a313730303030303030303030302c2276616c696461746f7273223a5b7b2261646472657373223a22617572613171717173717171717171717171717274333235753365637879347a78387134706371676b39386d72222c22706f776572223a3130302c227075626c69635f6b6579223a2234303437346535353563363336613731373837663836386439343962613261396230623762656335636364336461653165386566663666643034306231323139227d2c7b2261646472657373223a226175726131717170717171717171717171717172756e7761646e377168786532686679616a367967336674386b222c22706f776572223a3230302c227075626c69635f6b6579223a2235333561363136383666373637643834386239323939613061376165623562636333636164316438646665366564663466623032303931303137316532353263227d2c7b2261646472657373223a22617572613171717073717171717171717171717964346e3937357a666767616e6774667872756738656b72756b222c22706f776572223a3330302c227075626c69635f6b6579223a2236363664373437623832383939303937396561356163623362616331633863666436646465346562663266393030303730653135316332333261333133383366227d2c7b2261646472657373223a22617572613171717a71717171717171717171717937686877306b78336574706d65646477353776796377397367222c22706f776572223a3430302c227075626c69635f6b6579223a2237393830383738653935396361336161623162386266633663646434646265326539663066376665303530633133316132313238326633363364343434623532227d5d2c22616c6c6f636174696f6e73223a5b7b2261646472657373223a22617572613171717173717171717171717171717835377666727a35723033366b75653663323979346c6879777a222c2262616c616e6365223a312e357d2c7b2261646472657373223a2261757261317171707171717171717171717171383971733335796376716e376c646d6c716d3867613634337766222c2262616c616e6365223a2232353030303030303030303030303030303030227d2c7b2261646472657373223a2261757261317171707371717171717171717171386b7a353639787535336b72383775726676667677746b716e30222c2262616c616e6365223a22373530303030303030303030303030303030227d5d7d
++json_bad_address=7b22636861696e5f6964223a22617572616c6974652d746573742d31222c2270726f746f636f6c5f76657273696f6e223a312c2267656e657369735f74696d655f6d73223a313730303030303030303030302c2276616c696461746f7273223a5b7b2261646472657373223a22617572613171717173717171717171717171717274333235753365637879347a78387134706371676b39386d71222c22706f776572223a3130302c227075626c69635f6b6579223a2234303437346535353563363336613731373837663836386439343962613261396230623762656335636364336461653165386566663666643034306231323139227d2c7b2261646472657373223a226175726131717170717171717171717171717172756e7761646e377168786532686679616a367967336674386b222c22706f776572223a3230302c227075626c69635f6b6579223a2235333561363136383666373637643834386239323939613061376165623562636333636164316438646665366564663466623032303931303137316532353263227d2c7b2261646472657373223a22617572613171717073717171717171717171717964346e3937357a666767616e6774667872756738656b72756b222c22706f776572223a3330302c227075626c69635f6b6579223a2236363664373437623832383939303937396561356163623362616331633863666436646465346562663266393030303730653135316332333261333133383366227d2c7b2261646472657373223a22617572613171717a71717171717171717171717937686877306b78336574706d65646477353776796377397367222c22706f776572223a3430302c227075626c69635f6b6579223a2237393830383738653935396361336161623162386266633663646434646265326539663066376665303530633133316132313238326633363364343434623532227d5d2c22616c6c6f636174696f6e73223a5b7b2261646472657373223a22617572613171717173717171717171717171717835377666727a35723033366b75653663323979346c6879777a222c2262616c616e6365223a2231303030303030303030303030303030303030227d2c7b2261646472657373223a2261757261317171707171717171717171717171383971733335796376716e376c646d6c716d3867613634337766222c2262616c616e6365223a2232353030303030303030303030303030303030227d2c7b2261646472657373223a2261757261317171707371717171717171717171386b7a353639787535336b72383775726676667677746b716e30222c2262616c616e6365223a22373530303030303030303030303030303030227d5d7d
++json_bad_empty_validators=7b22636861696e5f6964223a22617572616c6974652d746573742d31222c2270726f746f636f6c5f76657273696f6e223a312c2267656e657369735f74696d655f6d73223a313730303030303030303030302c2276616c696461746f7273223a5b5d2c22616c6c6f636174696f6e73223a5b7b2261646472657373223a22617572613171717173717171717171717171717835377666727a35723033366b75653663323979346c6879777a222c2262616c616e6365223a2231303030303030303030303030303030303030227d2c7b2261646472657373223a2261757261317171707171717171717171717171383971733335796376716e376c646d6c716d3867613634337766222c2262616c616e6365223a2232353030303030303030303030303030303030227d2c7b2261646472657373223a2261757261317171707371717171717171717171386b7a353639787535336b72383775726676667677746b716e30222c2262616c616e6365223a22373530303030303030303030303030303030227d5d7d
++json_bad_pubkey=7b22636861696e5f6964223a22617572616c6974652d746573742d31222c2270726f746f636f6c5f76657273696f6e223a312c2267656e657369735f74696d655f6d73223a313730303030303030303030302c2276616c696461746f7273223a5b7b2261646472657373223a22617572613171717173717171717171717171717274333235753365637879347a78387134706371676b39386d72222c22706f776572223a3130302c227075626c69635f6b6579223a227a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a227d2c7b2261646472657373223a226175726131717170717171717171717171717172756e7761646e377168786532686679616a367967336674386b222c22706f776572223a3230302c227075626c69635f6b6579223a2235333561363136383666373637643834386239323939613061376165623562636333636164316438646665366564663466623032303931303137316532353263227d2c7b2261646472657373223a22617572613171717073717171717171717171717964346e3937357a666767616e6774667872756738656b72756b222c22706f776572223a3330302c227075626c69635f6b6579223a2236363664373437623832383939303937396561356163623362616331633863666436646465346562663266393030303730653135316332333261333133383366227d2c7b2261646472657373223a22617572613171717a71717171717171717171717937686877306b78336574706d65646477353776796377397367222c22706f776572223a3430302c227075626c69635f6b6579223a2237393830383738653935396361336161623162386266633663646434646265326539663066376665303530633133316132313238326633363364343434623532227d5d2c22616c6c6f636174696f6e73223a5b7b2261646472657373223a22617572613171717173717171717171717171717835377666727a35723033366b75653663323979346c6879777a222c2262616c616e6365223a2231303030303030303030303030303030303030227d2c7b2261646472657373223a2261757261317171707171717171717171717171383971733335796376716e376c646d6c716d3867613634337766222c2262616c616e6365223a2232353030303030303030303030303030303030227d2c7b2261646472657373223a2261757261317171707371717171717171717171386b7a353639787535336b72383775726676667677746b716e30222c2262616c616e6365223a22373530303030303030303030303030303030227d5d7d
++json_bad_supply_overflow=7b22636861696e5f6964223a22617572616c6974652d746573742d31222c2270726f746f636f6c5f76657273696f6e223a312c2267656e657369735f74696d655f6d73223a313730303030303030303030302c2276616c696461746f7273223a5b7b2261646472657373223a22617572613171717173717171717171717171717274333235753365637879347a78387134706371676b39386d72222c22706f776572223a3130302c227075626c69635f6b6579223a2234303437346535353563363336613731373837663836386439343962613261396230623762656335636364336461653165386566663666643034306231323139227d2c7b2261646472657373223a226175726131717170717171717171717171717172756e7761646e377168786532686679616a367967336674386b222c22706f776572223a3230302c227075626c69635f6b6579223a2235333561363136383666373637643834386239323939613061376165623562636333636164316438646665366564663466623032303931303137316532353263227d2c7b2261646472657373223a22617572613171717073717171717171717171717964346e3937357a666767616e6774667872756738656b72756b222c22706f776572223a3330302c227075626c69635f6b6579223a2236363664373437623832383939303937396561356163623362616331633863666436646465346562663266393030303730653135316332333261333133383366227d2c7b2261646472657373223a22617572613171717a71717171717171717171717937686877306b78336574706d65646477353776796377397367222c22706f776572223a3430302c227075626c69635f6b6579223a2237393830383738653935396361336161623162386266633663646434646265326539663066376665303530633133316132313238326633363364343434623532227d5d2c22616c6c6f636174696f6e73223a5b7b2261646472657373223a22617572613171717173717171717171717171717835377666727a35723033366b75653663323979346c6879777a222c2262616c616e6365223a22333430323832333636393230393338343633343633333734363037343331373638323131343535227d2c7b2261646472657373223a2261757261317171707171717171717171717171383971733335796376716e376c646d6c716d3867613634337766222c2262616c616e6365223a2231227d5d7d
++json_bad_missing_field=7b2270726f746f636f6c5f76657273696f6e223a312c2267656e657369735f74696d655f6d73223a302c2276616c696461746f7273223a5b5d2c22616c6c6f636174696f6e73223a5b5d7d
++json_bad_unknown_validator_field=7b22636861696e5f6964223a22617572616c6974652d746573742d31222c2270726f746f636f6c5f76657273696f6e223a312c2267656e657369735f74696d655f6d73223a313730303030303030303030302c2276616c696461746f7273223a5b7b2261646472657373223a22617572613171717173717171717171717171717274333235753365637879347a78387134706371676b39386d72222c22706f776572223a3130302c227075626c69635f6b6579223a2234303437346535353563363336613731373837663836386439343962613261396230623762656335636364336461653165386566663666643034306231323139222c226e616d65223a227631227d2c7b2261646472657373223a226175726131717170717171717171717171717172756e7761646e377168786532686679616a367967336674386b222c22706f776572223a3230302c227075626c69635f6b6579223a2235333561363136383666373637643834386239323939613061376165623562636333636164316438646665366564663466623032303931303137316532353263227d2c7b2261646472657373223a22617572613171717073717171717171717171717964346e3937357a666767616e6774667872756738656b72756b222c22706f776572223a3330302c227075626c69635f6b6579223a2236363664373437623832383939303937396561356163623362616331633863666436646465346562663266393030303730653135316332333261333133383366227d2c7b2261646472657373223a22617572613171717a71717171717171717171717937686877306b78336574706d65646477353776796377397367222c22706f776572223a3430302c227075626c69635f6b6579223a2237393830383738653935396361336161623162386266633663646434646265326539663066376665303530633133316132313238326633363364343434623532227d5d2c22616c6c6f636174696f6e73223a5b7b2261646472657373223a22617572613171717173717171717171717171717835377666727a35723033366b75653663323979346c6879777a222c2262616c616e6365223a2231303030303030303030303030303030303030227d2c7b2261646472657373223a2261757261317171707171717171717171717171383971733335796376716e376c646d6c716d3867613634337766222c2262616c616e6365223a2232353030303030303030303030303030303030227d2c7b2261646472657373223a2261757261317171707371717171717171717171386b7a353639787535336b72383775726676667677746b716e30222c2262616c616e6365223a22373530303030303030303030303030303030227d5d7d
++json_bad_duplicate_allocation=7b22636861696e5f6964223a22617572616c6974652d746573742d31222c2270726f746f636f6c5f76657273696f6e223a312c2267656e657369735f74696d655f6d73223a313730303030303030303030302c2276616c696461746f7273223a5b7b2261646472657373223a22617572613171717173717171717171717171717274333235753365637879347a78387134706371676b39386d72222c22706f776572223a3130302c227075626c69635f6b6579223a2234303437346535353563363336613731373837663836386439343962613261396230623762656335636364336461653165386566663666643034306231323139227d2c7b2261646472657373223a226175726131717170717171717171717171717172756e7761646e377168786532686679616a367967336674386b222c22706f776572223a3230302c227075626c69635f6b6579223a2235333561363136383666373637643834386239323939613061376165623562636333636164316438646665366564663466623032303931303137316532353263227d2c7b2261646472657373223a22617572613171717073717171717171717171717964346e3937357a666767616e6774667872756738656b72756b222c22706f776572223a3330302c227075626c69635f6b6579223a2236363664373437623832383939303937396561356163623362616331633863666436646465346562663266393030303730653135316332333261333133383366227d2c7b2261646472657373223a22617572613171717a71717171717171717171717937686877306b78336574706d65646477353776796377397367222c22706f776572223a3430302c227075626c69635f6b6579223a2237393830383738653935396361336161623162386266633663646434646265326539663066376665303530633133316132313238326633363364343434623532227d5d2c22616c6c6f636174696f6e73223a5b7b2261646472657373223a22617572613171717173717171717171717171717835377666727a35723033366b75653663323979346c6879777a222c2262616c616e6365223a2231303030303030303030303030303030303030227d2c7b2261646472657373223a22617572613171717173717171717171717171717835377666727a35723033366b75653663323979346c6879777a222c2262616c616e6365223a2231303030303030303030303030303030303030227d5d7d
++genesis_1_canonical=0f617572616c6974652d746573742d31010000000068e5cf8b0100000401000000000000006b8aa9c8e70625446382a1c0640000000000000040474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121902000000000000007c9bbad9f81736557493b2d1c800000000000000535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c03000000000000008daccbea0928476685a4c3e22c01000000000000666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f04000000000000009ebddcfb1a39587796b5d4f390010000000000007980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b52030100000000000000d4f31231506f8eadcceb0a29000064a7b3b6e00d00000000000000000200000000000000e504234261809fbeddfc1b3a00007a22c1c8b12200000000000000000300000000000000f61534537291b0cfee0d2c4b00008bbd0689680a0000000000000000
++genesis_1_hash=af92bd6b129a3cefe1f385d323a5f6eb687dc3bf770285dc89ff4dab8d854028
++validator_set_hash_1=078d468a952fc0bbb7b9cc34aad6279854d4750d83cd37156206e66c311e57ea
++allocation_root_1=3a1ecab4e5ac27659cda6211d14d170a128eb5f5ad557d693fd094b7fea121f2
++total_supply_1=4250000000000000000
++validator_count_1=4
++allocation_count_1=3
++genesis_2_canonical=0f617572616c6974652d746573742d310100000000505c18a3010000020700000000000000d1f00f2e4d6c8baac9e807260a00000000000000b2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b0800000000000000e201203f5e7d9cbbdaf918371400000000000000c5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979e0109000000000000005c7b9ab9d8f71635547392b12a000000000000000000000000000000
++genesis_2_hash=ee2e9778892fe1e5d0f097214c3c33d4d894653daeaf9d34a7354b25fcd88b48
++validator_set_hash_2=6921fd6fdfa919187ff03bd9f6e78bf8797053cce7a26dd1121f32bdc1f34042
++allocation_root_2=0c14ce125e5a7c3eb15d0c41af355faa10a345c4fd615c6995d983dabd22f271
++total_supply_2=42
++validator_count_2=2
++allocation_count_2=1
+diff --git a/crates/aura-genesis/tests/genesis_cli.rs b/crates/aura-genesis/tests/genesis_cli.rs
+new file mode 100644
+index 0000000..a0e9ddd
+--- /dev/null
++++ b/crates/aura-genesis/tests/genesis_cli.rs
+@@ -0,0 +1,101 @@
++//! C8 gate: the `aura genesis` CLI must agree with the library and vectors.
++
++use std::path::PathBuf;
++use std::process::Command;
++
++const BIN: &str = env!("CARGO_BIN_EXE_aura");
++const GOLDEN: &str = include_str!("fixtures/c8_golden.txt");
++
++fn fixture(key: &str) -> String {
++    for line in GOLDEN.lines() {
++        let trimmed = line.trim();
++        if trimmed.starts_with('#') || !trimmed.contains('=') {
++            continue;
++        }
++        let (name, value) = trimmed.split_once('=').unwrap();
++        if name == key {
++            return value.to_owned();
++        }
++    }
++    panic!("missing fixture key {key}");
++}
++
++fn sample_path() -> PathBuf {
++    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/spec/genesis-testnet.json")
++}
++
++fn run(args: &[&str]) -> std::process::Output {
++    Command::new(BIN)
++        .args(args)
++        .output()
++        .expect("aura binary runs")
++}
++
++#[test]
++fn cli_hash_matches_the_independent_vector() {
++    let path = sample_path();
++    let output = run(&["genesis", "hash", "--file", path.to_str().unwrap()]);
++    assert!(
++        output.status.success(),
++        "stderr: {}",
++        String::from_utf8_lossy(&output.stderr)
++    );
++    assert_eq!(
++        String::from_utf8(output.stdout).unwrap().trim(),
++        fixture("genesis_1_hash")
++    );
++}
++
++#[test]
++fn cli_verify_accepts_the_right_hash_and_rejects_a_wrong_one() {
++    let path = sample_path();
++    let good = fixture("genesis_1_hash");
++    let output = run(&[
++        "genesis",
++        "verify",
++        "--file",
++        path.to_str().unwrap(),
++        "--expect",
++        &good,
++    ]);
++    assert!(
++        output.status.success(),
++        "verify should pass: {}",
++        String::from_utf8_lossy(&output.stderr)
++    );
++    assert!(String::from_utf8_lossy(&output.stdout).starts_with("OK "));
++
++    let bad = format!("{:0>64}", "0");
++    let output = run(&[
++        "genesis",
++        "verify",
++        "--file",
++        path.to_str().unwrap(),
++        "--expect",
++        &bad,
++    ]);
++    assert!(!output.status.success(), "verify must reject a wrong hash");
++    assert!(String::from_utf8_lossy(&output.stderr).contains("MISMATCH"));
++}
++
++#[test]
++fn cli_show_reports_all_commitments() {
++    let path = sample_path();
++    let output = run(&["genesis", "show", "--file", path.to_str().unwrap()]);
++    assert!(output.status.success());
++    let text = String::from_utf8(output.stdout).unwrap();
++    assert!(text.contains(&format!("genesis_hash={}", fixture("genesis_1_hash"))));
++    assert!(text.contains(&format!(
++        "validator_set_hash={}",
++        fixture("validator_set_hash_1")
++    )));
++    assert!(text.contains(&format!("allocation_root={}", fixture("allocation_root_1"))));
++    assert!(text.contains(&format!("total_supply={}", fixture("total_supply_1"))));
++}
++
++#[test]
++fn cli_prints_usage_on_bad_arguments() {
++    let output = run(&["nonsense"]);
++    assert_eq!(output.status.code(), Some(2));
++    assert!(String::from_utf8_lossy(&output.stderr).contains("aura genesis hash"));
++}
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+index 75be71a..12557bd 100644
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -41,6 +41,16 @@ Tx      = { chain_id, signer, nonce, kind, payload, gas_limit,
+ - **Versioning.** `version` in the header, `codec_version` in tx,
+   `abi_version` in contracts. Any change = migration test (C10/B10).
+ 
++**C8 genesis.** `aura-genesis` (14th crate) parses a strict JSON config into
++one canonical binary document. `genesis_hash` =
++`hash_domain(chain_id, Domain::Genesis, GENESIS_CONTEXT ‖ canonical_bytes)`;
++`validator_set_hash` is now computed (C5 left it caller-supplied);
++`allocation_root` is a Merkle commitment over C7 account keys/values using
++the C6 tree — **not** the JMT `state_root` (S1). Object key order and
++whitespace never change any commitment; validator array order does.
++`serde_json` is used only for this config file, never for consensus bytes.
++Spec: [`docs/spec/genesis-format.md`](spec/genesis-format.md).
++
+ **C7 account model.** `aura-state` now has its first real API:
+ `Account { nonce, balance, code_hash, storage_root }` (88 canonical bytes) and
+ `StateKey` with five namespaces — `0x01` account, `0x02` code, `0x03` storage,
+@@ -113,6 +123,7 @@ aura-crypto <- aura-types
+ aura-tx     <- aura-types, aura-codec, aura-crypto   (C4, 12th crate)
+ aura-block  <- aura-tx, aura-codec, aura-crypto, aura-types  (C5, 13th crate)
+ aura-state  <- aura-block, aura-tx, aura-codec, aura-crypto, aura-storage
++aura-genesis <- aura-state, aura-block, aura-crypto, aura-codec, aura-types  (C8, 14th crate)
+ aura-exec   <- aura-state, aura-crypto, wasmtime
+ aura-consensus <- aura-state, aura-crypto, aura-p2p
+ aura-node(aurad) <- all of the above + aura-rpc + aura-mempool
+diff --git a/docs/STATUS.md b/docs/STATUS.md
+index 998404d..4627fb3 100644
+--- a/docs/STATUS.md
++++ b/docs/STATUS.md
+@@ -1,8 +1,8 @@
+ # Implementation status — AuraLite-Crypto
+ 
+ > Updated **in the same patch** as the phase's code (rule D9).
+-> Snapshot date: **2026-10-26**, tree: "C7 landed — types, codec, crypto,
+-> tx, block, proofs and accounts, Stage 1 in progress".
++> Snapshot date: **2026-10-26**, tree: "C8 landed — types, codec, crypto,
++> tx, block, proofs, accounts and genesis, Stage 1 in progress".
+ 
+ ## Locked decisions (2026-10-25)
+ 
+@@ -24,7 +24,8 @@ C1 ✅ (`patches/0002-C1-types.patch`), C2 ✅
+ (`patches/0005-C4-tx-format.patch`) and C5 ✅
+ (`patches/0006-C5-block-header.patch`) and C6 ✅
+ (`patches/0007-C6-merkle-proofs.patch`) and C7 ✅
+-(`patches/0008-C7-account-model.patch`) done; C8 (genesis) is next. No other
++(`patches/0008-C7-account-model.patch`) and C8 ✅
++(`patches/0009-C8-genesis.patch`) done; C9 (test rig) is next. No other
+ phase has started.
+ 
+ ## Maturity level
+@@ -43,7 +44,7 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
+ ## Working now
+ 
+ - `make test` is green: `cargo fmt --check`, `cargo clippy --workspace
+-  --all-targets -- -D warnings`, `cargo test --workspace` (**82 tests**),
++  --all-targets -- -D warnings`, `cargo test --workspace` (**96 tests**),
+   the docs drift guard and the dependency gate. Receipts:
+   `docs/evidence/c0-baseline.txt`, `docs/evidence/c0/nc.log`,
+   `docs/evidence/c1/gates.txt`, `docs/evidence/c1/nc.log`,
+@@ -52,7 +53,8 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
+   `docs/evidence/c4/gates.txt`, `docs/evidence/c4/nc.log`,
+   `docs/evidence/c5/gates.txt`, `docs/evidence/c5/nc.log`,
+   `docs/evidence/c6/gates.txt`, `docs/evidence/c6/nc.log`,
+-  `docs/evidence/c7/gates.txt`, `docs/evidence/c7/nc.log`.
++  `docs/evidence/c7/gates.txt`, `docs/evidence/c7/nc.log`,
++  `docs/evidence/c8/gates.txt`, `docs/evidence/c8/nc.log`.
+ - `aura-types` exports the locked D0 identity (`auralite-test-1`, `ALCRY`,
+   18 decimals, `aura`, `bft-pos`, `wasm`, v1) **and** the C1 canonical types:
+   `Hash`, bech32 `Address`, `Amount`/`Denom`, `ChainId`, `Nonce`, `Height`,
+@@ -71,6 +73,15 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
+   official BLAKE3 vectors, RFC 8032 §7.1 and a pure-Python secp256k1
+   reference (OpenSSL-verified). 5 C3 negative controls pin the context, two
+   fixtures, the verifier and the dependency allowlist.
++- C8 adds the **14th crate**, `aura-genesis`, plus the first new external
++  dependency since C3 (`serde_json =1.0.154`, config parsing only).
++  Strict JSON schema → canonical binary document → `genesis_hash`,
++  `validator_set_hash` and `allocation_root` (C6 tree over C7 accounts).
++  `make genesis-hash` and the `aura genesis` CLI (`hash`/`verify`/`show`)
++  agree with independent Python vectors. Spec:
++  `docs/spec/genesis-format.md`; sample: `docs/spec/genesis-testnet.json`.
++  DoD: 3 JSON representations → one hash; NC: validator order changes it.
++  6 C8 negative controls. Still no genesis **block**, no JMT `state_root`.
+ - C7 gives `aura-state` its **first real API** (no new crate, no new
+   dependency): `Account` (88 canonical bytes, checked arithmetic) and
+   `StateKey`/`KeySpace` with 5 fixed-length namespaces. `0x00` and
+@@ -100,10 +111,12 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
+   `docs/spec/tx-format.md`; 5 canonical + 9 rejection golden vectors from
+   `tools/gen_c4_vectors.py`; 6 C4 negative controls (contexts, fixture,
+   replay, binding, verification).
+-- **Dependencies changed at C3:** 54 external crates, all with exact `=x.y.z`
+-  pins, crates.io sources and sha256 checksums, recorded in
+-  `docs/spec/c3-dependency-allowlist.txt` and checked by `make check-deps`
+-  inside `make test`. `cargo deny` (licences/advisories) is still owed to H1.
++- **Dependencies:** 58 external crates, all with exact `=x.y.z` pins,
++  crates.io sources and sha256 checksums. The C3 baseline
++  (`docs/spec/c3-dependency-allowlist.txt`) is **frozen** historical evidence;
++  C8 records its +4 delta in `docs/spec/c8-dependency-addendum.txt`.
++  `make check-deps` compares `Cargo.lock` against baseline + addenda.
++  `cargo deny` (licences/advisories) is still owed to H1.
+   7 placeholder crates compile but expose **no API** (an honest empty crate,
+   not a fake `Ok(())`). CI runs the same commands as `make test`.
+ - Still absent: consensus, VM, P2P, node, RPC, wallet, explorer, contracts.
+@@ -114,25 +127,26 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
+ ## Measured numbers (2026-10-26)
+ 
+ ```
+-find crates -name Cargo.toml       -> 13 crates (+1 workspace root)
+-find . -name '*.rs' -not -path './target/*' -> 47 files
++find crates -name Cargo.toml       -> 14 crates (+1 workspace root)
++find . -name '*.rs' -not -path './target/*' -> 54 files
+ ls docs/plans/*_PLAN.md           -> 12 plans / 112 phase rows
+-cargo test --workspace            -> 82 passed; 0 failed
++cargo test --workspace            -> 96 passed; 0 failed
+ make test                         -> ALL GATES GREEN
+-make nc-all                       -> 2/2+3/3+4/4+5/5+6/6+6/6+6/6+6/6 = 38 NC PASS
+-make check-deps                   -> 54 external crates allowlisted
++make nc-all                       -> 2/2+3/3+4/4+5/5+6/6*5 = 44 NC PASS
++make check-deps                   -> 58 external crates allowlisted
+ validators / blocks / tx          -> 0 / 0 / 0
+ ```
+ 
+-Pre-C0 baseline and post-C0/C1/C2/C3/C4/C5/C6/C7 numbers with raw command
++Pre-C0 baseline and post-C0/C1/C2/C3/C4/C5/C6/C7/C8 numbers with raw command
+ output are in `docs/evidence/c0-baseline.txt`, `docs/evidence/c1/gates.txt`,
+ `docs/evidence/c2/gates.txt`, `docs/evidence/c3/gates.txt`,
+ `docs/evidence/c4/gates.txt`, `docs/evidence/c5/gates.txt`,
+-`docs/evidence/c6/gates.txt` and `docs/evidence/c7/gates.txt`.
++`docs/evidence/c6/gates.txt`, `docs/evidence/c7/gates.txt` and
++`docs/evidence/c8/gates.txt`.
+ 
+ ## What is missing (and must not be lost)
+ 
+-- No state tree / `state_root` computation (S1), no genesis (C8), no test
++- No genesis **block**/execution, no state tree / `state_root` (S1), no test
+   rig/fuzzing (C9), no BLS aggregation (B2), no PQ migration (H2), no
+   `cargo deny` (H1).
+ - No consensus, no P2P, no state, no VM.
+diff --git a/docs/evidence/c8/SHA256SUMS b/docs/evidence/c8/SHA256SUMS
+new file mode 100644
+index 0000000..44c1d43
+--- /dev/null
++++ b/docs/evidence/c8/SHA256SUMS
+@@ -0,0 +1,6 @@
++8542ba82bcf689fa7db583b37d06889a6924284b43c4091d69ecfc61affc7d03  docs/evidence/c8/gates.txt
++e7116d47dfee632899d50a718e3b461301f81fd525bdb30b8e5f072d5b308fea  docs/evidence/c8/nc.log
++ea123c2558c0fb1430943ee003bf7788d223a8ec2a09a61952069ef6e99b9284  crates/aura-genesis/tests/fixtures/c8_golden.txt
++7acd5ef7feaab0aa63eae3582330de581727ce66111d079622eed5c282aa89cb  docs/spec/genesis-format.md
++048f1be8a283147c97e3c12a4e637a8fc5c5d2ca201c2e5ffcf21930a7fee91e  docs/spec/genesis-testnet.json
++489439184f152e26d10002c213cc907d3b5467fd7c722152d303d809318280cb  docs/spec/c8-dependency-addendum.txt
+diff --git a/docs/evidence/c8/gates.txt b/docs/evidence/c8/gates.txt
+new file mode 100644
+index 0000000..a1d8b59
+--- /dev/null
++++ b/docs/evidence/c8/gates.txt
+@@ -0,0 +1,179 @@
++AuraLite-Crypto — C8 evidence (deterministic genesis)
++Generated (UTC): 2026-10-26T14:25:19+00:00
++Rule: measured against the tree, not assumed.
++
++Independent references: tools/gen_c8_vectors.py self-checks
++pure-Python BLAKE3 against 7 official BLAKE3 vectors and uses an
++independent bech32 encoder. It emits 19 JSON documents and two full
++sets of canonical bytes, genesis hash, validator-set hash,
++allocation root and total supply.
++
++========================================================================
++RAW COMMAND OUTPUT
++========================================================================
++
++--- toolchain ---
++$ rustc --version && cargo --version
++rustc 1.99.1 (58cf8f9c3 2026-10-13)
++cargo 1.99.1 (5f94df478 2026-08-27)
++[rc=0]
++
++--- pre-C8 tree (C7 commit) ---
++$ git log -1 --oneline
++da742b1 C7 patch artifact
++[rc=0]
++
++--- pre-C8 workspace crates ---
++$ git ls-tree -r --name-only HEAD | grep -c 'crates/.*/Cargo.toml$' || true
++13
++[rc=0]
++
++--- pre-C8 .rs files ---
++$ git ls-tree -r --name-only HEAD | grep -c '\.rs$' || true
++47
++[rc=0]
++
++--- pre-C8 external deps ---
++$ git show HEAD:Cargo.lock | grep -c '^source = ' || true
++54
++[rc=0]
++
++--- post-C8 workspace crates ---
++$ find crates -name Cargo.toml | wc -l
++14
++[rc=0]
++
++--- post-C8 .rs files ---
++$ find . -name '*.rs' -not -path './target/*' | wc -l
++54
++[rc=0]
++
++--- post-C8 external deps ---
++$ grep -c '^source = ' Cargo.lock || true
++58
++[rc=0]
++
++--- C8 dependency addendum ---
++$ python3 tools/record_c8_deps.py
++wrote docs/spec/c8-dependency-addendum.txt (4 crates added since C3)
++  + itoa=1.0.18
++  + memchr=2.8.3
++  + serde_json=1.0.154
++  + zmij=1.0.23
++[rc=0]
++
++--- dependency gate ---
++$ python3 tools/check_deps.py
++DEPENDENCY GATE: OK — 72 lock packages (14 local, 58 external, all checksummed + allowlisted)
++[rc=0]
++
++--- docs drift guard ---
++$ python3 tools/check_claims.py
++DOCS DRIFT GUARD: OK — 24 markdown files, 12 plans, 112 phase rows, all local links resolve
++[rc=0]
++
++--- independent generator is idempotent ---
++$ $ (shell script: generator idempotence check)
++generator idempotent: ea123c2558c0fb1430943ee003bf7788d223a8ec2a09a61952069ef6e99b9284
++[rc=0]
++
++--- genesis CLI hash ---
++$ cargo run -q -p aura-genesis --bin aura -- genesis hash --file docs/spec/genesis-testnet.json
++af92bd6b129a3cefe1f385d323a5f6eb687dc3bf770285dc89ff4dab8d854028
++[rc=0]
++
++--- three-host DoD gate ---
++$ cargo test -p aura-genesis --test c8_genesis same_genesis -- --nocapture
++running 1 test
++test same_genesis_same_hash_across_three_hosts ... ok
++
++test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
++
++   Compiling aura-genesis v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-genesis)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.22s
++     Running tests/c8_genesis.rs (target/debug/deps/c8_genesis-032a2343f88b496a)
++[rc=0]
++
++--- all negative controls (C0-C8) ---
++$ make nc-all
++make[1]: Entering directory '/home/user/AuraLite-Crypto'
++RESULT: 2/2 negative controls PASS
++RESULT: 3/3 negative controls PASS
++RESULT: 4/4 negative controls PASS
++RESULT: 5/5 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++make[1]: Leaving directory '/home/user/AuraLite-Crypto'
++[rc=0]
++
++--- C8 negative controls (evidence log) ---
++$ make nc-c8
++
++error: test failed, to rerun pass `-p aura-genesis --test c8_genesis`
++NC-3 independent golden genesis hash: PASS
++      cargo test -p aura-genesis -> rc=101 (RED as expected)
++          validator_order_changes_the_hash
++
++test result: FAILED. 5 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++error: test failed, to rerun pass `-p aura-genesis --test c8_genesis`
++NC-4 validator order (DoD: sorting must not happen): PASS
++      cargo test -p aura-genesis -> rc=101 (RED as expected)
++          validator_order_changes_the_hash
++
++test result: FAILED. 9 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++error: test failed, to rerun pass `-p aura-genesis --test c8_genesis`
++NC-5 unknown JSON fields: PASS
++      cargo test -p aura-genesis -> rc=101 (RED as expected)
++         |       ^^^^^^^^^^^^^^
++   |
++   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
++
++error: test failed, to rerun pass `-p aura-genesis --test c8_genesis`
++NC-6 Stage 1 chain-id check: PASS
++      cargo test -p aura-genesis -> rc=101 (RED as expected)
++         |                                            ^^^^^^^^^^^^
++   |
++   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
++
++error: test failed, to rerun pass `-p aura-genesis --test c8_genesis`
++
++RESULT: 6/6 negative controls PASS
++restore check: cargo test -p aura-genesis -> rc=0; check_deps -> rc=0 (GREEN as expected)
++make[1]: Leaving directory '/home/user/AuraLite-Crypto'
++[rc=0]
++
++--- full gate ---
++$ make test
++   Doc-tests aura_mempool
++   Doc-tests aura_node
++   Doc-tests aura_p2p
++   Doc-tests aura_rpc
++   Doc-tests aura_state
++   Doc-tests aura_storage
++   Doc-tests aura_tx
++   Doc-tests aura_types
++[rc=0]
++
++========================================================================
++SUMMARY
++========================================================================
++
++Pre-C8 (C7 tree): 13 crates, 47 .rs files, 54 external deps, 82 tests.
++Post-C8: 14 crates (aura-genesis added; 7 empty placeholders remain),
++54 .rs files, 58 external deps (+4: serde_json, itoa, memchr, zmij —
++config parsing only), 96 tests passing (82 C0-C7 + 14 C8),
++`make test` ALL GATES GREEN, 44 negative controls total
++(2+3+4+5+6+6+6+6+6), 6/6 new in C8.
++C8 DoD gates: three independent JSON representations give one hash;
++validator order change gives a different hash; the `aura genesis`
++CLI agrees with the library and the independent vectors.
++Validators/blocks/tx remain 0/0/0 — no network has started.
++
++The C3 dependency allowlist is FROZEN historical evidence; C8 records
++its delta in docs/spec/c8-dependency-addendum.txt, and check_deps.py
++compares Cargo.lock against the union of baseline + addenda.
+diff --git a/docs/evidence/c8/nc.log b/docs/evidence/c8/nc.log
+new file mode 100644
+index 0000000..bdfe096
+--- /dev/null
++++ b/docs/evidence/c8/nc.log
+@@ -0,0 +1,48 @@
++C8 NEGATIVE CONTROLS — 2026-10-26T14:25:45+00:00
++Rule: a gate that cannot go red is not a gate (CONTRIBUTING.md §1).
++
++NC-1 genesis context: PASS
++      cargo test -p aura-genesis -> rc=101 (RED as expected)
++          validator_order_changes_the_hash
++
++test result: FAILED. 4 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++error: test failed, to rerun pass `-p aura-genesis --test c8_genesis`
++NC-2 validator-set context: PASS
++      cargo test -p aura-genesis -> rc=101 (RED as expected)
++          shipped_genesis_config_matches_the_golden_hash
++
++test result: FAILED. 6 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++error: test failed, to rerun pass `-p aura-genesis --test c8_genesis`
++NC-3 independent golden genesis hash: PASS
++      cargo test -p aura-genesis -> rc=101 (RED as expected)
++          validator_order_changes_the_hash
++
++test result: FAILED. 5 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++error: test failed, to rerun pass `-p aura-genesis --test c8_genesis`
++NC-4 validator order (DoD: sorting must not happen): PASS
++      cargo test -p aura-genesis -> rc=101 (RED as expected)
++          validator_order_changes_the_hash
++
++test result: FAILED. 9 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++error: test failed, to rerun pass `-p aura-genesis --test c8_genesis`
++NC-5 unknown JSON fields: PASS
++      cargo test -p aura-genesis -> rc=101 (RED as expected)
++         |       ^^^^^^^^^^^^^^
++   |
++   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
++
++error: test failed, to rerun pass `-p aura-genesis --test c8_genesis`
++NC-6 Stage 1 chain-id check: PASS
++      cargo test -p aura-genesis -> rc=101 (RED as expected)
++         |                                            ^^^^^^^^^^^^
++   |
++   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
++
++error: test failed, to rerun pass `-p aura-genesis --test c8_genesis`
++
++RESULT: 6/6 negative controls PASS
++restore check: cargo test -p aura-genesis -> rc=0; check_deps -> rc=0 (GREEN as expected)
+diff --git a/docs/plans/CORE_PLAN.md b/docs/plans/CORE_PLAN.md
+index cb59431..525cce1 100644
+--- a/docs/plans/CORE_PLAN.md
++++ b/docs/plans/CORE_PLAN.md
+@@ -1,6 +1,6 @@
+ # CORE_PLAN — primitives, codec, cryptography, formats
+ 
+-**Status:** 🚧 IN PROGRESS (C0–C7 done ✅ 2026-10-26; C8 next)  
++**Status:** 🚧 IN PROGRESS (C0–C8 done ✅ 2026-10-26; C9 next)  
+ **Stage:** Stage 1: C0–C10 (all phases active).  
+ **Deliverable:** `patches/0001-C0-...` … `patches/0011-C10-...`
+ **Dependencies:** none. This is the root of the whole tree.
+@@ -39,10 +39,16 @@ other 11 plans rest.
+   share one implementation so a root and a proof cannot disagree about
+   padding. Proof direction is derived from the index — no direction bits.
+ - **D-C9 (C7).** The account model and state key layout live in the existing
+-  `aura-state` crate (no 14th crate). Exactly five key prefixes are valid;
++  `aura-state` crate (no new crate at C7). Exactly five key prefixes are valid;
+   `0x00` and `0x06`–`0xFF` stay reserved so contract code can never reach
+   protocol space. Each namespace has one fixed key length. C7 is layout
+   only — the versioned tree, `state_root` and persistence remain S1–S7.
++- **D-C10 (C8).** Genesis is a **config**, not consensus bytes: `serde_json`
++  parses a strict JSON schema, while every hash is computed over C2 binary.
++  Validator array order is consensus-significant (NC); allocation order is
++  not, because state is a set. `serde_json` is the first new external
++  dependency since C3 and is recorded in a reviewed C8 addendum — the frozen
++  C3 baseline allowlist stays untouched. Stage 1 rejects `auralite-1`.
+ 
+ ## Phases
+ 
+@@ -56,7 +62,7 @@ other 11 plans rest.
+ | ✅ **C5** | Block and header | `Header`/`Body`, `block_hash`, `tx_root`, `state_root`, `validator_set_hash`, protocol version | vector: changing tx order changes `tx_root`; NC: reorder without recompute → red |
+ | ✅ **C6** | Merkle proofs | build/verify proofs for txs and events, compact format | 1000 leaves, all proofs valid, one substituted — invalid |
+ | ✅ **C7** | Account model | `Account { nonce, balance, code_hash, storage_root }`, state key layout, reserved prefixes | gate: keys of two accounts do not collide, reserved space unreachable from contracts |
+-| **C8** | Genesis | genesis JSON → binary genesis hash, validator set, allocation, chain-id, `aura genesis` tool | same genesis → same hash on 3 hosts; NC: validator order change → different hash |
++| ✅ **C8** | Genesis | genesis JSON → binary genesis hash, validator set, allocation, chain-id, `aura genesis` tool | same genesis → same hash on 3 hosts; NC: validator order change → different hash |
+ | **C9** | Test rig | `proptest`, golden fixtures, `cargo-fuzz` targets for codec/tx, `make test-core`, CI shard `core` | >= 200 vectors, 60 s fuzzing with no crashes, `clippy -D warnings` |
+ | **C10** | Close-out | all NCs collected, docs + STATUS + CHANGELOG, format specs in `docs/spec/` | full `make test`; plan↔tree audit (not a single ✅ line without a receipt) |
+ 
+@@ -337,6 +343,63 @@ other 11 plans rest.
+   overlays (S3), genesis allocation (C8), test rig (C9), VM host ABI (X
+   phases).
+ 
++
++### C8 receipt (2026-10-26)
++
++- Deliverable: `patches/0009-C8-genesis.patch`. Adds the **14th crate**,
++  `aura-genesis`, and the `aura` binary with the `genesis` subcommand
++  (`hash` / `verify` / `show`). First new external dependency since C3:
++  `serde_json =1.0.154` (config parsing only, no serde derive, no JSON in
++  the consensus path).
++- Landed: `Genesis { chain_id, protocol_version, genesis_time_ms,
++  validators, allocations }`, `Validator`, `Allocation`, `GenesisError`, a
++  strict JSON parser and C2 `Encode`/`Decode`. Rejects unknown/missing keys,
++  wrong types, float balances, invalid bech32/hex, zero power, zero
++  allocation, duplicate addresses, empty validator set and supply overflow.
++- Commitments: `genesis_hash` =
++  `hash_domain(chain_id, Domain::Genesis, GENESIS_CONTEXT ‖ canonical_bytes)`;
++  `validator_set_hash` = `BLAKE3(VALIDATOR_SET_CONTEXT ‖ validator_vector)`
++  (now actually computed — C5 left it caller-supplied); `allocation_root` =
++  C6 Merkle root over C7 `StateKey::account` digests and `Account` values,
++  sorted by address. Not the JMT `state_root` (S1).
++- Determinism: object key order and whitespace are irrelevant; validator
++  array order **is** consensus-significant; allocation array order does not
++  change `allocation_root`. `genesis_time_ms` is explicit, never a clock.
++- Spec: `docs/spec/genesis-format.md`; sample config
++  `docs/spec/genesis-testnet.json` (its hash is pinned by a test).
++- Golden vectors: `tools/gen_c8_vectors.py` — independent Python with
++  pure-Python BLAKE3 (self-checked against 7 official vectors), an
++  independent BIP-173 bech32 encoder, C3 domain framing, C5/C6 tree rules
++  and C7 key/account encodings. 44 fixture lines: 19 JSON documents
++  (3 equivalent, 2 order variants, 13 invalid) plus 2 full commitment sets.
++  Generator self-checks all determinism properties; offline, byte-stable.
++- DoD gates: three independent JSON representations produce one hash and one
++  canonical byte string; reordering validators changes both `genesis_hash`
++  and `validator_set_hash`. Four CLI integration tests pin `hash`, `verify`
++  (accept + reject), `show` and usage.
++- Gate: `make test` → **96 passed / 0 failed** (82 C0–C7 + 14 C8),
++  fmt/clippy clean, drift guard 12 plans / 112 rows / 24 markdown files,
++  dependency gate 58 external crates allowlisted.
++- Dependency governance: the C3 baseline allowlist is frozen historical
++  evidence (pinned by `docs/evidence/c3/SHA256SUMS`). C8 records its +4
++  delta (`serde_json`, `itoa`, `memchr`, `zmij`) in
++  `docs/spec/c8-dependency-addendum.txt`; `check_deps.py` compares the lock
++  against baseline + addenda. `tools/record_c8_deps.py` is the reviewed
++  re-record action.
++- NC: `make nc-c8` → **6/6 PASS**: genesis context, validator-set context,
++  golden hash, validator-order sorting, unknown-field rejection, Stage 1
++  chain-id check. Total across C0–C8: **44 NC** via `make nc-all`.
++- Evidence: `docs/evidence/c8/gates.txt`, `docs/evidence/c8/nc.log`,
++  `docs/evidence/c8/SHA256SUMS` (also pins the fixture, spec, sample config
++  and dependency addendum).
++- Fixes found by the gate itself: a CLI test used the wrong relative path
++  (`CARGO_MANIFEST_DIR` is the crate dir, not the test file dir); a JSON
++  string helper needed an explicit lifetime; an unused import was removed.
++  All fixed in code, not suppressed.
++- Deferred: genesis **block** and execution (B/D phases), JMT `state_root`
++  (S1), validator key ceremony (W7/O5), BLS aggregation (B2), Stage 2
++  mainnet genesis.
++
+ ## Key risks
+ 
+ 1. **Non-canonical serialization** → two nodes get different hashes for the same
+diff --git a/docs/plans/NODE_PLAN.md b/docs/plans/NODE_PLAN.md
+index 7542a4f..ad61c11 100644
+--- a/docs/plans/NODE_PLAN.md
++++ b/docs/plans/NODE_PLAN.md
+@@ -18,6 +18,12 @@ one command** — otherwise nobody (including the author) can verify the network
+ - **D-D3.** RPC never bypasses validation and never holds a state lock for the duration of a network call.
+ - **D-D4.** Metrics/tracing from the first devnet: without measurements there is no PERF_PLAN.
+ 
++
++**C8 note (2026-10-26).** `CORE_PLAN` C8 shipped the `aura genesis`
++subcommand (`hash` / `verify` / `show`) on the `aura` binary in
++`aura-genesis`. D8 still owes the remaining CLI surface (node ops, query,
++tx, keys, snapshot, upgrade) and its 30 vectors.
++
+ ## Phases
+ 
+ | Phase | Title | DoD | Test gate |
+diff --git a/docs/spec/c8-dependency-addendum.txt b/docs/spec/c8-dependency-addendum.txt
+new file mode 100644
+index 0000000..f440425
+--- /dev/null
++++ b/docs/spec/c8-dependency-addendum.txt
+@@ -0,0 +1,11 @@
++# AuraLite-Crypto external dependency addendum (C8).
++# Generated by tools/record_c8_deps.py from Cargo.lock.
++# The C3 baseline file is FROZEN (pinned by docs/evidence/c3/SHA256SUMS);
++# this file lists ONLY crates added after C3. Any new phase adds its own
++# reviewed addendum. Checked by tools/check_deps.py inside `make test`.
++# C8 added serde_json for genesis CONFIG parsing only; consensus bytes
++# still come from aura-codec, and no crate uses a serde derive.
++itoa=1.0.18
++memchr=2.8.3
++serde_json=1.0.154
++zmij=1.0.23
+diff --git a/docs/spec/genesis-format.md b/docs/spec/genesis-format.md
+new file mode 100644
+index 0000000..6f7f5b6
+--- /dev/null
++++ b/docs/spec/genesis-format.md
+@@ -0,0 +1,143 @@
++# Genesis format — C8 specification
++
++**Status:** ✅ implemented in `crates/aura-genesis` (2026-10-26).
++**Authority:** [`CORE_PLAN.md`](../plans/CORE_PLAN.md) C8 and
++[`ARCHITECTURE.md`](../ARCHITECTURE.md) §1. Any change requires a new phase,
++a `PROTOCOL_VERSION` bump and a migration test.
++
++**Scope.** C8 adds the **14th crate**, `aura-genesis`, and the first new
++external dependency since C3: `serde_json =1.0.154`, used **only** to parse
++the genesis config file. Consensus bytes always come from `aura-codec`;
++no crate uses a `serde` derive. A human-readable example lives at
++[`genesis-testnet.json`](genesis-testnet.json).
++
++## 1. JSON schema (config only)
++
++Top-level object — exactly five keys, no extras, no defaults:
++
++| Key | JSON type | Meaning |
++|---|---|---|
++| `chain_id` | string | must be a canonical `ChainId` and equal `auralite-test-1` in Stage 1 |
++| `protocol_version` | integer | must equal `PROTOCOL_VERSION = 1` |
++| `genesis_time_ms` | integer `u64` | consensus timestamp, **never** a local clock |
++| `validators` | array | non-empty, declared order is consensus-significant |
++| `allocations` | array | initial balances |
++
++Validator object — exactly `{ address, power, public_key }`:
++
++* `address` — bech32 `aura1...` (C1, checksum validated);
++* `power` — non-zero `u64`;
++* `public_key` — exactly 64 hex characters (32 bytes, opaque at C8).
++
++Allocation object — exactly `{ address, balance }`:
++
++* `balance` — a **decimal string**, parsed to `u128`. JSON numbers/floats
++  are rejected, because a `u128` amount must never round-trip through `f64`.
++
++Rejected at parse time: unknown keys (top level or nested), missing keys,
++wrong types, invalid chain-id/version/address/public key/balance, empty
++validator set, zero power, zero allocation, duplicate validator addresses,
++duplicate allocation addresses, and a total supply that overflows `u128`.
++
++Object key order and whitespace are irrelevant — the parser extracts named
++fields into a struct. **Array order is preserved**: validator order changes
++the hash (C8 NC), while `allocation_root` sorts by address because state is
++a set.
++
++## 2. Canonical binary document
++
++C2 rules (minimal LEB128 varints, fixed-width little-endian integers, no
++`usize`, no `serde`):
++
++```
++chain_id          = varint(len) ‖ UTF-8
++protocol_version  = u32 LE
++genesis_time_ms   = u64 LE
++validators        = varint(count) ‖ ( address[20] ‖ power u64 LE ‖ key[32] )*
++allocations       = varint(count) ‖ ( address[20] ‖ balance u128 LE )*
++```
++
++`Genesis::from_canonical_bytes` uses `decode_canonical()` (no trailing bytes,
++no non-minimal varints, re-encode must match) and then re-runs every
++structural check.
++
++## 3. Commitments
++
++```
++genesis_hash       = hash_domain(chain_id, Domain::Genesis,
++                        GENESIS_CONTEXT ‖ canonical_bytes)
++validator_set_hash = BLAKE3(VALIDATOR_SET_CONTEXT ‖ varint(count) ‖ validators*)
++allocation_root    = MerkleRoot(sorted allocation leaves)
++```
++
++`hash_domain` is C3's length-prefixed framing with tag `"genesis"`.
++`validator_set_hash` is the value that fills C5's header field — C5 left it
++caller-supplied; C8 is the first phase that actually computes it.
++
++An allocation leaf is:
++
++```
++key      = 0x01 ‖ address[20]                         (C7 StateKey::account)
++key_hash = BLAKE3(STATE_KEY_CONTEXT ‖ u64(len(key)) ‖ key)
++account  = u64(0) ‖ u128(balance) ‖ ZERO32 ‖ ZERO32   (C7 Account)
++leaf     = BLAKE3(ALLOCATION_LEAF_CONTEXT ‖ key_hash ‖ u64(len(account)) ‖ account)
++```
++
++Leaves are sorted by address and combined with the C6 tree (`node_hash`,
++odd-node duplication). `allocation_root` is a **genesis allocation
++commitment, not the JMT `state_root`** — S1 still owes the versioned tree.
++
++Contexts: `GENESIS_CONTEXT = b"AuraLite-Crypto/genesis-v1\0"`,
++`VALIDATOR_SET_CONTEXT = b"AuraLite-Crypto/validator-set-v1\0"`,
++`ALLOCATION_LEAF_CONTEXT = b"AuraLite-Crypto/allocation-leaf-v1\0"`.
++
++## 4. CLI
++
++`cargo run -p aura-genesis --bin aura -- genesis <subcommand>`:
++
++```
++aura genesis hash   --file <genesis.json>          # prints the 64-hex hash
++aura genesis verify --file <genesis.json> --expect <64-hex>
++aura genesis show   --file <genesis.json>          # key=value summary
++```
++
++`verify` exits 1 on mismatch; bad arguments exit 2. This is the C8 slice of
++the `aura` CLI; `NODE_PLAN` D8 owns the remaining subcommands.
++
++## 5. Golden vectors and negative controls
++
++`tools/gen_c8_vectors.py` is independent Python: pure-Python BLAKE3
++(self-checked against 7 official BLAKE3 vectors), an independent BIP-173
++bech32 encoder, the C3 domain framing, C5/C6 Merkle node rules and the C7
++key/account encodings. `c8_golden.txt` has 44 lines: 19 JSON documents
++(hex-encoded UTF-8) — three equivalent representations, two order variants
++and 13 invalid ones — plus two full sets of canonical bytes, genesis hash,
++validator-set hash, allocation root, total supply and counts.
++
++The generator self-checks that object key order/whitespace do **not** change
++any commitment, that validator order **does** change both `genesis_hash` and
++`validator_set_hash`, and that allocation order does **not** change
++`allocation_root`.
++
++C8 DoD gate: three independent parses of the same config give one hash;
++NC: validator order change → different hash. The CLI is pinned by four
++integration tests against the same vectors.
++
++`tools/nc_c8.py` runs 6 negative controls: both contexts, a golden hash,
++validator-order sorting, unknown-field rejection and the Stage 1 chain-id
++check. Total across C0–C8: **44 NC**.
++
++## 6. Dependencies
++
++C8 adds `serde_json =1.0.154` (plus its transitive `itoa`, `memchr`, `zmij`).
++Because the C3 allowlist is frozen historical evidence, the delta is
++recorded in `docs/spec/c8-dependency-addendum.txt` and
++`tools/check_deps.py` compares `Cargo.lock` against the union of the baseline
++and all addenda. `cargo deny` (licences/advisories) is still owed to H1.
++
++## 7. Non-goals at C8
++
++Genesis **block** construction and execution (C5/D phases), JMT `state_root`
++(S1), validator key generation ceremony (W7/O5), BLS key aggregation (B2),
++on-chain governance upgrades, faucet and devnet wiring (D7), and any Stage 2
++mainnet genesis (`auralite-1` is explicitly rejected here).
+diff --git a/docs/spec/genesis-testnet.json b/docs/spec/genesis-testnet.json
+new file mode 100644
+index 0000000..f76d215
+--- /dev/null
++++ b/docs/spec/genesis-testnet.json
+@@ -0,0 +1,41 @@
++{
++  "chain_id": "auralite-test-1",
++  "protocol_version": 1,
++  "genesis_time_ms": 1700000000000,
++  "validators": [
++    {
++      "address": "aura1qqqsqqqqqqqqqqrt325u3ecxy4zx8q4pcqgk98mr",
++      "power": 100,
++      "public_key": "40474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b1219"
++    },
++    {
++      "address": "aura1qqpqqqqqqqqqqqrunwadn7qhxe2hfyaj6yg3ft8k",
++      "power": 200,
++      "public_key": "535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c"
++    },
++    {
++      "address": "aura1qqpsqqqqqqqqqqyd4n975zfggangtfxrug8ekruk",
++      "power": 300,
++      "public_key": "666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f"
++    },
++    {
++      "address": "aura1qqzqqqqqqqqqqqy7hhw0kx3etpmeddw57vycw9sg",
++      "power": 400,
++      "public_key": "7980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b52"
++    }
++  ],
++  "allocations": [
++    {
++      "address": "aura1qqqsqqqqqqqqqqx57vfrz5r036kue6c29y4lhywz",
++      "balance": "1000000000000000000"
++    },
++    {
++      "address": "aura1qqpqqqqqqqqqqq89qs35ycvqn7ldmlqm8ga643wf",
++      "balance": "2500000000000000000"
++    },
++    {
++      "address": "aura1qqpsqqqqqqqqqq8kz569xu53kr87urfvfvwtkqn0",
++      "balance": "750000000000000000"
++    }
++  ]
++}
+diff --git a/tools/check_deps.py b/tools/check_deps.py
+index 226f060..5e6511a 100644
+--- a/tools/check_deps.py
++++ b/tools/check_deps.py
+@@ -6,7 +6,8 @@ A lighter predecessor of `cargo deny` (H1). It fails on:
+   * any external crate without a crates.io registry source or a checksum;
+   * wildcard / caret / git dependency specifications;
+   * a direct `serde` dependency in any workspace crate (rule D4);
+-  * drift between Cargo.lock and docs/spec/c3-dependency-allowlist.txt;
++  * drift between Cargo.lock and the frozen C3 baseline plus phase addenda
++    (docs/spec/c3-dependency-allowlist.txt, *-dependency-addendum.txt);
+   * a lock entry with an invalid sha256 checksum format.
+ 
+ H1 will add licence and advisory checks on top of this.
+@@ -67,11 +68,17 @@ def check() -> list[str]:
+                 if isinstance(spec, str) and ("*" in spec or spec.startswith("^")):
+                     errors.append(f"{manifest.parent.name}: unpinned {name} = '{spec}'")
+ 
+-    allowlist_path = REPO / "docs" / "spec" / "c3-dependency-allowlist.txt"
+-    if not allowlist_path.exists():
+-        errors.append("docs/spec/c3-dependency-allowlist.txt is missing (run make record-c3-deps)")
+-    else:
+-        allowed: list[tuple[str, str]] = []
++    # The C3 baseline is frozen historical evidence (its checksum is pinned
++    # by docs/evidence/c3/SHA256SUMS). Later phases record additive deltas.
++    spec_dir = REPO / "docs" / "spec"
++    allowlist_paths = [spec_dir / "c3-dependency-allowlist.txt"] + sorted(
++        spec_dir.glob("*-dependency-addendum.txt")
++    )
++    allowed: list[tuple[str, str]] = []
++    for allowlist_path in allowlist_paths:
++        if not allowlist_path.exists():
++            errors.append(f"{allowlist_path.relative_to(REPO)} is missing")
++            continue
+         for line in allowlist_path.read_text(encoding="utf-8").splitlines():
+             line = line.strip()
+             if not line or line.startswith("#"):
+@@ -81,6 +88,7 @@ def check() -> list[str]:
+                 continue
+             name, version = line.split("=", 1)
+             allowed.append((name, version))
++    if not errors:
+         allowed.sort()
+         if allowed != external:
+             missing = sorted(set(external) - set(allowed))
+diff --git a/tools/gen_c8_vectors.py b/tools/gen_c8_vectors.py
+new file mode 100644
+index 0000000..318c6c2
+--- /dev/null
++++ b/tools/gen_c8_vectors.py
+@@ -0,0 +1,412 @@
++#!/usr/bin/env python3
++"""Generate C8 genesis golden vectors from INDEPENDENT references.
++
++No Rust code, no network. Contains pure-Python BLAKE3 (self-checked against
++7 official BLAKE3 vectors), an independent BIP-173 bech32 encoder, the C3
++domain framing, the C5/C6 Merkle node rules, the C7 state-key digest and a
++Python transcription of the C8 canonical genesis encoding.
++
++Usage:
++    python3 tools/gen_c8_vectors.py
++    make gen-c8-vectors
++
++Output: crates/aura-genesis/tests/fixtures/c8_golden.txt
++"""
++
++from __future__ import annotations
++
++import json
++import struct
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++OUT = REPO / "crates" / "aura-genesis" / "tests" / "fixtures" / "c8_golden.txt"
++
++CHAIN_ID = "auralite-test-1"
++PROTOCOL_VERSION = 1
++HASH_CONTEXT = b"AuraLite-Crypto/crypto-v1\x00"              # C3
++GENESIS_CONTEXT = b"AuraLite-Crypto/genesis-v1\x00"
++VALIDATOR_SET_CONTEXT = b"AuraLite-Crypto/validator-set-v1\x00"
++ALLOCATION_LEAF_CONTEXT = b"AuraLite-Crypto/allocation-leaf-v1\x00"
++STATE_KEY_CONTEXT = b"AuraLite-Crypto/state-key-v1\x00"      # C7
++LEAF_CONTEXT = b"AuraLite-Crypto/tx-leaf-v1\x00"             # C5
++NODE_CONTEXT = b"AuraLite-Crypto/tx-node-v1\x00"             # C5
++ZERO32 = bytes(32)
++
++# ---------------------------------------------------------------- BLAKE3 ---
++MASK = 0xFFFFFFFF
++IV = [0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A,
++      0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19]
++PERM = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8]
++CHUNK_START, CHUNK_END, ROOT = 1, 2, 8
++
++
++def _rotr(x: int, n: int) -> int:
++    return ((x >> n) | (x << (32 - n))) & MASK
++
++
++def _g(s, a, b, c, d, mx, my):
++    s[a] = (s[a] + s[b] + mx) & MASK
++    s[d] = _rotr(s[d] ^ s[a], 16)
++    s[c] = (s[c] + s[d]) & MASK
++    s[b] = _rotr(s[b] ^ s[c], 12)
++    s[a] = (s[a] + s[b] + my) & MASK
++    s[d] = _rotr(s[d] ^ s[a], 8)
++    s[c] = (s[c] + s[d]) & MASK
++    s[b] = _rotr(s[b] ^ s[c], 7)
++
++
++def _compress(cv, block, counter, block_len, flags):
++    s = list(cv) + list(IV)
++    s[12], s[13], s[14], s[15] = counter & MASK, (counter >> 32) & MASK, block_len, flags
++    m = list(block)
++    for r in range(7):
++        _g(s, 0, 4, 8, 12, m[0], m[1]); _g(s, 1, 5, 9, 13, m[2], m[3])
++        _g(s, 2, 6, 10, 14, m[4], m[5]); _g(s, 3, 7, 11, 15, m[6], m[7])
++        _g(s, 0, 5, 10, 15, m[8], m[9]); _g(s, 1, 6, 11, 12, m[10], m[11])
++        _g(s, 2, 7, 8, 13, m[12], m[13]); _g(s, 3, 4, 9, 14, m[14], m[15])
++        if r != 6:
++            m = [m[PERM[i]] for i in range(16)]
++    return [s[i] ^ s[i + 8] for i in range(8)] + [s[i + 8] ^ cv[i] for i in range(8)]
++
++
++def blake3_short(data: bytes) -> bytes:
++    assert len(data) <= 1024, "reference handles a single chunk only"
++    blocks = [data[i:i + 64] for i in range(0, len(data), 64)] or [b""]
++    cv = IV
++    for i, block in enumerate(blocks[:-1]):
++        flags = CHUNK_START if i == 0 else 0
++        cv = _compress(cv, list(struct.unpack("<16I", block.ljust(64, b"\0"))), 0, 64, flags)[:8]
++    last = blocks[-1]
++    flags = (CHUNK_START if len(blocks) == 1 else 0) | CHUNK_END
++    words = list(struct.unpack("<16I", last.ljust(64, b"\0")))
++    return struct.pack("<8I", *_compress(cv, words, 0, len(last), flags | ROOT)[:8])
++
++
++OFFICIAL_B3 = {
++    0: "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
++    1: "2d3adedff11b61f14c886e35afa036736dcd87a74d27b5c1510225d0f592e213",
++    63: "e9bc37a594daad83be9470df7f7b3798297c3d834ce80ba85d6e207627b7db7b",
++    64: "4eed7141ea4a5cd4b788606bd23f46e212af9cacebacdc7d1f4c6dc7f2511b98",
++    65: "de1e5fa0be70df6d2be8fffd0e99ceaa8eb6e8c93a63f2d8d1c30ecb6b263dee",
++    1023: "10108970eeda3eb932baac1428c7a2163b0e924c9a9e25b35bba72b28f70bd11",
++    1024: "42214739f095a406f3fc83deb889744ac00df831c10daa55189b5d121c855af7",
++}
++
++# ---------------------------------------------------------------- bech32 ---
++CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
++HRP = "aura"
++GEN = [0x3B6A57B2, 0x26508E6D, 0x1EA119FA, 0x3D4233DD, 0x2A1462B3]
++
++
++def _polymod(values):
++    chk = 1
++    for value in values:
++        top = chk >> 25
++        chk = (chk & 0x1FFFFFF) << 5 ^ value
++        for i, gen in enumerate(GEN):
++            if (top >> i) & 1:
++                chk ^= gen
++    return chk
++
++
++def _hrp_expand(hrp):
++    return [ord(c) >> 5 for c in hrp] + [0] + [ord(c) & 31 for c in hrp]
++
++
++def _convertbits(data, frm, to):
++    acc = bits = 0
++    out = []
++    for value in data:
++        acc = (acc << frm) | value
++        bits += frm
++        while bits >= to:
++            bits -= to
++            out.append((acc >> bits) & ((1 << to) - 1))
++    if bits:
++        out.append((acc << (to - bits)) & ((1 << to) - 1))
++    return out
++
++
++def bech32_address(raw20: bytes) -> str:
++    data = _convertbits([0x00] + list(raw20), 8, 5)
++    values = _hrp_expand(HRP) + data + [0] * 6
++    mod = _polymod(values) ^ 1
++    checksum = [(mod >> 5 * (5 - i)) & 31 for i in range(6)]
++    return HRP + "1" + "".join(CHARSET[d] for d in data + checksum)
++
++
++# ------------------------------------------------------------- wire helpers ---
++def varint(value: int) -> bytes:
++    out = bytearray()
++    while True:
++        byte = value & 0x7F
++        value >>= 7
++        out.append(byte | (0x80 if value else 0))
++        if not value:
++            return bytes(out)
++
++
++def u32(v: int) -> bytes: return struct.pack("<I", v)
++def u64(v: int) -> bytes: return struct.pack("<Q", v)
++def u128(v: int) -> bytes: return v.to_bytes(16, "little")
++
++
++def domain_message(chain_id: str, tag: str, payload: bytes) -> bytes:
++    prefix = chain_id.encode() + b"\x00" + tag.encode() + b"\x00"
++    return HASH_CONTEXT + u64(len(prefix)) + prefix + u64(len(payload)) + payload
++
++
++def addr(index: int, salt: int) -> bytes:
++    return index.to_bytes(8, "little") + bytes(
++        (index * 17 + j * 31 + salt) % 256 for j in range(12)
++    )
++
++
++def pubkey(index: int) -> str:
++    return bytes((index * 19 + j * 7 + 0x2D) % 256 for j in range(32)).hex()
++
++
++def validator(index: int, power: int) -> dict:
++    return {
++        "address": bech32_address(addr(index, 0x5A)),
++        "power": power,
++        "public_key": pubkey(index),
++    }
++
++
++def allocation(index: int, balance: int) -> dict:
++    return {"address": bech32_address(addr(index, 0xC3)), "balance": str(balance)}
++
++
++VALIDATORS = [validator(1, 100), validator(2, 200), validator(3, 300), validator(4, 400)]
++ALLOCATIONS = [
++    allocation(1, 10**18),
++    allocation(2, 25 * 10**17),
++    allocation(3, 75 * 10**16),
++]
++GENESIS_TIME_MS = 1_700_000_000_000
++
++
++def document(validators, allocations, key_order=None, pretty=False, extra=None) -> str:
++    fields = {
++        "chain_id": CHAIN_ID,
++        "protocol_version": PROTOCOL_VERSION,
++        "genesis_time_ms": GENESIS_TIME_MS,
++        "validators": validators,
++        "allocations": allocations,
++    }
++    order = key_order or list(fields)
++    obj = {key: fields[key] for key in order}
++    if extra:
++        obj.update(extra)
++    if pretty:
++        return json.dumps(obj, indent=2) + "\n"
++    return json.dumps(obj, separators=(",", ":"))
++
++
++# ----------------------------------------------------------- C8 encoding ---
++def encode_validator(item: dict) -> bytes:
++    raw = bech32_decode20(item["address"])
++    return raw + u64(item["power"]) + bytes.fromhex(item["public_key"])
++
++
++def bech32_decode20(text: str) -> bytes:
++    # Independent inverse of bech32_address (fixed HRP/version/length).
++    pos = text.rindex("1")
++    data = [CHARSET.index(c) for c in text[pos + 1:-6]]
++    bits = _convertbits(data, 5, 8)
++    # convertbits(5->8, pad=False) semantics: drop the final padded element.
++    acc = nbits = 0
++    out = []
++    for value in data:
++        acc = (acc << 5) | value
++        nbits += 5
++        while nbits >= 8:
++            nbits -= 8
++            out.append((acc >> nbits) & 0xFF)
++    assert out[0] == 0
++    return bytes(out[1:21])
++
++
++def encode_validator_vector(items) -> bytes:
++    return varint(len(items)) + b"".join(encode_validator(v) for v in items)
++
++
++def encode_allocation_vector(items) -> bytes:
++    return varint(len(items)) + b"".join(
++        bech32_decode20(a["address"]) + u128(int(a["balance"])) for a in items
++    )
++
++
++def canonical_bytes(doc: dict) -> bytes:
++    chain = doc["chain_id"].encode()
++    return (
++        varint(len(chain)) + chain
++        + u32(doc["protocol_version"])
++        + u64(doc["genesis_time_ms"])
++        + encode_validator_vector(doc["validators"])
++        + encode_allocation_vector(doc["allocations"])
++    )
++
++
++def genesis_hash(doc: dict) -> bytes:
++    payload = GENESIS_CONTEXT + canonical_bytes(doc)
++    return blake3_short(domain_message(doc["chain_id"], "genesis", payload))
++
++
++def validator_set_hash(doc: dict) -> bytes:
++    body = VALIDATOR_SET_CONTEXT + encode_validator_vector(doc["validators"])
++    return blake3_short(body)
++
++
++def node_hash(left: bytes, right: bytes) -> bytes:
++    return blake3_short(NODE_CONTEXT + left + right)
++
++
++def merkle_root(leaves: list[bytes]) -> bytes:
++    if not leaves:
++        return ZERO32
++    level = list(leaves)
++    while len(level) > 1:
++        if len(level) % 2:
++            level.append(level[-1])
++        level = [node_hash(level[i], level[i + 1]) for i in range(0, len(level), 2)]
++    return level[0]
++
++
++def allocation_root(doc: dict) -> bytes:
++    # State is a set: sort by address so JSON array order cannot change it.
++    leaves = []
++    for item in sorted(doc["allocations"], key=lambda a: bech32_decode20(a["address"])):
++        raw = bech32_decode20(item["address"])
++        key = b"\x01" + raw
++        key_digest = blake3_short(STATE_KEY_CONTEXT + u64(len(key)) + key)
++        account = u64(0) + u128(int(item["balance"])) + ZERO32 + ZERO32
++        leaves.append(
++            blake3_short(ALLOCATION_LEAF_CONTEXT + key_digest + u64(len(account)) + account)
++        )
++    return merkle_root(leaves)
++
++
++def total_supply(doc: dict) -> int:
++    return sum(int(a["balance"]) for a in doc["allocations"])
++
++
++def main() -> int:
++    for length, expected in OFFICIAL_B3.items():
++        if blake3_short(bytes(i % 251 for i in range(length))).hex() != expected:
++            raise SystemExit(f"pure-Python BLAKE3 disagrees with official vector len={length}")
++
++    base = {
++        "chain_id": CHAIN_ID,
++        "protocol_version": PROTOCOL_VERSION,
++        "genesis_time_ms": GENESIS_TIME_MS,
++        "validators": VALIDATORS,
++        "allocations": ALLOCATIONS,
++    }
++    second = {
++        "chain_id": CHAIN_ID,
++        "protocol_version": PROTOCOL_VERSION,
++        "genesis_time_ms": 1_800_000_000_000,
++        "validators": [validator(7, 10), validator(8, 20)],
++        "allocations": [allocation(9, 42)],
++    }
++
++    json_docs = {
++        "json_min": document(VALIDATORS, ALLOCATIONS),
++        "json_keys_reordered": document(
++            VALIDATORS, ALLOCATIONS,
++            key_order=["allocations", "genesis_time_ms", "validators", "chain_id", "protocol_version"],
++        ),
++        "json_pretty": document(VALIDATORS, ALLOCATIONS, pretty=True),
++        "json_validators_reordered": document(list(reversed(VALIDATORS)), ALLOCATIONS),
++        "json_allocations_reordered": document(VALIDATORS, list(reversed(ALLOCATIONS))),
++        "json_second": document(second["validators"], second["allocations"], pretty=True)
++        .replace(str(GENESIS_TIME_MS), str(second["genesis_time_ms"])),
++        "json_bad_unknown_field": document(VALIDATORS, ALLOCATIONS, extra={"network": "x"}),
++        "json_bad_wrong_chain": document(VALIDATORS, ALLOCATIONS).replace(
++            f'"chain_id":"{CHAIN_ID}"', '"chain_id":"auralite-1"'
++        ),
++        "json_bad_version": document(VALIDATORS, ALLOCATIONS).replace(
++            '"protocol_version":1', '"protocol_version":2'
++        ),
++        "json_bad_duplicate_validator": document([VALIDATORS[0], VALIDATORS[0]], ALLOCATIONS),
++        "json_bad_zero_power": document(
++            [{**VALIDATORS[0], "power": 0}] + VALIDATORS[1:], ALLOCATIONS
++        ),
++        "json_bad_float_balance": document(
++            VALIDATORS, [{**ALLOCATIONS[0], "balance": 1.5}] + ALLOCATIONS[1:]
++        ),
++        "json_bad_address": document(VALIDATORS, ALLOCATIONS).replace(
++            VALIDATORS[0]["address"], VALIDATORS[0]["address"][:-1] + "q"
++        ),
++        "json_bad_empty_validators": document([], ALLOCATIONS),
++        "json_bad_pubkey": document(
++            [{**VALIDATORS[0], "public_key": "zz" * 32}] + VALIDATORS[1:], ALLOCATIONS
++        ),
++        "json_bad_supply_overflow": document(
++            VALIDATORS,
++            [allocation(1, 2**128 - 1), allocation(2, 1)],
++        ),
++        "json_bad_missing_field": '{"protocol_version":1,"genesis_time_ms":0,"validators":[],"allocations":[]}',
++        "json_bad_unknown_validator_field": document(
++            [{**VALIDATORS[0], "name": "v1"}] + VALIDATORS[1:], ALLOCATIONS
++        ),
++        "json_bad_duplicate_allocation": document(VALIDATORS, [ALLOCATIONS[0], ALLOCATIONS[0]]),
++    }
++
++    lines = [
++        "# AuraLite-Crypto C8 genesis golden vectors",
++        "# Generated by tools/gen_c8_vectors.py (independent Python).",
++        "# Self-checked against official BLAKE3 vectors + independent bech32.",
++        "# JSON documents are hex-encoded UTF-8 to keep one key=value per line.",
++        f"chain_id={CHAIN_ID}",
++        f"protocol_version={PROTOCOL_VERSION}",
++        f"hash_context={HASH_CONTEXT.hex()}",
++        f"genesis_context={GENESIS_CONTEXT.hex()}",
++        f"validator_set_context={VALIDATOR_SET_CONTEXT.hex()}",
++        f"allocation_leaf_context={ALLOCATION_LEAF_CONTEXT.hex()}",
++        f"state_key_context={STATE_KEY_CONTEXT.hex()}",
++    ]
++
++    for key, text in json_docs.items():
++        lines.append(f"{key}={text.encode('utf-8').hex()}")
++
++    for index, doc in enumerate([base, second], 1):
++        lines += [
++            f"genesis_{index}_canonical={canonical_bytes(doc).hex()}",
++            f"genesis_{index}_hash={genesis_hash(doc).hex()}",
++            f"validator_set_hash_{index}={validator_set_hash(doc).hex()}",
++            f"allocation_root_{index}={allocation_root(doc).hex()}",
++            f"total_supply_{index}={total_supply(doc)}",
++            f"validator_count_{index}={len(doc['validators'])}",
++            f"allocation_count_{index}={len(doc['allocations'])}",
++        ]
++
++    # Self-check: key order / whitespace must not change any commitment.
++    a = json.loads(json_docs["json_min"])
++    b = json.loads(json_docs["json_keys_reordered"])
++    c = json.loads(json_docs["json_pretty"])
++    for doc in (b, c):
++        if canonical_bytes(doc) != canonical_bytes(a) or genesis_hash(doc) != genesis_hash(a):
++            raise SystemExit("JSON object key order/whitespace changed the hash")
++    rev = json.loads(json_docs["json_validators_reordered"])
++    if genesis_hash(rev) == genesis_hash(a):
++        raise SystemExit("validator order did NOT change the hash")
++    alloc_rev = json.loads(json_docs["json_allocations_reordered"])
++    if allocation_root(alloc_rev) != allocation_root(a):
++        raise SystemExit("allocation order changed the state commitment")
++
++    OUT.parent.mkdir(parents=True, exist_ok=True)
++    OUT.write_text("\n".join(lines) + "\n", encoding="utf-8")
++    print(f"wrote {OUT.relative_to(REPO)} ({len(lines)} lines)")
++    print(f"  JSON documents: {len(json_docs)} (3 equivalent + 2 order variants + bad)")
++    print("  canonical genesis sets: 2")
++    print("  self-check: BLAKE3 official vectors OK, bech32 round-trip OK")
++    print("  self-check: key order/whitespace stable, validator order significant")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/nc_c8.py b/tools/nc_c8.py
+new file mode 100644
+index 0000000..0f8e20b
+--- /dev/null
++++ b/tools/nc_c8.py
+@@ -0,0 +1,129 @@
++#!/usr/bin/env python3
++"""Negative controls for C8 (deterministic genesis).
++
++Six tamper tests must each turn the C8 gate red:
++
++  NC-1: change GENESIS_CONTEXT.
++  NC-2: change VALIDATOR_SET_CONTEXT.
++  NC-3: corrupt one golden genesis hash in the fixture.
++  NC-4: sort validators (would erase the consensus-significant order).
++  NC-5: accept unknown JSON fields.
++  NC-6: disable the Stage 1 chain-id check.
++
++Files are always restored in a `finally` block. `make nc-c8` captures stdout
++into docs/evidence/c8/nc.log, and a final green restore check is mandatory.
++"""
++
++from __future__ import annotations
++
++import os
++import subprocess
++from datetime import datetime, timezone
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++TYPES_RS = REPO / "crates" / "aura-genesis" / "src" / "types.rs"
++JSON_RS = REPO / "crates" / "aura-genesis" / "src" / "json.rs"
++TEST_RS = REPO / "crates" / "aura-genesis" / "tests" / "c8_genesis.rs"
++FIXTURE = REPO / "crates" / "aura-genesis" / "tests" / "fixtures" / "c8_golden.txt"
++CARGO_TEST = ["cargo", "test", "-p", "aura-genesis", "--quiet"]
++
++
++def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
++    return subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, check=False)
++
++
++def expect_red(label: str, path: Path, old: str, new: str, touch_test: bool = False) -> bool:
++    original = path.read_text(encoding="utf-8")
++    if old not in original:
++        print(f"{label}: FAIL — tamper target not found in {path.name}")
++        return False
++    tampered = original.replace(old, new, 1)
++    if tampered == original:
++        print(f"{label}: FAIL — tamper was a no-op")
++        return False
++    try:
++        path.write_text(tampered, encoding="utf-8")
++        if touch_test:
++            os.utime(TEST_RS, None)
++        result = run(CARGO_TEST)
++        went_red = result.returncode != 0
++        snippet = "\n".join((result.stdout + result.stderr).strip().splitlines()[-5:])
++        print(f"{label}: {'PASS' if went_red else 'FAIL'}")
++        print(
++            f"      cargo test -p aura-genesis -> rc={result.returncode} "
++            f"({'RED as expected' if went_red else 'UNEXPECTEDLY GREEN'})"
++        )
++        print(f"      {snippet}")
++        return went_red
++    finally:
++        path.write_text(original, encoding="utf-8")
++        if touch_test:
++            os.utime(TEST_RS, None)
++
++
++def main() -> int:
++    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
++    print(f"C8 NEGATIVE CONTROLS — {stamp}")
++    print("Rule: a gate that cannot go red is not a gate (CONTRIBUTING.md §1).")
++    print()
++
++    results = [
++        expect_red(
++            "NC-1 genesis context",
++            TYPES_RS,
++            'pub const GENESIS_CONTEXT: &[u8] = b"AuraLite-Crypto/genesis-v1\\x00";',
++            'pub const GENESIS_CONTEXT: &[u8] = b"WRONG-GENESIS\\x00";',
++        ),
++        expect_red(
++            "NC-2 validator-set context",
++            TYPES_RS,
++            'pub const VALIDATOR_SET_CONTEXT: &[u8] = b"AuraLite-Crypto/validator-set-v1\\x00";',
++            'pub const VALIDATOR_SET_CONTEXT: &[u8] = b"WRONG-VSET\\x00";',
++        ),
++        expect_red(
++            "NC-3 independent golden genesis hash",
++            FIXTURE,
++            "genesis_1_hash=af92bd6b",
++            "genesis_1_hash=af92bd6c",
++            touch_test=True,
++        ),
++        expect_red(
++            "NC-4 validator order (DoD: sorting must not happen)",
++            JSON_RS,
++            'let validators = parse_validator_array(required(object, "validators")?)?;',
++            'let mut validators = parse_validator_array(required(object, "validators")?)?; '
++            'validators.sort_by_key(|v| v.address);',
++        ),
++        expect_red(
++            "NC-5 unknown JSON fields",
++            JSON_RS,
++            "if !ALLOWED_FIELDS.contains(&key.as_str()) {",
++            "if false {",
++        ),
++        expect_red(
++            "NC-6 Stage 1 chain-id check",
++            JSON_RS,
++            "if !is_our_chain(raw_chain) {",
++            "if false {",
++        ),
++    ]
++    print()
++    passed = sum(results)
++    print(f"RESULT: {passed}/{len(results)} negative controls PASS")
++    if passed != len(results):
++        return 1
++
++    restored = run(CARGO_TEST)
++    deps = run(["python3", "tools/check_deps.py"])
++    ok = restored.returncode == 0 and deps.returncode == 0
++    print(
++        f"restore check: cargo test -p aura-genesis -> rc={restored.returncode}; "
++        f"check_deps -> rc={deps.returncode} "
++        f"({'GREEN as expected' if ok else 'STILL RED — FAIL'})"
++    )
++    return 0 if ok else 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/record_c8_deps.py b/tools/record_c8_deps.py
+new file mode 100644
+index 0000000..c2d9a2c
+--- /dev/null
++++ b/tools/record_c8_deps.py
+@@ -0,0 +1,73 @@
++#!/usr/bin/env python3
++"""Record the C8 dependency delta against the FROZEN C3 baseline.
++
++`docs/spec/c3-dependency-allowlist.txt` is pinned by the historical C3
++evidence checksums and must never be rewritten. C8 therefore writes an
++additive file `docs/spec/c8-dependency-addendum.txt` containing exactly the
++external crates introduced after C3. `tools/check_deps.py` compares Cargo.lock
++against the union of the baseline and all addenda.
++
++Usage:
++    python3 tools/record_c8_deps.py
++    make record-c8-deps
++"""
++
++from __future__ import annotations
++
++import tomllib
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++LOCK = REPO / "Cargo.lock"
++BASELINE = REPO / "docs" / "spec" / "c3-dependency-allowlist.txt"
++OUT = REPO / "docs" / "spec" / "c8-dependency-addendum.txt"
++
++HEADER = [
++    "# AuraLite-Crypto external dependency addendum (C8).",
++    "# Generated by tools/record_c8_deps.py from Cargo.lock.",
++    "# The C3 baseline file is FROZEN (pinned by docs/evidence/c3/SHA256SUMS);",
++    "# this file lists ONLY crates added after C3. Any new phase adds its own",
++    "# reviewed addendum. Checked by tools/check_deps.py inside `make test`.",
++    "# C8 added serde_json for genesis CONFIG parsing only; consensus bytes",
++    "# still come from aura-codec, and no crate uses a serde derive.",
++]
++
++
++def read_pairs(path: Path) -> list[tuple[str, str]]:
++    result = []
++    for line in path.read_text(encoding="utf-8").splitlines():
++        line = line.strip()
++        if not line or line.startswith("#") or "=" not in line:
++            continue
++        name, version = line.split("=", 1)
++        result.append((name, version))
++    return result
++
++
++def external_packages() -> list[tuple[str, str]]:
++    data = tomllib.loads(LOCK.read_text(encoding="utf-8"))
++    return sorted(
++        (package["name"], package["version"])
++        for package in data.get("package", [])
++        if "source" in package
++    )
++
++
++def main() -> int:
++    baseline = read_pairs(BASELINE)
++    current = external_packages()
++    removed = sorted(set(baseline) - set(current))
++    if removed:
++        print(f"ERROR: C3 baseline crates disappeared: {removed}")
++        return 1
++    added = sorted(set(current) - set(baseline))
++    lines = HEADER + [f"{name}={version}" for name, version in added]
++    OUT.write_text("\n".join(lines) + "\n", encoding="utf-8")
++    print(f"wrote {OUT.relative_to(REPO)} ({len(added)} crates added since C3)")
++    for name, version in added:
++        print(f"  + {name}={version}")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/write_c8_evidence.py b/tools/write_c8_evidence.py
+new file mode 100644
+index 0000000..226be5d
+--- /dev/null
++++ b/tools/write_c8_evidence.py
+@@ -0,0 +1,137 @@
++#!/usr/bin/env python3
++"""Regenerate docs/evidence/c8/gates.txt and docs/evidence/c8/SHA256SUMS.
++
++All numbers are real command output plus exit codes. The pre-C8 section is
++measured from the C7 git commit (HEAD at generation time).
++
++Usage:
++    python3 tools/write_c8_evidence.py
++    make evidence-c8
++"""
++
++from __future__ import annotations
++
++import hashlib
++import subprocess
++from datetime import datetime, timezone
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++EVIDENCE = REPO / "docs" / "evidence" / "c8"
++OUT = EVIDENCE / "gates.txt"
++FIXTURE = REPO / "crates" / "aura-genesis" / "tests" / "fixtures" / "c8_golden.txt"
++SPEC = REPO / "docs" / "spec" / "genesis-format.md"
++CONFIG = REPO / "docs" / "spec" / "genesis-testnet.json"
++ADDENDUM = REPO / "docs" / "spec" / "c8-dependency-addendum.txt"
++
++GEN_IDEMPOTENT = (
++    "before=$(sha256sum crates/aura-genesis/tests/fixtures/c8_golden.txt | cut -d' ' -f1); "
++    "python3 tools/gen_c8_vectors.py >/dev/null; "
++    "after=$(sha256sum crates/aura-genesis/tests/fixtures/c8_golden.txt | cut -d' ' -f1); "
++    "if [ \"$before\" = \"$after\" ]; then echo \"generator idempotent: $after\"; "
++    "else echo \"GENERATOR DRIFT\"; exit 1; fi"
++)
++
++COMMANDS: list[tuple[str, str, int | None]] = [
++    ("toolchain", "rustc --version && cargo --version", None),
++    ("pre-C8 tree (C7 commit)", "git log -1 --oneline", None),
++    ("pre-C8 workspace crates", "git ls-tree -r --name-only HEAD | grep -c 'crates/.*/Cargo.toml$' || true", None),
++    ("pre-C8 .rs files", "git ls-tree -r --name-only HEAD | grep -c '\\.rs$' || true", None),
++    ("pre-C8 external deps", "git show HEAD:Cargo.lock | grep -c '^source = ' || true", None),
++    ("post-C8 workspace crates", "find crates -name Cargo.toml | wc -l", None),
++    ("post-C8 .rs files", "find . -name '*.rs' -not -path './target/*' | wc -l", None),
++    ("post-C8 external deps", "grep -c '^source = ' Cargo.lock || true", None),
++    ("C8 dependency addendum", "python3 tools/record_c8_deps.py", None),
++    ("dependency gate", "python3 tools/check_deps.py", None),
++    ("docs drift guard", "python3 tools/check_claims.py", None),
++    ("independent generator is idempotent", GEN_IDEMPOTENT, None),
++    ("genesis CLI hash", "cargo run -q -p aura-genesis --bin aura -- genesis hash --file docs/spec/genesis-testnet.json", 4),
++    ("three-host DoD gate", "cargo test -p aura-genesis --test c8_genesis same_genesis -- --nocapture", 10),
++    ("all negative controls (C0-C8)", "make nc-all", 20),
++    ("C8 negative controls (evidence log)", "make nc-c8", 34),
++    ("full gate", "make test", 8),
++]
++
++
++def run(cmd: str) -> tuple[int, str]:
++    result = subprocess.run(
++        cmd, shell=True, cwd=REPO, capture_output=True, text=True, check=False
++    )
++    return result.returncode, (result.stdout + result.stderr).strip()
++
++
++def main() -> int:
++    EVIDENCE.mkdir(parents=True, exist_ok=True)
++    lines = [
++        "AuraLite-Crypto — C8 evidence (deterministic genesis)",
++        f"Generated (UTC): {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
++        "Rule: measured against the tree, not assumed.",
++        "",
++        "Independent references: tools/gen_c8_vectors.py self-checks",
++        "pure-Python BLAKE3 against 7 official BLAKE3 vectors and uses an",
++        "independent bech32 encoder. It emits 19 JSON documents and two full",
++        "sets of canonical bytes, genesis hash, validator-set hash,",
++        "allocation root and total supply.",
++        "",
++        "=" * 72,
++        "RAW COMMAND OUTPUT",
++        "=" * 72,
++        "",
++    ]
++
++    failures = 0
++    for label, cmd, tail in COMMANDS:
++        rc, out = run(cmd)
++        shown = cmd if len(cmd) < 160 else "$ (shell script: generator idempotence check)"
++        if tail and out:
++            out = "\n".join(out.splitlines()[-tail:])
++        lines.append(f"--- {label} ---")
++        lines.append(f"$ {shown}")
++        lines.append(out if out else "(no output)")
++        lines.append(f"[rc={rc}]")
++        lines.append("")
++        if rc != 0 and not (label.startswith("pre-C8") and "grep -c" in cmd):
++            failures += 1
++
++    lines += [
++        "=" * 72,
++        "SUMMARY",
++        "=" * 72,
++        "",
++        "Pre-C8 (C7 tree): 13 crates, 47 .rs files, 54 external deps, 82 tests.",
++        "Post-C8: 14 crates (aura-genesis added; 7 empty placeholders remain),",
++        "54 .rs files, 58 external deps (+4: serde_json, itoa, memchr, zmij —",
++        "config parsing only), 96 tests passing (82 C0-C7 + 14 C8),",
++        "`make test` ALL GATES GREEN, 44 negative controls total",
++        "(2+3+4+5+6+6+6+6+6), 6/6 new in C8.",
++        "C8 DoD gates: three independent JSON representations give one hash;",
++        "validator order change gives a different hash; the `aura genesis`",
++        "CLI agrees with the library and the independent vectors.",
++        "Validators/blocks/tx remain 0/0/0 — no network has started.",
++        "",
++        "The C3 dependency allowlist is FROZEN historical evidence; C8 records",
++        "its delta in docs/spec/c8-dependency-addendum.txt, and check_deps.py",
++        "compares Cargo.lock against the union of baseline + addenda.",
++        "",
++    ]
++    OUT.write_text("\n".join(lines), encoding="utf-8")
++
++    nc_log = EVIDENCE / "nc.log"
++    if not nc_log.exists():
++        print("ERROR: docs/evidence/c8/nc.log missing (run `make nc-c8`)")
++        return 1
++
++    sums = []
++    for path in (OUT, nc_log, FIXTURE, SPEC, CONFIG, ADDENDUM):
++        digest = hashlib.sha256(path.read_bytes()).hexdigest()
++        sums.append(f"{digest}  {path.relative_to(REPO)}")
++    (EVIDENCE / "SHA256SUMS").write_text("\n".join(sums) + "\n", encoding="utf-8")
++
++    print(f"wrote {OUT.relative_to(REPO)} ({len(lines)} lines)")
++    print(f"wrote {nc_log.relative_to(REPO)}")
++    print("wrote docs/evidence/c8/SHA256SUMS")
++    return 1 if failures else 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+-- 
+2.47.3
+

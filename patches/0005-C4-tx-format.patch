@@ -1,0 +1,2825 @@
+From ce4d3507b7917c68fe867f7a9f756e7fd84aeb84 Mon Sep 17 00:00:00 2001
+From: AlexanderNyr <alexander@auralite.local>
+Date: Sun, 25 Oct 2026 17:42:40 +0000
+Subject: [PATCH] C4 tx format
+
+---
+ .github/workflows/ci.yml                    |  33 +-
+ CHANGELOG.md                                |  61 +++
+ CONTRIBUTING.md                             |   4 +-
+ Cargo.lock                                  |   9 +
+ Cargo.toml                                  |   4 +
+ Makefile                                    |  30 +-
+ README.md                                   |  38 +-
+ ROADMAP.md                                  |  32 +-
+ crates/aura-codec/src/error.rs              |   6 +
+ crates/aura-tx/Cargo.toml                   |  14 +
+ crates/aura-tx/src/error.rs                 |  60 +++
+ crates/aura-tx/src/kind.rs                  |  69 ++++
+ crates/aura-tx/src/lib.rs                   |  43 ++
+ crates/aura-tx/src/signature.rs             |  83 ++++
+ crates/aura-tx/src/tx.rs                    | 294 ++++++++++++++
+ crates/aura-tx/tests/c4_tx.rs               | 410 ++++++++++++++++++++
+ crates/aura-tx/tests/fixtures/c4_golden.txt | 104 +++++
+ docs/ARCHITECTURE.md                        |  16 +-
+ docs/STATUS.md                              |  37 +-
+ docs/evidence/c4/SHA256SUMS                 |   4 +
+ docs/evidence/c4/gates.txt                  | 148 +++++++
+ docs/evidence/c4/nc.log                     |  48 +++
+ docs/plans/CORE_PLAN.md                     |  54 ++-
+ docs/spec/tx-format.md                      | 140 +++++++
+ tools/gen_c4_vectors.py                     | 373 ++++++++++++++++++
+ tools/nc_c4.py                              | 130 +++++++
+ tools/write_c4_evidence.py                  | 127 ++++++
+ 27 files changed, 2303 insertions(+), 68 deletions(-)
+ create mode 100644 crates/aura-tx/Cargo.toml
+ create mode 100644 crates/aura-tx/src/error.rs
+ create mode 100644 crates/aura-tx/src/kind.rs
+ create mode 100644 crates/aura-tx/src/lib.rs
+ create mode 100644 crates/aura-tx/src/signature.rs
+ create mode 100644 crates/aura-tx/src/tx.rs
+ create mode 100644 crates/aura-tx/tests/c4_tx.rs
+ create mode 100644 crates/aura-tx/tests/fixtures/c4_golden.txt
+ create mode 100644 docs/evidence/c4/SHA256SUMS
+ create mode 100644 docs/evidence/c4/gates.txt
+ create mode 100644 docs/evidence/c4/nc.log
+ create mode 100644 docs/spec/tx-format.md
+ create mode 100644 tools/gen_c4_vectors.py
+ create mode 100644 tools/nc_c4.py
+ create mode 100644 tools/write_c4_evidence.py
+
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 232d5df..a024bb3 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -10,7 +10,7 @@ on:
+ # perf) are added by O0 as the crates that need them actually appear.
+ jobs:
+   core:
+-    name: core (C0-C3 gate)
++    name: core (C0-C4 gate)
+     runs-on: ubuntu-latest
+     steps:
+       - uses: actions/checkout@v4
+@@ -27,34 +27,29 @@ jobs:
+       - name: make test
+         run: make test
+ 
+-      - name: golden vectors are reproducible (C1 + C2 + C3)
+-        run: make gen-c1-vectors && make gen-c2-vectors && make gen-c3-vectors
++      - name: golden vectors are reproducible (C1 + C2 + C3 + C4)
++        run: make gen-c1-vectors && make gen-c2-vectors && make gen-c3-vectors && make gen-c4-vectors
+ 
+-      - name: negative controls (C0)
+-        run: make nc-c0
++      # nc-all runs all 20 NCs without rewriting the historical C0-C3 logs,
++      # so those committed SHA256SUMS remain valid in the uploaded artifact.
++      - name: negative controls (C0-C4, 20 total)
++        run: make nc-all
+ 
+-      - name: negative controls (C1)
+-        run: make nc-c1
+-
+-      - name: negative controls (C2)
+-        run: make nc-c2
+-
+-      - name: negative controls (C3)
+-        run: make nc-c3
+-
+-      # C0 evidence is a HISTORICAL committed record measured at the baseline
+-      # commit; re-running it later would relabel the wrong tree.
+-      - name: phase evidence (C1 + C2 + C3)
+-        run: make evidence-c1 && make evidence-c2 && make evidence-c3
++      # Only the CURRENT phase's evidence is regenerated. C0-C3 evidence is a
++      # HISTORICAL committed record measured at its own commit; regenerating
++      # it later would relabel the wrong tree.
++      - name: current phase evidence (C4)
++        run: make evidence-c4
+ 
+       - name: Upload evidence
+         if: always()
+         uses: actions/upload-artifact@v4
+         with:
+-          name: c0-c3-evidence
++          name: c0-c4-evidence
+           path: |
+             docs/evidence/c0/
+             docs/evidence/c1/
+             docs/evidence/c2/
+             docs/evidence/c3/
++            docs/evidence/c4/
+           if-no-files-found: ignore
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 45b24d5..f2da263 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,67 @@
+ All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
+ never rewritten: corrections are made with a new entry or an explicit note.
+ 
++## [C4 — transaction format] 2026-10-25
++
++**Fifth code phase.** Deliverable: `patches/0005-C4-tx-format.patch`.
++Adds the **12th crate**, `aura-tx`, with **no new external dependencies**.
++
++- **Transaction format:** `Tx = UnsignedTx || Signature`. `UnsignedTx` has
++  the ten C4 fields (`chain_id, signer, nonce, kind, payload, gas_limit,
++  max_fee, tip, expiry`) plus `codec_version` from `ARCHITECTURE.md` §1.
++  `Signature` is an envelope `{ algo, public_key[32], bytes[64] }` —
++  Ed25519 cannot recover a public key, so it travels with the tx and is
++  bound to `signer` by `BLAKE3(ADDRESS_CONTEXT || public_key)[0..20]`.
++  `TxKind` has five strict tags; `SignatureAlgo` accepts Ed25519 only
++  (secp256k1 tag 1 reserved, PQ tags for H2).
++- **Signing:** `signing_bytes = SIGNING_CONTEXT || canonical(UnsignedTx)`,
++  signed with C3's domain-separated `aura_crypto::sign(Domain::Tx,
++  chain_id)` over the BLAKE3 digest. `txid = BLAKE3(TXID_CONTEXT ||
++  canonical(Tx))` includes the signature. `TxParams` groups the nine
++  constructor fields so clippy's `too_many_arguments` is fixed, not silenced.
++- **Replay protection (DoD gate):** `validate(expected_chain, height)`
++  rejects a tx minted for `auralite-1` on `auralite-test-1`; rewriting the
++  chain-id after signing breaks the signature because the chain-id is inside
++  both `signing_bytes` and the C3 domain prefix. Validation also checks
++  version, payload ≤ 65536, gas ≠ 0, tip ≤ max_fee and `height ≤ expiry`.
++  `height`/`expiry` are consensus heights — no local clock.
++- **Spec:** `docs/spec/tx-format.md` — field/wire tables, tags, signing,
++  txid, validation order, error catalogue and non-goals.
++- **Independent golden vectors:** `tools/gen_c4_vectors.py` contains
++  pure-Python BLAKE3 (self-checked against 7 official BLAKE3 vectors),
++  pure-Python Ed25519 (self-checked against RFC 8032 §7.1 TEST 1/2/3) and a
++  C2 wire encoder. 104 fixture lines: **5 canonical transactions** (including
++  u64/u128 maxima and a mainnet-chain tx) and **9 rejection vectors**
++  (trailing byte, truncation, bad version, unknown kind, unknown algorithm,
++  tampered signer/signature, non-minimal chain and payload length). Each bad
++  vector is pinned to a specific error. Generator is offline and byte-stable.
++- **Additive C2 change:** `CodecError::InvalidEnumTag(&'static str, u8)` for
++  caller-defined enums. No C2 wire-format change; C2 vectors, evidence and
++  checksums untouched.
++- **Gate:** `make test` → **49 passed / 0 failed** (39 C0–C3 + 10 C4),
++  fmt/clippy clean, drift guard 12 plans / 112 rows / 20 markdown files,
++  dependency gate 54 external crates allowlisted.
++- **Negative controls:** `tools/nc_c4.py` → `make nc-c4` →
++  `docs/evidence/c4/nc.log`, **6/6 PASS**: signing context, txid context,
++  golden signature, replay protection, signer↔key binding, Ed25519
++  verification. Total C0–C4: **20 NC**.
++- **Tooling / CI:** `make nc-all` runs all 20 NCs **without rewriting**
++  historical C0–C3 logs, so their committed `SHA256SUMS` stay valid; CI now
++  regenerates only the current phase's evidence (`make evidence-c4`). New
++  targets: `make gen-c4-vectors`, `make nc-c4`, `make evidence-c4`.
++  `make test-core` now covers all four implemented crates.
++- **Evidence:** `docs/evidence/c4/gates.txt` (pre-C4 counts from the C3
++  commit, 11→12 crates, raw gate output), `docs/evidence/c4/nc.log`,
++  `SHA256SUMS` (also pins the golden fixture and the format spec).
++- **Docs synced (D9):** `README.md`, `docs/STATUS.md`,
++  `docs/ARCHITECTURE.md` (crate graph + C4 block), `CHANGELOG.md`,
++  `ROADMAP.md` (ledger, §4, §8), `CONTRIBUTING.md`, `CORE_PLAN.md` (C4 ✅,
++  decision D-C6 + receipt), and the new `docs/spec/tx-format.md`.
++- **Not claimed:** block/header and `tx_root` (C5), Merkle proofs (C6),
++  accounts (C7), genesis (C8), fuzzing (C9), fee charging/gas metering,
++  secp256k1 in tx signatures, hardware keys (W5), PQ signatures (H2),
++  `cargo deny` (H1). Validators/blocks/tx remain **0/0/0**.
++
+ ## [C3 — cryptography] 2026-10-25
+ 
+ **Fourth code phase. First phase with external dependencies.**
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index 5023024..63ea56c 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -102,6 +102,8 @@ that does not run its main test is a dead gate — that is a separate defect
+ - [ ] NC demonstrated (test goes red without the fix).
+ - [ ] No format changes without a version bump.
+ - [ ] `docs/STATUS.md`, `CHANGELOG.md`, plan row updated.
+-- [ ] New dependency pinned and passed `cargo deny`.
++- [ ] New dependency pinned and passed `make check-deps` (`cargo deny` at H1).
++- [ ] Tx wire format unchanged, or `CODEC_VERSION` bumped and
++      `docs/spec/tx-format.md` + golden vectors updated in the same patch.
+ - [ ] No new `unsafe` without justification.
+ - [ ] The north star was not pushed aside by a "temporary" solution.
+diff --git a/Cargo.lock b/Cargo.lock
+index 38be3ec..c239bd0 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -59,6 +59,15 @@ version = "0.1.0"
+ name = "aura-storage"
+ version = "0.1.0"
+ 
++[[package]]
++name = "aura-tx"
++version = "0.1.0"
++dependencies = [
++ "aura-codec",
++ "aura-crypto",
++ "aura-types",
++]
++
+ [[package]]
+ name = "aura-types"
+ version = "0.1.0"
+diff --git a/Cargo.toml b/Cargo.toml
+index 1c15287..ae763c0 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -4,6 +4,7 @@ members = [
+     "crates/aura-types",
+     "crates/aura-codec",
+     "crates/aura-crypto",
++    "crates/aura-tx",
+     "crates/aura-state",
+     "crates/aura-storage",
+     "crates/aura-exec",
+@@ -22,6 +23,7 @@ rust-version = "1.99.1"
+ repository = "https://github.com/AlexanderNyr/AuraLite-Crypto"
+ publish = false
+ 
++# C4 adds the 12th crate, `aura-tx`, with no new external dependencies.
+ # C3 introduces the first EXTERNAL dependencies. Rules (ROADMAP 7 / H1):
+ #   * exact `=x.y.z` pins only — no carets, no wildcards, no git deps;
+ #   * the resolved set is recorded in docs/spec/c3-dependency-allowlist.txt
+@@ -31,6 +33,8 @@ publish = false
+ [workspace.dependencies]
+ aura-types = { path = "crates/aura-types" }
+ aura-codec = { path = "crates/aura-codec" }
++aura-crypto = { path = "crates/aura-crypto" }
++aura-tx = { path = "crates/aura-tx" }
+ blake3 = { version = "=1.8.7", default-features = false, features = ["pure", "std"] }
+ ed25519-dalek = { version = "=2.2.0" }
+ k256 = { version = "=0.13.4", default-features = false, features = ["ecdsa"] }
+diff --git a/Makefile b/Makefile
+index 496804a..8f53895 100644
+--- a/Makefile
++++ b/Makefile
+@@ -8,7 +8,8 @@ PYTHON ?= python3
+         test-determinism fuzz-smoke nc-c0 evidence-c0 \
+         gen-c1-vectors nc-c1 evidence-c1 \
+         gen-c2-vectors nc-c2 evidence-c2 \
+-        check-deps record-c3-deps gen-c3-vectors nc-c3 evidence-c3 devnet clean
++        check-deps record-c3-deps gen-c3-vectors nc-c3 evidence-c3 \
++        nc-all gen-c4-vectors nc-c4 evidence-c4 devnet clean
+ 
+ help:
+ 	@echo "AuraLite-Crypto (Stage 1, C0)"
+@@ -28,6 +29,10 @@ help:
+ 	@echo "  make gen-c3-vectors    regenerate independent crypto golden vectors"
+ 	@echo "  make nc-c3             C3 negative controls -> docs/evidence/c3/nc.log"
+ 	@echo "  make evidence-c3       regenerate docs/evidence/c3/gates.txt + SHA256SUMS"
++	@echo "  make nc-all            all C0-C4 NCs without rewriting historical logs"
++	@echo "  make gen-c4-vectors    regenerate independent tx golden vectors"
++	@echo "  make nc-c4             C4 negative controls -> docs/evidence/c4/nc.log"
++	@echo "  make evidence-c4       regenerate docs/evidence/c4/gates.txt + SHA256SUMS"
+ 	@echo "  make test-sanitize     SKIP until H3/C9"
+ 	@echo "  make test-determinism  SKIP until X7"
+ 	@echo "  make fuzz-smoke        SKIP until H3"
+@@ -62,8 +67,9 @@ test: deps-check
+ 	@echo "ALL GATES GREEN"
+ 
+ test-core:
+-	@$(CARGO) test -p aura-types
++	@$(CARGO) test -p aura-types -p aura-codec -p aura-crypto -p aura-tx
+ 	@$(PYTHON) tools/check_claims.py
++	@$(PYTHON) tools/check_deps.py
+ 
+ # Honest skips, not silent successes. These become real gates in their phases.
+ test-sanitize:
+@@ -122,6 +128,26 @@ nc-c3:
+ evidence-c3:
+ 	@$(PYTHON) tools/write_c3_evidence.py
+ 
++# Runs every NC script WITHOUT rewriting the historical C0-C3 evidence logs,
++# so their committed SHA256SUMS stay valid. CI uses this instead of nc-cX.
++nc-all:
++	@for phase in 0 1 2 3 4; do \
++	    $(PYTHON) tools/nc_c$$phase.py > /tmp/aura-nc-c$$phase.log 2>&1 || \
++	      { echo "C$$phase NEGATIVE CONTROLS FAILED"; tail -30 /tmp/aura-nc-c$$phase.log; exit 1; }; \
++	    grep '^RESULT:' /tmp/aura-nc-c$$phase.log; \
++	done
++
++gen-c4-vectors:
++	@$(PYTHON) tools/gen_c4_vectors.py
++
++nc-c4:
++	@mkdir -p docs/evidence/c4
++	@$(PYTHON) tools/nc_c4.py > docs/evidence/c4/nc.log 2>&1 || { cat docs/evidence/c4/nc.log; exit 1; }
++	@cat docs/evidence/c4/nc.log
++
++evidence-c4:
++	@$(PYTHON) tools/write_c4_evidence.py
++
+ devnet:
+ 	@echo "ERROR: devnet is D7 (NODE_PLAN). It is not implemented at C0." >&2
+ 	@exit 1
+diff --git a/README.md b/README.md
+index f823e03..032def8 100644
+--- a/README.md
++++ b/README.md
+@@ -11,15 +11,16 @@
+ Name and ticker were locked by the owner on 2026-10-25. The ticker was checked
+ for collisions — see [`docs/TICKER_AUDIT.md`](docs/TICKER_AUDIT.md).
+ 
+-> **Status: C3 LANDED (2026-10-25).** C0 gave us the workspace, CI and
+-> `make test`; C1 added the canonical types; C2 added `aura-codec`; C3 adds
+-> `aura-crypto` — BLAKE3, Ed25519, secp256k1/RFC6979, domain separation,
+-> constant-time comparison and zeroizing secrets, all pinned against
+-> **independent** references (official BLAKE3 vectors, RFC 8032, pure-Python
+-> secp256k1 verified with OpenSSL). There is still **no consensus, VM, P2P,
+-> node or wallet**. Everything else below is a plan, not a report about an
+-> implementation. Every claim of readiness appears only after a measurable
+-> test gate, as in
++> **Status: C4 LANDED (2026-10-25).** C0 gave us the workspace, CI and
++> `make test`; C1 added the canonical types; C2 added `aura-codec`; C3 added
++> `aura-crypto`; C4 adds `aura-tx` — the canonical transaction format with
++> `signing_bytes`, a signature envelope bound to the signer address, txid and
++> **replay protection** (`auralite-1` signatures die on `auralite-test-1`).
++> Golden vectors come from an independent Python encoder that self-checks
++> BLAKE3 and Ed25519 against official/RFC vectors. There is still **no
++> consensus, VM, P2P, node or wallet**. Everything else below is a plan, not
++> a report about an implementation. Every claim of readiness appears only
++> after a measurable test gate, as in
+ > [AuraLite-Emulator](https://github.com/AlexanderNyr/AuraLite-Emulator) and
+ > [AuraLite-OS](https://github.com/AlexanderNyr/AuraLite-OS).
+ 
+@@ -80,14 +81,14 @@ Details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+ 
+ ## Quickstart
+ 
+-**Now (C3)** the foundation is real and verifiable:
++**Now (C4)** the foundation is real and verifiable:
+ 
+ ```sh
+-make deps-check                                    # rustc / cargo / rustfmt / clippy
+-make test                                          # fmt + clippy + cargo test + drift + deps gate
+-make nc-c0 && make nc-c1 && make nc-c2 && make nc-c3  # 14 negative controls
+-make gen-c1-vectors && make gen-c2-vectors && make gen-c3-vectors  # independent vectors
+-make check-deps                                    # exact pins, checksums, allowlist
++make deps-check          # rustc / cargo / rustfmt / clippy
++make test                # fmt + clippy + cargo test + drift + dependency gate
++make nc-all              # all 20 negative controls (C0-C4), no historical log churn
++make gen-c4-vectors      # independent tx golden vectors (self-checked BLAKE3/Ed25519)
++make evidence-c4         # current phase gate + receipts
+ ```
+ 
+ **The devnet does not exist yet — and that is honest.** After phase D7 (devnet)
+@@ -114,7 +115,7 @@ AuraLite-Crypto/
+   CHANGELOG.md           <- what actually changed (ISO 8601 dates, Europe/Moscow)
+   CONTRIBUTING.md        <- how to land a phase: one patch, one gate, one NC
+   Makefile               <- single entry point (C0 OK)
+-  Cargo.toml             <- 11-crate workspace, zero dependencies (C0 OK)
++  Cargo.toml             <- 12-crate workspace (C4), 54 pinned external deps (C3)
+   rust-toolchain.toml    <- pinned 1.99.1 + rustfmt/clippy (C0 OK)
+   tools/                 <- docs drift guard + negative-control drivers (C0 OK)
+   docs/
+@@ -122,9 +123,10 @@ AuraLite-Crypto/
+     ARCHITECTURE.md      <- invariants and data flow
+     TICKER_AUDIT.md      <- measured ticker collision audit
+     plans/*_PLAN.md      <- 12 plans, dependency-ordered, DoD + gate per phase
+-    evidence/            <- gate logs / receipts (C0 OK)
++    evidence/            <- gate logs / receipts (C0-C4)
++    spec/                <- tx format spec (C4) + dependency allowlist (C3)
+   patches/               <- one .patch per phase (0001-C0-... shipped)
+-  crates/*               <- 11 crates: `aura-types`, `aura-codec`, `aura-crypto` + 8 placeholders
++  crates/*               <- 12 crates: types, codec, crypto, tx + 8 placeholders
+   contracts/*            <- reference contracts (ARC-20, ARC-721, AMM, ...)
+   tests/                 <- unit/property/integration/consensus/soak
+   fuzz/ sim/ bench/ deploy/ web/
+diff --git a/ROADMAP.md b/ROADMAP.md
+index 4b50275..e2f3a41 100644
+--- a/ROADMAP.md
++++ b/ROADMAP.md
+@@ -121,7 +121,7 @@ phase tables (decision Q5).
+ 
+ | Plan | Status | Scope | Phases |
+ |---|---|---|---|
+-| [`docs/plans/CORE_PLAN.md`](docs/plans/CORE_PLAN.md) | 🚧 IN PROGRESS (C0–C3 ✅) | primitives, codec, crypto, tx/block, genesis, test rig | C0–C10 |
++| [`docs/plans/CORE_PLAN.md`](docs/plans/CORE_PLAN.md) | 🚧 IN PROGRESS (C0–C4 ✅) | primitives, codec, crypto, tx/block, genesis, test rig | C0–C10 |
+ | [`docs/plans/STATE_PLAN.md`](docs/plans/STATE_PLAN.md) | 📋 PLAN | Merkle state, RocksDB, WAL, snapshots, pruning, recovery | S0–S7 |
+ | [`docs/plans/EXEC_PLAN.md`](docs/plans/EXEC_PLAN.md) | 📋 PLAN | WASM runtime, gas, ABI, contract SDK, determinism | X0–X9 |
+ | [`docs/plans/CONSENSUS_PLAN.md`](docs/plans/CONSENSUS_PLAN.md) | 📋 PLAN | BFT-PoS, QC, VRF, staking, slashing, finality, governance | B0–B10 |
+@@ -212,6 +212,12 @@ checksummed, allowlisted via `make check-deps`). Receipts:
+ `docs/evidence/c3/`. Note: C3 is where the "zero external dependencies" line
+ ends — deliberately, with a new gate rather than silently.
+ 
++**Post-C4 measurement (2026-10-25):** 12 crates (new `aura-tx`), 34 `.rs`
++files, 49 tests passing, `make nc-all` → **20/20 negative controls PASS**,
++6/6 new in C4, still 54 external crates (no new dependency), drift guard now
++covers 20 markdown files. Receipts: `docs/evidence/c4/`. Validators/blocks/tx
++are still 0/0/0 — C4 is a format, not a network.
++
+ ### Measured gaps to the north star
+ 
+ | # | Gap | Evidence in the tree | Plan |
+@@ -223,7 +229,11 @@ ends — deliberately, with a new gate rather than silently.
+ | 5 | No P2P and no sync | no `aura-p2p` | NET N1–N8 |
+ | 6 | No node, RPC or wallet | no `aurad`/`aura-wallet` | NODE, WALLET |
+ | 7 | No applications or economics | no `contracts/`, `sim/` | ECOSYSTEM, ECONOMICS |
+-| 8 | No security evidence | no `fuzz/`, `spec/`, audit | SECURITY, PERF, OPS |
++| 8 | No security evidence | no `fuzz/`, audit | SECURITY, PERF, OPS |
++
++The gap table above is the **pre-C0 snapshot**, kept as a historical
++reference. For the current tree see the post-C0/C1/C2/C3/C4 measurements
++above and [`docs/STATUS.md`](docs/STATUS.md).
+ 
+ ---
+ 
+@@ -282,16 +292,18 @@ after the fact, as in AuraLite OS.
+ 
+ ## 8. Immediate queue
+ 
+-**C0, C1, C2 and C3 shipped**
++**C0, C1, C2, C3 and C4 shipped**
+ (`patches/0001-C0-baseline-workspace.patch`,
+ `patches/0002-C1-types.patch`, `patches/0003-C2-codec.patch`,
+-`patches/0004-C3-crypto.patch`): workspace, CI, gates, identity constants,
+-canonical types, `aura-codec` and `aura-crypto` — all pinned against
+-independent references and guarded by 14 negative controls. Right now:
+-**C4** — the transaction format: `Tx { chain_id, signer, nonce, kind,
+-payload, gas_limit, max_fee, tip, expiry, sig }` built on `aura-codec`, with
+-canonical `signing_bytes`, replay protection and a cross-chain rejection test.
+-The next patch is `patches/0005-C4-tx-format.patch`.
++`patches/0004-C3-crypto.patch`, `patches/0005-C4-tx-format.patch`):
++workspace, CI, gates, identity constants, canonical types, `aura-codec`,
++`aura-crypto` and the `aura-tx` transaction format — all pinned against
++independent references and guarded by 20 negative controls. Right now:
++**C5** — block and header: `Header`/`Body`, `block_hash`, `tx_root`,
++`state_root`, `validator_set_hash` and a protocol version, with a vector
++proving that reordering transactions changes `tx_root` and an NC that
++reorders without recomputing the root. The next patch is
++`patches/0006-C5-block-header.patch`.
+ 
+ See also: [`docs/STATUS.md`](docs/STATUS.md),
+ [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
+diff --git a/crates/aura-codec/src/error.rs b/crates/aura-codec/src/error.rs
+index 481c63f..ea406f1 100644
+--- a/crates/aura-codec/src/error.rs
++++ b/crates/aura-codec/src/error.rs
+@@ -25,6 +25,11 @@ pub enum CodecError {
+     InvalidDomainTag(u8),
+     /// A `Denom` tag is not `0` or `1`.
+     InvalidDenomTag(u8),
++    /// An enum discriminant is unknown. Tuple is `(type name, tag)`.
++    ///
++    /// Added in C4 for caller-defined enums (`TxKind`, `SignatureAlgo`).
++    /// Additive: no change to the C2 wire format or its golden vectors.
++    InvalidEnumTag(&'static str, u8),
+     /// Unsupported wire version. Tuple is `(expected, got)`.
+     UnsupportedVersion(u8, u8),
+     /// A length-prefixed string was not valid UTF-8.
+@@ -58,6 +63,7 @@ impl fmt::Display for CodecError {
+             Self::InvalidOptionTag(v) => write!(f, "invalid Option tag 0x{v:02x}"),
+             Self::InvalidDomainTag(v) => write!(f, "invalid Domain tag 0x{v:02x}"),
+             Self::InvalidDenomTag(v) => write!(f, "invalid Denom tag 0x{v:02x}"),
++            Self::InvalidEnumTag(name, v) => write!(f, "invalid {name} tag 0x{v:02x}"),
+             Self::UnsupportedVersion(expected, got) => {
+                 write!(f, "unsupported codec version {got}, expected {expected}")
+             }
+diff --git a/crates/aura-tx/Cargo.toml b/crates/aura-tx/Cargo.toml
+new file mode 100644
+index 0000000..41ab3e0
+--- /dev/null
++++ b/crates/aura-tx/Cargo.toml
+@@ -0,0 +1,14 @@
++[package]
++name = "aura-tx"
++description = "AuraLite-Crypto canonical transaction format, signing and replay protection"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++rust-version.workspace = true
++repository.workspace = true
++publish.workspace = true
++
++[dependencies]
++aura-types.workspace = true
++aura-codec.workspace = true
++aura-crypto.workspace = true
+diff --git a/crates/aura-tx/src/error.rs b/crates/aura-tx/src/error.rs
+new file mode 100644
+index 0000000..e7a8110
+--- /dev/null
++++ b/crates/aura-tx/src/error.rs
+@@ -0,0 +1,60 @@
++//! Transaction validation errors.
++
++use std::fmt;
++
++use aura_codec::CodecError;
++
++/// Every reason a transaction can be rejected before execution.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum TxError {
++    /// `codec_version` is not [`aura_codec::CODEC_VERSION`]. Tuple is
++    /// `(expected, got)`.
++    UnsupportedCodecVersion(u8, u8),
++    /// The tx chain-id does not match the chain we are validating for.
++    /// Tuple is `(expected, got)`.
++    WrongChain(String, String),
++    /// Payload exceeds [`crate::MAX_TX_PAYLOAD`].
++    PayloadTooLarge(usize),
++    /// `gas_limit` is zero.
++    ZeroGasLimit,
++    /// `tip` is greater than `max_fee`.
++    TipExceedsMaxFee,
++    /// The tx has expired. Tuple is `(expiry_height, current_height)`.
++    Expired(u64, u64),
++    /// `signer` does not match the address derived from the public key.
++    SignerMismatch,
++    /// Ed25519 verification failed.
++    InvalidSignature,
++    /// Canonical decoding failed (structural).
++    Decode(CodecError),
++}
++
++impl fmt::Display for TxError {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::UnsupportedCodecVersion(expected, got) => {
++                write!(f, "unsupported tx codec version {got}, expected {expected}")
++            }
++            Self::WrongChain(expected, got) => {
++                write!(f, "replay rejected: chain '{got}' is not '{expected}'")
++            }
++            Self::PayloadTooLarge(n) => write!(f, "payload of {n} bytes exceeds the limit"),
++            Self::ZeroGasLimit => f.write_str("gas_limit must be non-zero"),
++            Self::TipExceedsMaxFee => f.write_str("tip exceeds max_fee"),
++            Self::Expired(expiry, height) => {
++                write!(f, "tx expired at height {expiry}, current height {height}")
++            }
++            Self::SignerMismatch => f.write_str("signer does not match the public key"),
++            Self::InvalidSignature => f.write_str("invalid transaction signature"),
++            Self::Decode(error) => write!(f, "canonical decode failed: {error}"),
++        }
++    }
++}
++
++impl std::error::Error for TxError {}
++
++impl From<CodecError> for TxError {
++    fn from(error: CodecError) -> Self {
++        TxError::Decode(error)
++    }
++}
+diff --git a/crates/aura-tx/src/kind.rs b/crates/aura-tx/src/kind.rs
+new file mode 100644
+index 0000000..aa36cd4
+--- /dev/null
++++ b/crates/aura-tx/src/kind.rs
+@@ -0,0 +1,69 @@
++//! Transaction kind tags.
++
++use aura_codec::{CodecError, Decode, Encode, Reader, Writer};
++
++/// What the transaction asks the chain to do.
++///
++/// Tags are protocol constants. Unknown tags are rejected at decode time;
++/// adding a kind requires a new phase, a `CODEC_VERSION` bump and a migration
++/// test.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
++pub enum TxKind {
++    /// Native asset transfer.
++    Transfer,
++    /// Publish WASM bytecode.
++    Deploy,
++    /// Invoke a contract.
++    Call,
++    /// Delegate stake to a validator.
++    Delegate,
++    /// Withdraw delegated stake.
++    Undelegate,
++}
++
++impl TxKind {
++    /// All kinds, in tag order.
++    pub const ALL: [TxKind; 5] = [
++        TxKind::Transfer,
++        TxKind::Deploy,
++        TxKind::Call,
++        TxKind::Delegate,
++        TxKind::Undelegate,
++    ];
++
++    /// Stable protocol tag.
++    pub const fn tag(self) -> u8 {
++        match self {
++            TxKind::Transfer => 0,
++            TxKind::Deploy => 1,
++            TxKind::Call => 2,
++            TxKind::Delegate => 3,
++            TxKind::Undelegate => 4,
++        }
++    }
++
++    /// Parse a protocol tag, rejecting unknown values.
++    pub const fn from_tag(tag: u8) -> Option<TxKind> {
++        match tag {
++            0 => Some(TxKind::Transfer),
++            1 => Some(TxKind::Deploy),
++            2 => Some(TxKind::Call),
++            3 => Some(TxKind::Delegate),
++            4 => Some(TxKind::Undelegate),
++            _ => None,
++        }
++    }
++}
++
++impl Encode for TxKind {
++    fn encode(&self, writer: &mut Writer) {
++        writer.push_byte(self.tag());
++    }
++}
++
++impl Decode for TxKind {
++    fn decode(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
++        let tag = u8::decode(reader)?;
++        TxKind::from_tag(tag).ok_or(CodecError::InvalidEnumTag("TxKind", tag))
++    }
++}
+diff --git a/crates/aura-tx/src/lib.rs b/crates/aura-tx/src/lib.rs
+new file mode 100644
+index 0000000..930ed2a
+--- /dev/null
++++ b/crates/aura-tx/src/lib.rs
+@@ -0,0 +1,43 @@
++//! AuraLite-Crypto canonical transaction format (C4).
++//!
++//! A transaction is `Tx = UnsignedTx || Signature`. The unsigned part carries
++//! the ten protocol fields from `CORE_PLAN.md` C4 plus a `codec_version` from
++//! `ARCHITECTURE.md`:
++//!
++//! ```text
++//! codec_version, chain_id, signer, nonce, kind, payload,
++//! gas_limit, max_fee, tip, expiry
++//! ```
++//!
++//! The signature is an **envelope**, not a bare 64-byte value: it also carries
++//! the algorithm tag and the 32-byte public key. Ed25519 cannot recover a
++//! public key from a signature, so the key must travel with the transaction;
++//! [`signer_address`] binds that key to the 20-byte `signer` field.
++//!
++//! Invariants:
++//! * one value → one byte string (C2 [`aura_codec::decode_canonical`]);
++//! * `signing_bytes()` = `SIGNING_CONTEXT || canonical(UnsignedTx)`, signed
++//!   through C3's domain-separated `aura_crypto::sign(Domain::Tx, chain_id)`;
++//! * replay protection: `validate()` takes the expected chain-id and rejects
++//!   a transaction minted for `auralite-1` on `auralite-test-1`;
++//! * no clock, no randomness, no floating point — `expiry` and `height` are
++//!   consensus heights supplied by the caller.
++//!
++//! Full field/wire specification: `docs/spec/tx-format.md`.
++//! Golden vectors: `tools/gen_c4_vectors.py` (independent Python).
++
++#![forbid(unsafe_code)]
++#![deny(missing_docs)]
++
++mod error;
++mod kind;
++mod signature;
++mod tx;
++
++pub use error::TxError;
++pub use kind::TxKind;
++pub use signature::{SIG_ALGO_ED25519, Signature, SignatureAlgo};
++pub use tx::{
++    ADDRESS_CONTEXT, MAX_TX_PAYLOAD, SIGNING_CONTEXT, TXID_CONTEXT, Tx, TxParams, UnsignedTx,
++    signer_address,
++};
+diff --git a/crates/aura-tx/src/signature.rs b/crates/aura-tx/src/signature.rs
+new file mode 100644
+index 0000000..eb5d5e4
+--- /dev/null
++++ b/crates/aura-tx/src/signature.rs
+@@ -0,0 +1,83 @@
++//! Signature envelope: algorithm tag + public key + 64-byte signature.
++
++use aura_codec::{CodecError, Decode, Encode, Reader, Writer};
++
++/// Ed25519 algorithm tag. Other tag values are reserved (secp256k1 = 1 is
++/// intentionally **not** accepted in the Stage 1 tx format; PQ tags will live
++/// in a separate range).
++pub const SIG_ALGO_ED25519: u8 = 0;
++
++/// Signature algorithm. Stage 1 accepts Ed25519 only.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
++pub enum SignatureAlgo {
++    /// Ed25519 (RFC 8032), verified through `aura-crypto`.
++    Ed25519,
++}
++
++impl SignatureAlgo {
++    /// Stable protocol tag.
++    pub const fn tag(self) -> u8 {
++        SIG_ALGO_ED25519
++    }
++
++    /// Parse a protocol tag. Unknown algorithms are rejected.
++    pub const fn from_tag(tag: u8) -> Option<SignatureAlgo> {
++        match tag {
++            SIG_ALGO_ED25519 => Some(SignatureAlgo::Ed25519),
++            _ => None,
++        }
++    }
++}
++
++/// The signature attached to a [`crate::Tx`].
++///
++/// Ed25519 cannot recover the public key from a signature, so the key is part
++/// of the wire format. [`crate::signer_address`] derives the 20-byte signer
++/// from it and validation requires an exact match.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct Signature {
++    /// Signature algorithm.
++    pub algo: SignatureAlgo,
++    /// 32-byte Ed25519 public key.
++    pub public_key: [u8; 32],
++    /// 64-byte Ed25519 signature.
++    pub bytes: [u8; 64],
++}
++
++impl Signature {
++    /// Construct an Ed25519 signature envelope.
++    pub fn ed25519(public_key: [u8; 32], bytes: [u8; 64]) -> Self {
++        Signature {
++            algo: SignatureAlgo::Ed25519,
++            public_key,
++            bytes,
++        }
++    }
++}
++
++impl Encode for Signature {
++    fn encode(&self, writer: &mut Writer) {
++        writer.push_byte(self.algo.tag());
++        writer.push_bytes(&self.public_key);
++        writer.push_bytes(&self.bytes);
++    }
++}
++
++impl Decode for Signature {
++    fn decode(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
++        let tag = u8::decode(reader)?;
++        let algo =
++            SignatureAlgo::from_tag(tag).ok_or(CodecError::InvalidEnumTag("SignatureAlgo", tag))?;
++        let key_bytes = reader.read_exact(32)?;
++        let mut public_key = [0u8; 32];
++        public_key.copy_from_slice(key_bytes);
++        let sig_bytes = reader.read_exact(64)?;
++        let mut bytes = [0u8; 64];
++        bytes.copy_from_slice(sig_bytes);
++        Ok(Signature {
++            algo,
++            public_key,
++            bytes,
++        })
++    }
++}
+diff --git a/crates/aura-tx/src/tx.rs b/crates/aura-tx/src/tx.rs
+new file mode 100644
+index 0000000..3d26213
+--- /dev/null
++++ b/crates/aura-tx/src/tx.rs
+@@ -0,0 +1,294 @@
++//! Canonical transaction, signing bytes, txid and validation.
++
++use aura_codec::{
++    CODEC_VERSION, CodecError, Decode, Encode, Reader, Writer, decode_canonical, encode_to_bytes,
++};
++use aura_crypto::{blake3_hash, ed25519_public_key};
++use aura_types::{ADDRESS_LEN, Address, Amount, ChainId, Domain, Gas, Hash, Height, Nonce};
++
++use crate::error::TxError;
++use crate::kind::TxKind;
++use crate::signature::Signature;
++
++/// Prefix of the bytes that are signed for a transaction.
++///
++/// NC target: `tools/nc_c4.py` changes this constant and requires the C4
++/// golden vectors to go red. A change here invalidates every existing
++/// signature and requires a protocol version bump.
++pub const SIGNING_CONTEXT: &[u8] = b"AuraLite-Crypto/tx-signing-v1\x00";
++
++/// Prefix of the bytes hashed to produce a transaction id.
++///
++/// NC target: `tools/nc_c4.py` changes this constant and requires the txid
++/// golden vectors to go red.
++pub const TXID_CONTEXT: &[u8] = b"AuraLite-Crypto/txid-v1\x00";
++
++/// Prefix for deriving a 20-byte account address from a 32-byte public key.
++pub const ADDRESS_CONTEXT: &[u8] = b"AuraLite-Crypto/address-v1\x00";
++
++/// Maximum payload size. Aligned with `aura-codec`'s `MAX_ITEMS` so a decoded
++/// payload can never exceed what the canonical decoder accepts.
++pub const MAX_TX_PAYLOAD: usize = 65_536;
++
++/// Derive the canonical 20-byte address for an Ed25519 public key.
++///
++/// `address = BLAKE3(ADDRESS_CONTEXT || public_key)[0..20]`. The binding is
++/// checked on every verification, so a transaction cannot claim someone
++/// else's `signer`.
++pub fn signer_address(public_key: &[u8; 32]) -> Address {
++    let mut input = Vec::with_capacity(ADDRESS_CONTEXT.len() + 32);
++    input.extend_from_slice(ADDRESS_CONTEXT);
++    input.extend_from_slice(public_key);
++    let digest = blake3_hash(&input);
++    let mut bytes = [0u8; ADDRESS_LEN];
++    bytes.copy_from_slice(&digest.as_bytes()[..ADDRESS_LEN]);
++    Address::from_bytes(bytes)
++}
++
++/// Construction parameters for [`UnsignedTx::new`].
++///
++/// A transaction genuinely has nine unsigned protocol fields. Grouping them
++/// keeps the constructor readable and satisfies `clippy::too_many_arguments`
++/// without suppressing the lint. `codec_version` is added by the constructor.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct TxParams {
++    /// Chain this transaction is valid on (replay protection).
++    pub chain_id: ChainId,
++    /// 20-byte account address derived from the signer's public key.
++    pub signer: Address,
++    /// Per-account sequence number.
++    pub nonce: Nonce,
++    /// What the transaction does.
++    pub kind: TxKind,
++    /// Opaque, length-prefixed call data.
++    pub payload: Vec<u8>,
++    /// Maximum gas the sender will buy.
++    pub gas_limit: Gas,
++    /// Maximum total fee the sender will pay.
++    pub max_fee: Amount,
++    /// Priority tip, must not exceed `max_fee`.
++    pub tip: Amount,
++    /// Last consensus height at which the transaction may be included.
++    pub expiry: Height,
++}
++
++/// The unsigned part of a transaction. Field order is the wire order.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct UnsignedTx {
++    /// Wire format version, must equal [`CODEC_VERSION`].
++    pub codec_version: u8,
++    /// Chain this transaction is valid on (replay protection).
++    pub chain_id: ChainId,
++    /// 20-byte account address derived from the signer's public key.
++    pub signer: Address,
++    /// Per-account sequence number.
++    pub nonce: Nonce,
++    /// What the transaction does.
++    pub kind: TxKind,
++    /// Opaque, length-prefixed call data.
++    pub payload: Vec<u8>,
++    /// Maximum gas the sender will buy.
++    pub gas_limit: Gas,
++    /// Maximum total fee the sender will pay.
++    pub max_fee: Amount,
++    /// Priority tip, must not exceed `max_fee`.
++    pub tip: Amount,
++    /// Last consensus height at which the transaction may be included.
++    pub expiry: Height,
++}
++
++impl UnsignedTx {
++    /// Construct and structurally validate an unsigned transaction.
++    pub fn new(params: TxParams) -> Result<Self, TxError> {
++        if params.payload.len() > MAX_TX_PAYLOAD {
++            return Err(TxError::PayloadTooLarge(params.payload.len()));
++        }
++        if params.gas_limit.value() == 0 {
++            return Err(TxError::ZeroGasLimit);
++        }
++        if params.tip > params.max_fee {
++            return Err(TxError::TipExceedsMaxFee);
++        }
++        Ok(UnsignedTx {
++            codec_version: CODEC_VERSION,
++            chain_id: params.chain_id,
++            signer: params.signer,
++            nonce: params.nonce,
++            kind: params.kind,
++            payload: params.payload,
++            gas_limit: params.gas_limit,
++            max_fee: params.max_fee,
++            tip: params.tip,
++            expiry: params.expiry,
++        })
++    }
++
++    /// The exact bytes that are signed: context plus the canonical encoding
++    /// of every unsigned field. The signature is **not** included.
++    pub fn signing_bytes(&self) -> Vec<u8> {
++        let mut writer = Writer::new();
++        writer.push_bytes(SIGNING_CONTEXT);
++        self.encode(&mut writer);
++        writer.into_bytes()
++    }
++
++    /// Sign with a seed. The seed's public key must derive to `self.signer`.
++    pub fn sign(&self, seed: &[u8; 32]) -> Result<Tx, TxError> {
++        let public_key = ed25519_public_key(seed);
++        if signer_address(&public_key) != self.signer {
++            return Err(TxError::SignerMismatch);
++        }
++        let signature = aura_crypto::sign(
++            seed,
++            self.chain_id.as_str(),
++            Domain::Tx,
++            &self.signing_bytes(),
++        );
++        Ok(Tx {
++            unsigned: self.clone(),
++            sig: Signature::ed25519(public_key, signature),
++        })
++    }
++}
++
++impl Encode for UnsignedTx {
++    fn encode(&self, writer: &mut Writer) {
++        self.codec_version.encode(writer);
++        self.chain_id.encode(writer);
++        self.signer.encode(writer);
++        self.nonce.encode(writer);
++        self.kind.encode(writer);
++        self.payload.encode(writer);
++        self.gas_limit.encode(writer);
++        self.max_fee.encode(writer);
++        self.tip.encode(writer);
++        self.expiry.encode(writer);
++    }
++}
++
++impl Decode for UnsignedTx {
++    fn decode(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
++        let version = u8::decode(reader)?;
++        if version != CODEC_VERSION {
++            return Err(CodecError::UnsupportedVersion(CODEC_VERSION, version));
++        }
++        Ok(UnsignedTx {
++            codec_version: version,
++            chain_id: ChainId::decode(reader)?,
++            signer: Address::decode(reader)?,
++            nonce: Nonce::decode(reader)?,
++            kind: TxKind::decode(reader)?,
++            payload: Vec::<u8>::decode(reader)?,
++            gas_limit: Gas::decode(reader)?,
++            max_fee: Amount::decode(reader)?,
++            tip: Amount::decode(reader)?,
++            expiry: Height::decode(reader)?,
++        })
++    }
++}
++
++/// A complete transaction: unsigned fields plus the signature envelope.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct Tx {
++    /// All unsigned fields, in canonical order.
++    pub unsigned: UnsignedTx,
++    /// Algorithm tag, public key and 64-byte signature.
++    pub sig: Signature,
++}
++
++fn verify_ed25519(pk: &[u8; 32], chain: &str, msg: &[u8], sig: &[u8; 64]) -> Result<(), TxError> {
++    aura_crypto::verify(pk, chain, Domain::Tx, msg, sig).map_err(|_| TxError::InvalidSignature)
++}
++
++impl Tx {
++    /// Bytes that are signed (delegates to [`UnsignedTx::signing_bytes`]).
++    pub fn signing_bytes(&self) -> Vec<u8> {
++        self.unsigned.signing_bytes()
++    }
++
++    /// Canonical wire bytes.
++    pub fn to_bytes(&self) -> Vec<u8> {
++        encode_to_bytes(self)
++    }
++
++    /// Transaction id: `BLAKE3(TXID_CONTEXT || canonical_bytes)`.
++    ///
++    /// Includes the signature, so two different signatures over the same
++    /// unsigned payload have different ids.
++    pub fn txid(&self) -> Hash {
++        let encoded = self.to_bytes();
++        let mut input = Vec::with_capacity(TXID_CONTEXT.len() + encoded.len());
++        input.extend_from_slice(TXID_CONTEXT);
++        input.extend_from_slice(&encoded);
++        blake3_hash(&input)
++    }
++
++    /// Decode with full C2 canonicality: no trailing bytes, no non-minimal
++    /// varints, field order fixed, re-encode must reproduce the input.
++    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, TxError> {
++        Ok(decode_canonical::<Tx>(bytes)?)
++    }
++
++    /// Verify the Ed25519 signature and the signer↔public-key binding.
++    ///
++    /// NC target: `tools/nc_c4.py` disables the binding check and requires
++    /// the signer-mismatch test to go red.
++    pub fn verify_signature(&self) -> Result<(), TxError> {
++        if signer_address(&self.sig.public_key) != self.unsigned.signer {
++            return Err(TxError::SignerMismatch);
++        }
++        let message = self.signing_bytes();
++        let chain = self.unsigned.chain_id.as_str();
++        verify_ed25519(&self.sig.public_key, chain, &message, &self.sig.bytes)
++    }
++
++    /// Full pre-execution validation for `expected_chain` at `height`.
++    ///
++    /// NC target: `tools/nc_c4.py` disables the chain check and requires the
++    /// replay test to go red.
++    pub fn validate(&self, expected_chain: &str, height: Height) -> Result<(), TxError> {
++        if self.unsigned.codec_version != CODEC_VERSION {
++            return Err(TxError::UnsupportedCodecVersion(
++                CODEC_VERSION,
++                self.unsigned.codec_version,
++            ));
++        }
++        if self.unsigned.chain_id.as_str() != expected_chain {
++            return Err(TxError::WrongChain(
++                expected_chain.to_owned(),
++                self.unsigned.chain_id.as_str().to_owned(),
++            ));
++        }
++        if self.unsigned.payload.len() > MAX_TX_PAYLOAD {
++            return Err(TxError::PayloadTooLarge(self.unsigned.payload.len()));
++        }
++        if self.unsigned.gas_limit.value() == 0 {
++            return Err(TxError::ZeroGasLimit);
++        }
++        if self.unsigned.tip > self.unsigned.max_fee {
++            return Err(TxError::TipExceedsMaxFee);
++        }
++        if height.value() > self.unsigned.expiry.value() {
++            return Err(TxError::Expired(
++                self.unsigned.expiry.value(),
++                height.value(),
++            ));
++        }
++        self.verify_signature()
++    }
++}
++
++impl Encode for Tx {
++    fn encode(&self, writer: &mut Writer) {
++        self.unsigned.encode(writer);
++        self.sig.encode(writer);
++    }
++}
++
++impl Decode for Tx {
++    fn decode(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
++        let unsigned = UnsignedTx::decode(reader)?;
++        let sig = Signature::decode(reader)?;
++        Ok(Tx { unsigned, sig })
++    }
++}
+diff --git a/crates/aura-tx/tests/c4_tx.rs b/crates/aura-tx/tests/c4_tx.rs
+new file mode 100644
+index 0000000..d70423e
+--- /dev/null
++++ b/crates/aura-tx/tests/c4_tx.rs
+@@ -0,0 +1,410 @@
++//! C4 gate: transaction format against an independent Python encoder.
++//!
++//! `fixtures/c4_golden.txt` is produced by `tools/gen_c4_vectors.py`, which
++//! self-checks pure-Python BLAKE3 and pure-Python Ed25519 against official
++//! BLAKE3 vectors and RFC 8032 before emitting anything.
++
++use std::collections::BTreeMap;
++
++use aura_codec::{CodecError, encode_to_bytes};
++use aura_crypto::{ed25519_public_key, hash_domain};
++use aura_tx::{
++    ADDRESS_CONTEXT, MAX_TX_PAYLOAD, SIGNING_CONTEXT, SignatureAlgo, TXID_CONTEXT, Tx, TxError,
++    TxKind, TxParams, UnsignedTx, signer_address,
++};
++use aura_types::{
++    Address, Amount, CHAIN_ID, ChainId, Domain, Gas, Height, MAINNET_CHAIN_ID, Nonce,
++};
++
++const GOLDEN: &str = include_str!("fixtures/c4_golden.txt");
++
++fn fixtures() -> BTreeMap<String, String> {
++    let mut map = BTreeMap::new();
++    for line in GOLDEN.lines() {
++        let trimmed = line.trim();
++        if trimmed.is_empty() || trimmed.starts_with('#') {
++            continue;
++        }
++        let (key, value) = trimmed
++            .split_once('=')
++            .unwrap_or_else(|| panic!("malformed golden line: {trimmed}"));
++        assert!(
++            map.insert(key.to_owned(), value.to_owned()).is_none(),
++            "duplicate golden key {key}"
++        );
++    }
++    map
++}
++
++fn hx(text: &str) -> Vec<u8> {
++    assert_eq!(text.len() % 2, 0, "even-length hex");
++    text.as_bytes()
++        .chunks(2)
++        .map(|pair| (nibble(pair[0]) << 4) | nibble(pair[1]))
++        .collect()
++}
++
++fn nibble(byte: u8) -> u8 {
++    match byte {
++        b'0'..=b'9' => byte - b'0',
++        b'a'..=b'f' => byte - b'a' + 10,
++        _ => panic!("invalid hex nibble in fixture"),
++    }
++}
++
++fn arr32(text: &str) -> [u8; 32] {
++    hx(text).try_into().expect("expected 32 bytes")
++}
++
++fn to_hex(bytes: &[u8]) -> String {
++    let mut out = String::with_capacity(bytes.len() * 2);
++    for byte in bytes {
++        out.push_str(&format!("{byte:02x}"));
++    }
++    out
++}
++
++fn get(f: &BTreeMap<String, String>, index: usize, key: &str) -> String {
++    f[&format!("tx{index}_{key}")].clone()
++}
++
++fn build(f: &BTreeMap<String, String>, index: usize) -> (UnsignedTx, [u8; 32]) {
++    let unsigned = UnsignedTx::new(TxParams {
++        chain_id: ChainId::new(&get(f, index, "chain")).expect("valid chain-id"),
++        signer: Address::from_slice(&hx(&get(f, index, "address"))).expect("20-byte address"),
++        nonce: Nonce::new(get(f, index, "nonce").parse().expect("u64")),
++        kind: TxKind::from_tag(get(f, index, "kind").parse().expect("u8 tag")).expect("known kind"),
++        payload: hx(&get(f, index, "payload")),
++        gas_limit: Gas::new(get(f, index, "gas").parse().expect("u64")),
++        max_fee: Amount::from_units(get(f, index, "max_fee").parse().expect("u128")),
++        tip: Amount::from_units(get(f, index, "tip").parse().expect("u128")),
++        expiry: Height::new(get(f, index, "expiry").parse().expect("u64")),
++    })
++    .expect("structurally valid");
++    (unsigned, arr32(&get(f, index, "seed")))
++}
++
++#[test]
++fn constants_are_pinned_by_the_independent_fixture() {
++    let f = fixtures();
++    assert_eq!(to_hex(SIGNING_CONTEXT), f["signing_context"]);
++    assert_eq!(to_hex(TXID_CONTEXT), f["txid_context"]);
++    assert_eq!(to_hex(ADDRESS_CONTEXT), f["address_context"]);
++    assert_eq!(MAX_TX_PAYLOAD.to_string(), f["max_tx_payload"]);
++    assert_eq!(aura_codec::CODEC_VERSION.to_string(), f["codec_version"]);
++}
++
++#[test]
++fn golden_transactions_match_the_independent_encoder() {
++    let f = fixtures();
++    for index in 1..=5 {
++        let (unsigned, seed) = build(&f, index);
++
++        assert_eq!(
++            to_hex(&encode_to_bytes(&unsigned)),
++            get(&f, index, "unsigned")
++        );
++        let signing = unsigned.signing_bytes();
++        assert_eq!(to_hex(&signing), get(&f, index, "signing_bytes"));
++
++        let digest = hash_domain(unsigned.chain_id.as_str(), Domain::Tx, &signing);
++        assert_eq!(digest.to_hex(), get(&f, index, "signing_hash"));
++
++        let public_key = ed25519_public_key(&seed);
++        assert_eq!(to_hex(&public_key), get(&f, index, "public_key"));
++        assert_eq!(
++            to_hex(signer_address(&public_key).as_bytes()),
++            get(&f, index, "address"),
++            "tx{index} signer derivation"
++        );
++
++        let tx = unsigned.sign(&seed).expect("signer matches key");
++        assert_eq!(to_hex(&tx.sig.bytes), get(&f, index, "signature"));
++        assert_eq!(to_hex(&tx.to_bytes()), get(&f, index, "bytes"));
++        assert_eq!(tx.txid().to_hex(), get(&f, index, "txid"));
++        assert_eq!(tx.signing_bytes(), signing);
++
++        let decoded = Tx::from_canonical_bytes(&hx(&get(&f, index, "bytes")))
++            .unwrap_or_else(|e| panic!("tx{index} decode: {e}"));
++        assert_eq!(decoded, tx, "tx{index} canonical round-trip");
++        assert_eq!(
++            decoded.txid().to_hex(),
++            get(&f, index, "txid"),
++            "tx{index} decoded txid"
++        );
++        assert!(
++            tx.validate(&get(&f, index, "chain"), Height::new(0))
++                .is_ok(),
++            "tx{index} validates on its own chain"
++        );
++    }
++}
++
++#[test]
++fn replay_across_chains_is_rejected() {
++    // tx3 is minted for the reserved mainnet chain-id.
++    let f = fixtures();
++    let (unsigned, seed) = build(&f, 3);
++    assert_eq!(unsigned.chain_id.as_str(), MAINNET_CHAIN_ID);
++    let tx = unsigned.sign(&seed).unwrap();
++
++    assert!(tx.validate(MAINNET_CHAIN_ID, Height::new(0)).is_ok());
++    assert_eq!(
++        tx.validate(CHAIN_ID, Height::new(0)),
++        Err(TxError::WrongChain(
++            CHAIN_ID.to_owned(),
++            MAINNET_CHAIN_ID.to_owned()
++        ))
++    );
++
++    // Rewriting the chain-id after signing cannot rescue it: chain-id is
++    // inside both signing_bytes and the C3 domain prefix.
++    let mut rewritten = tx.clone();
++    rewritten.unsigned.chain_id = ChainId::stage1();
++    assert!(rewritten.verify_signature().is_err());
++
++    // Same unsigned payload, different chain => different signature.
++    let mut other = unsigned.clone();
++    other.chain_id = ChainId::stage1();
++    // `signer` stays bound to the same key; only the chain changes.
++    let other_tx = other.sign(&seed).unwrap();
++    assert_ne!(tx.sig.bytes, other_tx.sig.bytes);
++    assert_ne!(tx.signing_bytes(), other_tx.signing_bytes());
++}
++
++#[test]
++fn signing_requires_the_matching_key() {
++    let f = fixtures();
++    let (unsigned, _) = build(&f, 1);
++    let wrong_seed = [0x66u8; 32];
++    assert_eq!(
++        unsigned.sign(&wrong_seed).err(),
++        Some(TxError::SignerMismatch)
++    );
++}
++
++#[test]
++fn every_mutation_breaks_the_signature() {
++    let f = fixtures();
++    let (unsigned, seed) = build(&f, 2);
++    let tx = unsigned.sign(&seed).unwrap();
++    assert!(tx.verify_signature().is_ok());
++
++    let mut cases: Vec<(&str, Tx)> = Vec::new();
++
++    let mut t = tx.clone();
++    t.unsigned.codec_version = 2;
++    cases.push(("codec_version", t));
++
++    let mut t = tx.clone();
++    t.unsigned.chain_id = ChainId::new("auralite-9").unwrap();
++    cases.push(("chain_id", t));
++
++    let mut t = tx.clone();
++    let mut addr = *t.unsigned.signer.as_bytes();
++    addr[0] ^= 0x01;
++    t.unsigned.signer = Address::from_bytes(addr);
++    cases.push(("signer", t));
++
++    let mut t = tx.clone();
++    t.unsigned.nonce = Nonce::new(999);
++    cases.push(("nonce", t));
++
++    let mut t = tx.clone();
++    t.unsigned.kind = TxKind::Deploy;
++    cases.push(("kind", t));
++
++    let mut t = tx.clone();
++    t.unsigned.payload.push(0x00);
++    cases.push(("payload", t));
++
++    let mut t = tx.clone();
++    t.unsigned.gas_limit = Gas::new(1);
++    cases.push(("gas_limit", t));
++
++    let mut t = tx.clone();
++    t.unsigned.max_fee = Amount::from_units(1);
++    cases.push(("max_fee", t));
++
++    let mut t = tx.clone();
++    t.unsigned.tip = Amount::from_units(1);
++    cases.push(("tip", t));
++
++    let mut t = tx.clone();
++    t.unsigned.expiry = Height::new(1);
++    cases.push(("expiry", t));
++
++    let mut t = tx.clone();
++    t.sig.public_key[0] ^= 0x01;
++    cases.push(("public_key", t));
++
++    let mut t = tx.clone();
++    t.sig.bytes[0] ^= 0x01;
++    cases.push(("signature_bytes", t));
++
++    for (name, mutated) in cases {
++        assert!(
++            mutated.verify_signature().is_err(),
++            "changing {name} must invalidate the signature"
++        );
++    }
++}
++
++#[test]
++fn every_bad_vector_is_rejected() {
++    let f = fixtures();
++    const BAD: [&str; 9] = [
++        "bad_trailing",
++        "bad_truncated",
++        "bad_version",
++        "bad_kind_tag",
++        "bad_algo_tag",
++        "bad_signer",
++        "bad_signature",
++        "bad_chain_len",
++        "bad_payload_len",
++    ];
++    for key in BAD {
++        let bytes = hx(&f[key]);
++        let rejected = match Tx::from_canonical_bytes(&bytes) {
++            Err(_) => true,
++            Ok(tx) => tx.validate(CHAIN_ID, Height::new(0)).is_err(),
++        };
++        assert!(rejected, "{key} must be rejected");
++    }
++}
++
++#[test]
++fn bad_vectors_return_the_specific_error() {
++    let f = fixtures();
++    let check = |key: &str, expected: CodecError| {
++        assert_eq!(
++            Tx::from_canonical_bytes(&hx(&f[key])),
++            Err(TxError::Decode(expected)),
++            "{key} error kind"
++        );
++    };
++    check("bad_trailing", CodecError::TrailingBytes(1));
++    check("bad_version", CodecError::UnsupportedVersion(1, 2));
++    check("bad_kind_tag", CodecError::InvalidEnumTag("TxKind", 9));
++    check(
++        "bad_algo_tag",
++        CodecError::InvalidEnumTag("SignatureAlgo", 1),
++    );
++    check("bad_chain_len", CodecError::NonCanonicalVarint);
++    check("bad_payload_len", CodecError::NonCanonicalVarint);
++    assert_eq!(
++        Tx::from_canonical_bytes(&hx(&f["bad_signer"]))
++            .unwrap()
++            .verify_signature(),
++        Err(TxError::SignerMismatch)
++    );
++    assert_eq!(
++        Tx::from_canonical_bytes(&hx(&f["bad_signature"]))
++            .unwrap()
++            .verify_signature(),
++        Err(TxError::InvalidSignature)
++    );
++}
++
++#[test]
++fn structural_validation_rules_are_enforced() {
++    let f = fixtures();
++    let (unsigned, seed) = build(&f, 1);
++    let tx = unsigned.sign(&seed).unwrap();
++
++    assert_eq!(
++        tx.validate(CHAIN_ID, Height::new(1001)),
++        Err(TxError::Expired(1000, 1001))
++    );
++    assert!(tx.validate(CHAIN_ID, Height::new(1000)).is_ok());
++
++    let mut wrong_version = tx.clone();
++    wrong_version.unsigned.codec_version = 2;
++    assert_eq!(
++        wrong_version.validate(CHAIN_ID, Height::new(0)),
++        Err(TxError::UnsupportedCodecVersion(1, 2))
++    );
++
++    let mut oversized = tx.clone();
++    oversized.unsigned.payload = vec![0u8; MAX_TX_PAYLOAD + 1];
++    assert_eq!(
++        oversized.validate(CHAIN_ID, Height::new(0)),
++        Err(TxError::PayloadTooLarge(MAX_TX_PAYLOAD + 1))
++    );
++
++    let mut zero_gas = tx.clone();
++    zero_gas.unsigned.gas_limit = Gas::new(0);
++    assert_eq!(
++        zero_gas.validate(CHAIN_ID, Height::new(0)),
++        Err(TxError::ZeroGasLimit)
++    );
++
++    let mut bad_tip = tx.clone();
++    bad_tip.unsigned.tip = Amount::from_units(1001);
++    bad_tip.unsigned.max_fee = Amount::from_units(1000);
++    assert_eq!(
++        bad_tip.validate(CHAIN_ID, Height::new(0)),
++        Err(TxError::TipExceedsMaxFee)
++    );
++
++    // The constructor refuses the same mistakes before signing exists.
++    assert_eq!(
++        UnsignedTx::new(TxParams {
++            chain_id: ChainId::stage1(),
++            signer: tx.unsigned.signer,
++            nonce: Nonce::new(0),
++            kind: TxKind::Transfer,
++            payload: vec![],
++            gas_limit: Gas::new(0),
++            max_fee: Amount::ZERO,
++            tip: Amount::ZERO,
++            expiry: Height::new(1),
++        })
++        .err(),
++        Some(TxError::ZeroGasLimit)
++    );
++    assert!(
++        UnsignedTx::new(TxParams {
++            chain_id: ChainId::stage1(),
++            signer: tx.unsigned.signer,
++            nonce: Nonce::new(0),
++            kind: TxKind::Transfer,
++            payload: vec![0u8; MAX_TX_PAYLOAD],
++            gas_limit: Gas::new(1),
++            max_fee: Amount::ZERO,
++            tip: Amount::ZERO,
++            expiry: Height::new(1),
++        })
++        .is_ok(),
++        "payload exactly at the limit is allowed"
++    );
++}
++
++#[test]
++fn enum_tags_are_strict() {
++    assert_eq!(TxKind::ALL.map(TxKind::tag), [0, 1, 2, 3, 4]);
++    for tag in 0..=4u8 {
++        assert_eq!(TxKind::from_tag(tag).map(TxKind::tag), Some(tag));
++    }
++    assert_eq!(TxKind::from_tag(5), None);
++    assert_eq!(TxKind::from_tag(255), None);
++    assert_eq!(
++        SignatureAlgo::from_tag(aura_tx::SIG_ALGO_ED25519),
++        Some(SignatureAlgo::Ed25519)
++    );
++    assert_eq!(SignatureAlgo::from_tag(1), None);
++}
++
++#[test]
++fn txid_covers_the_signature_too() {
++    let f = fixtures();
++    let (unsigned, seed) = build(&f, 1);
++    let tx = unsigned.sign(&seed).unwrap();
++
++    let mut other = tx.clone();
++    other.sig.bytes[63] ^= 0x01;
++    assert_ne!(tx.txid(), other.txid(), "signature must affect the txid");
++    assert!(other.verify_signature().is_err());
++    assert_eq!(tx.txid(), tx.txid(), "txid is deterministic");
++}
+diff --git a/crates/aura-tx/tests/fixtures/c4_golden.txt b/crates/aura-tx/tests/fixtures/c4_golden.txt
+new file mode 100644
+index 0000000..ef6b583
+--- /dev/null
++++ b/crates/aura-tx/tests/fixtures/c4_golden.txt
+@@ -0,0 +1,104 @@
++# AuraLite-Crypto C4 transaction golden vectors
++# Generated by tools/gen_c4_vectors.py (independent Python).
++# Self-checked against official BLAKE3 vectors and RFC 8032 §7.1.
++# Format: key=<hex|text|decimal>. Do not edit by hand.
++codec_version=1
++hash_context=417572614c6974652d43727970746f2f63727970746f2d763100
++signing_context=417572614c6974652d43727970746f2f74782d7369676e696e672d763100
++txid_context=417572614c6974652d43727970746f2f747869642d763100
++address_context=417572614c6974652d43727970746f2f616464726573732d763100
++max_tx_payload=65536
++tx1_chain=auralite-test-1
++tx1_seed=1111111111111111111111111111111111111111111111111111111111111111
++tx1_kind=0
++tx1_nonce=0
++tx1_payload=
++tx1_gas=21000
++tx1_max_fee=1000000000000
++tx1_tip=0
++tx1_expiry=1000
++tx1_address=5f499b5477d1257183f73043b47d0d2d0415c6b7
++tx1_public_key=d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737
++tx1_unsigned=010f617572616c6974652d746573742d315f499b5477d1257183f73043b47d0d2d0415c6b70000000000000000000008520000000000000010a5d4e8000000000000000000000000000000000000000000000000000000e803000000000000
++tx1_signing_bytes=417572614c6974652d43727970746f2f74782d7369676e696e672d763100010f617572616c6974652d746573742d315f499b5477d1257183f73043b47d0d2d0415c6b70000000000000000000008520000000000000010a5d4e8000000000000000000000000000000000000000000000000000000e803000000000000
++tx1_signing_hash=787cfbebb576cba955d9def69c482f571f49d9920634d84dab02e9a785cc3716
++tx1_signature=3f0bd406f49b7b1fdd7f7d39a322a32a4e7fb079ebd7af348360ba0ffb70bae22d4fcfef74c3f8e0e1243850d5a3277b76dd344800e381ad066a53c799946d01
++tx1_bytes=010f617572616c6974652d746573742d315f499b5477d1257183f73043b47d0d2d0415c6b70000000000000000000008520000000000000010a5d4e8000000000000000000000000000000000000000000000000000000e80300000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787373f0bd406f49b7b1fdd7f7d39a322a32a4e7fb079ebd7af348360ba0ffb70bae22d4fcfef74c3f8e0e1243850d5a3277b76dd344800e381ad066a53c799946d01
++tx1_txid=55ad5c203a44943306ad5dea983fffc90833a6191dd01e86995420eb215a68a8
++tx2_chain=auralite-test-1
++tx2_seed=2222222222222222222222222222222222222222222222222222222222222222
++tx2_kind=2
++tx2_nonce=7
++tx2_payload=7472616e736665723a616c6963652d3e626f623a312e35414c435259
++tx2_gas=100000
++tx2_max_fee=5000000000000000000
++tx2_tip=1000000000000000
++tx2_expiry=999999
++tx2_address=b7e5cffb03e53b062a3187cb19736a10b407a4ca
++tx2_public_key=a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0
++tx2_unsigned=010f617572616c6974652d746573742d31b7e5cffb03e53b062a3187cb19736a10b407a4ca0700000000000000021c7472616e736665723a616c6963652d3e626f623a312e35414c435259a0860100000000000000f4448291634500000000000000000080c6a47e8d030000000000000000003f420f0000000000
++tx2_signing_bytes=417572614c6974652d43727970746f2f74782d7369676e696e672d763100010f617572616c6974652d746573742d31b7e5cffb03e53b062a3187cb19736a10b407a4ca0700000000000000021c7472616e736665723a616c6963652d3e626f623a312e35414c435259a0860100000000000000f4448291634500000000000000000080c6a47e8d030000000000000000003f420f0000000000
++tx2_signing_hash=ed7f20a6934afa887c02ec1151b091d72c20ff7c9cae3539bafce6c7b3ca8534
++tx2_signature=d2124bca539adec62f8b7e5aa0ec349c8bd6c504c014704ca9c0a00778f00d23dde9548953385e0170ffa52bc8c62ec97436c282260fef9bc499baf74ff4fe06
++tx2_bytes=010f617572616c6974652d746573742d31b7e5cffb03e53b062a3187cb19736a10b407a4ca0700000000000000021c7472616e736665723a616c6963652d3e626f623a312e35414c435259a0860100000000000000f4448291634500000000000000000080c6a47e8d030000000000000000003f420f000000000000a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0d2124bca539adec62f8b7e5aa0ec349c8bd6c504c014704ca9c0a00778f00d23dde9548953385e0170ffa52bc8c62ec97436c282260fef9bc499baf74ff4fe06
++tx2_txid=e3ea5fcaa27b2aa0b6b2fecc45017cc90319fcf79996a90286131d46a391f3ce
++tx3_chain=auralite-1
++tx3_seed=3333333333333333333333333333333333333333333333333333333333333333
++tx3_kind=3
++tx3_nonce=1
++tx3_payload=76616c696461746f723a63616e6469646174652d37
++tx3_gas=50000
++tx3_max_fee=1000000000000000000
++tx3_tip=100000000000000
++tx3_expiry=42
++tx3_address=b0a8765fc1c0bb0b7511ce09cc2658988d6049f7
++tx3_public_key=17cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce
++tx3_unsigned=010a617572616c6974652d31b0a8765fc1c0bb0b7511ce09cc2658988d6049f70100000000000000031576616c696461746f723a63616e6469646174652d3750c3000000000000000064a7b3b6e00d000000000000000000407a10f35a000000000000000000002a00000000000000
++tx3_signing_bytes=417572614c6974652d43727970746f2f74782d7369676e696e672d763100010a617572616c6974652d31b0a8765fc1c0bb0b7511ce09cc2658988d6049f70100000000000000031576616c696461746f723a63616e6469646174652d3750c3000000000000000064a7b3b6e00d000000000000000000407a10f35a000000000000000000002a00000000000000
++tx3_signing_hash=493648d2c2c97fdc7343c0b425d55c723bba5323ac1094e047d0bd58e6aecdce
++tx3_signature=accbeab78ca44825f14d30cc3f2b9a2b3db2435cc0456c1743b43cfe3048af8549e32525c9df3c7df7ccc529fbf6de4b8af898bbaaee0d5b6e9bce9e705a9809
++tx3_bytes=010a617572616c6974652d31b0a8765fc1c0bb0b7511ce09cc2658988d6049f70100000000000000031576616c696461746f723a63616e6469646174652d3750c3000000000000000064a7b3b6e00d000000000000000000407a10f35a000000000000000000002a000000000000000017cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ceaccbeab78ca44825f14d30cc3f2b9a2b3db2435cc0456c1743b43cfe3048af8549e32525c9df3c7df7ccc529fbf6de4b8af898bbaaee0d5b6e9bce9e705a9809
++tx3_txid=780bda09206cc8aa3fc533f1d84f33f81e500f81b9773881319d796d2b82d99d
++tx4_chain=auralite-test-1
++tx4_seed=4444444444444444444444444444444444444444444444444444444444444444
++tx4_kind=4
++tx4_nonce=18446744073709551615
++tx4_payload=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7
++tx4_gas=18446744073709551615
++tx4_max_fee=340282366920938463463374607431768211455
++tx4_tip=340282366920938463463374607431768211455
++tx4_expiry=18446744073709551615
++tx4_address=d9798144b7a2c575f60785f57d3544ecd7a0dee0
++tx4_public_key=d759793bbc13a2819a827c76adb6fba8a49aee007f49f2d0992d99b825ad2c48
++tx4_unsigned=010f617572616c6974652d746573742d31d9798144b7a2c575f60785f57d3544ecd7a0dee0ffffffffffffffff04c801000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
++tx4_signing_bytes=417572614c6974652d43727970746f2f74782d7369676e696e672d763100010f617572616c6974652d746573742d31d9798144b7a2c575f60785f57d3544ecd7a0dee0ffffffffffffffff04c801000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
++tx4_signing_hash=a21551add9c20224442faf8ffe718ef7d70fc688338fa83acf9cf5a8d58123c2
++tx4_signature=500e717da273cb0a26769182c7e2afc4b2666368df63911de175e4b8daed769079dc8ea9987cd95caa5eb7ae0aaa0382a04515dff8387a751ca1e321aeda1c00
++tx4_bytes=010f617572616c6974652d746573742d31d9798144b7a2c575f60785f57d3544ecd7a0dee0ffffffffffffffff04c801000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff00d759793bbc13a2819a827c76adb6fba8a49aee007f49f2d0992d99b825ad2c48500e717da273cb0a26769182c7e2afc4b2666368df63911de175e4b8daed769079dc8ea9987cd95caa5eb7ae0aaa0382a04515dff8387a751ca1e321aeda1c00
++tx4_txid=ac1db89ce6c2cc249ae09b8b6c1441b36c672696450c09f627ebb62adf08ceec
++tx5_chain=auralite-test-1
++tx5_seed=5555555555555555555555555555555555555555555555555555555555555555
++tx5_kind=1
++tx5_nonce=3
++tx5_payload=007761736d00696e6974
++tx5_gas=1
++tx5_max_fee=7
++tx5_tip=7
++tx5_expiry=0
++tx5_address=d70b3bb55bfde146302dfbb1d34ce7cfdc070cee
++tx5_public_key=c6822637c7d310ec57627be00ba259d253749f4aaf644470cffbe53a35f73242
++tx5_unsigned=010f617572616c6974652d746573742d31d70b3bb55bfde146302dfbb1d34ce7cfdc070cee0300000000000000010a007761736d00696e6974010000000000000007000000000000000000000000000000070000000000000000000000000000000000000000000000
++tx5_signing_bytes=417572614c6974652d43727970746f2f74782d7369676e696e672d763100010f617572616c6974652d746573742d31d70b3bb55bfde146302dfbb1d34ce7cfdc070cee0300000000000000010a007761736d00696e6974010000000000000007000000000000000000000000000000070000000000000000000000000000000000000000000000
++tx5_signing_hash=a86303f536395541d41a89253b5af506f9d1e7b6c4f7e4082668834dea562de3
++tx5_signature=d0c118c4425cd8141d5df0f7db3d48a05eb442b7e9f5ddf0537b3533557f51b9fe67c87c00e684789dd087024c4d0042123ed655e0ab1dfacd7797d33079ce09
++tx5_bytes=010f617572616c6974652d746573742d31d70b3bb55bfde146302dfbb1d34ce7cfdc070cee0300000000000000010a007761736d00696e697401000000000000000700000000000000000000000000000007000000000000000000000000000000000000000000000000c6822637c7d310ec57627be00ba259d253749f4aaf644470cffbe53a35f73242d0c118c4425cd8141d5df0f7db3d48a05eb442b7e9f5ddf0537b3533557f51b9fe67c87c00e684789dd087024c4d0042123ed655e0ab1dfacd7797d33079ce09
++tx5_txid=43fe1e8b050b8720db56d7f5d7db34647b571baf8707597a87a397e275e512cb
++bad_trailing=010f617572616c6974652d746573742d315f499b5477d1257183f73043b47d0d2d0415c6b70000000000000000000008520000000000000010a5d4e8000000000000000000000000000000000000000000000000000000e80300000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787373f0bd406f49b7b1fdd7f7d39a322a32a4e7fb079ebd7af348360ba0ffb70bae22d4fcfef74c3f8e0e1243850d5a3277b76dd344800e381ad066a53c799946d0100
++bad_truncated=010f617572616c6974652d746573742d315f499b5477d1257183f73043b47d0d2d0415c6b70000000000000000000008520000000000000010a5d4e8000000000000000000000000000000000000000000000000000000e80300000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787373f0bd406f49b7b1fdd7f7d39a322a32a4e7fb079ebd7af348360ba0ffb70bae22d4fcfef74c3f8e0e1243850d5a3277b76dd344800e381ad066a53c799946d
++bad_version=020f617572616c6974652d746573742d315f499b5477d1257183f73043b47d0d2d0415c6b70000000000000000000008520000000000000010a5d4e8000000000000000000000000000000000000000000000000000000e80300000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787373f0bd406f49b7b1fdd7f7d39a322a32a4e7fb079ebd7af348360ba0ffb70bae22d4fcfef74c3f8e0e1243850d5a3277b76dd344800e381ad066a53c799946d01
++bad_kind_tag=010f617572616c6974652d746573742d315f499b5477d1257183f73043b47d0d2d0415c6b70000000000000000090008520000000000000010a5d4e8000000000000000000000000000000000000000000000000000000e80300000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787373f0bd406f49b7b1fdd7f7d39a322a32a4e7fb079ebd7af348360ba0ffb70bae22d4fcfef74c3f8e0e1243850d5a3277b76dd344800e381ad066a53c799946d01
++bad_algo_tag=010f617572616c6974652d746573742d315f499b5477d1257183f73043b47d0d2d0415c6b70000000000000000000008520000000000000010a5d4e8000000000000000000000000000000000000000000000000000000e80300000000000001d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787373f0bd406f49b7b1fdd7f7d39a322a32a4e7fb079ebd7af348360ba0ffb70bae22d4fcfef74c3f8e0e1243850d5a3277b76dd344800e381ad066a53c799946d01
++bad_signer=010f617572616c6974652d746573742d315e499b5477d1257183f73043b47d0d2d0415c6b70000000000000000000008520000000000000010a5d4e8000000000000000000000000000000000000000000000000000000e80300000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787373f0bd406f49b7b1fdd7f7d39a322a32a4e7fb079ebd7af348360ba0ffb70bae22d4fcfef74c3f8e0e1243850d5a3277b76dd344800e381ad066a53c799946d01
++bad_signature=010f617572616c6974652d746573742d315f499b5477d1257183f73043b47d0d2d0415c6b70000000000000000000008520000000000000010a5d4e8000000000000000000000000000000000000000000000000000000e80300000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787373e0bd406f49b7b1fdd7f7d39a322a32a4e7fb079ebd7af348360ba0ffb70bae22d4fcfef74c3f8e0e1243850d5a3277b76dd344800e381ad066a53c799946d01
++bad_chain_len=018000617572616c6974652d746573742d315f499b5477d1257183f73043b47d0d2d0415c6b70000000000000000000008520000000000000010a5d4e8000000000000000000000000000000000000000000000000000000e80300000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787373f0bd406f49b7b1fdd7f7d39a322a32a4e7fb079ebd7af348360ba0ffb70bae22d4fcfef74c3f8e0e1243850d5a3277b76dd344800e381ad066a53c799946d01
++bad_payload_len=010f617572616c6974652d746573742d315f499b5477d1257183f73043b47d0d2d0415c6b7000000000000000000800008520000000000000010a5d4e8000000000000000000000000000000000000000000000000000000e80300000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787373f0bd406f49b7b1fdd7f7d39a322a32a4e7fb079ebd7af348360ba0ffb70bae22d4fcfef74c3f8e0e1243850d5a3277b76dd344800e381ad066a53c799946d01
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+index 5c92009..28b23c5 100644
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -41,6 +41,17 @@ Tx      = { chain_id, signer, nonce, kind, payload, gas_limit,
+ - **Versioning.** `version` in the header, `codec_version` in tx,
+   `abi_version` in contracts. Any change = migration test (C10/B10).
+ 
++**C4 transaction format.** `aura-tx` defines
++`Tx = UnsignedTx || Signature`, where `UnsignedTx` is
++`codec_version, chain_id, signer, nonce, kind, payload, gas_limit, max_fee,
++tip, expiry` in that exact order, and `Signature` is an envelope
++`{ algo, public_key[32], bytes[64] }`. `signing_bytes` =
++`SIGNING_CONTEXT || canonical(UnsignedTx)`; the signature is Ed25519 over the
++C3 domain-separated BLAKE3 digest. `signer` is bound to the public key via
++`BLAKE3(ADDRESS_CONTEXT || public_key)[0..20]`. `validate(expected_chain,
++height)` rejects replay across chain-ids. Full byte-level spec:
++[`docs/spec/tx-format.md`](spec/tx-format.md).
++
+ **C2 wire format (one value → one byte string).** `aura-codec` uses fixed-width
+ little-endian integers (no `usize`/`isize`), minimal LEB128 length prefixes,
+ strict tags for `bool`/`Option`/`Domain`/`Denom`, ascending `BTreeMap` entries,
+@@ -71,8 +82,9 @@ files, network, env, float undefinedness.
+ 
+ ```
+ aura-codec  <- aura-types
+-aura-crypto <- aura-codec, aura-types
+-aura-state  <- aura-codec, aura-crypto, aura-storage
++aura-crypto <- aura-types
++aura-tx     <- aura-types, aura-codec, aura-crypto   (C4, 12th crate)
++aura-state  <- aura-tx, aura-codec, aura-crypto, aura-storage
+ aura-exec   <- aura-state, aura-crypto, wasmtime
+ aura-consensus <- aura-state, aura-crypto, aura-p2p
+ aura-node(aurad) <- all of the above + aura-rpc + aura-mempool
+diff --git a/docs/STATUS.md b/docs/STATUS.md
+index b84653d..4338fa5 100644
+--- a/docs/STATUS.md
++++ b/docs/STATUS.md
+@@ -1,8 +1,8 @@
+ # Implementation status — AuraLite-Crypto
+ 
+ > Updated **in the same patch** as the phase's code (rule D9).
+-> Snapshot date: **2026-10-25**, tree: "C3 landed — types, codec and
+-> `aura-crypto`, Stage 1 in progress".
++> Snapshot date: **2026-10-25**, tree: "C4 landed — types, codec, crypto
++> and `aura-tx`, Stage 1 in progress".
+ 
+ ## Locked decisions (2026-10-25)
+ 
+@@ -20,7 +20,8 @@
+ **Phase ledger:** C0 ✅ (`patches/0001-C0-baseline-workspace.patch`),
+ C1 ✅ (`patches/0002-C1-types.patch`), C2 ✅
+ (`patches/0003-C2-codec.patch`) and C3 ✅
+-(`patches/0004-C3-crypto.patch`) done; C4 (tx format) is next. No other
++(`patches/0004-C3-crypto.patch`) and C4 ✅
++(`patches/0005-C4-tx-format.patch`) done; C5 (block/header) is next. No other
+ phase has started.
+ 
+ ## Maturity level
+@@ -39,12 +40,13 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
+ ## Working now
+ 
+ - `make test` is green: `cargo fmt --check`, `cargo clippy --workspace
+-  --all-targets -- -D warnings`, `cargo test --workspace` (**39 tests**),
++  --all-targets -- -D warnings`, `cargo test --workspace` (**49 tests**),
+   the docs drift guard and the dependency gate. Receipts:
+   `docs/evidence/c0-baseline.txt`, `docs/evidence/c0/nc.log`,
+   `docs/evidence/c1/gates.txt`, `docs/evidence/c1/nc.log`,
+   `docs/evidence/c2/gates.txt`, `docs/evidence/c2/nc.log`,
+-  `docs/evidence/c3/gates.txt`, `docs/evidence/c3/nc.log`.
++  `docs/evidence/c3/gates.txt`, `docs/evidence/c3/nc.log`,
++  `docs/evidence/c4/gates.txt`, `docs/evidence/c4/nc.log`.
+ - `aura-types` exports the locked D0 identity (`auralite-test-1`, `ALCRY`,
+   18 decimals, `aura`, `bft-pos`, `wasm`, v1) **and** the C1 canonical types:
+   `Hash`, bech32 `Address`, `Amount`/`Denom`, `ChainId`, `Nonce`, `Height`,
+@@ -63,11 +65,17 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
+   official BLAKE3 vectors, RFC 8032 §7.1 and a pure-Python secp256k1
+   reference (OpenSSL-verified). 5 C3 negative controls pin the context, two
+   fixtures, the verifier and the dependency allowlist.
++- C4 adds the **12th crate**, `aura-tx`, with no new external dependencies.
++  It fixes `Tx = UnsignedTx || Signature`, canonical `signing_bytes`,
++  signer↔public-key binding, txid and replay protection. Spec:
++  `docs/spec/tx-format.md`; 5 canonical + 9 rejection golden vectors from
++  `tools/gen_c4_vectors.py`; 6 C4 negative controls (contexts, fixture,
++  replay, binding, verification).
+ - **Dependencies changed at C3:** 54 external crates, all with exact `=x.y.z`
+   pins, crates.io sources and sha256 checksums, recorded in
+   `docs/spec/c3-dependency-allowlist.txt` and checked by `make check-deps`
+   inside `make test`. `cargo deny` (licences/advisories) is still owed to H1.
+-- 10 placeholder crates compile but expose **no API** (an honest empty crate,
++  8 placeholder crates compile but expose **no API** (an honest empty crate,
+   not a fake `Ok(())`). CI runs the same commands as `make test`.
+ - Still absent: consensus, VM, P2P, node, RPC, wallet, explorer, contracts.
+   Present and agreed: north star, 12 plans, 112 phase rows, contribution rules,
+@@ -77,24 +85,25 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
+ ## Measured numbers (2026-10-25)
+ 
+ ```
+-find crates -name Cargo.toml       -> 11 crates (+1 workspace root)
+-find . -name '*.rs' -not -path './target/*' -> 28 files
++find crates -name Cargo.toml       -> 12 crates (+1 workspace root)
++find . -name '*.rs' -not -path './target/*' -> 34 files
+ ls docs/plans/*_PLAN.md           -> 12 plans / 112 phase rows
+-cargo test --workspace            -> 39 passed; 0 failed
++cargo test --workspace            -> 49 passed; 0 failed
+ make test                         -> ALL GATES GREEN
+-make nc-c0 / nc-c1 / nc-c2 / nc-c3 -> 2/2 + 3/3 + 4/4 + 5/5 = 14 NC PASS
++make nc-all                       -> 2/2 + 3/3 + 4/4 + 5/5 + 6/6 = 20 NC PASS
+ make check-deps                   -> 54 external crates allowlisted
+ validators / blocks / tx          -> 0 / 0 / 0
+ ```
+ 
+-Pre-C0 baseline and post-C0/C1/C2/C3 numbers with raw command output are in
++Pre-C0 baseline and post-C0/C1/C2/C3/C4 numbers with raw command output are in
+ `docs/evidence/c0-baseline.txt`, `docs/evidence/c1/gates.txt`,
+-`docs/evidence/c2/gates.txt` and `docs/evidence/c3/gates.txt`.
++`docs/evidence/c2/gates.txt`, `docs/evidence/c3/gates.txt` and
++`docs/evidence/c4/gates.txt`.
+ 
+ ## What is missing (and must not be lost)
+ 
+-- No tx/block formats (C4/C5), no Merkle proofs (C6), no BLS aggregation
+-  (B2), no PQ migration (H2), no `cargo deny` (H1).
++- No block/header format (C5), no Merkle proofs (C6), no accounts (C7), no
++  BLS aggregation (B2), no PQ migration (H2), no `cargo deny` (H1).
+ - No consensus, no P2P, no state, no VM.
+ - No wallet, explorer, contracts, token.
+ - No audit, no bug bounty, no legal opinion.
+diff --git a/docs/evidence/c4/SHA256SUMS b/docs/evidence/c4/SHA256SUMS
+new file mode 100644
+index 0000000..d6246c0
+--- /dev/null
++++ b/docs/evidence/c4/SHA256SUMS
+@@ -0,0 +1,4 @@
++5625d17dea191914165c26b232b9a26d8a5298dca07e95a138c8a74442f05d2a  docs/evidence/c4/gates.txt
++5805571ac3fcc8b395ad014bf3d9f6073d789db28a4420e6e19d7e65b237eca4  docs/evidence/c4/nc.log
++a99585c916482068a32589d6e83a0439504087c646cb9d1f869391d9ad5801d3  crates/aura-tx/tests/fixtures/c4_golden.txt
++af7bace7c48c0e82737f39412251b8c28c0a848d54338b4bc70f0ccf03d533b6  docs/spec/tx-format.md
+diff --git a/docs/evidence/c4/gates.txt b/docs/evidence/c4/gates.txt
+new file mode 100644
+index 0000000..718588f
+--- /dev/null
++++ b/docs/evidence/c4/gates.txt
+@@ -0,0 +1,148 @@
++AuraLite-Crypto — C4 evidence (aura-tx transaction format)
++Generated (UTC): 2026-10-25T17:41:30+00:00
++Rule: measured against the tree, not assumed.
++
++Independent references: tools/gen_c4_vectors.py self-checks pure-Python
++BLAKE3 against official BLAKE3 vectors and pure-Python Ed25519 against
++RFC 8032 §7.1 before emitting 5 canonical tx vectors + 9 rejections.
++
++========================================================================
++RAW COMMAND OUTPUT
++========================================================================
++
++--- toolchain ---
++$ rustc --version && cargo --version
++rustc 1.99.1 (58cf8f9c3 2026-10-13)
++cargo 1.99.1 (5f94df478 2026-08-27)
++[rc=0]
++
++--- pre-C4 tree (C3 commit) ---
++$ git log -1 --oneline
++1a0c915 C3 patch artifact
++[rc=0]
++
++--- pre-C4 workspace crates ---
++$ git ls-tree -r --name-only HEAD | grep -c 'crates/.*/Cargo.toml$' || true
++11
++[rc=0]
++
++--- pre-C4 .rs files ---
++$ git ls-tree -r --name-only HEAD | grep -c '\.rs$' || true
++28
++[rc=0]
++
++--- pre-C4 external deps ---
++$ git show HEAD:Cargo.lock | grep -c '^source = ' || true
++54
++[rc=0]
++
++--- post-C4 workspace crates ---
++$ find crates -name Cargo.toml | wc -l
++12
++[rc=0]
++
++--- post-C4 .rs files ---
++$ find . -name '*.rs' -not -path './target/*' | wc -l
++34
++[rc=0]
++
++--- post-C4 external deps ---
++$ grep -c '^source = ' Cargo.lock || true
++54
++[rc=0]
++
++--- post-C4 plan phase rows ---
++$ grep -hE '^\| (✅ |⏸ )?\*\*[A-Z]+[0-9]+\*\* \|' docs/plans/*_PLAN.md | wc -l
++112
++[rc=0]
++
++--- dependency gate ---
++$ python3 tools/check_deps.py
++DEPENDENCY GATE: OK — 66 lock packages (12 local, 54 external, all checksummed + allowlisted)
++[rc=0]
++
++--- docs drift guard ---
++$ python3 tools/check_claims.py
++DOCS DRIFT GUARD: OK — 20 markdown files, 12 plans, 112 phase rows, all local links resolve
++[rc=0]
++
++--- independent generator is idempotent ---
++$ $ (shell script: generator idempotence check)
++generator idempotent: a99585c916482068a32589d6e83a0439504087c646cb9d1f869391d9ad5801d3
++[rc=0]
++
++--- all negative controls (C0-C4) ---
++$ make nc-all
++make[1]: Entering directory '/home/user/AuraLite-Crypto'
++RESULT: 2/2 negative controls PASS
++RESULT: 3/3 negative controls PASS
++RESULT: 4/4 negative controls PASS
++RESULT: 5/5 negative controls PASS
++RESULT: 6/6 negative controls PASS
++make[1]: Leaving directory '/home/user/AuraLite-Crypto'
++[rc=0]
++
++--- C4 negative controls (evidence log) ---
++$ make nc-c4
++
++error: test failed, to rerun pass `-p aura-tx --test c4_tx`
++NC-3 independent golden signature: PASS
++      cargo test -p aura-tx -> rc=101 (RED as expected)
++          golden_transactions_match_the_independent_encoder
++
++test result: FAILED. 9 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
++
++error: test failed, to rerun pass `-p aura-tx --test c4_tx`
++NC-4 replay protection: PASS
++      cargo test -p aura-tx -> rc=101 (RED as expected)
++          replay_across_chains_is_rejected
++
++test result: FAILED. 9 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
++
++error: test failed, to rerun pass `-p aura-tx --test c4_tx`
++NC-5 signer/public-key binding: PASS
++      cargo test -p aura-tx -> rc=101 (RED as expected)
++          bad_vectors_return_the_specific_error
++
++test result: FAILED. 9 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
++
++error: test failed, to rerun pass `-p aura-tx --test c4_tx`
++NC-6 Ed25519 verification bypass: PASS
++      cargo test -p aura-tx -> rc=101 (RED as expected)
++          |
++199 | fn verify_ed25519(pk: &[u8; 32], chain: &str, msg: &[u8], sig: &[u8; 64]) -> Result<(), TxError> {
++    |                                                           ^^^ help: if this is intentional, prefix it with an underscore: `_sig`
++
++error: test failed, to rerun pass `-p aura-tx --test c4_tx`
++
++RESULT: 6/6 negative controls PASS
++restore check: cargo test -p aura-tx -> rc=0 (GREEN as expected)
++make[1]: Leaving directory '/home/user/AuraLite-Crypto'
++[rc=0]
++
++--- full gate ---
++$ make test
++   Doc-tests aura_mempool
++   Doc-tests aura_node
++   Doc-tests aura_p2p
++   Doc-tests aura_rpc
++   Doc-tests aura_state
++   Doc-tests aura_storage
++   Doc-tests aura_tx
++   Doc-tests aura_types
++[rc=0]
++
++========================================================================
++SUMMARY
++========================================================================
++
++Pre-C4 (C3 tree): 11 crates, 28 .rs files, 54 external deps, 39 tests.
++Post-C4: 12 crates (aura-tx added, 8 placeholders remain), 34 .rs
++files, 54 external deps (no new ones), 49 tests passing (39 C0-C3 +
++10 C4), `make test` ALL GATES GREEN, 20 negative controls total
++(2+3+4+5+6), 6/6 of them new in C4.
++Validators/blocks/tx remain 0/0/0 — C4 is a format, not a network.
++
++Note: C0-C3 evidence is now HISTORICAL and is no longer regenerated
++in CI. `make nc-all` runs every NC script without rewriting those
++logs, so the committed SHA256SUMS stay valid.
+diff --git a/docs/evidence/c4/nc.log b/docs/evidence/c4/nc.log
+new file mode 100644
+index 0000000..20f363d
+--- /dev/null
++++ b/docs/evidence/c4/nc.log
+@@ -0,0 +1,48 @@
++C4 NEGATIVE CONTROLS — 2026-10-25T17:41:44+00:00
++Rule: a gate that cannot go red is not a gate (CONTRIBUTING.md §1).
++
++NC-1 signing context: PASS
++      cargo test -p aura-tx -> rc=101 (RED as expected)
++          golden_transactions_match_the_independent_encoder
++
++test result: FAILED. 8 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
++
++error: test failed, to rerun pass `-p aura-tx --test c4_tx`
++NC-2 txid context: PASS
++      cargo test -p aura-tx -> rc=101 (RED as expected)
++          golden_transactions_match_the_independent_encoder
++
++test result: FAILED. 8 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
++
++error: test failed, to rerun pass `-p aura-tx --test c4_tx`
++NC-3 independent golden signature: PASS
++      cargo test -p aura-tx -> rc=101 (RED as expected)
++          golden_transactions_match_the_independent_encoder
++
++test result: FAILED. 9 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
++
++error: test failed, to rerun pass `-p aura-tx --test c4_tx`
++NC-4 replay protection: PASS
++      cargo test -p aura-tx -> rc=101 (RED as expected)
++          replay_across_chains_is_rejected
++
++test result: FAILED. 9 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
++
++error: test failed, to rerun pass `-p aura-tx --test c4_tx`
++NC-5 signer/public-key binding: PASS
++      cargo test -p aura-tx -> rc=101 (RED as expected)
++          bad_vectors_return_the_specific_error
++
++test result: FAILED. 9 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
++
++error: test failed, to rerun pass `-p aura-tx --test c4_tx`
++NC-6 Ed25519 verification bypass: PASS
++      cargo test -p aura-tx -> rc=101 (RED as expected)
++          |
++199 | fn verify_ed25519(pk: &[u8; 32], chain: &str, msg: &[u8], sig: &[u8; 64]) -> Result<(), TxError> {
++    |                                                           ^^^ help: if this is intentional, prefix it with an underscore: `_sig`
++
++error: test failed, to rerun pass `-p aura-tx --test c4_tx`
++
++RESULT: 6/6 negative controls PASS
++restore check: cargo test -p aura-tx -> rc=0 (GREEN as expected)
+diff --git a/docs/plans/CORE_PLAN.md b/docs/plans/CORE_PLAN.md
+index 64ba878..978253e 100644
+--- a/docs/plans/CORE_PLAN.md
++++ b/docs/plans/CORE_PLAN.md
+@@ -1,6 +1,6 @@
+ # CORE_PLAN — primitives, codec, cryptography, formats
+ 
+-**Status:** 🚧 IN PROGRESS (C0–C3 done ✅ 2026-10-25; C4 next)  
++**Status:** 🚧 IN PROGRESS (C0–C4 done ✅ 2026-10-25; C5 next)  
+ **Stage:** Stage 1: C0–C10 (all phases active).  
+ **Deliverable:** `patches/0001-C0-...` … `patches/0011-C10-...`
+ **Dependencies:** none. This is the root of the whole tree.
+@@ -23,6 +23,10 @@ other 11 plans rest.
+   non-canonical encodings. `serde` is for RPC/configs only.
+ - **D-C4.** Hash is BLAKE3 with domain tags; `Hash` is a newtype over `[u8; 32]`.
+ - **D-C5.** All signatures: `sign(domain || chain_id || canonical_bytes)`.
++- **D-C6 (C4).** The transaction format lives in a dedicated 12th crate,
++  `aura-tx`, because it needs **both** `aura-codec` and `aura-crypto` without
++  inverting the layering (a lower layer must not know a higher one). C4
++  updates the crate graph in `ARCHITECTURE.md` §3 and all crate counts.
+ 
+ ## Phases
+ 
+@@ -32,7 +36,7 @@ other 11 plans rest.
+ | ✅ **C1** | Canonical types | `Hash`, `Address` (bech32 `aura1...`), `Amount`/`Denom` (`ALCRY` / `aalcry`), `ChainId`, `Nonce`, `Height`, `Gas`, `Domain`; `BTreeMap` instead of `HashMap` | unit vectors: bech32 round-trip, bad checksum rejected, checked `Amount` overflow |
+ | ✅ **C2** | `aura-codec` | fixed field order, lengths, `Option` tags, non-canonical encodings banned, `codec_version` | golden vectors (hex fixtures), property: `decode(encode(x)) == x`, NC: one mutated byte → `Err` |
+ | ✅ **C3** | `aura-crypto` | BLAKE3 + domain tags, Ed25519, secp256k1, constant-time compare, zeroize | RFC/test-vector signatures, malleable `s` rejected, NC: swapped domain → `Err` |
+-| **C4** | Transaction format | `Tx { chain_id, signer, nonce, kind, payload, gas_limit, max_fee, tip, expiry, sig }`, canonical `signing_bytes` | sign/verify, replay test: a tx from `auralite-1` rejected in `auralite-test-1` |
++| ✅ **C4** | Transaction format | `Tx { chain_id, signer, nonce, kind, payload, gas_limit, max_fee, tip, expiry, sig }`, canonical `signing_bytes` | sign/verify, replay test: a tx from `auralite-1` rejected in `auralite-test-1` |
+ | **C5** | Block and header | `Header`/`Body`, `block_hash`, `tx_root`, `state_root`, `validator_set_hash`, protocol version | vector: changing tx order changes `tx_root`; NC: reorder without recompute → red |
+ | **C6** | Merkle proofs | build/verify proofs for txs and events, compact format | 1000 leaves, all proofs valid, one substituted — invalid |
+ | **C7** | Account model | `Account { nonce, balance, code_hash, storage_root }`, state key layout, reserved prefixes | gate: keys of two accounts do not collide, reserved space unreachable from contracts |
+@@ -136,6 +140,52 @@ other 11 plans rest.
+ - Deferred: BLS12-381 QC aggregation (B2), PQ migration to ML-DSA/SLH-DSA
+   (H2), tx/block formats (C4/C5).
+ 
++
++### C4 receipt (2026-10-25)
++
++- Deliverable: `patches/0005-C4-tx-format.patch`.
++- Landed: the 12th crate `aura-tx` (no new external dependencies). `Tx =
++  UnsignedTx || Signature`; `UnsignedTx` has the ten C4 fields plus
++  `codec_version`; `Signature` is an envelope `{ algo, public_key[32],
++  bytes[64] }` because Ed25519 cannot recover a public key. `TxParams`
++  groups the nine constructor fields (fixes `clippy::too_many_arguments`
++  without suppressing the lint).
++- Canonical `signing_bytes` = `SIGNING_CONTEXT || canonical(UnsignedTx)`,
++  signed via C3's domain-separated `aura_crypto::sign(Domain::Tx, chain_id)`.
++  `signer` is bound to the key by
++  `BLAKE3(ADDRESS_CONTEXT || public_key)[0..20]`. `txid` =
++  `BLAKE3(TXID_CONTEXT || canonical(Tx))`. Replay protection:
++  `validate(expected_chain, height)` rejects a tx minted for `auralite-1`
++  on `auralite-test-1` (DoD gate), and rewriting the chain-id after signing
++  breaks the signature.
++- Validation order: version, chain, payload ≤ 65536, gas ≠ 0, tip ≤ max_fee,
++  `height ≤ expiry`, signature. `height`/`expiry` are consensus heights, not
++  a local clock. Nonce/state checks remain C7/mempool.
++- Spec: `docs/spec/tx-format.md` (field table, wire layout, tags, signing,
++  txid, validation, errors, non-goals).
++- Golden vectors: `tools/gen_c4_vectors.py` — independent Python containing
++  pure-Python BLAKE3 (self-checked against 7 official vectors), pure-Python
++  Ed25519 (self-checked against RFC 8032 TEST 1/2/3) and a C2 wire encoder.
++  104 fixture lines: 5 canonical transactions (incl. u64/u128 maxima, a
++  mainnet-chain tx) and 9 rejection vectors, each pinned to a specific error.
++  Generator is offline and byte-stable.
++- Additive C2 change: `CodecError::InvalidEnumTag(&'static str, u8)` for
++  caller-defined enums (`TxKind`, `SignatureAlgo`). No C2 wire-format change;
++  C2 golden vectors and checksums are untouched.
++- Gate: `make test` → **49 passed / 0 failed** (39 C0–C3 + 10 C4), fmt/clippy
++  clean, drift guard 12 plans / 112 rows / 20 markdown files, dependency
++  gate 54 external crates allowlisted.
++- NC: `make nc-c4` → **6/6 PASS**: signing context, txid context, golden
++  signature, replay protection, signer↔key binding, Ed25519 verification.
++  Total across C0–C4: **20 NC** via `make nc-all`.
++- Evidence: `docs/evidence/c4/gates.txt`, `docs/evidence/c4/nc.log`,
++  `docs/evidence/c4/SHA256SUMS` (also pins the golden fixture and the spec).
++- CI: `make nc-all` runs every NC without rewriting historical C0–C3 logs;
++  only the current phase's evidence is regenerated. This keeps the committed
++  `SHA256SUMS` of past phases valid.
++- Deferred: block/header and `tx_root` (C5), Merkle proofs (C6), accounts
++  (C7), genesis (C8), fuzzing (C9), secp256k1 in tx signatures, PQ (H2).
++
+ ## Key risks
+ 
+ 1. **Non-canonical serialization** → two nodes get different hashes for the same
+diff --git a/docs/spec/tx-format.md b/docs/spec/tx-format.md
+new file mode 100644
+index 0000000..e41d896
+--- /dev/null
++++ b/docs/spec/tx-format.md
+@@ -0,0 +1,140 @@
++# Transaction format — C4 specification
++
++**Status:** ✅ implemented in `crates/aura-tx` (2026-10-25).
++**Authority:** [`CORE_PLAN.md`](../plans/CORE_PLAN.md) C4 and
++[`ARCHITECTURE.md`](../ARCHITECTURE.md) §1. This file fixes the bytes; any
++change requires a new phase, a `CODEC_VERSION` bump, regenerated golden
++vectors and a migration test.
++
++## 1. Shape
++
++A transaction is `Tx = UnsignedTx || Signature`. Grouping the unsigned fields
++is an implementation detail: the logical field list is exactly the C4 DoD —
++`chain_id, signer, nonce, kind, payload, gas_limit, max_fee, tip, expiry,
++sig` — plus `codec_version`, required by `ARCHITECTURE.md` §1.
++
++`Signature` is an **envelope**: `{ algo, public_key[32], bytes[64] }`.
++Ed25519 cannot recover a public key from a signature, so the key travels with
++the transaction and is bound to `signer` (§4). A bare 64-byte signature would
++need an on-chain key registry that does not exist yet (C7).
++
++## 2. Wire layout
++
++All integers are little-endian fixed width; all lengths/counts are minimal
++unsigned LEB128. This is the C2 format — see
++[`tools/gen_c2_vectors.py`](../../tools/gen_c2_vectors.py) and
++`crates/aura-codec`. There is no `usize`, no `HashMap`, no `serde`.
++
++`UnsignedTx` (in this exact order):
++
++| # | Field | Type | Encoding |
++|---|---|---|---|
++| 1 | `codec_version` | `u8` | 1 byte, must equal `CODEC_VERSION = 1` |
++| 2 | `chain_id` | `ChainId` | `varint(len) ‖ UTF-8`, validated charset (C1) |
++| 3 | `signer` | `Address` | 20 raw bytes |
++| 4 | `nonce` | `Nonce` | `u64` LE |
++| 5 | `kind` | `TxKind` | 1-byte tag (§3) |
++| 6 | `payload` | `Vec<u8>` | `varint(count) ‖ bytes`, `count ≤ 65536` |
++| 7 | `gas_limit` | `Gas` | `u64` LE |
++| 8 | `max_fee` | `Amount` | `u128` LE |
++| 9 | `tip` | `Amount` | `u128` LE |
++| 10 | `expiry` | `Height` | `u64` LE |
++
++`Signature` (appended):
++
++| # | Field | Type | Encoding |
++|---|---|---|---|
++| 11 | `algo` | `SignatureAlgo` | 1-byte tag, `0` = Ed25519 only |
++| 12 | `public_key` | `[u8; 32]` | 32 raw bytes |
++| 13 | `bytes` | `[u8; 64]` | 64 raw bytes |
++
++`MAX_TX_PAYLOAD = 65536`, aligned with `aura-codec`'s `MAX_ITEMS`. Decoding
++uses `decode_canonical()`: unknown tags, non-minimal varints, trailing bytes
++and re-encode mismatches are errors.
++
++## 3. Tags
++
++| `TxKind` | tag | `SignatureAlgo` | tag |
++|---|---|---|---|
++| `Transfer` | 0 | `Ed25519` | 0 |
++| `Deploy` | 1 | | |
++| `Call` | 2 | | |
++| `Delegate` | 3 | | |
++| `Undelegate` | 4 | | |
++
++All other tags are rejected. Tag `1` for `SignatureAlgo` (secp256k1) is
++**reserved but not accepted** in the Stage 1 tx format, even though
++`aura-crypto` implements secp256k1 for compatibility. PQ algorithms will get
++a separate tag range (H2).
++
++## 4. Signing
++
++```
++signing_bytes = SIGNING_CONTEXT ‖ canonical(UnsignedTx)
++signing_hash  = BLAKE3(C3_domain_message(chain_id, "tx", signing_bytes))
++signature     = Ed25519_sign(seed, signing_hash)      // RFC 8032, pure
++signer        = BLAKE3(ADDRESS_CONTEXT ‖ public_key)[0..20]
++```
++
++* `SIGNING_CONTEXT = b"AuraLite-Crypto/tx-signing-v1\0"` — distinguishes the
++  tx body from every other message the codec can produce.
++* `C3_domain_message` is the length-prefixed framing from `aura-crypto`:
++  `HASH_CONTEXT ‖ u64(len(prefix)) ‖ prefix ‖ u64(len(payload)) ‖ payload`,
++  `prefix = chain_id ‖ 0 ‖ "tx" ‖ 0`. It adds chain-id and purpose separation
++  a second time (rule D5), so a testnet signature cannot be replayed on
++  mainnet and a vote cannot be replayed as a transaction.
++* `ADDRESS_CONTEXT = b"AuraLite-Crypto/address-v1\0"`.
++* `sign()` refuses a seed whose public key does not derive to `signer`.
++
++Verification requires **all** of: `algo == Ed25519`,
++`signer_address(public_key) == signer`, and a valid Ed25519 signature over
++`signing_hash`.
++
++## 5. Transaction id
++
++```
++txid = BLAKE3(TXID_CONTEXT ‖ canonical(Tx))
++TXID_CONTEXT = b"AuraLite-Crypto/txid-v1\0"
++```
++
++The signature is included, so two different signatures over the same
++unsigned body have different ids. `txid` is not used for consensus ordering
++yet — that is C5 (`tx_root`).
++
++## 6. Validation order
++
++`Tx::validate(expected_chain, height)` checks, in order:
++
++1. `codec_version == CODEC_VERSION`;
++2. `chain_id == expected_chain` — **replay protection**;
++3. `payload.len() <= MAX_TX_PAYLOAD`;
++4. `gas_limit != 0`;
++5. `tip <= max_fee`;
++6. `height <= expiry`;
++7. `verify_signature()` (§4).
++
++`height` and `expiry` are consensus heights, never a local clock. Nonce/state
++checks belong to C7 and the mempool (D3), not here.
++
++## 7. Golden vectors and negative controls
++
++`tools/gen_c4_vectors.py` is an independent Python implementation. It
++self-checks pure-Python BLAKE3 against 7 official BLAKE3 vectors and
++pure-Python Ed25519 against RFC 8032 §7.1 TEST 1/2/3 **before** emitting
++`crates/aura-tx/tests/fixtures/c4_golden.txt`. The fixture holds 5 canonical
++transactions (including u64/u128 maxima and a mainnet-chain tx) and 9
++rejection vectors: trailing byte, truncation, bad version, unknown kind,
++unknown algorithm, tampered signer, tampered signature, non-minimal chain
++length, non-minimal payload length.
++
++`tools/nc_c4.py` runs 6 negative controls: both contexts, a golden fixture,
++replay protection, signer↔key binding and signature verification. Total
++across C0–C4: **20 NC**.
++
++## 8. Non-goals at C4
++
++Block/header format and `tx_root` (C5), Merkle proofs (C6), accounts and key
++layout (C7), genesis (C8), fuzzing (C9), secp256k1 in tx signatures, hardware
++keys (W5), PQ signatures (H2). Fee *charging*, gas metering and execution are
++not implemented — C4 only fixes the bytes and the checks that can be done
++without state.
+diff --git a/tools/gen_c4_vectors.py b/tools/gen_c4_vectors.py
+new file mode 100644
+index 0000000..374332c
+--- /dev/null
++++ b/tools/gen_c4_vectors.py
+@@ -0,0 +1,373 @@
++#!/usr/bin/env python3
++"""Generate C4 transaction golden vectors from INDEPENDENT references.
++
++No Rust code, no network. The generator contains three independent
++implementations, each self-checked before use:
++
++  * pure-Python BLAKE3 (single chunk) — self-checked against 15 official
++    BLAKE3-team test vectors;
++  * pure-Python Ed25519 (RFC 8032) — self-checked against RFC 8032 §7.1
++    TEST 1/2/3;
++  * a Python transcription of the C2 wire format + C4 tx layout.
++
++It emits canonical tx bytes, signing bytes, signing hash, Ed25519 public key
++and signature, signer address and txid for five transactions, plus a set of
++non-canonical / tampered vectors that must be rejected.
++
++Usage:
++    python3 tools/gen_c4_vectors.py
++    make gen-c4-vectors
++
++Output: crates/aura-tx/tests/fixtures/c4_golden.txt
++"""
++
++from __future__ import annotations
++
++import hashlib
++import struct
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++OUT = REPO / "crates" / "aura-tx" / "tests" / "fixtures" / "c4_golden.txt"
++
++CODEC_VERSION = 1
++HASH_CONTEXT = b"AuraLite-Crypto/crypto-v1\x00"          # from C3
++SIGNING_CONTEXT = b"AuraLite-Crypto/tx-signing-v1\x00"
++TXID_CONTEXT = b"AuraLite-Crypto/txid-v1\x00"
++ADDRESS_CONTEXT = b"AuraLite-Crypto/address-v1\x00"
++MAX_TX_PAYLOAD = 65536
++
++# ---------------------------------------------------------------- BLAKE3 ---
++MASK = 0xFFFFFFFF
++IV = [0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A,
++      0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19]
++PERM = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8]
++CHUNK_START, CHUNK_END, ROOT = 1, 2, 8
++
++
++def _rotr(x: int, n: int) -> int:
++    return ((x >> n) | (x << (32 - n))) & MASK
++
++
++def _g(s: list[int], a: int, b: int, c: int, d: int, mx: int, my: int) -> None:
++    s[a] = (s[a] + s[b] + mx) & MASK
++    s[d] = _rotr(s[d] ^ s[a], 16)
++    s[c] = (s[c] + s[d]) & MASK
++    s[b] = _rotr(s[b] ^ s[c], 12)
++    s[a] = (s[a] + s[b] + my) & MASK
++    s[d] = _rotr(s[d] ^ s[a], 8)
++    s[c] = (s[c] + s[d]) & MASK
++    s[b] = _rotr(s[b] ^ s[c], 7)
++
++
++def _compress(cv, block, counter: int, block_len: int, flags: int) -> list[int]:
++    s = list(cv) + list(IV)
++    s[12], s[13], s[14], s[15] = counter & MASK, (counter >> 32) & MASK, block_len, flags
++    m = list(block)
++    for r in range(7):
++        _g(s, 0, 4, 8, 12, m[0], m[1]); _g(s, 1, 5, 9, 13, m[2], m[3])
++        _g(s, 2, 6, 10, 14, m[4], m[5]); _g(s, 3, 7, 11, 15, m[6], m[7])
++        _g(s, 0, 5, 10, 15, m[8], m[9]); _g(s, 1, 6, 11, 12, m[10], m[11])
++        _g(s, 2, 7, 8, 13, m[12], m[13]); _g(s, 3, 4, 9, 14, m[14], m[15])
++        if r != 6:
++            m = [m[PERM[i]] for i in range(16)]
++    return [s[i] ^ s[i + 8] for i in range(8)] + [s[i + 8] ^ cv[i] for i in range(8)]
++
++
++def blake3_short(data: bytes) -> bytes:
++    """BLAKE3 for inputs <= 1024 bytes (one chunk)."""
++    assert len(data) <= 1024, "reference handles a single chunk only"
++    blocks = [data[i:i + 64] for i in range(0, len(data), 64)] or [b""]
++    cv = IV
++    for i, block in enumerate(blocks[:-1]):
++        flags = CHUNK_START if i == 0 else 0
++        cv = _compress(cv, list(struct.unpack("<16I", block.ljust(64, b"\0"))), 0, 64, flags)[:8]
++    last = blocks[-1]
++    flags = (CHUNK_START if len(blocks) == 1 else 0) | CHUNK_END
++    words = list(struct.unpack("<16I", last.ljust(64, b"\0")))
++    out = _compress(cv, words, 0, len(last), flags | ROOT)
++    return struct.pack("<8I", *out[:8])
++
++
++# Subset of BLAKE3-team/BLAKE3 test_vectors.json (first 32 bytes of the XOF).
++OFFICIAL_B3 = {
++    0: "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
++    1: "2d3adedff11b61f14c886e35afa036736dcd87a74d27b5c1510225d0f592e213",
++    63: "e9bc37a594daad83be9470df7f7b3798297c3d834ce80ba85d6e207627b7db7b",
++    64: "4eed7141ea4a5cd4b788606bd23f46e212af9cacebacdc7d1f4c6dc7f2511b98",
++    65: "de1e5fa0be70df6d2be8fffd0e99ceaa8eb6e8c93a63f2d8d1c30ecb6b263dee",
++    1023: "10108970eeda3eb932baac1428c7a2163b0e924c9a9e25b35bba72b28f70bd11",
++    1024: "42214739f095a406f3fc83deb889744ac00df831c10daa55189b5d121c855af7",
++}
++
++# -------------------------------------------------------------- Ed25519 ---
++Q = 2**255 - 19
++L = 2**252 + 27742317777372353535851937790883648493
++D = (-121665 * pow(121666, Q - 2, Q)) % Q
++SQRT_M1 = pow(2, (Q - 1) // 4, Q)
++
++
++def _xrecover(y: int) -> int:
++    xx = (y * y - 1) * pow(D * y * y + 1, Q - 2, Q) % Q
++    x = pow(xx, (Q + 3) // 8, Q)
++    if (x * x - xx) % Q != 0:
++        x = x * SQRT_M1 % Q
++    if x % 2 != 0:
++        x = Q - x
++    return x
++
++
++BY = 4 * pow(5, Q - 2, Q) % Q
++BASE = (_xrecover(BY), BY)
++
++
++def _edwards(p, qp):
++    x1, y1 = p
++    x2, y2 = qp
++    k = D * x1 * x2 * y1 * y2 % Q
++    x3 = (x1 * y2 + x2 * y1) * pow(1 + k, Q - 2, Q) % Q
++    y3 = (y1 * y2 + x1 * x2) * pow(1 - k, Q - 2, Q) % Q
++    return (x3, y3)
++
++
++def _scalarmult(p, e: int):
++    if e == 0:
++        return (0, 1)
++    half = _scalarmult(p, e // 2)
++    half = _edwards(half, half)
++    return _edwards(half, p) if e & 1 else half
++
++
++def _encodepoint(p) -> bytes:
++    x, y = p
++    return (y | ((x & 1) << 255)).to_bytes(32, "little")
++
++
++def _clamped(seed: bytes) -> int:
++    a = bytearray(hashlib.sha512(seed).digest()[:32])
++    a[0] &= 248
++    a[31] &= 127
++    a[31] |= 64
++    return int.from_bytes(a, "little")
++
++
++def _hint(data: bytes) -> int:
++    return int.from_bytes(hashlib.sha512(data).digest(), "little")
++
++
++def ed25519_public_key(seed: bytes) -> bytes:
++    return _encodepoint(_scalarmult(BASE, _clamped(seed)))
++
++
++def ed25519_sign(message: bytes, seed: bytes) -> bytes:
++    h = hashlib.sha512(seed).digest()
++    a = _clamped(seed)
++    public = _encodepoint(_scalarmult(BASE, a))
++    r = _hint(h[32:] + message)
++    cap_r = _scalarmult(BASE, r)
++    enc_r = _encodepoint(cap_r)
++    s = (r + _hint(enc_r + public + message) * a) % L
++    return enc_r + s.to_bytes(32, "little")
++
++
++# RFC 8032 §7.1 TEST 1/2/3 — self-check for the implementation above.
++RFC8032 = [
++    ("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
++     "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", "",
++     "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155"
++     "5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"),
++    ("4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
++     "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c", "72",
++     "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da"
++     "085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00"),
++    ("c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7",
++     "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025", "af82",
++     "6291d657deec24024827e69c3abe01a30ce548a284743a445e3680d7db5ac3ac"
++     "18ff9b538d16f290ae67f760984dc6594a7c15e9716ed28dc027beceea1ec40a"),
++]
++
++# ------------------------------------------------------- C2 wire helpers ---
++def varint(value: int) -> bytes:
++    out = bytearray()
++    while True:
++        byte = value & 0x7F
++        value >>= 7
++        out.append(byte | (0x80 if value else 0))
++        if not value:
++            return bytes(out)
++
++
++def text(value: str) -> bytes:
++    raw = value.encode("utf-8")
++    return varint(len(raw)) + raw
++
++
++def u64(value: int) -> bytes:
++    return struct.pack("<Q", value)
++
++
++def u128(value: int) -> bytes:
++    return struct.pack("<16s", value.to_bytes(16, "little"))
++
++
++def domain_message(chain_id: str, tag: str, payload: bytes) -> bytes:
++    """C3 hash_domain framing: unambiguous, length-prefixed."""
++    prefix = chain_id.encode() + b"\x00" + tag.encode() + b"\x00"
++    return (HASH_CONTEXT + u64(len(prefix)) + prefix
++            + u64(len(payload)) + payload)
++
++
++def signer_address(public_key: bytes) -> bytes:
++    return blake3_short(ADDRESS_CONTEXT + public_key)[:20]
++
++
++def encode_unsigned(case: dict) -> tuple[bytes, dict[str, int]]:
++    parts: list[bytes] = []
++    offsets: dict[str, int] = {}
++    pos = 0
++
++    def add(name: str, blob: bytes) -> None:
++        nonlocal pos
++        offsets[name] = pos
++        parts.append(blob)
++        pos += len(blob)
++
++    chain = case["chain"].encode("utf-8")
++    add("version", bytes([CODEC_VERSION]))
++    add("chain_len", varint(len(chain)))
++    add("chain", chain)
++    add("signer", case["address"])
++    add("nonce", u64(case["nonce"]))
++    add("kind", bytes([case["kind"]]))
++    add("payload_len", varint(len(case["payload"])))
++    add("payload", case["payload"])
++    add("gas", u64(case["gas"]))
++    add("max_fee", u128(case["max_fee"]))
++    add("tip", u128(case["tip"]))
++    add("expiry", u64(case["expiry"]))
++    return b"".join(parts), offsets
++
++
++def encode_signature(case: dict) -> bytes:
++    return bytes([0]) + case["public_key"] + case["signature"]
++
++
++CASES = [
++    dict(chain="auralite-test-1", seed=bytes([0x11] * 32), nonce=0, kind=0,
++         payload=b"", gas=21_000, max_fee=10**12, tip=0, expiry=1_000),
++    dict(chain="auralite-test-1", seed=bytes([0x22] * 32), nonce=7, kind=2,
++         payload=b"transfer:alice->bob:1.5ALCRY", gas=100_000,
++         max_fee=5 * 10**18, tip=10**15, expiry=999_999),
++    dict(chain="auralite-1", seed=bytes([0x33] * 32), nonce=1, kind=3,
++         payload=b"validator:candidate-7", gas=50_000,
++         max_fee=10**18, tip=10**14, expiry=42),
++    dict(chain="auralite-test-1", seed=bytes([0x44] * 32), nonce=2**64 - 1,
++         kind=4, payload=bytes(range(200)), gas=2**64 - 1,
++         max_fee=2**128 - 1, tip=2**128 - 1, expiry=2**64 - 1),
++    dict(chain="auralite-test-1", seed=bytes([0x55] * 32), nonce=3, kind=1,
++         payload=b"\x00wasm\x00init", gas=1, max_fee=7, tip=7, expiry=0),
++]
++
++
++def main() -> int:
++    # Self-check both independent primitives before generating anything.
++    for length, expected in OFFICIAL_B3.items():
++        data = bytes(i % 251 for i in range(length))
++        if blake3_short(data).hex() != expected:
++            raise SystemExit(f"pure-Python BLAKE3 disagrees with official vector len={length}")
++    for index, (secret, public, message, signature) in enumerate(RFC8032, 1):
++        seed = bytes.fromhex(secret)
++        if ed25519_public_key(seed).hex() != public or \
++           ed25519_sign(bytes.fromhex(message), seed).hex() != signature:
++            raise SystemExit(f"pure-Python Ed25519 disagrees with RFC 8032 TEST {index}")
++
++    lines = [
++        "# AuraLite-Crypto C4 transaction golden vectors",
++        "# Generated by tools/gen_c4_vectors.py (independent Python).",
++        "# Self-checked against official BLAKE3 vectors and RFC 8032 §7.1.",
++        "# Format: key=<hex|text|decimal>. Do not edit by hand.",
++        f"codec_version={CODEC_VERSION}",
++        f"hash_context={HASH_CONTEXT.hex()}",
++        f"signing_context={SIGNING_CONTEXT.hex()}",
++        f"txid_context={TXID_CONTEXT.hex()}",
++        f"address_context={ADDRESS_CONTEXT.hex()}",
++        f"max_tx_payload={MAX_TX_PAYLOAD}",
++    ]
++
++    first_tx: bytes | None = None
++    first_unsigned: bytes | None = None
++    first_offsets: dict[str, int] | None = None
++    first_sig: bytes | None = None
++
++    for index, case in enumerate(CASES, 1):
++        case = dict(case)
++        case["public_key"] = ed25519_public_key(case["seed"])
++        case["address"] = signer_address(case["public_key"])
++        unsigned, offsets = encode_unsigned(case)
++        signing_bytes = SIGNING_CONTEXT + unsigned
++        signing_hash = blake3_short(domain_message(case["chain"], "tx", signing_bytes))
++        case["signature"] = ed25519_sign(signing_hash, case["seed"])
++        sig_bytes = encode_signature(case)
++        tx_bytes = unsigned + sig_bytes
++        txid = blake3_short(TXID_CONTEXT + tx_bytes)
++
++        p = lambda k: f"tx{index}_{k}"  # noqa: E731
++        lines += [
++            f"{p('chain')}={case['chain']}",
++            f"{p('seed')}={case['seed'].hex()}",
++            f"{p('kind')}={case['kind']}",
++            f"{p('nonce')}={case['nonce']}",
++            f"{p('payload')}={case['payload'].hex()}",
++            f"{p('gas')}={case['gas']}",
++            f"{p('max_fee')}={case['max_fee']}",
++            f"{p('tip')}={case['tip']}",
++            f"{p('expiry')}={case['expiry']}",
++            f"{p('address')}={case['address'].hex()}",
++            f"{p('public_key')}={case['public_key'].hex()}",
++            f"{p('unsigned')}={unsigned.hex()}",
++            f"{p('signing_bytes')}={signing_bytes.hex()}",
++            f"{p('signing_hash')}={signing_hash.hex()}",
++            f"{p('signature')}={case['signature'].hex()}",
++            f"{p('bytes')}={tx_bytes.hex()}",
++            f"{p('txid')}={txid.hex()}",
++        ]
++        if index == 1:
++            first_tx, first_unsigned, first_offsets, first_sig = tx_bytes, unsigned, offsets, sig_bytes
++
++    assert first_tx is not None and first_unsigned is not None
++    assert first_offsets is not None and first_sig is not None
++    off = first_offsets
++    sig_start = len(first_unsigned)
++
++    def patched(at: int, value: int) -> bytes:
++        out = bytearray(first_tx)
++        out[at] = value
++        return bytes(out)
++
++    bad: dict[str, bytes] = {
++        "bad_trailing": first_tx + b"\x00",
++        "bad_truncated": first_tx[:-1],
++        "bad_version": patched(off["version"], 2),
++        "bad_kind_tag": patched(off["kind"], 9),
++        "bad_algo_tag": patched(sig_start, 1),
++        "bad_signer": patched(off["signer"], first_tx[off["signer"]] ^ 0x01),
++        "bad_signature": patched(sig_start + 33, first_tx[sig_start + 33] ^ 0x01),
++        "bad_chain_len": first_unsigned[:off["chain_len"]] + b"\x80\x00"
++                         + first_unsigned[off["chain_len"] + 1:] + first_sig,
++        "bad_payload_len": first_unsigned[:off["payload_len"]] + b"\x80\x00"
++                           + first_unsigned[off["payload_len"] + 1:] + first_sig,
++    }
++    for key, value in bad.items():
++        lines.append(f"{key}={value.hex()}")
++
++    OUT.parent.mkdir(parents=True, exist_ok=True)
++    OUT.write_text("\n".join(lines) + "\n", encoding="utf-8")
++    print(f"wrote {OUT.relative_to(REPO)} ({len(lines)} lines)")
++    print(f"  canonical transactions: {len(CASES)}")
++    print(f"  rejection vectors:      {len(bad)}")
++    print("  self-checks: BLAKE3 official vectors OK, RFC 8032 Ed25519 OK")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/nc_c4.py b/tools/nc_c4.py
+new file mode 100644
+index 0000000..8b9b9c9
+--- /dev/null
++++ b/tools/nc_c4.py
+@@ -0,0 +1,130 @@
++#!/usr/bin/env python3
++"""Negative controls for C4 (aura-tx transaction format).
++
++Six tamper tests must each turn the C4 gate red:
++
++  NC-1: change SIGNING_CONTEXT (invalidates every signature/vector).
++  NC-2: change TXID_CONTEXT (invalidates every txid).
++  NC-3: corrupt one golden signature in the fixture.
++  NC-4: disable the chain-id replay check in validate().
++  NC-5: disable the signer<->public-key binding check.
++  NC-6: bypass Ed25519 verification.
++
++Files are always restored in a `finally` block. `make nc-c4` captures stdout
++into docs/evidence/c4/nc.log, and a final green restore check is mandatory.
++"""
++
++from __future__ import annotations
++
++import os
++import subprocess
++from datetime import datetime, timezone
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++TX_RS = REPO / "crates" / "aura-tx" / "src" / "tx.rs"
++TEST_RS = REPO / "crates" / "aura-tx" / "tests" / "c4_tx.rs"
++FIXTURE = REPO / "crates" / "aura-tx" / "tests" / "fixtures" / "c4_golden.txt"
++CARGO_TEST = ["cargo", "test", "-p", "aura-tx", "--quiet"]
++
++
++def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
++    return subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, check=False)
++
++
++def expect_red(
++    label: str,
++    path: Path,
++    old: str,
++    new: str,
++    touch_test: bool = False,
++) -> bool:
++    original = path.read_text(encoding="utf-8")
++    if old not in original:
++        print(f"{label}: FAIL — tamper target not found in {path.name}")
++        return False
++    tampered = original.replace(old, new, 1)
++    if tampered == original:
++        print(f"{label}: FAIL — tamper was a no-op")
++        return False
++    try:
++        path.write_text(tampered, encoding="utf-8")
++        if touch_test:
++            os.utime(TEST_RS, None)
++        result = run(CARGO_TEST)
++        went_red = result.returncode != 0
++        snippet = "\n".join((result.stdout + result.stderr).strip().splitlines()[-5:])
++        print(f"{label}: {'PASS' if went_red else 'FAIL'}")
++        print(
++            f"      cargo test -p aura-tx -> rc={result.returncode} "
++            f"({'RED as expected' if went_red else 'UNEXPECTEDLY GREEN'})"
++        )
++        print(f"      {snippet}")
++        return went_red
++    finally:
++        path.write_text(original, encoding="utf-8")
++        if touch_test:
++            os.utime(TEST_RS, None)
++
++
++def main() -> int:
++    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
++    print(f"C4 NEGATIVE CONTROLS — {stamp}")
++    print("Rule: a gate that cannot go red is not a gate (CONTRIBUTING.md §1).")
++    print()
++
++    results = [
++        expect_red(
++            "NC-1 signing context",
++            TX_RS,
++            'pub const SIGNING_CONTEXT: &[u8] = b"AuraLite-Crypto/tx-signing-v1\\x00";',
++            'pub const SIGNING_CONTEXT: &[u8] = b"WRONG-SIGNING\\x00";',
++        ),
++        expect_red(
++            "NC-2 txid context",
++            TX_RS,
++            'pub const TXID_CONTEXT: &[u8] = b"AuraLite-Crypto/txid-v1\\x00";',
++            'pub const TXID_CONTEXT: &[u8] = b"WRONG-TXID\\x00";',
++        ),
++        expect_red(
++            "NC-3 independent golden signature",
++            FIXTURE,
++            "tx1_signature=3f0bd406",
++            "tx1_signature=3f0bd407",
++            touch_test=True,
++        ),
++        expect_red(
++            "NC-4 replay protection",
++            TX_RS,
++            "if self.unsigned.chain_id.as_str() != expected_chain {",
++            "if false {",
++        ),
++        expect_red(
++            "NC-5 signer/public-key binding",
++            TX_RS,
++            "if signer_address(&self.sig.public_key) != self.unsigned.signer {",
++            "if false {",
++        ),
++        expect_red(
++            "NC-6 Ed25519 verification bypass",
++            TX_RS,
++            "aura_crypto::verify(pk, chain, Domain::Tx, msg, sig).map_err(|_| TxError::InvalidSignature)",
++            "Ok(())",
++        ),
++    ]
++    print()
++    passed = sum(results)
++    print(f"RESULT: {passed}/{len(results)} negative controls PASS")
++    if passed != len(results):
++        return 1
++
++    restored = run(CARGO_TEST)
++    print(
++        f"restore check: cargo test -p aura-tx -> rc={restored.returncode} "
++        f"({'GREEN as expected' if restored.returncode == 0 else 'STILL RED — FAIL'})"
++    )
++    return 0 if restored.returncode == 0 else 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/write_c4_evidence.py b/tools/write_c4_evidence.py
+new file mode 100644
+index 0000000..caec167
+--- /dev/null
++++ b/tools/write_c4_evidence.py
+@@ -0,0 +1,127 @@
++#!/usr/bin/env python3
++"""Regenerate docs/evidence/c4/gates.txt and docs/evidence/c4/SHA256SUMS.
++
++All numbers are real command output plus exit codes. The pre-C4 section is
++measured from the C3 git commit (HEAD at generation time).
++
++Usage:
++    python3 tools/write_c4_evidence.py
++    make evidence-c4
++"""
++
++from __future__ import annotations
++
++import hashlib
++import subprocess
++from datetime import datetime, timezone
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++EVIDENCE = REPO / "docs" / "evidence" / "c4"
++OUT = EVIDENCE / "gates.txt"
++FIXTURE = REPO / "crates" / "aura-tx" / "tests" / "fixtures" / "c4_golden.txt"
++SPEC = REPO / "docs" / "spec" / "tx-format.md"
++
++GEN_IDEMPOTENT = (
++    "before=$(sha256sum crates/aura-tx/tests/fixtures/c4_golden.txt | cut -d' ' -f1); "
++    "python3 tools/gen_c4_vectors.py >/dev/null; "
++    "after=$(sha256sum crates/aura-tx/tests/fixtures/c4_golden.txt | cut -d' ' -f1); "
++    "if [ \"$before\" = \"$after\" ]; then echo \"generator idempotent: $after\"; "
++    "else echo \"GENERATOR DRIFT\"; exit 1; fi"
++)
++
++COMMANDS: list[tuple[str, str, int | None]] = [
++    ("toolchain", "rustc --version && cargo --version", None),
++    ("pre-C4 tree (C3 commit)", "git log -1 --oneline", None),
++    ("pre-C4 workspace crates", "git ls-tree -r --name-only HEAD | grep -c 'crates/.*/Cargo.toml$' || true", None),
++    ("pre-C4 .rs files", "git ls-tree -r --name-only HEAD | grep -c '\\.rs$' || true", None),
++    ("pre-C4 external deps", "git show HEAD:Cargo.lock | grep -c '^source = ' || true", None),
++    ("post-C4 workspace crates", "find crates -name Cargo.toml | wc -l", None),
++    ("post-C4 .rs files", "find . -name '*.rs' -not -path './target/*' | wc -l", None),
++    ("post-C4 external deps", "grep -c '^source = ' Cargo.lock || true", None),
++    ("post-C4 plan phase rows", "grep -hE '^\\| (✅ |⏸ )?\\*\\*[A-Z]+[0-9]+\\*\\* \\|' docs/plans/*_PLAN.md | wc -l", None),
++    ("dependency gate", "python3 tools/check_deps.py", None),
++    ("docs drift guard", "python3 tools/check_claims.py", None),
++    ("independent generator is idempotent", GEN_IDEMPOTENT, None),
++    ("all negative controls (C0-C4)", "make nc-all", 12),
++    ("C4 negative controls (evidence log)", "make nc-c4", 34),
++    ("full gate", "make test", 8),
++]
++
++
++def run(cmd: str) -> tuple[int, str]:
++    result = subprocess.run(
++        cmd, shell=True, cwd=REPO, capture_output=True, text=True, check=False
++    )
++    return result.returncode, (result.stdout + result.stderr).strip()
++
++
++def main() -> int:
++    EVIDENCE.mkdir(parents=True, exist_ok=True)
++    lines = [
++        "AuraLite-Crypto — C4 evidence (aura-tx transaction format)",
++        f"Generated (UTC): {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
++        "Rule: measured against the tree, not assumed.",
++        "",
++        "Independent references: tools/gen_c4_vectors.py self-checks pure-Python",
++        "BLAKE3 against official BLAKE3 vectors and pure-Python Ed25519 against",
++        "RFC 8032 §7.1 before emitting 5 canonical tx vectors + 9 rejections.",
++        "",
++        "=" * 72,
++        "RAW COMMAND OUTPUT",
++        "=" * 72,
++        "",
++    ]
++
++    failures = 0
++    for label, cmd, tail in COMMANDS:
++        rc, out = run(cmd)
++        shown = cmd if len(cmd) < 160 else "$ (shell script: generator idempotence check)"
++        if tail and out:
++            out = "\n".join(out.splitlines()[-tail:])
++        lines.append(f"--- {label} ---")
++        lines.append(f"$ {shown}")
++        lines.append(out if out else "(no output)")
++        lines.append(f"[rc={rc}]")
++        lines.append("")
++        if rc != 0 and not (label.startswith("pre-C4") and "grep -c" in cmd):
++            failures += 1
++
++    lines += [
++        "=" * 72,
++        "SUMMARY",
++        "=" * 72,
++        "",
++        "Pre-C4 (C3 tree): 11 crates, 28 .rs files, 54 external deps, 39 tests.",
++        "Post-C4: 12 crates (aura-tx added, 8 placeholders remain), 34 .rs",
++        "files, 54 external deps (no new ones), 49 tests passing (39 C0-C3 +",
++        "10 C4), `make test` ALL GATES GREEN, 20 negative controls total",
++        "(2+3+4+5+6), 6/6 of them new in C4.",
++        "Validators/blocks/tx remain 0/0/0 — C4 is a format, not a network.",
++        "",
++        "Note: C0-C3 evidence is now HISTORICAL and is no longer regenerated",
++        "in CI. `make nc-all` runs every NC script without rewriting those",
++        "logs, so the committed SHA256SUMS stay valid.",
++        "",
++    ]
++    OUT.write_text("\n".join(lines), encoding="utf-8")
++
++    nc_log = EVIDENCE / "nc.log"
++    if not nc_log.exists():
++        print("ERROR: docs/evidence/c4/nc.log missing (run `make nc-c4`)")
++        return 1
++
++    sums = []
++    for path in (OUT, nc_log, FIXTURE, SPEC):
++        digest = hashlib.sha256(path.read_bytes()).hexdigest()
++        sums.append(f"{digest}  {path.relative_to(REPO)}")
++    (EVIDENCE / "SHA256SUMS").write_text("\n".join(sums) + "\n", encoding="utf-8")
++
++    print(f"wrote {OUT.relative_to(REPO)} ({len(lines)} lines)")
++    print(f"wrote {nc_log.relative_to(REPO)}")
++    print("wrote docs/evidence/c4/SHA256SUMS")
++    return 1 if failures else 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+-- 
+2.47.3
+

@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# C0 baseline: one honest shard. The 10 shards listed in CONTRIBUTING.md
+# (core, state, exec, consensus, net, node, wallet, ecosystem, security,
+# perf) are added by O0 as the crates that need them actually appear.
+jobs:
+  core:
+    name: core (C0-C10 gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+          components: rustfmt, clippy
+
+      - name: deps-check
+        run: make deps-check
+
+      - name: make test
+        run: make test
+
+      - name: golden vectors are reproducible (C1-C9)
+        run: make gen-c1-vectors && make gen-c2-vectors && make gen-c3-vectors && make gen-c4-vectors && make gen-c5-vectors && make gen-c6-vectors && make gen-c7-vectors && make gen-c8-vectors && make gen-c9-vectors
+
+      - name: vector inventory (>= 200)
+        run: make vector-inventory
+
+      # C9 CORE shard: golden vectors + proptest + short deterministic fuzz.
+      - name: CORE shard
+        run: make test-core
+
+      # C9 DoD: 60 seconds of fuzzing with zero panics on stable Rust.
+      - name: fuzz smoke (60 s)
+        run: make fuzz-smoke
+
+      # C10: plan<->tree audit — no ✅ row without a receipt.
+      - name: close-out audit
+        run: make audit-closeout
+
+      # nc-all runs all 56 NCs without rewriting the historical C0-C9 logs,
+      # so those committed SHA256SUMS remain valid in the uploaded artifact.
+      - name: negative controls (C0-C10, 56 total)
+        run: make nc-all
+
+      # Only the CURRENT phase's evidence is regenerated. C0-C9 evidence is a
+      # HISTORICAL committed record measured at its own commit; regenerating
+      # it later would relabel the wrong tree.
+      - name: current phase evidence (C10)
+        run: make evidence-c10
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: c0-c10-evidence
+          path: |
+            docs/evidence/c0/
+            docs/evidence/c1/
+            docs/evidence/c2/
+            docs/evidence/c3/
+            docs/evidence/c4/
+            docs/evidence/c5/
+            docs/evidence/c6/
+            docs/evidence/c7/
+            docs/evidence/c8/
+            docs/evidence/c9/
+            docs/evidence/c10/
+          if-no-files-found: ignore

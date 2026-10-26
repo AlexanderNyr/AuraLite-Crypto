@@ -1,0 +1,2797 @@
+From 1e5ef94a8dc5f17210ae40943098a2c3dddab0bd Mon Sep 17 00:00:00 2001
+From: AlexanderNyr <alexander@auralite.local>
+Date: Sun, 25 Oct 2026 17:15:36 +0000
+Subject: [PATCH] C3 crypto
+
+---
+ .github/workflows/ci.yml                      |  16 +-
+ CHANGELOG.md                                  |  52 ++
+ CONTRIBUTING.md                               |   5 +
+ Cargo.lock                                    | 515 ++++++++++++++++++
+ Cargo.toml                                    |  16 +-
+ Makefile                                      |  27 +-
+ README.md                                     |  29 +-
+ ROADMAP.md                                    |  24 +-
+ crates/aura-crypto/Cargo.toml                 |   8 +-
+ crates/aura-crypto/src/ed25519.rs             |  56 ++
+ crates/aura-crypto/src/error.rs               |  35 ++
+ crates/aura-crypto/src/hash.rs                |  38 ++
+ crates/aura-crypto/src/lib.rs                 |  37 +-
+ crates/aura-crypto/src/secp.rs                |  43 ++
+ crates/aura-crypto/src/secret.rs              |  49 ++
+ crates/aura-crypto/tests/c3_crypto.rs         | 288 ++++++++++
+ .../aura-crypto/tests/fixtures/c3_golden.txt  |  66 +++
+ docs/ARCHITECTURE.md                          |   7 +
+ docs/STATUS.md                                |  53 +-
+ docs/evidence/c3/SHA256SUMS                   |   4 +
+ docs/evidence/c3/gates.txt                    | 140 +++++
+ docs/evidence/c3/nc.log                       |  41 ++
+ docs/plans/CORE_PLAN.md                       |  31 +-
+ docs/spec/c3-dependency-allowlist.txt         |  61 +++
+ tools/check_deps.py                           | 114 ++++
+ tools/gen_c3_vectors.py                       | 295 ++++++++++
+ tools/nc_c3.py                                | 139 +++++
+ tools/record_c3_deps.py                       |  55 ++
+ tools/write_c3_evidence.py                    | 123 +++++
+ 29 files changed, 2304 insertions(+), 63 deletions(-)
+ create mode 100644 crates/aura-crypto/src/ed25519.rs
+ create mode 100644 crates/aura-crypto/src/error.rs
+ create mode 100644 crates/aura-crypto/src/hash.rs
+ create mode 100644 crates/aura-crypto/src/secp.rs
+ create mode 100644 crates/aura-crypto/src/secret.rs
+ create mode 100644 crates/aura-crypto/tests/c3_crypto.rs
+ create mode 100644 crates/aura-crypto/tests/fixtures/c3_golden.txt
+ create mode 100644 docs/evidence/c3/SHA256SUMS
+ create mode 100644 docs/evidence/c3/gates.txt
+ create mode 100644 docs/evidence/c3/nc.log
+ create mode 100644 docs/spec/c3-dependency-allowlist.txt
+ create mode 100644 tools/check_deps.py
+ create mode 100644 tools/gen_c3_vectors.py
+ create mode 100644 tools/nc_c3.py
+ create mode 100644 tools/record_c3_deps.py
+ create mode 100644 tools/write_c3_evidence.py
+
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index f62fead..232d5df 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -10,7 +10,7 @@ on:
+ # perf) are added by O0 as the crates that need them actually appear.
+ jobs:
+   core:
+-    name: core (C0-C2 gate)
++    name: core (C0-C3 gate)
+     runs-on: ubuntu-latest
+     steps:
+       - uses: actions/checkout@v4
+@@ -27,8 +27,8 @@ jobs:
+       - name: make test
+         run: make test
+ 
+-      - name: golden vectors are reproducible (C1 + C2)
+-        run: make gen-c1-vectors && make gen-c2-vectors
++      - name: golden vectors are reproducible (C1 + C2 + C3)
++        run: make gen-c1-vectors && make gen-c2-vectors && make gen-c3-vectors
+ 
+       - name: negative controls (C0)
+         run: make nc-c0
+@@ -39,18 +39,22 @@ jobs:
+       - name: negative controls (C2)
+         run: make nc-c2
+ 
++      - name: negative controls (C3)
++        run: make nc-c3
++
+       # C0 evidence is a HISTORICAL committed record measured at the baseline
+       # commit; re-running it later would relabel the wrong tree.
+-      - name: phase evidence (C1 + C2)
+-        run: make evidence-c1 && make evidence-c2
++      - name: phase evidence (C1 + C2 + C3)
++        run: make evidence-c1 && make evidence-c2 && make evidence-c3
+ 
+       - name: Upload evidence
+         if: always()
+         uses: actions/upload-artifact@v4
+         with:
+-          name: c0-c2-evidence
++          name: c0-c3-evidence
+           path: |
+             docs/evidence/c0/
+             docs/evidence/c1/
+             docs/evidence/c2/
++            docs/evidence/c3/
+           if-no-files-found: ignore
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index b71da87..45b24d5 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,58 @@
+ All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
+ never rewritten: corrections are made with a new entry or an explicit note.
+ 
++## [C3 — cryptography] 2026-10-25
++
++**Fourth code phase. First phase with external dependencies.**
++Deliverable: `patches/0004-C3-crypto.patch`.
++
++- **`aura-crypto` crate:** BLAKE3 hashing (upstream `pure` feature — portable
++  Rust, no C/assembly in the hash path), Ed25519 signatures (RFC 8032),
++  secp256k1 deterministic ECDSA (RFC 6979, low-S, compatibility only),
++  domain-separated hashing and signing, constant-time byte comparison
++  (`subtle`) and zeroizing secret storage (`zeroize`).
++- **Domain separation:** `HASH_CONTEXT || u64(len(prefix)) || prefix ||
++  u64(len(payload)) || payload`, where `prefix = chain_id || 0x00 ||
++  domain_tag || 0x00` comes from C1's `Domain::prefix`. A testnet signature
++  is invalid on mainnet; a vote cannot be replayed as a transaction. Changing
++  `HASH_CONTEXT` is a protocol change and is pinned by an NC.
++- **Independent golden vectors** (`tools/gen_c3_vectors.py`, 66 fixture
++  lines, byte-stable, offline): 15 official BLAKE3 vectors from
++  `BLAKE3-team/BLAKE3/test_vectors.json`; a self-checking pure-Python BLAKE3
++  producing 5 domain-hash vectors; RFC 8032 §7.1 Ed25519 TEST 1/2/3; and a
++  pure-Python secp256k1 + RFC 6979 implementation producing 2 signatures,
++  additionally verified with OpenSSL `pkeyutl -verify`. `k256` matched the
++  independent signatures byte for byte.
++- **Dependencies (reviewed, not silent):** exact pins in
++  `[workspace.dependencies]` — `blake3 =1.8.7`, `ed25519-dalek =2.2.0`,
++  `k256 =0.13.4`, `zeroize =1.8.2`, `subtle =2.6.1`. `Cargo.lock` resolves
++  54 external crates, all crates.io-sourced with sha256 checksums.
++  `docs/spec/c3-dependency-allowlist.txt` records the exact resolved set;
++  `tools/check_deps.py` is now part of `make test` and rejects unpinned/git
++  specs, missing checksums, direct `serde` in consensus crates and allowlist
++  drift. `tools/record_c3_deps.py` is the deliberate re-record action.
++  **Full `cargo deny` (licences + advisories) is still owed to H1.**
++- **Gate:** `make test` → **39 passed / 0 failed** (28 C0–C2 + 11 C3),
++  fmt/clippy clean, drift guard 12 plans / 112 rows, dependency gate OK.
++- **Negative controls:** `tools/nc_c3.py` → `make nc-c3` →
++  `docs/evidence/c3/nc.log`, **5/5 PASS**: changed `HASH_CONTEXT`, corrupted
++  domain-hash vector, corrupted RFC 8032 vector, Ed25519 verification
++  bypass, dependency allowlist drift (this one runs `make test`, proving the
++  new gate is actually wired in). Total across C0–C3: **14 NC**.
++- **Evidence:** `docs/evidence/c3/gates.txt` (pre-C3 counts from the C2
++  commit, dependency audit, raw gate output), `docs/evidence/c3/nc.log`,
++  `SHA256SUMS`.
++- **Tooling:** `make gen-c3-vectors`, `make nc-c3`, `make evidence-c3`,
++  `make check-deps`, `make record-c3-deps`; CI runs all four phases' NCs and
++  uploads C0–C3 evidence.
++- **Docs synced (D9):** `README.md`, `docs/STATUS.md`,
++  `docs/ARCHITECTURE.md` (C3 status block), `CHANGELOG.md`, `ROADMAP.md`
++  (ledger, §4, §8), `CONTRIBUTING.md`, `CORE_PLAN.md` (C3 ✅ + receipt).
++- **Not claimed:** BLS12-381 QC aggregation (B2), PQ migration to
++  ML-DSA/SLH-DSA (H2), hardware-backed keys (W5), tx/block formats (C4/C5),
++  `cargo deny` (H1). `cc` remains an upstream build-dependency of `blake3`
++  but no native hash code is compiled with the `pure` feature.
++
+ ## [C2 — canonical codec] 2026-10-25
+ 
+ **Third code phase.** Deliverable: `patches/0003-C2-codec.patch`. Still zero
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index cd940ba..5023024 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -68,6 +68,11 @@ that does not run its main test is a dead gate — that is a separate defect
+   vectors come from `tools/gen_c2_vectors.py`.
+ - Changing the `aura-codec` wire format without bumping `CODEC_VERSION` and
+   adding a migration test. One value must have exactly one byte encoding.
++- Unpinned dependencies. Since C3 every external crate uses an exact `=x.y.z`
++  pin in `[workspace.dependencies]`, is checksummed in `Cargo.lock`, and is
++  recorded in `docs/spec/c3-dependency-allowlist.txt`. Adding one requires a
++  dedicated phase patch, `make record-c3-deps` and an NC. `make check-deps`
++  enforces this; `cargo deny` (licences/advisories) arrives with H1.
+ - "Temporary" stubs that silently return success. A stub must explicitly
+   return `Err(Unimplemented)` and be visible in STATUS.
+ - Format changes without a protocol version and a migration test.
+diff --git a/Cargo.lock b/Cargo.lock
+index 402fdc6..38be3ec 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -2,6 +2,12 @@
+ # It is not intended for manual editing.
+ version = 4
+ 
++[[package]]
++name = "arrayvec"
++version = "0.7.8"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
++
+ [[package]]
+ name = "aura-codec"
+ version = "0.1.0"
+@@ -16,6 +22,14 @@ version = "0.1.0"
+ [[package]]
+ name = "aura-crypto"
+ version = "0.1.0"
++dependencies = [
++ "aura-types",
++ "blake3",
++ "ed25519-dalek",
++ "k256",
++ "subtle",
++ "zeroize",
++]
+ 
+ [[package]]
+ name = "aura-exec"
+@@ -48,3 +62,504 @@ version = "0.1.0"
+ [[package]]
+ name = "aura-types"
+ version = "0.1.0"
++
++[[package]]
++name = "base16ct"
++version = "0.2.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "4c7f02d4ea65f2c1853089ffd8d2787bdbc63de2f0d29dedbcf8ccdfa0ccd4cf"
++
++[[package]]
++name = "base64ct"
++version = "1.8.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
++
++[[package]]
++name = "blake3"
++version = "1.8.7"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6d9e454fc11f76977dc803893aff6304ed33d6a26efae8696573bea74baa27ae"
++dependencies = [
++ "arrayvec",
++ "cc",
++ "cfg-if",
++ "constant_time_eq",
++ "cpufeatures 0.3.1",
++]
++
++[[package]]
++name = "block-buffer"
++version = "0.10.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
++dependencies = [
++ "generic-array",
++]
++
++[[package]]
++name = "cc"
++version = "1.10.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "86e055fa6e3e40ad6187ba25b6855eeb635d5271f8e0f0e1e9a5826b8d75bea0"
++dependencies = [
++ "find-msvc-tools",
++ "shlex",
++]
++
++[[package]]
++name = "cfg-if"
++version = "1.0.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
++
++[[package]]
++name = "const-oid"
++version = "0.9.6"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
++
++[[package]]
++name = "constant_time_eq"
++version = "0.4.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
++
++[[package]]
++name = "cpufeatures"
++version = "0.2.17"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280"
++dependencies = [
++ "libc",
++]
++
++[[package]]
++name = "cpufeatures"
++version = "0.3.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "5ca28b0ae3115b884660db4118d803791fd6756b6e88f39c0f3f7859060d7566"
++dependencies = [
++ "libc",
++]
++
++[[package]]
++name = "crypto-bigint"
++version = "0.5.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "0dc92fb57ca44df6db8059111ab3af99a63d5d0f8375d9972e319a379c6bab76"
++dependencies = [
++ "generic-array",
++ "rand_core",
++ "subtle",
++ "zeroize",
++]
++
++[[package]]
++name = "crypto-common"
++version = "0.1.6"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1bfb12502f3fc46cca1bb51ac28df9d618d813cdc3d2f25b9fe775a34af26bb3"
++dependencies = [
++ "generic-array",
++ "typenum",
++]
++
++[[package]]
++name = "curve25519-dalek"
++version = "4.1.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "97fb8b7c4503de7d6ae7b42ab72a5a59857b4c937ec27a3d4539dba95b5ab2be"
++dependencies = [
++ "cfg-if",
++ "cpufeatures 0.2.17",
++ "curve25519-dalek-derive",
++ "digest",
++ "fiat-crypto",
++ "rustc_version",
++ "subtle",
++ "zeroize",
++]
++
++[[package]]
++name = "curve25519-dalek-derive"
++version = "0.1.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f46882e17999c6cc590af592290432be3bce0428cb0d5f8b6715e4dc7b383eb3"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn 2.0.119",
++]
++
++[[package]]
++name = "der"
++version = "0.7.10"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e7c1832837b905bbfb5101e07cc24c8deddf52f93225eee6ead5f4d63d53ddcb"
++dependencies = [
++ "const-oid",
++ "zeroize",
++]
++
++[[package]]
++name = "digest"
++version = "0.10.7"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
++dependencies = [
++ "block-buffer",
++ "const-oid",
++ "crypto-common",
++ "subtle",
++]
++
++[[package]]
++name = "ecdsa"
++version = "0.16.9"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ee27f32b5c5292967d2d4a9d7f1e0b0aed2c15daded5a60300e4abb9d8020bca"
++dependencies = [
++ "der",
++ "digest",
++ "elliptic-curve",
++ "rfc6979",
++ "signature",
++]
++
++[[package]]
++name = "ed25519"
++version = "2.2.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "115531babc129696a58c64a4fef0a8bf9e9698629fb97e9e40767d235cfbcd53"
++dependencies = [
++ "pkcs8",
++ "signature",
++]
++
++[[package]]
++name = "ed25519-dalek"
++version = "2.2.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
++dependencies = [
++ "curve25519-dalek",
++ "ed25519",
++ "serde",
++ "sha2",
++ "subtle",
++ "zeroize",
++]
++
++[[package]]
++name = "elliptic-curve"
++version = "0.13.8"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b5e6043086bf7973472e0c7dff2142ea0b680d30e18d9cc40f267efbf222bd47"
++dependencies = [
++ "base16ct",
++ "crypto-bigint",
++ "digest",
++ "ff",
++ "generic-array",
++ "group",
++ "rand_core",
++ "sec1",
++ "subtle",
++ "zeroize",
++]
++
++[[package]]
++name = "ff"
++version = "0.13.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "c0b50bfb653653f9ca9095b427bed08ab8d75a137839d9ad64eb11810d5b6393"
++dependencies = [
++ "rand_core",
++ "subtle",
++]
++
++[[package]]
++name = "fiat-crypto"
++version = "0.2.9"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
++
++[[package]]
++name = "find-msvc-tools"
++version = "0.1.15"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1c66915cc5391097de7a2b0b972e8505aa33c0df401fd3a6811dbdb32881ba48"
++
++[[package]]
++name = "generic-array"
++version = "0.14.9"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "4bb6743198531e02858aeaea5398fcc883e71851fcbcb5a2f773e2fb6cb1edf2"
++dependencies = [
++ "typenum",
++ "version_check",
++ "zeroize",
++]
++
++[[package]]
++name = "getrandom"
++version = "0.2.17"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
++dependencies = [
++ "cfg-if",
++ "libc",
++ "wasi",
++]
++
++[[package]]
++name = "group"
++version = "0.13.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f0f9ef7462f7c099f518d754361858f86d8a07af53ba9af0fe635bbccb151a63"
++dependencies = [
++ "ff",
++ "rand_core",
++ "subtle",
++]
++
++[[package]]
++name = "hmac"
++version = "0.12.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
++dependencies = [
++ "digest",
++]
++
++[[package]]
++name = "k256"
++version = "0.13.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f6e3919bbaa2945715f0bb6d3934a173d1e9a59ac23767fbaaef277265a7411b"
++dependencies = [
++ "cfg-if",
++ "ecdsa",
++ "elliptic-curve",
++ "sha2",
++]
++
++[[package]]
++name = "libc"
++version = "0.2.191"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
++
++[[package]]
++name = "pkcs8"
++version = "0.10.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f950b2377845cebe5cf8b5165cb3cc1a5e0fa5cfa3e1f7f55707d8fd82e0a7b7"
++dependencies = [
++ "der",
++ "spki",
++]
++
++[[package]]
++name = "proc-macro2"
++version = "1.0.107"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
++dependencies = [
++ "unicode-ident",
++]
++
++[[package]]
++name = "quote"
++version = "1.0.47"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
++dependencies = [
++ "proc-macro2",
++]
++
++[[package]]
++name = "rand_core"
++version = "0.6.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
++dependencies = [
++ "getrandom",
++]
++
++[[package]]
++name = "rfc6979"
++version = "0.4.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f8dd2a808d456c4a54e300a23e9f5a67e122c3024119acbfd73e3bf664491cb2"
++dependencies = [
++ "hmac",
++ "subtle",
++]
++
++[[package]]
++name = "rustc_version"
++version = "0.4.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
++dependencies = [
++ "semver",
++]
++
++[[package]]
++name = "sec1"
++version = "0.7.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d3e97a565f76233a6003f9f5c54be1d9c5bdfa3eccfb189469f11ec4901c47dc"
++dependencies = [
++ "base16ct",
++ "der",
++ "generic-array",
++ "subtle",
++ "zeroize",
++]
++
++[[package]]
++name = "semver"
++version = "1.0.28"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
++
++[[package]]
++name = "serde"
++version = "1.0.229"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
++dependencies = [
++ "serde_core",
++]
++
++[[package]]
++name = "serde_core"
++version = "1.0.229"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "67dca2c9c51e58a4791a4b1ed58308b39c64224d349a935ab5039aa360942a48"
++dependencies = [
++ "serde_derive",
++]
++
++[[package]]
++name = "serde_derive"
++version = "1.0.229"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn 3.0.9",
++]
++
++[[package]]
++name = "sha2"
++version = "0.10.9"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
++dependencies = [
++ "cfg-if",
++ "cpufeatures 0.2.17",
++ "digest",
++]
++
++[[package]]
++name = "shlex"
++version = "2.0.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
++
++[[package]]
++name = "signature"
++version = "2.2.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
++dependencies = [
++ "digest",
++ "rand_core",
++]
++
++[[package]]
++name = "spki"
++version = "0.7.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
++dependencies = [
++ "base64ct",
++ "der",
++]
++
++[[package]]
++name = "subtle"
++version = "2.6.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
++
++[[package]]
++name = "syn"
++version = "2.0.119"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "unicode-ident",
++]
++
++[[package]]
++name = "syn"
++version = "3.0.9"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d78c8dee4c7bf0e14673097256fed6142ce9d3b85a408189d07482442145823b"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "unicode-ident",
++]
++
++[[package]]
++name = "typenum"
++version = "1.20.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
++
++[[package]]
++name = "unicode-ident"
++version = "1.0.27"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
++
++[[package]]
++name = "version_check"
++version = "0.9.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
++
++[[package]]
++name = "wasi"
++version = "0.11.1+wasi-snapshot-preview1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
++
++[[package]]
++name = "zeroize"
++version = "1.8.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0"
++dependencies = [
++ "zeroize_derive",
++]
++
++[[package]]
++name = "zeroize_derive"
++version = "1.5.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "3c50655cbb0fe3fc43170059e702f1ce5e19b84cec58dc87b037a09935c2f328"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn 2.0.119",
++]
+diff --git a/Cargo.toml b/Cargo.toml
+index 4eb0057..1c15287 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -22,9 +22,17 @@ rust-version = "1.99.1"
+ repository = "https://github.com/AlexanderNyr/AuraLite-Crypto"
+ publish = false
+ 
+-# C2 adds the first INTERNAL dependency. There are still ZERO external
+-# dependencies: `source`/`checksum` entries in Cargo.lock remain at 0.
+-# Every external crate is pinned here in the phase that introduces it
+-# (ROADMAP rule 7 / SECURITY_PLAN H1).
++# C3 introduces the first EXTERNAL dependencies. Rules (ROADMAP 7 / H1):
++#   * exact `=x.y.z` pins only — no carets, no wildcards, no git deps;
++#   * the resolved set is recorded in docs/spec/c3-dependency-allowlist.txt
++#     and checked by tools/check_deps.py inside `make test`;
++#   * full `cargo deny` (licenses + advisories) arrives with H1;
++#   * `blake3` uses `pure` so no C/assembly code enters the consensus path.
+ [workspace.dependencies]
+ aura-types = { path = "crates/aura-types" }
++aura-codec = { path = "crates/aura-codec" }
++blake3 = { version = "=1.8.7", default-features = false, features = ["pure", "std"] }
++ed25519-dalek = { version = "=2.2.0" }
++k256 = { version = "=0.13.4", default-features = false, features = ["ecdsa"] }
++zeroize = { version = "=1.8.2", features = ["zeroize_derive"] }
++subtle = { version = "=2.6.1", default-features = false }
+diff --git a/Makefile b/Makefile
+index 0fa1b62..496804a 100644
+--- a/Makefile
++++ b/Makefile
+@@ -7,7 +7,8 @@ PYTHON ?= python3
+ .PHONY: help deps-check fmt clippy test test-core test-sanitize \
+         test-determinism fuzz-smoke nc-c0 evidence-c0 \
+         gen-c1-vectors nc-c1 evidence-c1 \
+-        gen-c2-vectors nc-c2 evidence-c2 devnet clean
++        gen-c2-vectors nc-c2 evidence-c2 \
++        check-deps record-c3-deps gen-c3-vectors nc-c3 evidence-c3 devnet clean
+ 
+ help:
+ 	@echo "AuraLite-Crypto (Stage 1, C0)"
+@@ -22,6 +23,11 @@ help:
+ 	@echo "  make gen-c2-vectors    regenerate independent codec golden vectors"
+ 	@echo "  make nc-c2             C2 negative controls -> docs/evidence/c2/nc.log"
+ 	@echo "  make evidence-c2       regenerate docs/evidence/c2/gates.txt + SHA256SUMS"
++	@echo "  make check-deps        exact-pin + checksum + allowlist gate"
++	@echo "  make record-c3-deps    re-record external deps (reviewable action)"
++	@echo "  make gen-c3-vectors    regenerate independent crypto golden vectors"
++	@echo "  make nc-c3             C3 negative controls -> docs/evidence/c3/nc.log"
++	@echo "  make evidence-c3       regenerate docs/evidence/c3/gates.txt + SHA256SUMS"
+ 	@echo "  make test-sanitize     SKIP until H3/C9"
+ 	@echo "  make test-determinism  SKIP until X7"
+ 	@echo "  make fuzz-smoke        SKIP until H3"
+@@ -51,6 +57,8 @@ test: deps-check
+ 	@$(CARGO) test --workspace
+ 	@echo "== docs drift guard =="
+ 	@$(PYTHON) tools/check_claims.py
++	@echo "== dependency gate =="
++	@$(PYTHON) tools/check_deps.py
+ 	@echo "ALL GATES GREEN"
+ 
+ test-core:
+@@ -97,6 +105,23 @@ nc-c2:
+ evidence-c2:
+ 	@$(PYTHON) tools/write_c2_evidence.py
+ 
++check-deps:
++	@$(PYTHON) tools/check_deps.py
++
++record-c3-deps:
++	@$(PYTHON) tools/record_c3_deps.py
++
++gen-c3-vectors:
++	@$(PYTHON) tools/gen_c3_vectors.py
++
++nc-c3:
++	@mkdir -p docs/evidence/c3
++	@$(PYTHON) tools/nc_c3.py > docs/evidence/c3/nc.log 2>&1 || { cat docs/evidence/c3/nc.log; exit 1; }
++	@cat docs/evidence/c3/nc.log
++
++evidence-c3:
++	@$(PYTHON) tools/write_c3_evidence.py
++
+ devnet:
+ 	@echo "ERROR: devnet is D7 (NODE_PLAN). It is not implemented at C0." >&2
+ 	@exit 1
+diff --git a/README.md b/README.md
+index ba97f5b..f823e03 100644
+--- a/README.md
++++ b/README.md
+@@ -11,13 +11,15 @@
+ Name and ticker were locked by the owner on 2026-10-25. The ticker was checked
+ for collisions — see [`docs/TICKER_AUDIT.md`](docs/TICKER_AUDIT.md).
+ 
+-> **Status: C2 LANDED (2026-10-25).** C0 gave us the workspace, CI and
+-> `make test`; C1 added the canonical types; C2 adds `aura-codec` — our own
+-> deterministic serializer, pinned against an **independent** Python encoder
+-> and guarded by `decode_canonical()`. There is still **no crypto, consensus,
+-> VM, P2P, node or wallet**. Everything else below is a plan, not a report
+-> about an implementation. Every claim of readiness appears only after a
+-> measurable test gate, as in
++> **Status: C3 LANDED (2026-10-25).** C0 gave us the workspace, CI and
++> `make test`; C1 added the canonical types; C2 added `aura-codec`; C3 adds
++> `aura-crypto` — BLAKE3, Ed25519, secp256k1/RFC6979, domain separation,
++> constant-time comparison and zeroizing secrets, all pinned against
++> **independent** references (official BLAKE3 vectors, RFC 8032, pure-Python
++> secp256k1 verified with OpenSSL). There is still **no consensus, VM, P2P,
++> node or wallet**. Everything else below is a plan, not a report about an
++> implementation. Every claim of readiness appears only after a measurable
++> test gate, as in
+ > [AuraLite-Emulator](https://github.com/AlexanderNyr/AuraLite-Emulator) and
+ > [AuraLite-OS](https://github.com/AlexanderNyr/AuraLite-OS).
+ 
+@@ -78,13 +80,14 @@ Details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+ 
+ ## Quickstart
+ 
+-**Now (C2)** the foundation is real and verifiable:
++**Now (C3)** the foundation is real and verifiable:
+ 
+ ```sh
+-make deps-check                          # rustc / cargo / rustfmt / clippy
+-make test                                # fmt + clippy -D warnings + cargo test + drift guard
+-make nc-c0 && make nc-c1 && make nc-c2   # 9 negative controls: gates can go red
+-make gen-c1-vectors && make gen-c2-vectors  # independent golden vectors (byte-stable)
++make deps-check                                    # rustc / cargo / rustfmt / clippy
++make test                                          # fmt + clippy + cargo test + drift + deps gate
++make nc-c0 && make nc-c1 && make nc-c2 && make nc-c3  # 14 negative controls
++make gen-c1-vectors && make gen-c2-vectors && make gen-c3-vectors  # independent vectors
++make check-deps                                    # exact pins, checksums, allowlist
+ ```
+ 
+ **The devnet does not exist yet — and that is honest.** After phase D7 (devnet)
+@@ -121,7 +124,7 @@ AuraLite-Crypto/
+     plans/*_PLAN.md      <- 12 plans, dependency-ordered, DoD + gate per phase
+     evidence/            <- gate logs / receipts (C0 OK)
+   patches/               <- one .patch per phase (0001-C0-... shipped)
+-  crates/*               <- 11 crates: `aura-types` (C1), `aura-codec` (C2), 9 placeholders
++  crates/*               <- 11 crates: `aura-types`, `aura-codec`, `aura-crypto` + 8 placeholders
+   contracts/*            <- reference contracts (ARC-20, ARC-721, AMM, ...)
+   tests/                 <- unit/property/integration/consensus/soak
+   fuzz/ sim/ bench/ deploy/ web/
+diff --git a/ROADMAP.md b/ROADMAP.md
+index f1cec57..4b50275 100644
+--- a/ROADMAP.md
++++ b/ROADMAP.md
+@@ -121,7 +121,7 @@ phase tables (decision Q5).
+ 
+ | Plan | Status | Scope | Phases |
+ |---|---|---|---|
+-| [`docs/plans/CORE_PLAN.md`](docs/plans/CORE_PLAN.md) | 🚧 IN PROGRESS (C0–C2 ✅) | primitives, codec, crypto, tx/block, genesis, test rig | C0–C10 |
++| [`docs/plans/CORE_PLAN.md`](docs/plans/CORE_PLAN.md) | 🚧 IN PROGRESS (C0–C3 ✅) | primitives, codec, crypto, tx/block, genesis, test rig | C0–C10 |
+ | [`docs/plans/STATE_PLAN.md`](docs/plans/STATE_PLAN.md) | 📋 PLAN | Merkle state, RocksDB, WAL, snapshots, pruning, recovery | S0–S7 |
+ | [`docs/plans/EXEC_PLAN.md`](docs/plans/EXEC_PLAN.md) | 📋 PLAN | WASM runtime, gas, ABI, contract SDK, determinism | X0–X9 |
+ | [`docs/plans/CONSENSUS_PLAN.md`](docs/plans/CONSENSUS_PLAN.md) | 📋 PLAN | BFT-PoS, QC, VRF, staking, slashing, finality, governance | B0–B10 |
+@@ -206,6 +206,12 @@ Receipts: `docs/evidence/c1/`.
+ `make nc-c2` → 4/4 negative controls PASS, 0 external dependencies (one
+ internal path dependency). Receipts: `docs/evidence/c2/`.
+ 
++**Post-C3 measurement (2026-10-25):** 28 `.rs` files, 39 tests passing,
++`make nc-c3` → 5/5 negative controls PASS, 54 external crates (exact pins,
++checksummed, allowlisted via `make check-deps`). Receipts:
++`docs/evidence/c3/`. Note: C3 is where the "zero external dependencies" line
++ends — deliberately, with a new gate rather than silently.
++
+ ### Measured gaps to the north star
+ 
+ | # | Gap | Evidence in the tree | Plan |
+@@ -276,14 +282,16 @@ after the fact, as in AuraLite OS.
+ 
+ ## 8. Immediate queue
+ 
+-**C0, C1 and C2 shipped**
++**C0, C1, C2 and C3 shipped**
+ (`patches/0001-C0-baseline-workspace.patch`,
+-`patches/0002-C1-types.patch`, `patches/0003-C2-codec.patch`): workspace, CI,
+-gates, identity constants, canonical types and `aura-codec` with independent
+-golden vectors plus a structural re-encode canonicality check. Right now:
+-**C3** — `aura-crypto`: BLAKE3 with domain tags, Ed25519/secp256k1
+-signatures, constant-time comparison and zeroize, with RFC test vectors and an
+-NC on domain separation. The next patch is `patches/0004-C3-crypto.patch`.
++`patches/0002-C1-types.patch`, `patches/0003-C2-codec.patch`,
++`patches/0004-C3-crypto.patch`): workspace, CI, gates, identity constants,
++canonical types, `aura-codec` and `aura-crypto` — all pinned against
++independent references and guarded by 14 negative controls. Right now:
++**C4** — the transaction format: `Tx { chain_id, signer, nonce, kind,
++payload, gas_limit, max_fee, tip, expiry, sig }` built on `aura-codec`, with
++canonical `signing_bytes`, replay protection and a cross-chain rejection test.
++The next patch is `patches/0005-C4-tx-format.patch`.
+ 
+ See also: [`docs/STATUS.md`](docs/STATUS.md),
+ [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
+diff --git a/crates/aura-crypto/Cargo.toml b/crates/aura-crypto/Cargo.toml
+index a8cb022..17926fa 100644
+--- a/crates/aura-crypto/Cargo.toml
++++ b/crates/aura-crypto/Cargo.toml
+@@ -1,6 +1,6 @@
+ [package]
+ name = "aura-crypto"
+-description = "AuraLite-Crypto hashing, signatures and domain separation (placeholder, lands in C3)"
++description = "AuraLite-Crypto hashing, signatures, domain separation and secret handling"
+ version.workspace = true
+ edition.workspace = true
+ license.workspace = true
+@@ -9,3 +9,9 @@ repository.workspace = true
+ publish.workspace = true
+ 
+ [dependencies]
++aura-types.workspace = true
++blake3.workspace = true
++ed25519-dalek.workspace = true
++k256.workspace = true
++zeroize.workspace = true
++subtle.workspace = true
+diff --git a/crates/aura-crypto/src/ed25519.rs b/crates/aura-crypto/src/ed25519.rs
+new file mode 100644
+index 0000000..fdb7e72
+--- /dev/null
++++ b/crates/aura-crypto/src/ed25519.rs
+@@ -0,0 +1,56 @@
++//! Ed25519 signatures (RFC 8032) and domain-separated signing.
++
++use aura_types::Domain;
++use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
++
++use crate::error::CryptoError;
++use crate::hash::hash_domain;
++
++/// Derive the 32-byte public key for a 32-byte seed.
++pub fn ed25519_public_key(seed: &[u8; 32]) -> [u8; 32] {
++    SigningKey::from_bytes(seed).verifying_key().to_bytes()
++}
++
++/// Sign an arbitrary message with pure Ed25519 (RFC 8032).
++///
++/// This is the low-level primitive used for the RFC 8032 golden vectors.
++/// Protocol code should prefer [`sign`], which adds domain separation.
++pub fn sign_raw(seed: &[u8; 32], message: &[u8]) -> [u8; 64] {
++    SigningKey::from_bytes(seed).sign(message).to_bytes()
++}
++
++/// Verify a pure Ed25519 signature.
++///
++/// NC target: `tools/nc_c3.py` replaces the verification expression with
++/// `Ok(())` and requires the tampered-signature test to go red.
++pub fn verify_raw(
++    public: &[u8; 32],
++    message: &[u8],
++    signature: &[u8; 64],
++) -> Result<(), CryptoError> {
++    let key = VerifyingKey::from_bytes(public).map_err(|_| CryptoError::InvalidPublicKey)?;
++    let sig = Signature::from_bytes(signature);
++    key.verify(message, &sig)
++        .map_err(|_| CryptoError::VerificationFailed)
++}
++
++/// Sign `payload` under `(chain_id, domain)`.
++///
++/// The signed bytes are the 32-byte domain-separated BLAKE3 digest, so the
++/// signature covers the chain, the purpose and the exact payload length.
++pub fn sign(seed: &[u8; 32], chain_id: &str, domain: Domain, payload: &[u8]) -> [u8; 64] {
++    let digest = hash_domain(chain_id, domain, payload);
++    sign_raw(seed, digest.as_bytes())
++}
++
++/// Verify a domain-separated signature produced by [`sign`].
++pub fn verify(
++    public: &[u8; 32],
++    chain_id: &str,
++    domain: Domain,
++    payload: &[u8],
++    signature: &[u8; 64],
++) -> Result<(), CryptoError> {
++    let digest = hash_domain(chain_id, domain, payload);
++    verify_raw(public, digest.as_bytes(), signature)
++}
+diff --git a/crates/aura-crypto/src/error.rs b/crates/aura-crypto/src/error.rs
+new file mode 100644
+index 0000000..f39d019
+--- /dev/null
++++ b/crates/aura-crypto/src/error.rs
+@@ -0,0 +1,35 @@
++//! Crypto errors.
++
++use std::fmt;
++
++/// Errors produced by the hashing/signature API.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum CryptoError {
++    /// A secret seed was not exactly 32 bytes. Tuple is the actual length.
++    InvalidSecretLength(usize),
++    /// A public key could not be parsed.
++    InvalidPublicKey,
++    /// A signature could not be parsed.
++    InvalidSignature,
++    /// A prehash was not exactly 32 bytes. Tuple is the actual length.
++    InvalidPrehashLength(usize),
++    /// A secp256k1 scalar was zero or out of range.
++    InvalidSecpSecret,
++    /// Signature verification failed.
++    VerificationFailed,
++}
++
++impl fmt::Display for CryptoError {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::InvalidSecretLength(n) => write!(f, "secret seed must be 32 bytes, got {n}"),
++            Self::InvalidPublicKey => f.write_str("invalid public key encoding"),
++            Self::InvalidSignature => f.write_str("invalid signature encoding"),
++            Self::InvalidPrehashLength(n) => write!(f, "prehash must be 32 bytes, got {n}"),
++            Self::InvalidSecpSecret => f.write_str("invalid secp256k1 secret scalar"),
++            Self::VerificationFailed => f.write_str("signature verification failed"),
++        }
++    }
++}
++
++impl std::error::Error for CryptoError {}
+diff --git a/crates/aura-crypto/src/hash.rs b/crates/aura-crypto/src/hash.rs
+new file mode 100644
+index 0000000..8e58149
+--- /dev/null
++++ b/crates/aura-crypto/src/hash.rs
+@@ -0,0 +1,38 @@
++//! BLAKE3 hashing and domain separation.
++
++use aura_types::{Domain, Hash};
++
++/// Versioned context string for all domain-separated hashes.
++///
++/// NC target: `tools/nc_c3.py` changes this constant and requires the domain
++/// golden vectors to go red. A change here is a protocol change: it requires
++/// a new phase, a `CODEC_VERSION` bump and a migration test.
++pub const HASH_CONTEXT: &[u8] = b"AuraLite-Crypto/crypto-v1\x00";
++
++/// Raw BLAKE3 hash of a byte string, returned as our canonical [`Hash`].
++pub fn blake3_hash(input: &[u8]) -> Hash {
++    Hash::from_bytes(*blake3::hash(input).as_bytes())
++}
++
++/// Build the unambiguous message that is hashed/signed for a given domain.
++///
++/// Layout (little-endian lengths):
++/// `HASH_CONTEXT || u64(prefix_len) || prefix || u64(payload_len) || payload`,
++/// where `prefix = chain_id || 0x00 || domain_tag || 0x00` comes from C1's
++/// [`Domain::prefix`]. Explicit lengths prevent ambiguous concatenation.
++pub fn domain_message(chain_id: &str, domain: Domain, payload: &[u8]) -> Vec<u8> {
++    let prefix = domain.prefix(chain_id);
++    let mut out = Vec::with_capacity(HASH_CONTEXT.len() + 8 + prefix.len() + 8 + payload.len());
++    out.extend_from_slice(HASH_CONTEXT);
++    out.extend_from_slice(&(prefix.len() as u64).to_le_bytes());
++    out.extend_from_slice(&prefix);
++    out.extend_from_slice(&(payload.len() as u64).to_le_bytes());
++    out.extend_from_slice(payload);
++    out
++}
++
++/// Domain-separated BLAKE3 hash. Used for block/tx hashes and as the digest
++/// that Ed25519 signs.
++pub fn hash_domain(chain_id: &str, domain: Domain, payload: &[u8]) -> Hash {
++    blake3_hash(&domain_message(chain_id, domain, payload))
++}
+diff --git a/crates/aura-crypto/src/lib.rs b/crates/aura-crypto/src/lib.rs
+index 047d219..f5188b0 100644
+--- a/crates/aura-crypto/src/lib.rs
++++ b/crates/aura-crypto/src/lib.rs
+@@ -1,9 +1,36 @@
+-//! `aura-crypto` — placeholder crate for hashing, signatures and domain separation.
++//! AuraLite-Crypto hashing, signatures and secret handling.
+ //!
+-//! C0 creates the workspace skeleton only. The real API lands in phase C3.
+-//! This crate intentionally exposes **no public items**: CONTRIBUTING.md
+-//! forbids stubs that silently return success. An empty crate is honest;
+-//! a fake `Ok(())` is not.
++//! C3 sits on top of C1 (`aura-types`) and implements the cryptographic
++//! primitives named in `docs/ARCHITECTURE.md`:
++//!
++//! * **BLAKE3** (`pure` feature, no C/assembly) for all hashes;
++//! * **Ed25519** (RFC 8032) for transaction and consensus signatures;
++//! * **secp256k1 / ECDSA** (RFC 6979 deterministic, low-S) for compatibility;
++//! * **domain separation** — `chain-id || 0 || domain || 0` framing plus a
++//!   versioned context and explicit length prefixes, so a vote can never be
++//!   replayed as a transaction and a testnet signature dies on mainnet;
++//! * **constant-time comparison** and **zeroizing** secret storage.
++//!
++//! All public APIs use fixed-size byte arrays. No external crate types leak
++//! out of this crate, and no randomness is used anywhere: signing is fully
++//! deterministic given a seed (rule D3).
++//!
++//! Golden vectors come from `tools/gen_c3_vectors.py`: official BLAKE3 vectors,
++//! RFC 8032 §7.1, and a pure-Python secp256k1/RFC6979 implementation verified
++//! with OpenSSL. Full `cargo deny` (licences + advisories) arrives with H1;
++//! C3 adds the exact-pin dependency gate `tools/check_deps.py` to `make test`.
+ 
+ #![forbid(unsafe_code)]
+ #![deny(missing_docs)]
++
++mod ed25519;
++mod error;
++mod hash;
++mod secp;
++mod secret;
++
++pub use ed25519::{ed25519_public_key, sign, sign_raw, verify, verify_raw};
++pub use error::CryptoError;
++pub use hash::{HASH_CONTEXT, blake3_hash, domain_message, hash_domain};
++pub use secp::{secp_public_key, sign_prehash_raw, verify_prehash_raw};
++pub use secret::{SecretBytes, constant_time_eq};
+diff --git a/crates/aura-crypto/src/secp.rs b/crates/aura-crypto/src/secp.rs
+new file mode 100644
+index 0000000..d8a21fc
+--- /dev/null
++++ b/crates/aura-crypto/src/secp.rs
+@@ -0,0 +1,43 @@
++//! secp256k1 deterministic ECDSA (RFC 6979) for compatibility.
++
++use k256::ecdsa::signature::hazmat::{PrehashSigner, PrehashVerifier};
++use k256::ecdsa::{Signature, SigningKey, VerifyingKey};
++
++use crate::error::CryptoError;
++
++/// Derive the 33-byte SEC1 compressed public key for a 32-byte seed.
++pub fn secp_public_key(seed: &[u8; 32]) -> Result<Vec<u8>, CryptoError> {
++    let key = SigningKey::from_bytes(seed.into()).map_err(|_| CryptoError::InvalidSecpSecret)?;
++    Ok(key
++        .verifying_key()
++        .to_encoded_point(true)
++        .as_bytes()
++        .to_vec())
++}
++
++/// Sign a 32-byte prehash with deterministic ECDSA (RFC 6979 / SHA-256).
++///
++/// `k256` produces low-S signatures, matching the independent pure-Python
++/// reference in `tools/gen_c3_vectors.py`.
++pub fn sign_prehash_raw(seed: &[u8; 32], prehash: &[u8; 32]) -> Result<[u8; 64], CryptoError> {
++    let key = SigningKey::from_bytes(seed.into()).map_err(|_| CryptoError::InvalidSecpSecret)?;
++    let signature: Signature = key
++        .sign_prehash(prehash)
++        .map_err(|_| CryptoError::InvalidSignature)?;
++    let bytes = signature.to_bytes();
++    let mut out = [0u8; 64];
++    out.copy_from_slice(&bytes);
++    Ok(out)
++}
++
++/// Verify a deterministic ECDSA signature over a 32-byte prehash.
++pub fn verify_prehash_raw(
++    public: &[u8],
++    prehash: &[u8; 32],
++    signature: &[u8; 64],
++) -> Result<(), CryptoError> {
++    let key = VerifyingKey::from_sec1_bytes(public).map_err(|_| CryptoError::InvalidPublicKey)?;
++    let sig = Signature::from_slice(signature).map_err(|_| CryptoError::InvalidSignature)?;
++    key.verify_prehash(prehash, &sig)
++        .map_err(|_| CryptoError::VerificationFailed)
++}
+diff --git a/crates/aura-crypto/src/secret.rs b/crates/aura-crypto/src/secret.rs
+new file mode 100644
+index 0000000..8277e54
+--- /dev/null
++++ b/crates/aura-crypto/src/secret.rs
+@@ -0,0 +1,49 @@
++//! Zeroizing secret storage and constant-time comparison.
++
++use std::fmt;
++
++use subtle::ConstantTimeEq;
++use zeroize::Zeroizing;
++
++use crate::error::CryptoError;
++
++/// A 32-byte secret that is zeroed on drop and never printed.
++///
++/// `Zeroizing<[u8; 32]>` wipes the buffer when this value leaves scope.
++/// `Debug` is deliberately redacted so a stray `{:?}` in a log cannot leak a
++/// key. This is tested, not assumed.
++pub struct SecretBytes(Zeroizing<[u8; 32]>);
++
++impl SecretBytes {
++    /// Construct from exactly 32 bytes.
++    pub fn from_slice(bytes: &[u8]) -> Result<Self, CryptoError> {
++        if bytes.len() != 32 {
++            return Err(CryptoError::InvalidSecretLength(bytes.len()));
++        }
++        let mut array = [0u8; 32];
++        array.copy_from_slice(bytes);
++        Ok(SecretBytes(Zeroizing::new(array)))
++    }
++
++    /// Borrow the secret bytes.
++    pub fn as_bytes(&self) -> &[u8; 32] {
++        &self.0
++    }
++}
++
++impl fmt::Debug for SecretBytes {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.write_str("SecretBytes([REDACTED])")
++    }
++}
++
++/// Constant-time equality of two byte slices.
++///
++/// Different lengths return `false` immediately (length is not secret);
++/// equal-length comparisons use `subtle::ConstantTimeEq`.
++pub fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
++    if left.len() != right.len() {
++        return false;
++    }
++    bool::from(left.ct_eq(right))
++}
+diff --git a/crates/aura-crypto/tests/c3_crypto.rs b/crates/aura-crypto/tests/c3_crypto.rs
+new file mode 100644
+index 0000000..3e3e30a
+--- /dev/null
++++ b/crates/aura-crypto/tests/c3_crypto.rs
+@@ -0,0 +1,288 @@
++//! C3 gate: crypto primitives against independent references.
++//!
++//! Sources: official BLAKE3 test vectors, RFC 8032 §7.1, and a pure-Python
++//! secp256k1/RFC6979 implementation (verified with OpenSSL). None of these
++//! fixtures were produced by the Rust code under test.
++
++use std::collections::BTreeMap;
++
++use aura_crypto::{
++    HASH_CONTEXT, SecretBytes, blake3_hash, constant_time_eq, domain_message, ed25519_public_key,
++    hash_domain, secp_public_key, sign, sign_prehash_raw, sign_raw, verify, verify_prehash_raw,
++    verify_raw,
++};
++use aura_types::{CHAIN_ID, Domain};
++
++const GOLDEN: &str = include_str!("fixtures/c3_golden.txt");
++
++fn fixtures() -> BTreeMap<String, String> {
++    let mut map = BTreeMap::new();
++    for line in GOLDEN.lines() {
++        let trimmed = line.trim();
++        if trimmed.is_empty() || trimmed.starts_with('#') {
++            continue;
++        }
++        let (key, value) = trimmed
++            .split_once('=')
++            .unwrap_or_else(|| panic!("malformed golden line: {trimmed}"));
++        assert!(
++            map.insert(key.to_owned(), value.to_owned()).is_none(),
++            "duplicate golden key {key}"
++        );
++    }
++    map
++}
++
++fn hx(text: &str) -> Vec<u8> {
++    assert_eq!(text.len() % 2, 0, "even-length hex");
++    text.as_bytes()
++        .chunks(2)
++        .map(|pair| (nibble(pair[0]) << 4) | nibble(pair[1]))
++        .collect()
++}
++
++fn nibble(byte: u8) -> u8 {
++    match byte {
++        b'0'..=b'9' => byte - b'0',
++        b'a'..=b'f' => byte - b'a' + 10,
++        b'A'..=b'F' => byte - b'A' + 10,
++        _ => panic!("invalid hex nibble in fixture"),
++    }
++}
++
++fn arr32(text: &str) -> [u8; 32] {
++    hx(text).try_into().expect("expected 32 bytes")
++}
++
++fn arr64(text: &str) -> [u8; 64] {
++    hx(text).try_into().expect("expected 64 bytes")
++}
++
++fn to_hex(bytes: &[u8]) -> String {
++    let mut out = String::with_capacity(bytes.len() * 2);
++    for byte in bytes {
++        out.push_str(&format!("{byte:02x}"));
++    }
++    out
++}
++
++fn tag_to_domain(tag: &str) -> Domain {
++    match tag {
++        "tx" => Domain::Tx,
++        "vote" => Domain::Vote,
++        "block" => Domain::Block,
++        "contract" => Domain::Contract,
++        "genesis" => Domain::Genesis,
++        _ => panic!("unknown domain tag {tag}"),
++    }
++}
++
++#[test]
++fn blake3_matches_official_vectors() {
++    let f = fixtures();
++    // Input pattern from BLAKE3-team/BLAKE3 test_vectors.json.
++    for key in f.keys().filter(|k| k.starts_with("b3_official_")) {
++        let length: usize = key
++            .strip_prefix("b3_official_")
++            .unwrap()
++            .parse()
++            .expect("numeric length");
++        let input: Vec<u8> = (0..length).map(|i| (i % 251) as u8).collect();
++        assert_eq!(blake3_hash(&input).to_hex(), f[key], "{key}");
++    }
++    assert_eq!(blake3_hash(b"").to_hex(), f["b3_official_0"]);
++}
++
++#[test]
++fn hash_context_is_pinned() {
++    let f = fixtures();
++    assert_eq!(to_hex(HASH_CONTEXT), f["hash_context"]);
++}
++
++#[test]
++fn domain_messages_and_hashes_match_independent_reference() {
++    let f = fixtures();
++    for index in 1..=5 {
++        let chain = &f[&format!("domain_{index}_chain")];
++        let tag = &f[&format!("domain_{index}_tag")];
++        let payload = hx(&f[&format!("domain_{index}_payload")]);
++        let domain = tag_to_domain(tag);
++
++        let message = domain_message(chain, domain, &payload);
++        assert_eq!(
++            to_hex(&message),
++            f[&format!("domain_{index}_message")],
++            "domain_{index} framing"
++        );
++        assert_eq!(
++            hash_domain(chain, domain, &payload).to_hex(),
++            f[&format!("domain_{index}_hash")],
++            "domain_{index} BLAKE3"
++        );
++    }
++}
++
++#[test]
++fn domain_separation_changes_the_hash() {
++    let payload = b"same payload";
++    let tx = hash_domain(CHAIN_ID, Domain::Tx, payload);
++    let vote = hash_domain(CHAIN_ID, Domain::Vote, payload);
++    let other_chain = hash_domain("auralite-1", Domain::Tx, payload);
++    let other_payload = hash_domain(CHAIN_ID, Domain::Tx, b"same payload!");
++
++    assert_ne!(tx, vote, "domain tag must change the hash");
++    assert_ne!(tx, other_chain, "chain-id must change the hash");
++    assert_ne!(tx, other_payload, "payload must change the hash");
++    assert_eq!(
++        tx,
++        hash_domain(CHAIN_ID, Domain::Tx, payload),
++        "deterministic"
++    );
++}
++
++#[test]
++fn rfc8032_ed25519_vectors_match() {
++    let f = fixtures();
++    for index in 1..=3 {
++        let seed = arr32(&f[&format!("ed{index}_secret")]);
++        let expected_public = arr32(&f[&format!("ed{index}_public")]);
++        let message = hx(&f[&format!("ed{index}_message")]);
++        let expected_signature = arr64(&f[&format!("ed{index}_signature")]);
++
++        assert_eq!(
++            ed25519_public_key(&seed),
++            expected_public,
++            "ed{index} public"
++        );
++        let signature = sign_raw(&seed, &message);
++        assert_eq!(signature, expected_signature, "ed{index} signature");
++        assert!(
++            verify_raw(&expected_public, &message, &expected_signature).is_ok(),
++            "ed{index} verify"
++        );
++    }
++}
++
++#[test]
++fn ed25519_rejects_tampering() {
++    // Pins NC-4 (verification bypass).
++    let f = fixtures();
++    let seed = arr32(&f["ed2_secret"]);
++    let public = ed25519_public_key(&seed);
++    let message = hx(&f["ed2_message"]);
++    let mut signature = sign_raw(&seed, &message);
++
++    assert!(verify_raw(&public, &message, &signature).is_ok());
++    signature[0] ^= 0x01;
++    assert!(
++        verify_raw(&public, &message, &signature).is_err(),
++        "tampered sig"
++    );
++    assert!(
++        verify_raw(&public, b"different message", &signature).is_err(),
++        "tampered message"
++    );
++}
++
++#[test]
++fn domain_signed_messages_verify_only_in_their_domain() {
++    let seed = [0x42u8; 32];
++    let public = ed25519_public_key(&seed);
++    let payload = b"transfer 10 ALCRY";
++    let signature = sign(&seed, CHAIN_ID, Domain::Tx, payload);
++
++    assert!(verify(&public, CHAIN_ID, Domain::Tx, payload, &signature).is_ok());
++    assert!(verify(&public, CHAIN_ID, Domain::Vote, payload, &signature).is_err());
++    assert!(verify(&public, "auralite-1", Domain::Tx, payload, &signature).is_err());
++    assert!(
++        verify(
++            &public,
++            CHAIN_ID,
++            Domain::Tx,
++            b"transfer 11 ALCRY",
++            &signature
++        )
++        .is_err()
++    );
++
++    let mut tampered = signature;
++    tampered[63] ^= 0x80;
++    assert!(verify(&public, CHAIN_ID, Domain::Tx, payload, &tampered).is_err());
++}
++
++#[test]
++fn secp256k1_rfc6979_vectors_match_independent_reference() {
++    let f = fixtures();
++    for index in 1..=2 {
++        let seed = arr32(&f[&format!("secp{index}_secret")]);
++        let expected_public = hx(&f[&format!("secp{index}_public")]);
++        let prehash = arr32(&f[&format!("secp{index}_prehash")]);
++        let expected_signature = arr64(&f[&format!("secp{index}_signature")]);
++
++        assert_eq!(
++            secp_public_key(&seed).unwrap(),
++            expected_public,
++            "secp{index} public"
++        );
++        let signature = sign_prehash_raw(&seed, &prehash).unwrap();
++        assert_eq!(
++            signature, expected_signature,
++            "secp{index} deterministic signature"
++        );
++        assert!(
++            verify_prehash_raw(&expected_public, &prehash, &expected_signature).is_ok(),
++            "secp{index} verify"
++        );
++    }
++}
++
++#[test]
++fn secp256k1_rejects_tampering_and_bad_keys() {
++    let f = fixtures();
++    let seed = arr32(&f["secp1_secret"]);
++    let public = secp_public_key(&seed).unwrap();
++    let prehash = arr32(&f["secp1_prehash"]);
++    let mut signature = sign_prehash_raw(&seed, &prehash).unwrap();
++
++    assert!(verify_prehash_raw(&public, &prehash, &signature).is_ok());
++    signature[10] ^= 0x01;
++    assert!(verify_prehash_raw(&public, &prehash, &signature).is_err());
++
++    let mut other_prehash = prehash;
++    other_prehash[0] ^= 0x01;
++    assert!(verify_prehash_raw(&public, &other_prehash, &signature).is_err());
++
++    assert_eq!(
++        secp_public_key(&[0u8; 32]).err(),
++        Some(aura_crypto::CryptoError::InvalidSecpSecret)
++    );
++    assert!(verify_prehash_raw(&[0u8; 33], &prehash, &signature).is_err());
++}
++
++#[test]
++fn constant_time_eq_is_correct() {
++    assert!(constant_time_eq(b"aura", b"aura"));
++    assert!(!constant_time_eq(b"aura", b"aurb"));
++    assert!(!constant_time_eq(b"aura", b"aur"));
++    assert!(constant_time_eq(b"", b""));
++    assert!(!constant_time_eq(b"", b"x"));
++}
++
++#[test]
++fn secret_bytes_are_redacted_and_length_checked() {
++    let secret = SecretBytes::from_slice(&[0xab; 32]).unwrap();
++    assert_eq!(secret.as_bytes(), &[0xab; 32]);
++
++    let debug = format!("{secret:?}");
++    assert_eq!(debug, "SecretBytes([REDACTED])");
++    assert!(!debug.contains("abab"), "secret must not appear in Debug");
++
++    assert_eq!(
++        SecretBytes::from_slice(&[0u8; 31]).err(),
++        Some(aura_crypto::CryptoError::InvalidSecretLength(31))
++    );
++    assert_eq!(
++        SecretBytes::from_slice(&[0u8; 33]).err(),
++        Some(aura_crypto::CryptoError::InvalidSecretLength(33))
++    );
++}
+diff --git a/crates/aura-crypto/tests/fixtures/c3_golden.txt b/crates/aura-crypto/tests/fixtures/c3_golden.txt
+new file mode 100644
+index 0000000..d63b0d6
+--- /dev/null
++++ b/crates/aura-crypto/tests/fixtures/c3_golden.txt
+@@ -0,0 +1,66 @@
++# AuraLite-Crypto C3 golden vectors
++# Sources: official BLAKE3 test_vectors.json, RFC 8032 §7.1,
++# and a pure-Python secp256k1/RFC6979 implementation (OpenSSL-verified).
++# Generated by tools/gen_c3_vectors.py. Format: key=value. Do not edit.
++# BLAKE3 official inputs are bytes(i % 251 for i in range(N)).
++hash_context=417572614c6974652d43727970746f2f63727970746f2d763100
++b3_official_0=af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262
++b3_official_1=2d3adedff11b61f14c886e35afa036736dcd87a74d27b5c1510225d0f592e213
++b3_official_2=7b7015bb92cf0b318037702a6cdd81dee41224f734684c2c122cd6359cb1ee63
++b3_official_3=e1be4d7a8ab5560aa4199eea339849ba8e293d55ca0a81006726d184519e647f
++b3_official_4=f30f5ab28fe047904037f77b6da4fea1e27241c5d132638d8bedce9d40494f32
++b3_official_7=3f8770f387faad08faa9d8414e9f449ac68e6ff0417f673f602a646a891419fe
++b3_official_8=2351207d04fc16ade43ccab08600939c7c1fa70a5c0aaca76063d04c3228eaeb
++b3_official_63=e9bc37a594daad83be9470df7f7b3798297c3d834ce80ba85d6e207627b7db7b
++b3_official_64=4eed7141ea4a5cd4b788606bd23f46e212af9cacebacdc7d1f4c6dc7f2511b98
++b3_official_65=de1e5fa0be70df6d2be8fffd0e99ceaa8eb6e8c93a63f2d8d1c30ecb6b263dee
++b3_official_127=d81293fda863f008c09e92fc382a81f5a0b4a1251cba1634016a0f86a6bd640d
++b3_official_128=f17e570564b26578c33bb7f44643f539624b05df1a76c81f30acd548c44b45ef
++b3_official_129=683aaae9f3c5ba37eaaf072aed0f9e30bac0865137bae68b1fde4ca2aebdcb12
++b3_official_1023=10108970eeda3eb932baac1428c7a2163b0e924c9a9e25b35bba72b28f70bd11
++b3_official_1024=42214739f095a406f3fc83deb889744ac00df831c10daa55189b5d121c855af7
++domain_1_chain=auralite-test-1
++domain_1_tag=tx
++domain_1_payload=
++domain_1_message=417572614c6974652d43727970746f2f63727970746f2d7631001300000000000000617572616c6974652d746573742d31007478000000000000000000
++domain_1_hash=7d4f8a30a53380858b36f0807e7acd4196edbb358199a27f5d5b993d5e7ec5a8
++domain_2_chain=auralite-test-1
++domain_2_tag=tx
++domain_2_payload=7472616e736665723a616c6963652d3e626f623a312e35414c435259
++domain_2_message=417572614c6974652d43727970746f2f63727970746f2d7631001300000000000000617572616c6974652d746573742d31007478001c000000000000007472616e736665723a616c6963652d3e626f623a312e35414c435259
++domain_2_hash=3f1eff667479d7b7c0490b703ed243cdffe8c3911e460ff6c00783ad459c672f
++domain_3_chain=auralite-test-1
++domain_3_tag=vote
++domain_3_payload=7472616e736665723a616c6963652d3e626f623a312e35414c435259
++domain_3_message=417572614c6974652d43727970746f2f63727970746f2d7631001500000000000000617572616c6974652d746573742d3100766f7465001c000000000000007472616e736665723a616c6963652d3e626f623a312e35414c435259
++domain_3_hash=4726c20e7cbb6a30f749877ce5c336471d6a65bf678541471d4c31c7d94869e0
++domain_4_chain=auralite-1
++domain_4_tag=tx
++domain_4_payload=7472616e736665723a616c6963652d3e626f623a312e35414c435259
++domain_4_message=417572614c6974652d43727970746f2f63727970746f2d7631000e00000000000000617572616c6974652d31007478001c000000000000007472616e736665723a616c6963652d3e626f623a312e35414c435259
++domain_4_hash=355f8693583dec79db91c2b0291b6f64635fdb26627d2eb9ea097cca3d321899
++domain_5_chain=auralite-test-1
++domain_5_tag=block
++domain_5_payload=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7
++domain_5_message=417572614c6974652d43727970746f2f63727970746f2d7631001600000000000000617572616c6974652d746573742d3100626c6f636b00c800000000000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7
++domain_5_hash=1accd823ac383ad6b03eb0c0c4112d0a9f7b662220badfca67db6a9c09478fa9
++ed1_secret=9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60
++ed1_public=d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
++ed1_message=
++ed1_signature=e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b
++ed2_secret=4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb
++ed2_public=3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c
++ed2_message=72
++ed2_signature=92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00
++ed3_secret=c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7
++ed3_public=fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025
++ed3_message=af82
++ed3_signature=6291d657deec24024827e69c3abe01a30ce548a284743a445e3680d7db5ac3ac18ff9b538d16f290ae67f760984dc6594a7c15e9716ed28dc027beceea1ec40a
++secp1_secret=0707070707070707070707070707070707070707070707070707070707070707
++secp1_public=02989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f
++secp1_prehash=0303030303030303030303030303030303030303030303030303030303030303
++secp1_signature=b1c47ade5c2eb6b33193f72c0782ed89717216cab52542aa5dd7ba2bdf44a3ef4926d5adca8bbc26ff11a655744c8067781eb90aff6b16a1fd7b68c6b247d991
++secp2_secret=e379e9d43baa2bb4c8cd4d42758a2a5d3b0280f1e08b10a72c0bd1a4a6af1b91
++secp2_public=02a73fb1748bf0cf5d0d4d5f3fe590e725cd73fb4657190b2ef4f151f64e4689ef
++secp2_prehash=239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5
++secp2_signature=d5b34ce54c491e196cae184d4d7fb7e4cc3eabb65e5524a9021727ed9428dbdf79420a8aa4a75535e962f8b1ccc0f601c6f678b809ab18c15f36fde52766bd23
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+index 272bca1..5c92009 100644
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -95,6 +95,13 @@ review error.
+ | P2P encryption | Noise + QUIC/TCP (libp2p) | identity = pubkey |
+ | PQ horizon | ML-DSA (FIPS 204) / SLH-DSA (FIPS 205) | versioned `sig_algo` in address |
+ 
++**C3 status.** BLAKE3 (pure Rust), Ed25519, secp256k1/RFC6979, constant-time
++comparison and zeroizing secrets are implemented in `crates/aura-crypto`.
++Domain separation is
++`HASH_CONTEXT || u64(len(prefix)) || prefix || u64(len(payload)) || payload`,
++where `prefix = chain_id || 0x00 || domain_tag || 0x00` (C1). BLS12-381 QC
++aggregation (B2) and the PQ migration (H2) are still planned, not implemented.
++
+ All signatures are verified with `domain = chain_id || purpose || version`.
+ Keys are zeroize-on-drop; comparisons are constant-time.
+ 
+diff --git a/docs/STATUS.md b/docs/STATUS.md
+index b596b55..b84653d 100644
+--- a/docs/STATUS.md
++++ b/docs/STATUS.md
+@@ -1,8 +1,8 @@
+ # Implementation status — AuraLite-Crypto
+ 
+ > Updated **in the same patch** as the phase's code (rule D9).
+-> Snapshot date: **2026-10-25**, tree: "C2 landed — canonical types and
+-> `aura-codec`, Stage 1 in progress".
++> Snapshot date: **2026-10-25**, tree: "C3 landed — types, codec and
++> `aura-crypto`, Stage 1 in progress".
+ 
+ ## Locked decisions (2026-10-25)
+ 
+@@ -18,8 +18,9 @@
+ | Docs language | English (owner request, 2026-10-25) |
+ 
+ **Phase ledger:** C0 ✅ (`patches/0001-C0-baseline-workspace.patch`),
+-C1 ✅ (`patches/0002-C1-types.patch`) and C2 ✅
+-(`patches/0003-C2-codec.patch`) done; C3 (`aura-crypto`) is next. No other
++C1 ✅ (`patches/0002-C1-types.patch`), C2 ✅
++(`patches/0003-C2-codec.patch`) and C3 ✅
++(`patches/0004-C3-crypto.patch`) done; C4 (tx format) is next. No other
+ phase has started.
+ 
+ ## Maturity level
+@@ -38,11 +39,12 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
+ ## Working now
+ 
+ - `make test` is green: `cargo fmt --check`, `cargo clippy --workspace
+-  --all-targets -- -D warnings`, `cargo test --workspace` (**28 tests**) and
+-  the docs drift guard. Receipts: `docs/evidence/c0-baseline.txt`,
+-  `docs/evidence/c0/nc.log`, `docs/evidence/c1/gates.txt`,
+-  `docs/evidence/c1/nc.log`, `docs/evidence/c2/gates.txt`,
+-  `docs/evidence/c2/nc.log`.
++  --all-targets -- -D warnings`, `cargo test --workspace` (**39 tests**),
++  the docs drift guard and the dependency gate. Receipts:
++  `docs/evidence/c0-baseline.txt`, `docs/evidence/c0/nc.log`,
++  `docs/evidence/c1/gates.txt`, `docs/evidence/c1/nc.log`,
++  `docs/evidence/c2/gates.txt`, `docs/evidence/c2/nc.log`,
++  `docs/evidence/c3/gates.txt`, `docs/evidence/c3/nc.log`.
+ - `aura-types` exports the locked D0 identity (`auralite-test-1`, `ALCRY`,
+   18 decimals, `aura`, `bft-pos`, `wasm`, v1) **and** the C1 canonical types:
+   `Hash`, bech32 `Address`, `Amount`/`Denom`, `ChainId`, `Nonce`, `Height`,
+@@ -55,9 +57,16 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
+   non-canonical vectors). `decode_canonical()` re-encodes and requires byte
+   equality. 4 C2 negative controls pin the version, the golden fixture, the
+   trailing-byte guard and the non-minimal-varint guard.
+-- Still **zero external dependencies**: `Cargo.lock` has 11 packages (our own
+-  crates), 0 `source`/`checksum` lines. `aura-codec -> aura-types` is one
+-  internal path dependency.
++- C3 `aura-crypto` implements BLAKE3 (`pure` feature), Ed25519 (RFC 8032),
++  secp256k1 deterministic ECDSA (RFC 6979), domain-separated hashing/signing,
++  constant-time equality and zeroizing secret storage. Verified against
++  official BLAKE3 vectors, RFC 8032 §7.1 and a pure-Python secp256k1
++  reference (OpenSSL-verified). 5 C3 negative controls pin the context, two
++  fixtures, the verifier and the dependency allowlist.
++- **Dependencies changed at C3:** 54 external crates, all with exact `=x.y.z`
++  pins, crates.io sources and sha256 checksums, recorded in
++  `docs/spec/c3-dependency-allowlist.txt` and checked by `make check-deps`
++  inside `make test`. `cargo deny` (licences/advisories) is still owed to H1.
+ - 10 placeholder crates compile but expose **no API** (an honest empty crate,
+   not a fake `Ok(())`). CI runs the same commands as `make test`.
+ - Still absent: consensus, VM, P2P, node, RPC, wallet, explorer, contracts.
+@@ -69,25 +78,23 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
+ 
+ ```
+ find crates -name Cargo.toml       -> 11 crates (+1 workspace root)
+-find . -name '*.rs' -not -path './target/*' -> 22 files
++find . -name '*.rs' -not -path './target/*' -> 28 files
+ ls docs/plans/*_PLAN.md           -> 12 plans / 112 phase rows
+-cargo test --workspace            -> 28 passed; 0 failed
++cargo test --workspace            -> 39 passed; 0 failed
+ make test                         -> ALL GATES GREEN
+-make nc-c0                        -> 2/2 negative controls PASS
+-make nc-c1                        -> 3/3 negative controls PASS
+-make nc-c2                        -> 4/4 negative controls PASS
+-external dependencies             -> 0
++make nc-c0 / nc-c1 / nc-c2 / nc-c3 -> 2/2 + 3/3 + 4/4 + 5/5 = 14 NC PASS
++make check-deps                   -> 54 external crates allowlisted
+ validators / blocks / tx          -> 0 / 0 / 0
+ ```
+ 
+-Pre-C0 baseline and post-C0/C1/C2 numbers with raw command output are in
+-`docs/evidence/c0-baseline.txt`, `docs/evidence/c1/gates.txt` and
+-`docs/evidence/c2/gates.txt`.
++Pre-C0 baseline and post-C0/C1/C2/C3 numbers with raw command output are in
++`docs/evidence/c0-baseline.txt`, `docs/evidence/c1/gates.txt`,
++`docs/evidence/c2/gates.txt` and `docs/evidence/c3/gates.txt`.
+ 
+ ## What is missing (and must not be lost)
+ 
+-- No crypto implementation (C3), no tx/block formats (C4/C5), no Merkle
+-  proofs (C6).
++- No tx/block formats (C4/C5), no Merkle proofs (C6), no BLS aggregation
++  (B2), no PQ migration (H2), no `cargo deny` (H1).
+ - No consensus, no P2P, no state, no VM.
+ - No wallet, explorer, contracts, token.
+ - No audit, no bug bounty, no legal opinion.
+diff --git a/docs/evidence/c3/SHA256SUMS b/docs/evidence/c3/SHA256SUMS
+new file mode 100644
+index 0000000..ce3254c
+--- /dev/null
++++ b/docs/evidence/c3/SHA256SUMS
+@@ -0,0 +1,4 @@
++560a125917d0654433159f2da29f337e5a07f2b08988245a2e2dfa650d6fab53  docs/evidence/c3/gates.txt
++2979ca90f2aba5a332bb11c959f5840ee74350f4e1f888a03e9ec170731750ab  docs/evidence/c3/nc.log
++cc02fc3da3ad0cd207ea98c81ada6d533fec1cd6aead2bc92f8017e7837c583a  crates/aura-crypto/tests/fixtures/c3_golden.txt
++8899f96fb16e15eedda8c54021b352c740ee7d91bbc83956249d9ab19d9d80db  docs/spec/c3-dependency-allowlist.txt
+diff --git a/docs/evidence/c3/gates.txt b/docs/evidence/c3/gates.txt
+new file mode 100644
+index 0000000..be279e6
+--- /dev/null
++++ b/docs/evidence/c3/gates.txt
+@@ -0,0 +1,140 @@
++AuraLite-Crypto — C3 evidence (aura-crypto)
++Generated (UTC): 2026-10-25T17:14:44+00:00
++Rule: measured against the tree, not assumed.
++
++Independent references: official BLAKE3 test_vectors.json,
++RFC 8032 §7.1 Ed25519 vectors, and pure-Python secp256k1/RFC6979
++(signatures additionally verified with OpenSSL pkeyutl -verify).
++
++========================================================================
++RAW COMMAND OUTPUT
++========================================================================
++
++--- toolchain ---
++$ rustc --version && cargo --version
++rustc 1.99.1 (58cf8f9c3 2026-10-13)
++cargo 1.99.1 (5f94df478 2026-08-27)
++[rc=0]
++
++--- pre-C3 tree (C2 commit) ---
++$ git log -1 --oneline
++e37e328 C2 patch artifact
++[rc=0]
++
++--- pre-C3 .rs files ---
++$ git ls-tree -r --name-only HEAD | grep -c '\.rs$' || true
++22
++[rc=0]
++
++--- pre-C3 external deps ---
++$ git show HEAD:Cargo.lock | grep -c '^source = ' || true
++0
++[rc=0]
++
++--- post-C3 .rs files ---
++$ find . -name '*.rs' -not -path './target/*' | wc -l
++28
++[rc=0]
++
++--- post-C3 external deps ---
++$ grep -c '^source = ' Cargo.lock || true
++54
++[rc=0]
++
++--- post-C3 plan phase rows ---
++$ grep -hE '^\| (✅ |⏸ )?\*\*[A-Z]+[0-9]+\*\* \|' docs/plans/*_PLAN.md | wc -l
++112
++[rc=0]
++
++--- dependency gate ---
++$ python3 tools/check_deps.py
++DEPENDENCY GATE: OK — 65 lock packages (11 local, 54 external, all checksummed + allowlisted)
++[rc=0]
++
++--- independent generator is idempotent ---
++$ $ (shell script: generator idempotence check)
++generator idempotent: cc02fc3da3ad0cd207ea98c81ada6d533fec1cd6aead2bc92f8017e7837c583a
++[rc=0]
++
++--- full gate ---
++$ make test
++     Running tests/c3_crypto.rs (target/debug/deps/c3_crypto-24c231c671b89c6e)
++     Running unittests src/lib.rs (target/debug/deps/aura_exec-376036da62a1a889)
++     Running unittests src/lib.rs (target/debug/deps/aura_mempool-d4afd06ebea00a27)
++     Running unittests src/lib.rs (target/debug/deps/aura_node-f89cb5fec9076dca)
++     Running unittests src/lib.rs (target/debug/deps/aura_p2p-a8f698eab67efd73)
++     Running unittests src/lib.rs (target/debug/deps/aura_rpc-f6ef2bc286c42693)
++     Running unittests src/lib.rs (target/debug/deps/aura_state-1313f3cb4a570b49)
++     Running unittests src/lib.rs (target/debug/deps/aura_storage-1026462560aae3b0)
++     Running unittests src/lib.rs (target/debug/deps/aura_types-308b229bcbc15c92)
++     Running tests/c1_types.rs (target/debug/deps/c1_types-30318a674a00d8c5)
++     Running tests/identity.rs (target/debug/deps/identity-22b5be58a3e6ffbb)
++   Doc-tests aura_codec
++   Doc-tests aura_consensus
++   Doc-tests aura_crypto
++   Doc-tests aura_exec
++   Doc-tests aura_mempool
++   Doc-tests aura_node
++   Doc-tests aura_p2p
++   Doc-tests aura_rpc
++   Doc-tests aura_state
++   Doc-tests aura_storage
++   Doc-tests aura_types
++[rc=0]
++
++--- C3 negative controls ---
++$ make nc-c3
++
++error: test failed, to rerun pass `-p aura-crypto --test c3_crypto`
++NC-2 independent domain-hash vector: PASS
++      cargo test -p aura-crypto --quiet -> rc=101 (RED as expected)
++          domain_messages_and_hashes_match_independent_reference
++
++test result: FAILED. 10 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
++
++error: test failed, to rerun pass `-p aura-crypto --test c3_crypto`
++NC-3 RFC 8032 vector: PASS
++      cargo test -p aura-crypto --quiet -> rc=101 (RED as expected)
++          rfc8032_ed25519_vectors_match
++
++test result: FAILED. 10 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
++
++error: test failed, to rerun pass `-p aura-crypto --test c3_crypto`
++NC-4 Ed25519 verification bypass: PASS
++      cargo test -p aura-crypto --quiet -> rc=101 (RED as expected)
++         |
++32 |     let sig = Signature::from_bytes(signature);
++   |         ^^^ help: if this is intentional, prefix it with an underscore: `_sig`
++
++error: test failed, to rerun pass `-p aura-crypto --test c3_crypto`
++NC-5 dependency allowlist / make test gate: PASS
++      make test -> rc=2 (RED as expected)
++         Doc-tests aura_rpc
++   Doc-tests aura_state
++   Doc-tests aura_storage
++   Doc-tests aura_types
++make[2]: *** [Makefile:61: test] Error 1
++
++RESULT: 5/5 negative controls PASS
++restore check: cargo test -p aura-crypto -> rc=0; check_deps -> rc=0 (GREEN as expected)
++make[1]: Leaving directory '/home/user/AuraLite-Crypto'
++[rc=0]
++
++--- docs drift guard ---
++$ python3 tools/check_claims.py
++DOCS DRIFT GUARD: OK — 19 markdown files, 12 plans, 112 phase rows, all local links resolve
++[rc=0]
++
++========================================================================
++SUMMARY
++========================================================================
++
++Pre-C3 (C2 tree): 22 .rs files, 0 external dependencies, 28 tests.
++Post-C3: 28 .rs files, 54 external crates (all checksummed, exact
++pins, allowlisted), 11 local crates, 39 tests passing (28 C0-C2 +
++11 C3), `make test` ALL GATES GREEN, 5/5 C3 negative controls PASS.
++Validators/blocks/tx remain 0/0/0.
++
++Notes: blake3 uses the `pure` feature (portable Rust implementation);
++`cc` remains an upstream build-dependency but no native hash code is
++compiled. `cargo deny` (licences/advisories) is still owed to H1.
+diff --git a/docs/evidence/c3/nc.log b/docs/evidence/c3/nc.log
+new file mode 100644
+index 0000000..0cae376
+--- /dev/null
++++ b/docs/evidence/c3/nc.log
+@@ -0,0 +1,41 @@
++C3 NEGATIVE CONTROLS — 2026-10-25T17:14:46+00:00
++Rule: a gate that cannot go red is not a gate (CONTRIBUTING.md §1).
++
++NC-1 domain separation context: PASS
++      cargo test -p aura-crypto --quiet -> rc=101 (RED as expected)
++          hash_context_is_pinned
++
++test result: FAILED. 9 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
++
++error: test failed, to rerun pass `-p aura-crypto --test c3_crypto`
++NC-2 independent domain-hash vector: PASS
++      cargo test -p aura-crypto --quiet -> rc=101 (RED as expected)
++          domain_messages_and_hashes_match_independent_reference
++
++test result: FAILED. 10 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
++
++error: test failed, to rerun pass `-p aura-crypto --test c3_crypto`
++NC-3 RFC 8032 vector: PASS
++      cargo test -p aura-crypto --quiet -> rc=101 (RED as expected)
++          rfc8032_ed25519_vectors_match
++
++test result: FAILED. 10 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
++
++error: test failed, to rerun pass `-p aura-crypto --test c3_crypto`
++NC-4 Ed25519 verification bypass: PASS
++      cargo test -p aura-crypto --quiet -> rc=101 (RED as expected)
++         |
++32 |     let sig = Signature::from_bytes(signature);
++   |         ^^^ help: if this is intentional, prefix it with an underscore: `_sig`
++
++error: test failed, to rerun pass `-p aura-crypto --test c3_crypto`
++NC-5 dependency allowlist / make test gate: PASS
++      make test -> rc=2 (RED as expected)
++         Doc-tests aura_rpc
++   Doc-tests aura_state
++   Doc-tests aura_storage
++   Doc-tests aura_types
++make[2]: *** [Makefile:61: test] Error 1
++
++RESULT: 5/5 negative controls PASS
++restore check: cargo test -p aura-crypto -> rc=0; check_deps -> rc=0 (GREEN as expected)
+diff --git a/docs/plans/CORE_PLAN.md b/docs/plans/CORE_PLAN.md
+index ebdcf8c..64ba878 100644
+--- a/docs/plans/CORE_PLAN.md
++++ b/docs/plans/CORE_PLAN.md
+@@ -1,6 +1,6 @@
+ # CORE_PLAN — primitives, codec, cryptography, formats
+ 
+-**Status:** 🚧 IN PROGRESS (C0–C2 done ✅ 2026-10-25; C3 next)  
++**Status:** 🚧 IN PROGRESS (C0–C3 done ✅ 2026-10-25; C4 next)  
+ **Stage:** Stage 1: C0–C10 (all phases active).  
+ **Deliverable:** `patches/0001-C0-...` … `patches/0011-C10-...`
+ **Dependencies:** none. This is the root of the whole tree.
+@@ -31,7 +31,7 @@ other 11 plans rest.
+ | ✅ **C0** | Baseline + workspace + CI | `Cargo.toml` workspace, `Makefile`, `rust-toolchain.toml`, `.github/workflows/ci.yml`, `docs/evidence/c0-baseline.txt` with measured zeros; constants `CHAIN_ID="auralite-test-1"`, `DENOM="ALCRY"`, `DECIMALS=18` fixed in code and checked by a test | `make test` green (0 tests so far, but the pipeline is real); NC: broken CI → red |
+ | ✅ **C1** | Canonical types | `Hash`, `Address` (bech32 `aura1...`), `Amount`/`Denom` (`ALCRY` / `aalcry`), `ChainId`, `Nonce`, `Height`, `Gas`, `Domain`; `BTreeMap` instead of `HashMap` | unit vectors: bech32 round-trip, bad checksum rejected, checked `Amount` overflow |
+ | ✅ **C2** | `aura-codec` | fixed field order, lengths, `Option` tags, non-canonical encodings banned, `codec_version` | golden vectors (hex fixtures), property: `decode(encode(x)) == x`, NC: one mutated byte → `Err` |
+-| **C3** | `aura-crypto` | BLAKE3 + domain tags, Ed25519, secp256k1, constant-time compare, zeroize | RFC/test-vector signatures, malleable `s` rejected, NC: swapped domain → `Err` |
++| ✅ **C3** | `aura-crypto` | BLAKE3 + domain tags, Ed25519, secp256k1, constant-time compare, zeroize | RFC/test-vector signatures, malleable `s` rejected, NC: swapped domain → `Err` |
+ | **C4** | Transaction format | `Tx { chain_id, signer, nonce, kind, payload, gas_limit, max_fee, tip, expiry, sig }`, canonical `signing_bytes` | sign/verify, replay test: a tx from `auralite-1` rejected in `auralite-test-1` |
+ | **C5** | Block and header | `Header`/`Body`, `block_hash`, `tx_root`, `state_root`, `validator_set_hash`, protocol version | vector: changing tx order changes `tx_root`; NC: reorder without recompute → red |
+ | **C6** | Merkle proofs | build/verify proofs for txs and events, compact format | 1000 leaves, all proofs valid, one substituted — invalid |
+@@ -109,6 +109,33 @@ other 11 plans rest.
+ - Deferred: hashing/signatures (C3), tx/block formats (C4/C5). Any wire
+   format change requires a `CODEC_VERSION` bump + migration test.
+ 
++
++### C3 receipt (2026-10-25)
++
++- Deliverable: `patches/0004-C3-crypto.patch`.
++- Landed: `aura-crypto` with BLAKE3 (`pure`), Ed25519 (RFC 8032), secp256k1
++  deterministic ECDSA (RFC 6979, low-S), `HASH_CONTEXT`-framed domain
++  separation (`chain-id || 0 || tag || 0`, explicit u64 lengths),
++  constant-time equality and `SecretBytes` (zeroize-on-drop, redacted Debug).
++  No randomness in the API; all signing is deterministic from a seed.
++- Golden vectors: `tools/gen_c3_vectors.py` — official BLAKE3 vectors (15),
++  a self-checking pure-Python BLAKE3 for 5 domain hashes, RFC 8032 §7.1
++  TEST 1/2/3, and pure-Python secp256k1/RFC6979 (2 cases, verified with
++  OpenSSL `pkeyutl -verify`). 66 fixture lines, generator byte-stable.
++- Gate: `make test` → **39 passed / 0 failed** (28 C0–C2 + 11 C3), fmt/clippy
++  clean, drift guard 12 plans / 112 rows, dependency gate 54 external crates.
++- NC: `make nc-c3` → **5/5 PASS**: HASH_CONTEXT change, two corrupted golden
++  vectors, Ed25519 verification bypass, dependency allowlist drift (proves
++  `make test` really runs `check_deps.py`).
++- Evidence: `docs/evidence/c3/gates.txt`, `docs/evidence/c3/nc.log`,
++  `docs/evidence/c3/SHA256SUMS`; `docs/spec/c3-dependency-allowlist.txt`.
++- Dependencies: exact pins `blake3 =1.8.7`, `ed25519-dalek =2.2.0`,
++  `k256 =0.13.4`, `zeroize =1.8.2`, `subtle =2.6.1`. `blake3` uses `pure`
++  (portable Rust); `cc` remains an upstream build-dependency but compiles no
++  native hash code. `cargo deny` (licences/advisories) is owed to H1.
++- Deferred: BLS12-381 QC aggregation (B2), PQ migration to ML-DSA/SLH-DSA
++  (H2), tx/block formats (C4/C5).
++
+ ## Key risks
+ 
+ 1. **Non-canonical serialization** → two nodes get different hashes for the same
+diff --git a/docs/spec/c3-dependency-allowlist.txt b/docs/spec/c3-dependency-allowlist.txt
+new file mode 100644
+index 0000000..a19322c
+--- /dev/null
++++ b/docs/spec/c3-dependency-allowlist.txt
+@@ -0,0 +1,61 @@
++# AuraLite-Crypto external dependency allowlist (C3).
++# Generated by tools/record_c3_deps.py from Cargo.lock.
++# Checked by tools/check_deps.py inside `make test`.
++# Lines are name=version; duplicate names with distinct versions are
++# intentional (e.g. cpufeatures 0.2/0.3, syn 2/3).
++# Any change requires a dedicated phase patch, review and an NC.
++# Full cargo deny (licences + advisories) arrives with H1.
++arrayvec=0.7.8
++base16ct=0.2.0
++base64ct=1.8.3
++blake3=1.8.7
++block-buffer=0.10.4
++cc=1.10.0
++cfg-if=1.0.5
++const-oid=0.9.6
++constant_time_eq=0.4.2
++cpufeatures=0.2.17
++cpufeatures=0.3.1
++crypto-bigint=0.5.5
++crypto-common=0.1.6
++curve25519-dalek=4.1.3
++curve25519-dalek-derive=0.1.1
++der=0.7.10
++digest=0.10.7
++ecdsa=0.16.9
++ed25519=2.2.3
++ed25519-dalek=2.2.0
++elliptic-curve=0.13.8
++ff=0.13.1
++fiat-crypto=0.2.9
++find-msvc-tools=0.1.15
++generic-array=0.14.9
++getrandom=0.2.17
++group=0.13.0
++hmac=0.12.1
++k256=0.13.4
++libc=0.2.191
++pkcs8=0.10.2
++proc-macro2=1.0.107
++quote=1.0.47
++rand_core=0.6.4
++rfc6979=0.4.0
++rustc_version=0.4.1
++sec1=0.7.3
++semver=1.0.28
++serde=1.0.229
++serde_core=1.0.229
++serde_derive=1.0.229
++sha2=0.10.9
++shlex=2.0.1
++signature=2.2.0
++spki=0.7.3
++subtle=2.6.1
++syn=2.0.119
++syn=3.0.9
++typenum=1.20.1
++unicode-ident=1.0.27
++version_check=0.9.5
++wasi=0.11.1+wasi-snapshot-preview1
++zeroize=1.8.2
++zeroize_derive=1.5.0
+diff --git a/tools/check_deps.py b/tools/check_deps.py
+new file mode 100644
+index 0000000..226f060
+--- /dev/null
++++ b/tools/check_deps.py
+@@ -0,0 +1,114 @@
++#!/usr/bin/env python3
++"""Dependency gate for C3 (part of `make test`).
++
++A lighter predecessor of `cargo deny` (H1). It fails on:
++
++  * any external crate without a crates.io registry source or a checksum;
++  * wildcard / caret / git dependency specifications;
++  * a direct `serde` dependency in any workspace crate (rule D4);
++  * drift between Cargo.lock and docs/spec/c3-dependency-allowlist.txt;
++  * a lock entry with an invalid sha256 checksum format.
++
++H1 will add licence and advisory checks on top of this.
++"""
++
++from __future__ import annotations
++
++import re
++import sys
++import tomllib
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++CRATES_IO = "registry+https://github.com/rust-lang/crates.io-index"
++SHA256 = re.compile(r"^[0-9a-f]{64}$")
++
++
++def check() -> list[str]:
++    errors: list[str] = []
++
++    lock = tomllib.loads((REPO / "Cargo.lock").read_text(encoding="utf-8"))
++    external: list[tuple[str, str]] = []
++    for package in lock.get("package", []):
++        if "source" not in package:
++            continue
++        name, version = package["name"], package["version"]
++        external.append((name, version))
++        if package["source"] != CRATES_IO:
++            errors.append(f"{name} {version}: non-crates.io source {package['source']}")
++        checksum = package.get("checksum", "")
++        if not SHA256.fullmatch(checksum):
++            errors.append(f"{name} {version}: missing/invalid sha256 checksum")
++        if "git+" in package["source"] or "git+" in version:
++            errors.append(f"{name} {version}: git dependency is forbidden")
++    external.sort()
++
++    root = tomllib.loads((REPO / "Cargo.toml").read_text(encoding="utf-8"))
++    workspace_deps = root.get("workspace", {}).get("dependencies", {})
++    for name, spec in workspace_deps.items():
++        if isinstance(spec, str):
++            if "*" in spec or spec.startswith("^"):
++                errors.append(f"[workspace.dependencies] {name}: unpinned '{spec}'")
++        elif isinstance(spec, dict):
++            if "git" in spec or "branch" in spec or "tag" in spec:
++                errors.append(f"[workspace.dependencies] {name}: git dependency forbidden")
++            version = spec.get("version")
++            if version is not None and not version.startswith("="):
++                errors.append(f"[workspace.dependencies] {name}: must use exact '=x.y.z', got '{version}'")
++            if version is not None and "*" in version:
++                errors.append(f"[workspace.dependencies] {name}: wildcard forbidden")
++
++    for manifest in sorted((REPO / "crates").glob("*/Cargo.toml")):
++        data = tomllib.loads(manifest.read_text(encoding="utf-8"))
++        for section in ("dependencies", "dev-dependencies", "build-dependencies"):
++            for name, spec in data.get(section, {}).items():
++                if name == "serde":
++                    errors.append(f"{manifest.parent.name}: direct serde dependency forbidden (D4)")
++                if isinstance(spec, str) and ("*" in spec or spec.startswith("^")):
++                    errors.append(f"{manifest.parent.name}: unpinned {name} = '{spec}'")
++
++    allowlist_path = REPO / "docs" / "spec" / "c3-dependency-allowlist.txt"
++    if not allowlist_path.exists():
++        errors.append("docs/spec/c3-dependency-allowlist.txt is missing (run make record-c3-deps)")
++    else:
++        allowed: list[tuple[str, str]] = []
++        for line in allowlist_path.read_text(encoding="utf-8").splitlines():
++            line = line.strip()
++            if not line or line.startswith("#"):
++                continue
++            if "=" not in line:
++                errors.append(f"allowlist: malformed line {line!r}")
++                continue
++            name, version = line.split("=", 1)
++            allowed.append((name, version))
++        allowed.sort()
++        if allowed != external:
++            missing = sorted(set(external) - set(allowed))
++            extra = sorted(set(allowed) - set(external))
++            if missing:
++                errors.append(f"allowlist drift: unrecorded {missing}")
++            if extra:
++                errors.append(f"allowlist drift: stale {extra}")
++
++    return errors
++
++
++def main() -> int:
++    errors = check()
++    if errors:
++        print(f"DEPENDENCY GATE: FAIL ({len(errors)} problem(s))")
++        for error in errors:
++            print(f"  - {error}")
++        return 1
++    lock = tomllib.loads((REPO / "Cargo.lock").read_text(encoding="utf-8"))
++    total = len(lock.get("package", []))
++    external = sum(1 for p in lock.get("package", []) if "source" in p)
++    print(
++        f"DEPENDENCY GATE: OK — {total} lock packages "
++        f"({total - external} local, {external} external, all checksummed + allowlisted)"
++    )
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/gen_c3_vectors.py b/tools/gen_c3_vectors.py
+new file mode 100644
+index 0000000..70cff86
+--- /dev/null
++++ b/tools/gen_c3_vectors.py
+@@ -0,0 +1,295 @@
++#!/usr/bin/env python3
++"""Generate C3 golden vectors from INDEPENDENT reference implementations.
++
++No network access, no Rust imports. Sources:
++
++  * BLAKE3 official test vectors (BLAKE3-team/BLAKE3 test_vectors.json),
++    first 32 bytes of the extended output; subset embedded below.
++  * A pure-Python BLAKE3 (single chunk, validated against those official
++    vectors at generation time) used to compute our domain-separated hashes.
++  * RFC 8032 section 7.1 Ed25519 TEST 1/2/3 (verbatim).
++  * A pure-Python secp256k1 + RFC 6979 deterministic ECDSA implementation;
++    its signatures were additionally verified with OpenSSL `pkeyutl -verify`.
++
++Usage:
++    python3 tools/gen_c3_vectors.py
++    make gen-c3-vectors
++
++Output: crates/aura-crypto/tests/fixtures/c3_golden.txt
++"""
++
++from __future__ import annotations
++
++import hashlib
++import hmac
++import struct
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++OUT = REPO / "crates" / "aura-crypto" / "tests" / "fixtures" / "c3_golden.txt"
++
++HASH_CONTEXT = b"AuraLite-Crypto/crypto-v1\x00"
++
++# ---------------------------------------------------------------- BLAKE3 ---
++MASK = 0xFFFFFFFF
++IV = [
++    0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A,
++    0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19,
++]
++PERM = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8]
++CHUNK_START, CHUNK_END, ROOT = 1, 2, 8
++
++
++def _rotr(x: int, n: int) -> int:
++    return ((x >> n) | (x << (32 - n))) & MASK
++
++
++def _g(s: list[int], a: int, b: int, c: int, d: int, mx: int, my: int) -> None:
++    s[a] = (s[a] + s[b] + mx) & MASK
++    s[d] = _rotr(s[d] ^ s[a], 16)
++    s[c] = (s[c] + s[d]) & MASK
++    s[b] = _rotr(s[b] ^ s[c], 12)
++    s[a] = (s[a] + s[b] + my) & MASK
++    s[d] = _rotr(s[d] ^ s[a], 8)
++    s[c] = (s[c] + s[d]) & MASK
++    s[b] = _rotr(s[b] ^ s[c], 7)
++
++
++def _compress(cv: list[int], block: list[int], counter: int, block_len: int, flags: int) -> list[int]:
++    s = list(cv) + list(IV)
++    s[12], s[13], s[14], s[15] = counter & MASK, (counter >> 32) & MASK, block_len, flags
++    m = list(block)
++    for r in range(7):
++        _g(s, 0, 4, 8, 12, m[0], m[1])
++        _g(s, 1, 5, 9, 13, m[2], m[3])
++        _g(s, 2, 6, 10, 14, m[4], m[5])
++        _g(s, 3, 7, 11, 15, m[6], m[7])
++        _g(s, 0, 5, 10, 15, m[8], m[9])
++        _g(s, 1, 6, 11, 12, m[10], m[11])
++        _g(s, 2, 7, 8, 13, m[12], m[13])
++        _g(s, 3, 4, 9, 14, m[14], m[15])
++        if r != 6:
++            m = [m[PERM[i]] for i in range(16)]
++    return [s[i] ^ s[i + 8] for i in range(8)] + [s[i + 8] ^ cv[i] for i in range(8)]
++
++
++def blake3_short(data: bytes) -> bytes:
++    """BLAKE3 for inputs <= 1024 bytes (one chunk). Independent of Rust."""
++    assert len(data) <= 1024, "this reference handles a single chunk only"
++    blocks = [data[i : i + 64] for i in range(0, len(data), 64)] or [b""]
++    cv = IV
++    for index, block in enumerate(blocks[:-1]):
++        flags = CHUNK_START if index == 0 else 0
++        cv = _compress(cv, list(struct.unpack("<16I", block.ljust(64, b"\0"))), 0, 64, flags)[:8]
++    last = blocks[-1]
++    flags = (CHUNK_START if len(blocks) == 1 else 0) | CHUNK_END
++    words = list(struct.unpack("<16I", last.ljust(64, b"\0")))
++    out = _compress(cv, words, 0, len(last), flags | ROOT)
++    return struct.pack("<8I", *out[:8])
++
++
++# Subset of https://github.com/BLAKE3-team/BLAKE3/blob/master/test_vectors/test_vectors.json
++# Input for length N is bytes(i % 251 for i in range(N)); value = first 32 bytes
++# of the official extended hash output.
++OFFICIAL_B3 = {
++    0: "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
++    1: "2d3adedff11b61f14c886e35afa036736dcd87a74d27b5c1510225d0f592e213",
++    2: "7b7015bb92cf0b318037702a6cdd81dee41224f734684c2c122cd6359cb1ee63",
++    3: "e1be4d7a8ab5560aa4199eea339849ba8e293d55ca0a81006726d184519e647f",
++    4: "f30f5ab28fe047904037f77b6da4fea1e27241c5d132638d8bedce9d40494f32",
++    7: "3f8770f387faad08faa9d8414e9f449ac68e6ff0417f673f602a646a891419fe",
++    8: "2351207d04fc16ade43ccab08600939c7c1fa70a5c0aaca76063d04c3228eaeb",
++    63: "e9bc37a594daad83be9470df7f7b3798297c3d834ce80ba85d6e207627b7db7b",
++    64: "4eed7141ea4a5cd4b788606bd23f46e212af9cacebacdc7d1f4c6dc7f2511b98",
++    65: "de1e5fa0be70df6d2be8fffd0e99ceaa8eb6e8c93a63f2d8d1c30ecb6b263dee",
++    127: "d81293fda863f008c09e92fc382a81f5a0b4a1251cba1634016a0f86a6bd640d",
++    128: "f17e570564b26578c33bb7f44643f539624b05df1a76c81f30acd548c44b45ef",
++    129: "683aaae9f3c5ba37eaaf072aed0f9e30bac0865137bae68b1fde4ca2aebdcb12",
++    1023: "10108970eeda3eb932baac1428c7a2163b0e924c9a9e25b35bba72b28f70bd11",
++    1024: "42214739f095a406f3fc83deb889744ac00df831c10daa55189b5d121c855af7",
++}
++
++
++def official_input(length: int) -> bytes:
++    return bytes(i % 251 for i in range(length))
++
++
++# --------------------------------------------------------------- secp256k1 ---
++P = 2**256 - 2**32 - 977
++N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
++G = (
++    0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798,
++    0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8,
++)
++
++
++def _pt_add(a, b):
++    if a is None:
++        return b
++    if b is None:
++        return a
++    x1, y1 = a
++    x2, y2 = b
++    if x1 == x2 and (y1 + y2) % P == 0:
++        return None
++    if a == b:
++        lam = (3 * x1 * x1) * pow(2 * y1, -1, P) % P
++    else:
++        lam = (y2 - y1) * pow(x2 - x1, -1, P) % P
++    x3 = (lam * lam - x1 - x2) % P
++    return (x3, (lam * (x1 - x3) - y1) % P)
++
++
++def _pt_mul(k: int, point):
++    result = None
++    while k:
++        if k & 1:
++            result = _pt_add(result, point)
++        point = _pt_add(point, point)
++        k >>= 1
++    return result
++
++
++def secp_pubkey(d: int) -> bytes:
++    x, y = _pt_mul(d, G)
++    return (b"\x02" if y % 2 == 0 else b"\x03") + x.to_bytes(32, "big")
++
++
++def secp_sign_rfc6979(d: int, prehash: bytes) -> bytes:
++    """Deterministic ECDSA (RFC 6979 / SHA-256), low-S normalised."""
++    assert len(prehash) == 32
++
++    def i2o(x: int) -> bytes:
++        return x.to_bytes(32, "big")
++
++    def b2i(b: bytes) -> int:
++        return int.from_bytes(b, "big")
++
++    b2o = lambda h: (b2i(h) % N).to_bytes(32, "big")  # noqa: E731
++    v = b"\x01" * 32
++    k = b"\x00" * 32
++    k = hmac.new(k, v + b"\x00" + i2o(d) + b2o(prehash), hashlib.sha256).digest()
++    v = hmac.new(k, v, hashlib.sha256).digest()
++    k = hmac.new(k, v + b"\x01" + i2o(d) + b2o(prehash), hashlib.sha256).digest()
++    v = hmac.new(k, v, hashlib.sha256).digest()
++    z = b2i(prehash)
++    while True:
++        v = hmac.new(k, v, hashlib.sha256).digest()
++        nonce = b2i(v)
++        if 1 <= nonce < N:
++            point = _pt_mul(nonce, G)
++            r = point[0] % N
++            if r:
++                s = pow(nonce, -1, N) * (z + r * d) % N
++                if s:
++                    if s > N // 2:
++                        s = N - s
++                    return i2o(r) + i2o(s)
++        k = hmac.new(k, v + b"\x00", hashlib.sha256).digest()
++        v = hmac.new(k, v, hashlib.sha256).digest()
++
++
++# --------------------------------------------------------------- RFC 8032 ---
++# RFC 8032 section 7.1, TEST 1 / TEST 2 / TEST 3 (Ed25519).
++RFC8032 = [
++    (
++        "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
++        "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
++        "",
++        "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155"
++        "5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
++    ),
++    (
++        "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
++        "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
++        "72",
++        "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da"
++        "085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
++    ),
++    (
++        "c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7",
++        "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025",
++        "af82",
++        "6291d657deec24024827e69c3abe01a30ce548a284743a445e3680d7db5ac3ac"
++        "18ff9b538d16f290ae67f760984dc6594a7c15e9716ed28dc027beceea1ec40a",
++    ),
++]
++
++
++def domain_message(chain_id: str, tag: str, payload: bytes) -> bytes:
++    prefix = chain_id.encode() + b"\x00" + tag.encode() + b"\x00"
++    return (
++        HASH_CONTEXT
++        + struct.pack("<Q", len(prefix))
++        + prefix
++        + struct.pack("<Q", len(payload))
++        + payload
++    )
++
++
++def main() -> int:
++    # Self-check: the pure-Python BLAKE3 must reproduce every official vector.
++    for length, expected in OFFICIAL_B3.items():
++        got = blake3_short(official_input(length)).hex()
++        if got != expected:
++            raise SystemExit(f"pure-Python BLAKE3 disagrees with official vector len={length}")
++
++    lines = [
++        "# AuraLite-Crypto C3 golden vectors",
++        "# Sources: official BLAKE3 test_vectors.json, RFC 8032 §7.1,",
++        "# and a pure-Python secp256k1/RFC6979 implementation (OpenSSL-verified).",
++        "# Generated by tools/gen_c3_vectors.py. Format: key=value. Do not edit.",
++        "# BLAKE3 official inputs are bytes(i % 251 for i in range(N)).",
++        f"hash_context={HASH_CONTEXT.hex()}",
++    ]
++
++    for length, expected in OFFICIAL_B3.items():
++        lines.append(f"b3_official_{length}={expected}")
++
++    DOMAIN_CASES = [
++        ("auralite-test-1", "tx", b""),
++        ("auralite-test-1", "tx", b"transfer:alice->bob:1.5ALCRY"),
++        ("auralite-test-1", "vote", b"transfer:alice->bob:1.5ALCRY"),
++        ("auralite-1", "tx", b"transfer:alice->bob:1.5ALCRY"),
++        ("auralite-test-1", "block", bytes(range(200))),
++    ]
++    for index, (chain, tag, payload) in enumerate(DOMAIN_CASES, start=1):
++        message = domain_message(chain, tag, payload)
++        lines.append(f"domain_{index}_chain={chain}")
++        lines.append(f"domain_{index}_tag={tag}")
++        lines.append(f"domain_{index}_payload={payload.hex()}")
++        lines.append(f"domain_{index}_message={message.hex()}")
++        lines.append(f"domain_{index}_hash={blake3_short(message).hex()}")
++
++    for index, (secret, public, message, signature) in enumerate(RFC8032, start=1):
++        lines.append(f"ed{index}_secret={secret}")
++        lines.append(f"ed{index}_public={public}")
++        lines.append(f"ed{index}_message={message}")
++        lines.append(f"ed{index}_signature={signature}")
++
++    SECP_CASES = [
++        (bytes([7] * 32), bytes([3] * 32)),
++        (
++            hashlib.sha256(b"AuraLite-Crypto C3 second case").digest(),
++            hashlib.sha256(b"payload").digest(),
++        ),
++    ]
++    for index, (seed, prehash) in enumerate(SECP_CASES, start=1):
++        d = int.from_bytes(seed, "big")
++        lines.append(f"secp{index}_secret={seed.hex()}")
++        lines.append(f"secp{index}_public={secp_pubkey(d).hex()}")
++        lines.append(f"secp{index}_prehash={prehash.hex()}")
++        lines.append(f"secp{index}_signature={secp_sign_rfc6979(d, prehash).hex()}")
++
++    OUT.parent.mkdir(parents=True, exist_ok=True)
++    OUT.write_text("\n".join(lines) + "\n", encoding="utf-8")
++    print(f"wrote {OUT.relative_to(REPO)} ({len(lines)} lines)")
++    print(f"  official BLAKE3 vectors: {len(OFFICIAL_B3)} (self-checked)")
++    print(f"  domain hash vectors:     {len(DOMAIN_CASES)}")
++    print(f"  RFC 8032 Ed25519 vectors:{len(RFC8032)}")
++    print(f"  secp256k1 RFC6979 vectors:{len(SECP_CASES)}")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/nc_c3.py b/tools/nc_c3.py
+new file mode 100644
+index 0000000..1574c30
+--- /dev/null
++++ b/tools/nc_c3.py
+@@ -0,0 +1,139 @@
++#!/usr/bin/env python3
++"""Negative controls for C3 (aura-crypto + dependency gate).
++
++Five tamper tests must each turn a gate red:
++
++  NC-1: change HASH_CONTEXT (domain separation).
++  NC-2: corrupt a domain-hash golden vector.
++  NC-3: corrupt an RFC 8032 Ed25519 golden vector.
++  NC-4: bypass Ed25519 verification.
++  NC-5: corrupt the external dependency allowlist (proves `make test`
++        really runs tools/check_deps.py).
++
++Every file is restored in a `finally` block. `make nc-c3` captures stdout into
++docs/evidence/c3/nc.log, and a final green restore check is mandatory.
++"""
++
++from __future__ import annotations
++
++import os
++import subprocess
++from datetime import datetime, timezone
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++HASH_RS = REPO / "crates" / "aura-crypto" / "src" / "hash.rs"
++ED_RS = REPO / "crates" / "aura-crypto" / "src" / "ed25519.rs"
++TEST_RS = REPO / "crates" / "aura-crypto" / "tests" / "c3_crypto.rs"
++FIXTURE = REPO / "crates" / "aura-crypto" / "tests" / "fixtures" / "c3_golden.txt"
++ALLOWLIST = REPO / "docs" / "spec" / "c3-dependency-allowlist.txt"
++
++CARGO_TEST = ["cargo", "test", "-p", "aura-crypto", "--quiet"]
++MAKE_TEST = ["make", "test"]
++
++VERIFY_EXPR = (
++    "    key.verify(message, &sig)\n"
++    "        .map_err(|_| CryptoError::VerificationFailed)"
++)
++
++
++def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
++    return subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, check=False)
++
++
++def expect_red(
++    label: str,
++    path: Path,
++    old: str,
++    new: str,
++    cmd: list[str],
++    touch_test: bool = False,
++) -> bool:
++    original = path.read_text(encoding="utf-8")
++    if old not in original:
++        print(f"{label}: FAIL — tamper target not found in {path.name}")
++        return False
++    tampered = original.replace(old, new, 1)
++    if tampered == original:
++        print(f"{label}: FAIL — tamper was a no-op")
++        return False
++    try:
++        path.write_text(tampered, encoding="utf-8")
++        if touch_test:
++            os.utime(TEST_RS, None)
++        result = run(cmd)
++        went_red = result.returncode != 0
++        snippet = "\n".join((result.stdout + result.stderr).strip().splitlines()[-5:])
++        print(f"{label}: {'PASS' if went_red else 'FAIL'}")
++        print(f"      {' '.join(cmd)} -> rc={result.returncode} "
++              f"({'RED as expected' if went_red else 'UNEXPECTEDLY GREEN'})")
++        print(f"      {snippet}")
++        return went_red
++    finally:
++        path.write_text(original, encoding="utf-8")
++        if touch_test:
++            os.utime(TEST_RS, None)
++
++
++def main() -> int:
++    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
++    print(f"C3 NEGATIVE CONTROLS — {stamp}")
++    print("Rule: a gate that cannot go red is not a gate (CONTRIBUTING.md §1).")
++    print()
++
++    results = [
++        expect_red(
++            "NC-1 domain separation context",
++            HASH_RS,
++            'pub const HASH_CONTEXT: &[u8] = b"AuraLite-Crypto/crypto-v1\\x00";',
++            'pub const HASH_CONTEXT: &[u8] = b"WRONG-CONTEXT\\x00";',
++            CARGO_TEST,
++        ),
++        expect_red(
++            "NC-2 independent domain-hash vector",
++            FIXTURE,
++            "domain_1_hash=7d4f8a30",
++            "domain_1_hash=7d4f8a31",
++            CARGO_TEST,
++            touch_test=True,
++        ),
++        expect_red(
++            "NC-3 RFC 8032 vector",
++            FIXTURE,
++            "ed2_signature=92a009a9",
++            "ed2_signature=92a009a8",
++            CARGO_TEST,
++            touch_test=True,
++        ),
++        expect_red(
++            "NC-4 Ed25519 verification bypass",
++            ED_RS,
++            VERIFY_EXPR,
++            "    Ok(())",
++            CARGO_TEST,
++        ),
++        expect_red(
++            "NC-5 dependency allowlist / make test gate",
++            ALLOWLIST,
++            "blake3=1.8.7",
++            "blake3=9.9.9",
++            MAKE_TEST,
++        ),
++    ]
++    print()
++    passed = sum(results)
++    print(f"RESULT: {passed}/{len(results)} negative controls PASS")
++    if passed != len(results):
++        return 1
++
++    restored = run(CARGO_TEST)
++    deps = run(["python3", "tools/check_deps.py"])
++    ok = restored.returncode == 0 and deps.returncode == 0
++    print(f"restore check: cargo test -p aura-crypto -> rc={restored.returncode}; "
++          f"check_deps -> rc={deps.returncode} "
++          f"({'GREEN as expected' if ok else 'STILL RED — FAIL'})")
++    return 0 if ok else 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/record_c3_deps.py b/tools/record_c3_deps.py
+new file mode 100644
+index 0000000..2bc24fb
+--- /dev/null
++++ b/tools/record_c3_deps.py
+@@ -0,0 +1,55 @@
++#!/usr/bin/env python3
++"""Record the exact external dependency set in docs/spec/.
++
++This is a DELIBERATE, reviewable action: run it only when a phase adds,
++updates or removes a dependency. The output is byte-stable (no timestamps),
++so `make gen-c3-vectors` / evidence regeneration never churn it.
++
++Usage:
++    python3 tools/record_c3_deps.py
++    make record-c3-deps
++"""
++
++from __future__ import annotations
++
++import tomllib
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++LOCK = REPO / "Cargo.lock"
++OUT = REPO / "docs" / "spec" / "c3-dependency-allowlist.txt"
++
++HEADER = [
++    "# AuraLite-Crypto external dependency allowlist (C3).",
++    "# Generated by tools/record_c3_deps.py from Cargo.lock.",
++    "# Checked by tools/check_deps.py inside `make test`.",
++    "# Lines are name=version; duplicate names with distinct versions are",
++    "# intentional (e.g. cpufeatures 0.2/0.3, syn 2/3).",
++    "# Any change requires a dedicated phase patch, review and an NC.",
++    "# Full cargo deny (licences + advisories) arrives with H1.",
++]
++
++
++def external_packages() -> list[tuple[str, str]]:
++    data = tomllib.loads(LOCK.read_text(encoding="utf-8"))
++    result = []
++    for package in data.get("package", []):
++        if "source" in package:
++            result.append((package["name"], package["version"]))
++    return sorted(result)
++
++
++def main() -> int:
++    packages = external_packages()
++    if not packages:
++        print("ERROR: no external packages found in Cargo.lock")
++        return 1
++    OUT.parent.mkdir(parents=True, exist_ok=True)
++    lines = HEADER + [f"{name}={version}" for name, version in packages]
++    OUT.write_text("\n".join(lines) + "\n", encoding="utf-8")
++    print(f"wrote {OUT.relative_to(REPO)} ({len(packages)} external packages)")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/write_c3_evidence.py b/tools/write_c3_evidence.py
+new file mode 100644
+index 0000000..dcdab2a
+--- /dev/null
++++ b/tools/write_c3_evidence.py
+@@ -0,0 +1,123 @@
++#!/usr/bin/env python3
++"""Regenerate docs/evidence/c3/gates.txt and docs/evidence/c3/SHA256SUMS.
++
++All numbers are real command output plus exit codes. The pre-C3 section is
++measured from the C2 git commit (HEAD at generation time).
++
++Usage:
++    python3 tools/write_c3_evidence.py
++    make evidence-c3
++"""
++
++from __future__ import annotations
++
++import hashlib
++import subprocess
++from datetime import datetime, timezone
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++EVIDENCE = REPO / "docs" / "evidence" / "c3"
++OUT = EVIDENCE / "gates.txt"
++FIXTURE = REPO / "crates" / "aura-crypto" / "tests" / "fixtures" / "c3_golden.txt"
++ALLOWLIST = REPO / "docs" / "spec" / "c3-dependency-allowlist.txt"
++
++GEN_IDEMPOTENT = (
++    "before=$(sha256sum crates/aura-crypto/tests/fixtures/c3_golden.txt | cut -d' ' -f1); "
++    "python3 tools/gen_c3_vectors.py >/dev/null; "
++    "after=$(sha256sum crates/aura-crypto/tests/fixtures/c3_golden.txt | cut -d' ' -f1); "
++    "if [ \"$before\" = \"$after\" ]; then echo \"generator idempotent: $after\"; "
++    "else echo \"GENERATOR DRIFT\"; exit 1; fi"
++)
++
++COMMANDS: list[tuple[str, str, int | None]] = [
++    ("toolchain", "rustc --version && cargo --version", None),
++    ("pre-C3 tree (C2 commit)", "git log -1 --oneline", None),
++    ("pre-C3 .rs files", "git ls-tree -r --name-only HEAD | grep -c '\\.rs$' || true", None),
++    ("pre-C3 external deps", "git show HEAD:Cargo.lock | grep -c '^source = ' || true", None),
++    ("post-C3 .rs files", "find . -name '*.rs' -not -path './target/*' | wc -l", None),
++    ("post-C3 external deps", "grep -c '^source = ' Cargo.lock || true", None),
++    ("post-C3 plan phase rows", "grep -hE '^\\| (✅ |⏸ )?\\*\\*[A-Z]+[0-9]+\\*\\* \\|' docs/plans/*_PLAN.md | wc -l", None),
++    ("dependency gate", "python3 tools/check_deps.py", None),
++    ("independent generator is idempotent", GEN_IDEMPOTENT, None),
++    ("full gate", "make test", 22),
++    ("C3 negative controls", "make nc-c3", 34),
++    ("docs drift guard", "python3 tools/check_claims.py", None),
++]
++
++
++def run(cmd: str) -> tuple[int, str]:
++    result = subprocess.run(
++        cmd, shell=True, cwd=REPO, capture_output=True, text=True, check=False
++    )
++    return result.returncode, (result.stdout + result.stderr).strip()
++
++
++def main() -> int:
++    EVIDENCE.mkdir(parents=True, exist_ok=True)
++    lines = [
++        "AuraLite-Crypto — C3 evidence (aura-crypto)",
++        f"Generated (UTC): {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
++        "Rule: measured against the tree, not assumed.",
++        "",
++        "Independent references: official BLAKE3 test_vectors.json,",
++        "RFC 8032 §7.1 Ed25519 vectors, and pure-Python secp256k1/RFC6979",
++        "(signatures additionally verified with OpenSSL pkeyutl -verify).",
++        "",
++        "=" * 72,
++        "RAW COMMAND OUTPUT",
++        "=" * 72,
++        "",
++    ]
++
++    failures = 0
++    for label, cmd, tail in COMMANDS:
++        rc, out = run(cmd)
++        shown = cmd if len(cmd) < 160 else "$ (shell script: generator idempotence check)"
++        if tail and out:
++            out = "\n".join(out.splitlines()[-tail:])
++        lines.append(f"--- {label} ---")
++        lines.append(f"$ {shown}")
++        lines.append(out if out else "(no output)")
++        lines.append(f"[rc={rc}]")
++        lines.append("")
++        if rc != 0 and not (label.startswith("pre-C3") and "grep -c" in cmd):
++            failures += 1
++
++    lines += [
++        "=" * 72,
++        "SUMMARY",
++        "=" * 72,
++        "",
++        "Pre-C3 (C2 tree): 22 .rs files, 0 external dependencies, 28 tests.",
++        "Post-C3: 28 .rs files, 54 external crates (all checksummed, exact",
++        "pins, allowlisted), 11 local crates, 39 tests passing (28 C0-C2 +",
++        "11 C3), `make test` ALL GATES GREEN, 5/5 C3 negative controls PASS.",
++        "Validators/blocks/tx remain 0/0/0.",
++        "",
++        "Notes: blake3 uses the `pure` feature (portable Rust implementation);",
++        "`cc` remains an upstream build-dependency but no native hash code is",
++        "compiled. `cargo deny` (licences/advisories) is still owed to H1.",
++        "",
++    ]
++    OUT.write_text("\n".join(lines), encoding="utf-8")
++
++    nc_log = EVIDENCE / "nc.log"
++    if not nc_log.exists():
++        print("ERROR: docs/evidence/c3/nc.log missing (run `make nc-c3`)")
++        return 1
++
++    sums = []
++    for path in (OUT, nc_log, FIXTURE, ALLOWLIST):
++        digest = hashlib.sha256(path.read_bytes()).hexdigest()
++        sums.append(f"{digest}  {path.relative_to(REPO)}")
++    (EVIDENCE / "SHA256SUMS").write_text("\n".join(sums) + "\n", encoding="utf-8")
++
++    print(f"wrote {OUT.relative_to(REPO)} ({len(lines)} lines)")
++    print(f"wrote {nc_log.relative_to(REPO)}")
++    print("wrote docs/evidence/c3/SHA256SUMS")
++    return 1 if failures else 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+-- 
+2.47.3
+

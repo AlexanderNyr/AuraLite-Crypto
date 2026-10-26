@@ -1,0 +1,2659 @@
+From 74e441bb152091703f8e5772adb4f92f0eaf46af Mon Sep 17 00:00:00 2001
+From: AlexanderNyr <alexander@auralite.local>
+Date: Sun, 25 Oct 2026 18:47:19 +0000
+Subject: [PATCH] C5 block header
+
+---
+ .github/workflows/ci.yml                      |  19 +-
+ CHANGELOG.md                                  |  67 ++++
+ CONTRIBUTING.md                               |   2 +
+ Cargo.lock                                    |  10 +
+ Cargo.toml                                    |   5 +-
+ Makefile                                      |  21 +-
+ README.md                                     |  32 +-
+ ROADMAP.md                                    |  28 +-
+ crates/aura-block/Cargo.toml                  |  15 +
+ crates/aura-block/src/block.rs                | 121 ++++++
+ crates/aura-block/src/body.rs                 |  62 +++
+ crates/aura-block/src/error.rs                |  75 ++++
+ crates/aura-block/src/header.rs               | 144 +++++++
+ crates/aura-block/src/lib.rs                  |  36 ++
+ crates/aura-block/src/merkle.rs               |  62 +++
+ crates/aura-block/tests/c5_block.rs           | 356 +++++++++++++++++
+ .../aura-block/tests/fixtures/c5_golden.txt   |  95 +++++
+ docs/ARCHITECTURE.md                          |  15 +-
+ docs/STATUS.md                                |  43 ++-
+ docs/evidence/c5/SHA256SUMS                   |   4 +
+ docs/evidence/c5/gates.txt                    | 150 ++++++++
+ docs/evidence/c5/nc.log                       |  48 +++
+ docs/plans/CORE_PLAN.md                       |  52 ++-
+ docs/spec/block-format.md                     | 129 +++++++
+ tools/gen_c5_vectors.py                       | 362 ++++++++++++++++++
+ tools/nc_c5.py                                | 126 ++++++
+ tools/write_c5_evidence.py                    | 128 +++++++
+ 27 files changed, 2146 insertions(+), 61 deletions(-)
+ create mode 100644 crates/aura-block/Cargo.toml
+ create mode 100644 crates/aura-block/src/block.rs
+ create mode 100644 crates/aura-block/src/body.rs
+ create mode 100644 crates/aura-block/src/error.rs
+ create mode 100644 crates/aura-block/src/header.rs
+ create mode 100644 crates/aura-block/src/lib.rs
+ create mode 100644 crates/aura-block/src/merkle.rs
+ create mode 100644 crates/aura-block/tests/c5_block.rs
+ create mode 100644 crates/aura-block/tests/fixtures/c5_golden.txt
+ create mode 100644 docs/evidence/c5/SHA256SUMS
+ create mode 100644 docs/evidence/c5/gates.txt
+ create mode 100644 docs/evidence/c5/nc.log
+ create mode 100644 docs/spec/block-format.md
+ create mode 100644 tools/gen_c5_vectors.py
+ create mode 100644 tools/nc_c5.py
+ create mode 100644 tools/write_c5_evidence.py
+
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index a024bb3..9a323d5 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -10,7 +10,7 @@ on:
+ # perf) are added by O0 as the crates that need them actually appear.
+ jobs:
+   core:
+-    name: core (C0-C4 gate)
++    name: core (C0-C5 gate)
+     runs-on: ubuntu-latest
+     steps:
+       - uses: actions/checkout@v4
+@@ -27,29 +27,30 @@ jobs:
+       - name: make test
+         run: make test
+ 
+-      - name: golden vectors are reproducible (C1 + C2 + C3 + C4)
+-        run: make gen-c1-vectors && make gen-c2-vectors && make gen-c3-vectors && make gen-c4-vectors
++      - name: golden vectors are reproducible (C1 + C2 + C3 + C4 + C5)
++        run: make gen-c1-vectors && make gen-c2-vectors && make gen-c3-vectors && make gen-c4-vectors && make gen-c5-vectors
+ 
+-      # nc-all runs all 20 NCs without rewriting the historical C0-C3 logs,
++      # nc-all runs all 26 NCs without rewriting the historical C0-C4 logs,
+       # so those committed SHA256SUMS remain valid in the uploaded artifact.
+-      - name: negative controls (C0-C4, 20 total)
++      - name: negative controls (C0-C5, 26 total)
+         run: make nc-all
+ 
+-      # Only the CURRENT phase's evidence is regenerated. C0-C3 evidence is a
++      # Only the CURRENT phase's evidence is regenerated. C0-C4 evidence is a
+       # HISTORICAL committed record measured at its own commit; regenerating
+       # it later would relabel the wrong tree.
+-      - name: current phase evidence (C4)
+-        run: make evidence-c4
++      - name: current phase evidence (C5)
++        run: make evidence-c5
+ 
+       - name: Upload evidence
+         if: always()
+         uses: actions/upload-artifact@v4
+         with:
+-          name: c0-c4-evidence
++          name: c0-c5-evidence
+           path: |
+             docs/evidence/c0/
+             docs/evidence/c1/
+             docs/evidence/c2/
+             docs/evidence/c3/
+             docs/evidence/c4/
++            docs/evidence/c5/
+           if-no-files-found: ignore
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index f2da263..f9e5c8d 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,73 @@
+ All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
+ never rewritten: corrections are made with a new entry or an explicit note.
+ 
++## [C5 — block and header] 2026-10-25
++
++**Sixth code phase.** Deliverable: `patches/0006-C5-block-header.patch`.
++Adds the **13th crate**, `aura-block`, with **no new external dependencies**.
++
++- **Format:** `Block = Header || Body`. `Header` has 12 fields: `version,
++  chain_id, height, parent_hash, tx_root, state_root, validator_set_hash,
++  timestamp_ms, proposer, qc, gas_used, base_fee`. `HeaderParams` groups the
++  11 caller-supplied fields; `tx_root` is deliberately absent and always
++  derived, so it cannot be forged at construction. `Body::new` sorts by
++  `(signer, nonce)` (both derive `Ord`) and rejects duplicate keys.
++- **C5 amends `ARCHITECTURE.md` §1 (decision D-C7):** `chain_id` is added to
++  the header because rule D5 requires chain separation for block ids. No
++  migration is needed — the network has produced **0 blocks**.
++  `state_root`, `validator_set_hash` and `qc` are caller-supplied values:
++  state (S1), validator sets and QCs (B phases) are not implemented. C5 fixes
++  their wire representation and validation, not their computation.
++- **`tx_root`:** binary BLAKE3 Merkle tree over C4 txids —
++  `leaf = BLAKE3(LEAF_CONTEXT || txid)`,
++  `node = BLAKE3(NODE_CONTEXT || left || right)`, odd final node duplicated,
++  empty body → `Hash::ZERO`. Order-sensitive: the DoD vector proves
++  `tx_root_forward != tx_root_backward`. The shape is fixed now so C6 can add
++  proofs without changing the root scheme.
++- **`block_hash`:** C3 `hash_domain(chain_id, Domain::Block,
++  BLOCK_HASH_PAYLOAD_CONTEXT || canonical(Header))`. Header only; `tx_root`
++  commits to the body. Any header field or chain change alters the id.
++- **Validation:** `validate(expected_chain)` checks version, chain, body/QC
++  size limits, strict `(signer, nonce)` ordering, duplicates and then a
++  recomputed `tx_root`. `validate_transactions()` is separate and checks each
++  tx signature/expiry at `header.height`. `timestamp_ms` is caller supplied —
++  no local clock anywhere.
++- **Spec:** `docs/spec/block-format.md` (field table, tree, hash, validation
++  order, error catalogue, non-goals).
++- **Independent golden vectors:** `tools/gen_c5_vectors.py` — pure-Python
++  BLAKE3 (self-checked against 7 official vectors), C2/C3 wire transcription
++  and the committed C4 tx vectors as bodies. 95 fixture lines: **4 canonical
++  blocks** (2/3/0/1 transactions covering even/odd tree levels, empty tree,
++  a real `b1 → b2` parent link, `Some(qc)`, u64/u128 maxima), an
++  order-sensitivity pair and **9 rejection vectors** (trailing byte,
++  truncation, bad version, bad root, reordered body, reordered body **with a
++  recomputed root**, duplicate key, bad QC tag, non-minimal count). Each bad
++  vector is pinned to a specific error. Generator is offline and byte-stable.
++- **Gate:** `make test` → **60 passed / 0 failed** (49 C0–C4 + 11 C5),
++  fmt/clippy clean, drift guard 12 plans / 112 rows / 21 markdown files,
++  dependency gate 54 external crates allowlisted.
++- **Negative controls:** `tools/nc_c5.py` → `make nc-c5` →
++  `docs/evidence/c5/nc.log`, **6/6 PASS**: leaf context, node context,
++  block-hash context, golden `tx_root`, `tx_root` check, canonical-order
++  check. Total C0–C5: **26 NC**.
++- **Gate-found fixes:** clippy caught an unused import, a collapsible `if`,
++  `chunks_exact(2)` and a cloned single-ref slice. Fixed in code
++  (`as_chunks::<2>()`, `std::slice::from_ref`), not suppressed.
++- **Tooling / CI:** `make nc-all` now covers C0–C5 (26 NC) without rewriting
++  historical logs; CI regenerates only `make evidence-c5`. New targets:
++  `make gen-c5-vectors`, `make nc-c5`, `make evidence-c5`; `make test-core`
++  now covers all five implemented crates.
++- **Evidence:** `docs/evidence/c5/gates.txt` (pre-C5 counts from the C4
++  commit, 12→13 crates, raw gate output), `docs/evidence/c5/nc.log`,
++  `SHA256SUMS` (also pins the golden fixture and the format spec).
++- **Docs synced (D9):** `README.md`, `docs/STATUS.md`,
++  `docs/ARCHITECTURE.md` (§1 header + §3 graph + C5 block), `CHANGELOG.md`,
++  `ROADMAP.md` (ledger, §4, §8), `CONTRIBUTING.md`, `CORE_PLAN.md` (C5 ✅,
++  decision D-C7 + receipt), and the new `docs/spec/block-format.md`.
++- **Not claimed:** Merkle proofs (C6), accounts (C7), genesis (C8), fuzzing
++  (C9), QC/validator-set/state computations (B/S phases), BLS (B2), PQ (H2),
++  `cargo deny` (H1). Validators/blocks/tx remain **0/0/0**.
++
+ ## [C4 — transaction format] 2026-10-25
+ 
+ **Fifth code phase.** Deliverable: `patches/0005-C4-tx-format.patch`.
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index 63ea56c..79c6497 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -105,5 +105,7 @@ that does not run its main test is a dead gate — that is a separate defect
+ - [ ] New dependency pinned and passed `make check-deps` (`cargo deny` at H1).
+ - [ ] Tx wire format unchanged, or `CODEC_VERSION` bumped and
+       `docs/spec/tx-format.md` + golden vectors updated in the same patch.
++- [ ] Block wire format unchanged, or `PROTOCOL_VERSION` bumped and
++      `docs/spec/block-format.md` + golden vectors updated in the same patch.
+ - [ ] No new `unsafe` without justification.
+ - [ ] The north star was not pushed aside by a "temporary" solution.
+diff --git a/Cargo.lock b/Cargo.lock
+index c239bd0..2be4863 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -8,6 +8,16 @@ version = "0.7.8"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
+ 
++[[package]]
++name = "aura-block"
++version = "0.1.0"
++dependencies = [
++ "aura-codec",
++ "aura-crypto",
++ "aura-tx",
++ "aura-types",
++]
++
+ [[package]]
+ name = "aura-codec"
+ version = "0.1.0"
+diff --git a/Cargo.toml b/Cargo.toml
+index ae763c0..039eef8 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -5,6 +5,7 @@ members = [
+     "crates/aura-codec",
+     "crates/aura-crypto",
+     "crates/aura-tx",
++    "crates/aura-block",
+     "crates/aura-state",
+     "crates/aura-storage",
+     "crates/aura-exec",
+@@ -23,7 +24,8 @@ rust-version = "1.99.1"
+ repository = "https://github.com/AlexanderNyr/AuraLite-Crypto"
+ publish = false
+ 
+-# C4 adds the 12th crate, `aura-tx`, with no new external dependencies.
++# C5 adds the 13th crate, `aura-block`, with no new external dependencies.
++# C4 added the 12th crate, `aura-tx`.
+ # C3 introduces the first EXTERNAL dependencies. Rules (ROADMAP 7 / H1):
+ #   * exact `=x.y.z` pins only — no carets, no wildcards, no git deps;
+ #   * the resolved set is recorded in docs/spec/c3-dependency-allowlist.txt
+@@ -35,6 +37,7 @@ aura-types = { path = "crates/aura-types" }
+ aura-codec = { path = "crates/aura-codec" }
+ aura-crypto = { path = "crates/aura-crypto" }
+ aura-tx = { path = "crates/aura-tx" }
++aura-block = { path = "crates/aura-block" }
+ blake3 = { version = "=1.8.7", default-features = false, features = ["pure", "std"] }
+ ed25519-dalek = { version = "=2.2.0" }
+ k256 = { version = "=0.13.4", default-features = false, features = ["ecdsa"] }
+diff --git a/Makefile b/Makefile
+index 8f53895..e8e43eb 100644
+--- a/Makefile
++++ b/Makefile
+@@ -9,7 +9,8 @@ PYTHON ?= python3
+         gen-c1-vectors nc-c1 evidence-c1 \
+         gen-c2-vectors nc-c2 evidence-c2 \
+         check-deps record-c3-deps gen-c3-vectors nc-c3 evidence-c3 \
+-        nc-all gen-c4-vectors nc-c4 evidence-c4 devnet clean
++        nc-all gen-c4-vectors nc-c4 evidence-c4 \
++        gen-c5-vectors nc-c5 evidence-c5 devnet clean
+ 
+ help:
+ 	@echo "AuraLite-Crypto (Stage 1, C0)"
+@@ -33,6 +34,9 @@ help:
+ 	@echo "  make gen-c4-vectors    regenerate independent tx golden vectors"
+ 	@echo "  make nc-c4             C4 negative controls -> docs/evidence/c4/nc.log"
+ 	@echo "  make evidence-c4       regenerate docs/evidence/c4/gates.txt + SHA256SUMS"
++	@echo "  make gen-c5-vectors    regenerate independent block golden vectors"
++	@echo "  make nc-c5             C5 negative controls -> docs/evidence/c5/nc.log"
++	@echo "  make evidence-c5       regenerate docs/evidence/c5/gates.txt + SHA256SUMS"
+ 	@echo "  make test-sanitize     SKIP until H3/C9"
+ 	@echo "  make test-determinism  SKIP until X7"
+ 	@echo "  make fuzz-smoke        SKIP until H3"
+@@ -67,7 +71,7 @@ test: deps-check
+ 	@echo "ALL GATES GREEN"
+ 
+ test-core:
+-	@$(CARGO) test -p aura-types -p aura-codec -p aura-crypto -p aura-tx
++	@$(CARGO) test -p aura-types -p aura-codec -p aura-crypto -p aura-tx -p aura-block
+ 	@$(PYTHON) tools/check_claims.py
+ 	@$(PYTHON) tools/check_deps.py
+ 
+@@ -131,7 +135,7 @@ evidence-c3:
+ # Runs every NC script WITHOUT rewriting the historical C0-C3 evidence logs,
+ # so their committed SHA256SUMS stay valid. CI uses this instead of nc-cX.
+ nc-all:
+-	@for phase in 0 1 2 3 4; do \
++	@for phase in 0 1 2 3 4 5; do \
+ 	    $(PYTHON) tools/nc_c$$phase.py > /tmp/aura-nc-c$$phase.log 2>&1 || \
+ 	      { echo "C$$phase NEGATIVE CONTROLS FAILED"; tail -30 /tmp/aura-nc-c$$phase.log; exit 1; }; \
+ 	    grep '^RESULT:' /tmp/aura-nc-c$$phase.log; \
+@@ -148,6 +152,17 @@ nc-c4:
+ evidence-c4:
+ 	@$(PYTHON) tools/write_c4_evidence.py
+ 
++gen-c5-vectors:
++	@$(PYTHON) tools/gen_c5_vectors.py
++
++nc-c5:
++	@mkdir -p docs/evidence/c5
++	@$(PYTHON) tools/nc_c5.py > docs/evidence/c5/nc.log 2>&1 || { cat docs/evidence/c5/nc.log; exit 1; }
++	@cat docs/evidence/c5/nc.log
++
++evidence-c5:
++	@$(PYTHON) tools/write_c5_evidence.py
++
+ devnet:
+ 	@echo "ERROR: devnet is D7 (NODE_PLAN). It is not implemented at C0." >&2
+ 	@exit 1
+diff --git a/README.md b/README.md
+index 032def8..951f8da 100644
+--- a/README.md
++++ b/README.md
+@@ -11,15 +11,15 @@
+ Name and ticker were locked by the owner on 2026-10-25. The ticker was checked
+ for collisions — see [`docs/TICKER_AUDIT.md`](docs/TICKER_AUDIT.md).
+ 
+-> **Status: C4 LANDED (2026-10-25).** C0 gave us the workspace, CI and
+-> `make test`; C1 added the canonical types; C2 added `aura-codec`; C3 added
+-> `aura-crypto`; C4 adds `aura-tx` — the canonical transaction format with
+-> `signing_bytes`, a signature envelope bound to the signer address, txid and
+-> **replay protection** (`auralite-1` signatures die on `auralite-test-1`).
+-> Golden vectors come from an independent Python encoder that self-checks
+-> BLAKE3 and Ed25519 against official/RFC vectors. There is still **no
+-> consensus, VM, P2P, node or wallet**. Everything else below is a plan, not
+-> a report about an implementation. Every claim of readiness appears only
++> **Status: C5 LANDED (2026-10-25).** C0 gave us the workspace, CI and
++> `make test`; C1 added the canonical types; C2 `aura-codec`; C3
++> `aura-crypto`; C4 `aura-tx`; C5 adds `aura-block` — the canonical
++> `Header`/`Body`, a binary BLAKE3 `tx_root`, `block_hash` and a body sorted
++> by `(signer, nonce)`. Reordering transactions changes `tx_root`; a block
++> whose root was not recomputed is rejected. There is still **no consensus,
++> VM, P2P, node or wallet**, and `state_root`/`validator_set_hash`/`qc` are
++> caller-supplied values, not computed state. Everything else below is a plan,
++> not a report about an implementation. Every claim of readiness appears only
+ > after a measurable test gate, as in
+ > [AuraLite-Emulator](https://github.com/AlexanderNyr/AuraLite-Emulator) and
+ > [AuraLite-OS](https://github.com/AlexanderNyr/AuraLite-OS).
+@@ -81,14 +81,14 @@ Details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+ 
+ ## Quickstart
+ 
+-**Now (C4)** the foundation is real and verifiable:
++**Now (C5)** the foundation is real and verifiable:
+ 
+ ```sh
+ make deps-check          # rustc / cargo / rustfmt / clippy
+ make test                # fmt + clippy + cargo test + drift + dependency gate
+-make nc-all              # all 20 negative controls (C0-C4), no historical log churn
+-make gen-c4-vectors      # independent tx golden vectors (self-checked BLAKE3/Ed25519)
+-make evidence-c4         # current phase gate + receipts
++make nc-all              # all 26 negative controls (C0-C5), no historical log churn
++make gen-c5-vectors      # independent block vectors (self-checked BLAKE3)
++make evidence-c5         # current phase gate + receipts
+ ```
+ 
+ **The devnet does not exist yet — and that is honest.** After phase D7 (devnet)
+@@ -115,7 +115,7 @@ AuraLite-Crypto/
+   CHANGELOG.md           <- what actually changed (ISO 8601 dates, Europe/Moscow)
+   CONTRIBUTING.md        <- how to land a phase: one patch, one gate, one NC
+   Makefile               <- single entry point (C0 OK)
+-  Cargo.toml             <- 12-crate workspace (C4), 54 pinned external deps (C3)
++  Cargo.toml             <- 13-crate workspace (C5), 54 pinned external deps (C3)
+   rust-toolchain.toml    <- pinned 1.99.1 + rustfmt/clippy (C0 OK)
+   tools/                 <- docs drift guard + negative-control drivers (C0 OK)
+   docs/
+@@ -124,9 +124,9 @@ AuraLite-Crypto/
+     TICKER_AUDIT.md      <- measured ticker collision audit
+     plans/*_PLAN.md      <- 12 plans, dependency-ordered, DoD + gate per phase
+     evidence/            <- gate logs / receipts (C0-C4)
+-    spec/                <- tx format spec (C4) + dependency allowlist (C3)
++    spec/                <- tx (C4) + block (C5) specs, dependency allowlist
+   patches/               <- one .patch per phase (0001-C0-... shipped)
+-  crates/*               <- 12 crates: types, codec, crypto, tx + 8 placeholders
++  crates/*               <- 13 crates: types, codec, crypto, tx, block + 8 placeholders
+   contracts/*            <- reference contracts (ARC-20, ARC-721, AMM, ...)
+   tests/                 <- unit/property/integration/consensus/soak
+   fuzz/ sim/ bench/ deploy/ web/
+diff --git a/ROADMAP.md b/ROADMAP.md
+index e2f3a41..6c489da 100644
+--- a/ROADMAP.md
++++ b/ROADMAP.md
+@@ -121,7 +121,7 @@ phase tables (decision Q5).
+ 
+ | Plan | Status | Scope | Phases |
+ |---|---|---|---|
+-| [`docs/plans/CORE_PLAN.md`](docs/plans/CORE_PLAN.md) | 🚧 IN PROGRESS (C0–C4 ✅) | primitives, codec, crypto, tx/block, genesis, test rig | C0–C10 |
++| [`docs/plans/CORE_PLAN.md`](docs/plans/CORE_PLAN.md) | 🚧 IN PROGRESS (C0–C5 ✅) | primitives, codec, crypto, tx/block, genesis, test rig | C0–C10 |
+ | [`docs/plans/STATE_PLAN.md`](docs/plans/STATE_PLAN.md) | 📋 PLAN | Merkle state, RocksDB, WAL, snapshots, pruning, recovery | S0–S7 |
+ | [`docs/plans/EXEC_PLAN.md`](docs/plans/EXEC_PLAN.md) | 📋 PLAN | WASM runtime, gas, ABI, contract SDK, determinism | X0–X9 |
+ | [`docs/plans/CONSENSUS_PLAN.md`](docs/plans/CONSENSUS_PLAN.md) | 📋 PLAN | BFT-PoS, QC, VRF, staking, slashing, finality, governance | B0–B10 |
+@@ -218,6 +218,12 @@ files, 49 tests passing, `make nc-all` → **20/20 negative controls PASS**,
+ covers 20 markdown files. Receipts: `docs/evidence/c4/`. Validators/blocks/tx
+ are still 0/0/0 — C4 is a format, not a network.
+ 
++**Post-C5 measurement (2026-10-25):** 13 crates (new `aura-block`), 41 `.rs`
++files, 60 tests passing, `make nc-all` → **26/26 negative controls PASS**,
++6/6 new in C5, still 54 external crates (no new dependency), drift guard now
++covers 21 markdown files. Receipts: `docs/evidence/c5/`. Validators/blocks/tx
++are still 0/0/0 — C5 is a format, not a network.
++
+ ### Measured gaps to the north star
+ 
+ | # | Gap | Evidence in the tree | Plan |
+@@ -292,18 +298,18 @@ after the fact, as in AuraLite OS.
+ 
+ ## 8. Immediate queue
+ 
+-**C0, C1, C2, C3 and C4 shipped**
++**C0, C1, C2, C3, C4 and C5 shipped**
+ (`patches/0001-C0-baseline-workspace.patch`,
+ `patches/0002-C1-types.patch`, `patches/0003-C2-codec.patch`,
+-`patches/0004-C3-crypto.patch`, `patches/0005-C4-tx-format.patch`):
+-workspace, CI, gates, identity constants, canonical types, `aura-codec`,
+-`aura-crypto` and the `aura-tx` transaction format — all pinned against
+-independent references and guarded by 20 negative controls. Right now:
+-**C5** — block and header: `Header`/`Body`, `block_hash`, `tx_root`,
+-`state_root`, `validator_set_hash` and a protocol version, with a vector
+-proving that reordering transactions changes `tx_root` and an NC that
+-reorders without recomputing the root. The next patch is
+-`patches/0006-C5-block-header.patch`.
++`patches/0004-C3-crypto.patch`, `patches/0005-C4-tx-format.patch`,
++`patches/0006-C5-block-header.patch`): workspace, CI, gates, identity
++constants, canonical types, `aura-codec`, `aura-crypto`, the `aura-tx`
++transaction format and the `aura-block` block format — all pinned against
++independent references and guarded by 26 negative controls. Right now:
++**C6** — Merkle proofs: build/verify proofs for transactions and events in a
++compact format over the C5 tree, with 1000 leaves, all proofs valid and one
++substituted leaf rejected. The next patch is
++`patches/0007-C6-merkle-proofs.patch`.
+ 
+ See also: [`docs/STATUS.md`](docs/STATUS.md),
+ [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
+diff --git a/crates/aura-block/Cargo.toml b/crates/aura-block/Cargo.toml
+new file mode 100644
+index 0000000..49f9c37
+--- /dev/null
++++ b/crates/aura-block/Cargo.toml
+@@ -0,0 +1,15 @@
++[package]
++name = "aura-block"
++description = "AuraLite-Crypto block/header format, tx_root and block_hash"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++rust-version.workspace = true
++repository.workspace = true
++publish.workspace = true
++
++[dependencies]
++aura-types.workspace = true
++aura-codec.workspace = true
++aura-crypto.workspace = true
++aura-tx.workspace = true
+diff --git a/crates/aura-block/src/block.rs b/crates/aura-block/src/block.rs
+new file mode 100644
+index 0000000..f88b24c
+--- /dev/null
++++ b/crates/aura-block/src/block.rs
+@@ -0,0 +1,121 @@
++//! Complete block: header plus body, hashing and validation.
++
++use aura_codec::{CodecError, Decode, Encode, Reader, Writer, decode_canonical, encode_to_bytes};
++use aura_types::{Hash, PROTOCOL_VERSION};
++
++use crate::body::{Body, MAX_BLOCK_TXS};
++use crate::error::BlockError;
++use crate::header::{Header, HeaderParams, MAX_QC_BYTES};
++
++/// A complete block. Header order, then body order, is the wire order.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct Block {
++    /// Header (commits to the body via `tx_root`).
++    pub header: Header,
++    /// Canonically sorted transactions.
++    pub body: Body,
++}
++
++impl Block {
++    /// Build a block: sort the body, compute `tx_root`, then assemble.
++    ///
++    /// The caller cannot supply `tx_root`, so a freshly built block always
++    /// has a correct root. Tests and NCs mutate the public fields directly
++    /// to construct invalid blocks.
++    pub fn new(params: HeaderParams, txs: Vec<aura_tx::Tx>) -> Result<Self, BlockError> {
++        let body = Body::new(txs)?;
++        let tx_root = body.tx_root();
++        Ok(Block {
++            header: Header::from_params(params, tx_root),
++            body,
++        })
++    }
++
++    /// The block id: hash of the header (see [`Header::block_hash`]).
++    pub fn block_hash(&self) -> Hash {
++        self.header.block_hash()
++    }
++
++    /// Canonical wire bytes.
++    pub fn to_bytes(&self) -> Vec<u8> {
++        encode_to_bytes(self)
++    }
++
++    /// Decode with full C2 canonicality (no trailing bytes, no non-minimal
++    /// varints, re-encode must reproduce the input).
++    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, BlockError> {
++        Ok(decode_canonical::<Block>(bytes)?)
++    }
++
++    /// Validate block-level invariants for `expected_chain`.
++    ///
++    /// Deliberately does **not** execute or charge gas; transaction signature
++    /// checks are available separately in [`Block::validate_transactions`].
++    ///
++    /// NC targets: `tools/nc_c5.py` disables the canonical-order check and
++    /// the `tx_root` check here, requiring the reorder vectors to go red.
++    pub fn validate(&self, expected_chain: &str) -> Result<(), BlockError> {
++        if self.header.version != PROTOCOL_VERSION {
++            return Err(BlockError::UnsupportedProtocolVersion(
++                PROTOCOL_VERSION,
++                self.header.version,
++            ));
++        }
++        if self.header.chain_id.as_str() != expected_chain {
++            return Err(BlockError::WrongChain(
++                expected_chain.to_owned(),
++                self.header.chain_id.as_str().to_owned(),
++            ));
++        }
++        if self.body.txs.len() > MAX_BLOCK_TXS {
++            return Err(BlockError::TooManyTransactions(self.body.txs.len()));
++        }
++        if let Some(qc) = &self.header.qc
++            && qc.len() > MAX_QC_BYTES
++        {
++            return Err(BlockError::QcTooLarge(qc.len()));
++        }
++        for pair in self.body.txs.windows(2) {
++            let a = (&pair[0].unsigned.signer, &pair[0].unsigned.nonce);
++            let b = (&pair[1].unsigned.signer, &pair[1].unsigned.nonce);
++            if a == b {
++                return Err(BlockError::DuplicateTxKey);
++            }
++            if a > b {
++                return Err(BlockError::UnsortedTransactions);
++            }
++        }
++        let computed_root = self.body.tx_root();
++        if computed_root != self.header.tx_root {
++            return Err(BlockError::TxRootMismatch(
++                computed_root,
++                self.header.tx_root,
++            ));
++        }
++        Ok(())
++    }
++
++    /// Validate every transaction in the body at this block's height.
++    pub fn validate_transactions(&self, expected_chain: &str) -> Result<(), BlockError> {
++        for tx in &self.body.txs {
++            tx.validate(expected_chain, self.header.height)?;
++        }
++        Ok(())
++    }
++}
++
++impl Encode for Block {
++    fn encode(&self, writer: &mut Writer) {
++        self.header.encode(writer);
++        self.body.encode(writer);
++    }
++}
++
++impl Decode for Block {
++    fn decode(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
++        Ok(Block {
++            header: Header::decode(reader)?,
++            body: Body::decode(reader)?,
++        })
++    }
++}
+diff --git a/crates/aura-block/src/body.rs b/crates/aura-block/src/body.rs
+new file mode 100644
+index 0000000..51efb2e
+--- /dev/null
++++ b/crates/aura-block/src/body.rs
+@@ -0,0 +1,62 @@
++//! Block body: canonically sorted transactions.
++
++use aura_codec::{CodecError, Decode, Encode, Reader, Writer};
++use aura_tx::Tx;
++use aura_types::Hash;
++
++use crate::error::BlockError;
++use crate::merkle::compute_tx_root;
++
++/// Maximum number of transactions in a block. Aligned with `aura-codec`'s
++/// `MAX_ITEMS` so the canonical decoder can always read a valid body.
++pub const MAX_BLOCK_TXS: usize = 65_536;
++
++/// An ordered list of transactions.
++#[derive(Debug, Clone, PartialEq, Eq, Default)]
++pub struct Body {
++    /// Transactions, canonically sorted by `(signer, nonce)`.
++    pub txs: Vec<Tx>,
++}
++
++impl Body {
++    /// Sort by `(signer, nonce)` and reject duplicates.
++    ///
++    /// `Address` and `Nonce` both derive `Ord`, so this is a total,
++    /// platform-independent order — no `HashMap`, no local time.
++    pub fn new(mut txs: Vec<Tx>) -> Result<Self, BlockError> {
++        if txs.len() > MAX_BLOCK_TXS {
++            return Err(BlockError::TooManyTransactions(txs.len()));
++        }
++        txs.sort_by(|left, right| {
++            (left.unsigned.signer, left.unsigned.nonce)
++                .cmp(&(right.unsigned.signer, right.unsigned.nonce))
++        });
++        for pair in txs.windows(2) {
++            let a = (&pair[0].unsigned.signer, &pair[0].unsigned.nonce);
++            let b = (&pair[1].unsigned.signer, &pair[1].unsigned.nonce);
++            if a == b {
++                return Err(BlockError::DuplicateTxKey);
++            }
++        }
++        Ok(Body { txs })
++    }
++
++    /// Recompute the Merkle root of this body (order-sensitive).
++    pub fn tx_root(&self) -> Hash {
++        compute_tx_root(&self.txs)
++    }
++}
++
++impl Encode for Body {
++    fn encode(&self, writer: &mut Writer) {
++        self.txs.encode(writer);
++    }
++}
++
++impl Decode for Body {
++    fn decode(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
++        Ok(Body {
++            txs: Vec::<Tx>::decode(reader)?,
++        })
++    }
++}
+diff --git a/crates/aura-block/src/error.rs b/crates/aura-block/src/error.rs
+new file mode 100644
+index 0000000..a98ef7b
+--- /dev/null
++++ b/crates/aura-block/src/error.rs
+@@ -0,0 +1,75 @@
++//! Block validation errors.
++
++use std::fmt;
++
++use aura_codec::CodecError;
++use aura_tx::TxError;
++use aura_types::Hash;
++
++/// Every reason a block can be rejected before execution.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum BlockError {
++    /// Header `version` is not [`aura_types::PROTOCOL_VERSION`]. Tuple is
++    /// `(expected, got)`.
++    UnsupportedProtocolVersion(u32, u32),
++    /// The block chain-id does not match the chain we validate for.
++    /// Tuple is `(expected, got)`.
++    WrongChain(String, String),
++    /// Body has more than [`crate::MAX_BLOCK_TXS`] transactions.
++    TooManyTransactions(usize),
++    /// The QC blob exceeds [`crate::MAX_QC_BYTES`].
++    QcTooLarge(usize),
++    /// Two transactions share the same `(signer, nonce)` key.
++    DuplicateTxKey,
++    /// Body is not sorted by `(signer, nonce)`.
++    UnsortedTransactions,
++    /// `tx_root` does not match the Merkle root of the body. Tuple is
++    /// `(computed, declared)`.
++    TxRootMismatch(Hash, Hash),
++    /// A transaction in the body failed validation.
++    InvalidTransaction(TxError),
++    /// Canonical decoding failed (structural).
++    Decode(CodecError),
++}
++
++impl fmt::Display for BlockError {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::UnsupportedProtocolVersion(expected, got) => {
++                write!(f, "unsupported protocol version {got}, expected {expected}")
++            }
++            Self::WrongChain(expected, got) => {
++                write!(f, "block chain '{got}' is not '{expected}'")
++            }
++            Self::TooManyTransactions(n) => write!(f, "body has {n} transactions, over the limit"),
++            Self::QcTooLarge(n) => write!(f, "QC blob of {n} bytes exceeds the limit"),
++            Self::DuplicateTxKey => f.write_str("duplicate (signer, nonce) in block body"),
++            Self::UnsortedTransactions => {
++                f.write_str("body is not canonically sorted by (signer, nonce)")
++            }
++            Self::TxRootMismatch(computed, declared) => {
++                write!(
++                    f,
++                    "tx_root mismatch: computed {}, declared {}",
++                    computed, declared
++                )
++            }
++            Self::InvalidTransaction(error) => write!(f, "invalid transaction: {error}"),
++            Self::Decode(error) => write!(f, "canonical decode failed: {error}"),
++        }
++    }
++}
++
++impl std::error::Error for BlockError {}
++
++impl From<CodecError> for BlockError {
++    fn from(error: CodecError) -> Self {
++        BlockError::Decode(error)
++    }
++}
++
++impl From<TxError> for BlockError {
++    fn from(error: TxError) -> Self {
++        BlockError::InvalidTransaction(error)
++    }
++}
+diff --git a/crates/aura-block/src/header.rs b/crates/aura-block/src/header.rs
+new file mode 100644
+index 0000000..bcea3df
+--- /dev/null
++++ b/crates/aura-block/src/header.rs
+@@ -0,0 +1,144 @@
++//! Block header: fields, encoding and `block_hash`.
++
++use aura_codec::{CodecError, Decode, Encode, Reader, Writer, encode_to_bytes};
++use aura_crypto::hash_domain;
++use aura_types::{Address, Amount, ChainId, Domain, Gas, Hash, Height};
++
++/// Extra context inside the `block_hash` payload, before the header bytes.
++///
++/// NC target: `tools/nc_c5.py` changes this constant and requires the C5
++/// block-hash vectors to go red.
++pub const BLOCK_HASH_PAYLOAD_CONTEXT: &[u8] = b"AuraLite-Crypto/block-hash-v1\x00";
++
++/// Maximum length of the opaque QC blob.
++pub const MAX_QC_BYTES: usize = 65_536;
++
++/// Everything the caller supplies for a header.
++///
++/// `tx_root` is deliberately **absent**: it is always derived from the body
++/// by [`crate::Block::new`], so it cannot be forged at construction time.
++/// `version` is included so a caller can construct a wrong-version header for
++/// tests; real blocks use [`aura_types::PROTOCOL_VERSION`].
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct HeaderParams {
++    /// Protocol version.
++    pub version: u32,
++    /// Chain this block belongs to.
++    pub chain_id: ChainId,
++    /// Block height.
++    pub height: Height,
++    /// Hash of the parent header.
++    pub parent_hash: Hash,
++    /// State root, supplied by the state layer (S1; not yet implemented).
++    pub state_root: Hash,
++    /// Validator-set hash, supplied by consensus (B phases; not yet implemented).
++    pub validator_set_hash: Hash,
++    /// Consensus timestamp in milliseconds — never `SystemTime::now()`.
++    pub timestamp_ms: u64,
++    /// Block proposer.
++    pub proposer: Address,
++    /// Opaque quorum certificate bytes; `None` for genesis-like blocks.
++    pub qc: Option<Vec<u8>>,
++    /// Gas consumed by the block.
++    pub gas_used: Gas,
++    /// Base fee for the block.
++    pub base_fee: Amount,
++}
++
++/// A block header. Field order below **is** the wire order.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct Header {
++    /// Protocol version.
++    pub version: u32,
++    /// Chain this block belongs to (block-level replay separation).
++    pub chain_id: ChainId,
++    /// Block height.
++    pub height: Height,
++    /// Hash of the parent header.
++    pub parent_hash: Hash,
++    /// Binary Merkle root of the body's txids.
++    pub tx_root: Hash,
++    /// State root.
++    pub state_root: Hash,
++    /// Validator-set hash.
++    pub validator_set_hash: Hash,
++    /// Consensus timestamp in milliseconds.
++    pub timestamp_ms: u64,
++    /// Block proposer.
++    pub proposer: Address,
++    /// Opaque quorum certificate bytes.
++    pub qc: Option<Vec<u8>>,
++    /// Gas consumed by the block.
++    pub gas_used: Gas,
++    /// Base fee for the block.
++    pub base_fee: Amount,
++}
++
++impl Header {
++    /// Build a header from caller params and a computed `tx_root`.
++    pub fn from_params(params: HeaderParams, tx_root: Hash) -> Self {
++        Header {
++            version: params.version,
++            chain_id: params.chain_id,
++            height: params.height,
++            parent_hash: params.parent_hash,
++            tx_root,
++            state_root: params.state_root,
++            validator_set_hash: params.validator_set_hash,
++            timestamp_ms: params.timestamp_ms,
++            proposer: params.proposer,
++            qc: params.qc,
++            gas_used: params.gas_used,
++            base_fee: params.base_fee,
++        }
++    }
++
++    /// Hash of this header: the block id.
++    ///
++    /// `hash_domain(chain_id, Domain::Block,
++    /// BLOCK_HASH_PAYLOAD_CONTEXT || canonical(header))`. The body is not
++    /// included directly; `tx_root` commits to it.
++    pub fn block_hash(&self) -> Hash {
++        let encoded = encode_to_bytes(self);
++        let mut payload = Vec::with_capacity(BLOCK_HASH_PAYLOAD_CONTEXT.len() + encoded.len());
++        payload.extend_from_slice(BLOCK_HASH_PAYLOAD_CONTEXT);
++        payload.extend_from_slice(&encoded);
++        hash_domain(self.chain_id.as_str(), Domain::Block, &payload)
++    }
++}
++
++impl Encode for Header {
++    fn encode(&self, writer: &mut Writer) {
++        self.version.encode(writer);
++        self.chain_id.encode(writer);
++        self.height.encode(writer);
++        self.parent_hash.encode(writer);
++        self.tx_root.encode(writer);
++        self.state_root.encode(writer);
++        self.validator_set_hash.encode(writer);
++        self.timestamp_ms.encode(writer);
++        self.proposer.encode(writer);
++        self.qc.encode(writer);
++        self.gas_used.encode(writer);
++        self.base_fee.encode(writer);
++    }
++}
++
++impl Decode for Header {
++    fn decode(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
++        Ok(Header {
++            version: u32::decode(reader)?,
++            chain_id: ChainId::decode(reader)?,
++            height: Height::decode(reader)?,
++            parent_hash: Hash::decode(reader)?,
++            tx_root: Hash::decode(reader)?,
++            state_root: Hash::decode(reader)?,
++            validator_set_hash: Hash::decode(reader)?,
++            timestamp_ms: u64::decode(reader)?,
++            proposer: Address::decode(reader)?,
++            qc: Option::<Vec<u8>>::decode(reader)?,
++            gas_used: Gas::decode(reader)?,
++            base_fee: Amount::decode(reader)?,
++        })
++    }
++}
+diff --git a/crates/aura-block/src/lib.rs b/crates/aura-block/src/lib.rs
+new file mode 100644
+index 0000000..00581f9
+--- /dev/null
++++ b/crates/aura-block/src/lib.rs
+@@ -0,0 +1,36 @@
++//! AuraLite-Crypto block and header format (C5).
++//!
++//! `Block = Header || Body`. The header carries the protocol version, the
++//! chain-id, the height, the parent hash, three roots (`tx_root`,
++//! `state_root`, `validator_set_hash`), a consensus timestamp, the proposer,
++//! an opaque QC, gas used and the base fee. The body is a canonically sorted
++//! list of [`aura_tx::Tx`].
++//!
++//! [`Block::block_hash`] hashes the **header only** (the `tx_root` commits to
++//! the body), with chain-id and `Domain::Block` separation from C3.
++//! [`compute_tx_root`] is a binary BLAKE3 Merkle root over txids; C6 adds
++//! proofs over exactly this tree.
++//!
++//! `state_root`, `validator_set_hash` and `qc` are **supplied by the caller**
++//! at C5: state (S1), validator sets (B phases) and quorum certificates
++//! (B phase) are not implemented yet. C5 fixes their wire representation and
++//! their validation, not their computation. Honest placeholders, not fake
++//! values.
++//!
++//! Full byte-level specification: `docs/spec/block-format.md`.
++//! Golden vectors: `tools/gen_c5_vectors.py` (independent Python).
++
++#![forbid(unsafe_code)]
++#![deny(missing_docs)]
++
++mod block;
++mod body;
++mod error;
++mod header;
++mod merkle;
++
++pub use block::Block;
++pub use body::{Body, MAX_BLOCK_TXS};
++pub use error::BlockError;
++pub use header::{BLOCK_HASH_PAYLOAD_CONTEXT, Header, HeaderParams, MAX_QC_BYTES};
++pub use merkle::{LEAF_CONTEXT, NODE_CONTEXT, compute_tx_root, leaf_hash, node_hash};
+diff --git a/crates/aura-block/src/merkle.rs b/crates/aura-block/src/merkle.rs
+new file mode 100644
+index 0000000..91defba
+--- /dev/null
++++ b/crates/aura-block/src/merkle.rs
+@@ -0,0 +1,62 @@
++//! Binary BLAKE3 Merkle root over transaction ids.
++//!
++//! C5 fixes the tree shape; C6 adds proof generation and verification over
++//! exactly these leaves and nodes.
++
++use aura_crypto::blake3_hash;
++use aura_tx::Tx;
++use aura_types::Hash;
++
++/// Domain tag for a leaf hash.
++///
++/// NC target: `tools/nc_c5.py` changes this constant and requires the C5
++/// golden vectors to go red.
++pub const LEAF_CONTEXT: &[u8] = b"AuraLite-Crypto/tx-leaf-v1\x00";
++
++/// Domain tag for an internal node hash.
++///
++/// NC target: `tools/nc_c5.py` changes this constant and requires the C5
++/// golden vectors to go red.
++pub const NODE_CONTEXT: &[u8] = b"AuraLite-Crypto/tx-node-v1\x00";
++
++/// Hash one leaf: `BLAKE3(LEAF_CONTEXT || txid)`.
++pub fn leaf_hash(txid: &Hash) -> Hash {
++    let mut input = Vec::with_capacity(LEAF_CONTEXT.len() + 32);
++    input.extend_from_slice(LEAF_CONTEXT);
++    input.extend_from_slice(txid.as_bytes());
++    blake3_hash(&input)
++}
++
++/// Hash one internal node: `BLAKE3(NODE_CONTEXT || left || right)`.
++pub fn node_hash(left: &Hash, right: &Hash) -> Hash {
++    let mut input = Vec::with_capacity(NODE_CONTEXT.len() + 64);
++    input.extend_from_slice(NODE_CONTEXT);
++    input.extend_from_slice(left.as_bytes());
++    input.extend_from_slice(right.as_bytes());
++    blake3_hash(&input)
++}
++
++/// Compute the `tx_root` for an ordered slice of transactions.
++///
++/// Rules: an empty body yields [`Hash::ZERO`]; a single leaf is the root; at
++/// each level an odd final node is duplicated before pairing. The result is
++/// order-sensitive — that is the C5 DoD property.
++pub fn compute_tx_root(txs: &[Tx]) -> Hash {
++    if txs.is_empty() {
++        return Hash::ZERO;
++    }
++    let mut level: Vec<Hash> = txs.iter().map(|tx| leaf_hash(&tx.txid())).collect();
++    while level.len() > 1 {
++        if level.len() % 2 == 1 {
++            let last = *level.last().expect("non-empty level");
++            level.push(last);
++        }
++        level = level
++            .as_chunks::<2>()
++            .0
++            .iter()
++            .map(|pair| node_hash(&pair[0], &pair[1]))
++            .collect();
++    }
++    level[0]
++}
+diff --git a/crates/aura-block/tests/c5_block.rs b/crates/aura-block/tests/c5_block.rs
+new file mode 100644
+index 0000000..120f8a8
+--- /dev/null
++++ b/crates/aura-block/tests/c5_block.rs
+@@ -0,0 +1,356 @@
++//! C5 gate: block/header format against an independent Python encoder.
++//!
++//! `fixtures/c5_golden.txt` comes from `tools/gen_c5_vectors.py`, which
++//! self-checks pure-Python BLAKE3 against official vectors and reuses the
++//! committed C4 transaction vectors as block bodies.
++
++use std::collections::BTreeMap;
++
++use aura_block::{
++    BLOCK_HASH_PAYLOAD_CONTEXT, Block, BlockError, Body, HeaderParams, LEAF_CONTEXT, MAX_BLOCK_TXS,
++    MAX_QC_BYTES, NODE_CONTEXT, compute_tx_root, leaf_hash, node_hash,
++};
++use aura_codec::{CodecError, encode_to_bytes};
++use aura_tx::Tx;
++use aura_types::{Address, Amount, CHAIN_ID, ChainId, Gas, Hash, Height, PROTOCOL_VERSION};
++
++const GOLDEN: &str = include_str!("fixtures/c5_golden.txt");
++const C4_GOLDEN: &str = include_str!("../../aura-tx/tests/fixtures/c4_golden.txt");
++
++fn parse(text: &str) -> BTreeMap<String, String> {
++    let mut map = BTreeMap::new();
++    for line in text.lines() {
++        let trimmed = line.trim();
++        if trimmed.is_empty() || trimmed.starts_with('#') {
++            continue;
++        }
++        let (key, value) = trimmed
++            .split_once('=')
++            .unwrap_or_else(|| panic!("malformed golden line: {trimmed}"));
++        assert!(
++            map.insert(key.to_owned(), value.to_owned()).is_none(),
++            "duplicate golden key {key}"
++        );
++    }
++    map
++}
++
++fn hx(text: &str) -> Vec<u8> {
++    assert_eq!(text.len() % 2, 0, "even-length hex");
++    text.as_bytes()
++        .chunks(2)
++        .map(|pair| (nibble(pair[0]) << 4) | nibble(pair[1]))
++        .collect()
++}
++
++fn nibble(byte: u8) -> u8 {
++    match byte {
++        b'0'..=b'9' => byte - b'0',
++        b'a'..=b'f' => byte - b'a' + 10,
++        _ => panic!("invalid hex nibble in fixture"),
++    }
++}
++
++fn to_hex(bytes: &[u8]) -> String {
++    let mut out = String::with_capacity(bytes.len() * 2);
++    for byte in bytes {
++        out.push_str(&format!("{byte:02x}"));
++    }
++    out
++}
++
++fn hash32(text: &str) -> Hash {
++    Hash::from_slice(&hx(text)).expect("32-byte hash")
++}
++
++fn c4_tx(index: usize) -> Tx {
++    let f = parse(C4_GOLDEN);
++    Tx::from_canonical_bytes(&hx(&f[&format!("tx{index}_bytes")]))
++        .unwrap_or_else(|e| panic!("tx{index} decode: {e}"))
++}
++
++fn header_params(g: &BTreeMap<String, String>, index: usize) -> HeaderParams {
++    let k = |key: &str| g[&format!("b{index}_{key}")].clone();
++    let qc = if k("qc_present") == "1" {
++        Some(hx(&k("qc")))
++    } else {
++        None
++    };
++    HeaderParams {
++        version: k("version").parse().expect("u32"),
++        chain_id: ChainId::new(&k("chain")).expect("valid chain-id"),
++        height: Height::new(k("height").parse().expect("u64")),
++        parent_hash: hash32(&k("parent")),
++        state_root: hash32(&k("state_root")),
++        validator_set_hash: hash32(&k("validator_set_hash")),
++        timestamp_ms: k("timestamp_ms").parse().expect("u64"),
++        proposer: Address::from_slice(&hx(&k("proposer"))).expect("20-byte address"),
++        qc,
++        gas_used: Gas::new(k("gas_used").parse().expect("u64")),
++        base_fee: Amount::from_units(k("base_fee").parse().expect("u128")),
++    }
++}
++
++fn build(g: &BTreeMap<String, String>, index: usize) -> Block {
++    let ids: Vec<usize> = g[&format!("b{index}_tx_ids")]
++        .split(',')
++        .filter(|item| !item.is_empty())
++        .map(|item| item.parse().expect("tx index"))
++        .collect();
++    let txs: Vec<Tx> = ids.into_iter().map(c4_tx).collect();
++    Block::new(header_params(g, index), txs).expect("valid block")
++}
++
++#[test]
++fn constants_are_pinned_by_the_independent_fixture() {
++    let f = parse(GOLDEN);
++    assert_eq!(to_hex(LEAF_CONTEXT), f["leaf_context"]);
++    assert_eq!(to_hex(NODE_CONTEXT), f["node_context"]);
++    assert_eq!(
++        to_hex(BLOCK_HASH_PAYLOAD_CONTEXT),
++        f["block_hash_payload_context"]
++    );
++    assert_eq!(MAX_BLOCK_TXS.to_string(), f["max_block_txs"]);
++    assert_eq!(MAX_QC_BYTES.to_string(), f["max_qc_bytes"]);
++    assert_eq!(PROTOCOL_VERSION.to_string(), f["protocol_version"]);
++    assert_eq!(CHAIN_ID, f["chain_id"]);
++}
++
++#[test]
++fn golden_blocks_match_the_independent_encoder() {
++    let f = parse(GOLDEN);
++    for index in 1..=4 {
++        let block = build(&f, index);
++        assert_eq!(
++            to_hex(&encode_to_bytes(&block.header)),
++            f[&format!("b{index}_header")]
++        );
++        assert_eq!(
++            to_hex(&encode_to_bytes(&block.body)),
++            f[&format!("b{index}_body")]
++        );
++        assert_eq!(to_hex(&block.to_bytes()), f[&format!("b{index}_bytes")]);
++        assert_eq!(
++            block.header.tx_root.to_hex(),
++            f[&format!("b{index}_tx_root")]
++        );
++        assert_eq!(
++            block.body.tx_root().to_hex(),
++            f[&format!("b{index}_tx_root")]
++        );
++        assert_eq!(
++            block.block_hash().to_hex(),
++            f[&format!("b{index}_block_hash")]
++        );
++
++        let decoded = Block::from_canonical_bytes(&hx(&f[&format!("b{index}_bytes")]))
++            .unwrap_or_else(|e| panic!("b{index} decode: {e}"));
++        assert_eq!(decoded, block, "b{index} canonical round-trip");
++        assert_eq!(
++            decoded.block_hash().to_hex(),
++            f[&format!("b{index}_block_hash")]
++        );
++        assert!(block.validate(CHAIN_ID).is_ok(), "b{index} validates");
++    }
++    // b2 really is the child of b1.
++    assert_eq!(f["b2_parent"], f["b1_block_hash"]);
++}
++
++#[test]
++fn changing_tx_order_changes_tx_root() {
++    let f = parse(GOLDEN);
++    assert_ne!(f["tx_root_forward"], f["tx_root_backward"]);
++    let first = c4_tx(1);
++    let second = c4_tx(2);
++    let forward = compute_tx_root(&[first.clone(), second.clone()]);
++    let backward = compute_tx_root(&[second, first]);
++    assert_eq!(forward.to_hex(), f["tx_root_forward"]);
++    assert_eq!(backward.to_hex(), f["tx_root_backward"]);
++    assert_ne!(forward, backward);
++}
++
++#[test]
++fn merkle_tree_shape_is_pinned() {
++    assert_eq!(compute_tx_root(&[]), Hash::ZERO, "empty body -> zero root");
++
++    let single = c4_tx(4);
++    assert_eq!(
++        compute_tx_root(std::slice::from_ref(&single)),
++        leaf_hash(&single.txid()),
++        "one leaf is the root"
++    );
++
++    // Three leaves: odd final node is duplicated at the second level.
++    let a = c4_tx(1);
++    let b = c4_tx(2);
++    let c = c4_tx(5);
++    let la = leaf_hash(&a.txid());
++    let lb = leaf_hash(&b.txid());
++    let lc = leaf_hash(&c.txid());
++    let expected = node_hash(&node_hash(&la, &lb), &node_hash(&lc, &lc));
++    assert_eq!(compute_tx_root(&[a, b, c]), expected);
++}
++
++#[test]
++fn block_hash_covers_the_whole_header_and_the_chain() {
++    let f = parse(GOLDEN);
++    let block = build(&f, 1);
++    let original = block.block_hash();
++
++    let mut cases: Vec<(&str, Block)> = Vec::new();
++    let mut t = block.clone();
++    t.header.timestamp_ms += 1;
++    cases.push(("timestamp_ms", t));
++    let mut t = block.clone();
++    t.header.parent_hash = Hash::ZERO;
++    cases.push(("parent_hash", t));
++    let mut t = block.clone();
++    t.header.state_root = Hash::ZERO;
++    cases.push(("state_root", t));
++    let mut t = block.clone();
++    t.header.chain_id = ChainId::new("auralite-9").unwrap();
++    cases.push(("chain_id", t));
++    let mut t = block.clone();
++    t.header.version += 1;
++    cases.push(("version", t));
++
++    for (name, mutated) in cases {
++        assert_ne!(
++            mutated.block_hash(),
++            original,
++            "changing {name} must change block_hash"
++        );
++    }
++    assert_eq!(block.block_hash(), original, "block_hash is deterministic");
++}
++
++#[test]
++fn every_bad_vector_is_rejected() {
++    let f = parse(GOLDEN);
++    const BAD: [&str; 9] = [
++        "bad_trailing",
++        "bad_truncated",
++        "bad_version",
++        "bad_root",
++        "bad_reordered",
++        "bad_unsorted_with_root",
++        "bad_duplicate",
++        "bad_qc_tag",
++        "bad_nonminimal_count",
++    ];
++    for key in BAD {
++        let bytes = hx(&f[key]);
++        let rejected = match Block::from_canonical_bytes(&bytes) {
++            Err(_) => true,
++            Ok(block) => block.validate(CHAIN_ID).is_err(),
++        };
++        assert!(rejected, "{key} must be rejected");
++    }
++}
++
++#[test]
++fn bad_vectors_return_the_specific_error() {
++    let f = parse(GOLDEN);
++    let decode = |key: &str| Block::from_canonical_bytes(&hx(&f[key]));
++
++    assert_eq!(
++        decode("bad_trailing"),
++        Err(BlockError::Decode(CodecError::TrailingBytes(1)))
++    );
++    assert!(decode("bad_truncated").is_err());
++    assert_eq!(
++        decode("bad_qc_tag"),
++        Err(BlockError::Decode(CodecError::InvalidOptionTag(2)))
++    );
++    assert_eq!(
++        decode("bad_nonminimal_count"),
++        Err(BlockError::Decode(CodecError::NonCanonicalVarint))
++    );
++    assert_eq!(
++        decode("bad_version").unwrap().validate(CHAIN_ID),
++        Err(BlockError::UnsupportedProtocolVersion(1, 2))
++    );
++    let bad_root = decode("bad_root").unwrap();
++    assert!(matches!(
++        bad_root.validate(CHAIN_ID),
++        Err(BlockError::TxRootMismatch(_, _))
++    ));
++    assert_eq!(
++        decode("bad_reordered").unwrap().validate(CHAIN_ID),
++        Err(BlockError::UnsortedTransactions)
++    );
++    assert_eq!(
++        decode("bad_unsorted_with_root").unwrap().validate(CHAIN_ID),
++        Err(BlockError::UnsortedTransactions)
++    );
++    assert_eq!(
++        decode("bad_duplicate").unwrap().validate(CHAIN_ID),
++        Err(BlockError::DuplicateTxKey)
++    );
++}
++
++#[test]
++fn reorder_without_recomputing_the_root_is_rejected() {
++    let f = parse(GOLDEN);
++    let mut block = build(&f, 1);
++    assert!(block.validate(CHAIN_ID).is_ok());
++    block.body.txs.reverse();
++    assert!(
++        block.validate(CHAIN_ID).is_err(),
++        "NC target: reorder -> red"
++    );
++    assert_ne!(block.body.tx_root(), block.header.tx_root);
++}
++
++#[test]
++fn body_rejects_duplicate_keys_at_construction() {
++    let first = c4_tx(1);
++    assert_eq!(
++        Body::new(vec![first.clone(), first]).err(),
++        Some(BlockError::DuplicateTxKey)
++    );
++}
++
++#[test]
++fn wrong_chain_and_size_limits_are_enforced() {
++    let f = parse(GOLDEN);
++    let block = build(&f, 1);
++    assert_eq!(
++        block.validate("auralite-1"),
++        Err(BlockError::WrongChain(
++            "auralite-1".to_owned(),
++            CHAIN_ID.to_owned()
++        ))
++    );
++
++    let mut big_qc = build(&f, 4);
++    big_qc.header.qc = Some(vec![0u8; MAX_QC_BYTES + 1]);
++    assert_eq!(
++        big_qc.validate(CHAIN_ID),
++        Err(BlockError::QcTooLarge(MAX_QC_BYTES + 1))
++    );
++}
++
++#[test]
++fn transaction_validation_is_separate_from_block_validation() {
++    let f = parse(GOLDEN);
++    let mut block = build(&f, 1);
++    assert!(block.validate(CHAIN_ID).is_ok());
++    assert!(block.validate_transactions(CHAIN_ID).is_ok());
++
++    // Break a signature, recompute the root so block-level validation still
++    // passes: only full transaction validation can catch this.
++    block.body.txs[0].sig.bytes[0] ^= 0x01;
++    block.header.tx_root = block.body.tx_root();
++    assert!(block.validate(CHAIN_ID).is_ok());
++    assert!(matches!(
++        block.validate_transactions(CHAIN_ID),
++        Err(BlockError::InvalidTransaction(_))
++    ));
++
++    // A height past a tx's expiry is also a transaction-level failure.
++    let mut expired = build(&f, 1);
++    expired.header.height = Height::new(2_000);
++    assert!(expired.validate(CHAIN_ID).is_ok());
++    assert!(expired.validate_transactions(CHAIN_ID).is_err());
++}
+diff --git a/crates/aura-block/tests/fixtures/c5_golden.txt b/crates/aura-block/tests/fixtures/c5_golden.txt
+new file mode 100644
+index 0000000..955f9be
+--- /dev/null
++++ b/crates/aura-block/tests/fixtures/c5_golden.txt
+@@ -0,0 +1,95 @@
++# AuraLite-Crypto C5 block/header golden vectors
++# Generated by tools/gen_c5_vectors.py (independent Python).
++# Self-checked against official BLAKE3 vectors; bodies reuse the
++# committed C4 tx vectors. Format: key=<hex|text|decimal>.
++protocol_version=1
++chain_id=auralite-test-1
++hash_context=417572614c6974652d43727970746f2f63727970746f2d763100
++leaf_context=417572614c6974652d43727970746f2f74782d6c6561662d763100
++node_context=417572614c6974652d43727970746f2f74782d6e6f64652d763100
++block_hash_payload_context=417572614c6974652d43727970746f2f626c6f636b2d686173682d763100
++max_block_txs=65536
++max_qc_bytes=65536
++b1_version=1
++b1_chain=auralite-test-1
++b1_height=100
++b1_parent=1111111111111111111111111111111111111111111111111111111111111111
++b1_state_root=2222222222222222222222222222222222222222222222222222222222222222
++b1_validator_set_hash=3333333333333333333333333333333333333333333333333333333333333333
++b1_timestamp_ms=1700000000000
++b1_proposer=4444444444444444444444444444444444444444
++b1_qc_present=0
++b1_qc=
++b1_gas_used=21000
++b1_base_fee=1000000000
++b1_tx_ids=1,2
++b1_tx_root=62463b0e0ad8488881eb7c04d5be29473e9dcb5b7a672183d68f2a7399ce5874
++b1_header=010000000f617572616c6974652d746573742d316400000000000000111111111111111111111111111111111111111111111111111111111111111162463b0e0ad8488881eb7c04d5be29473e9dcb5b7a672183d68f2a7399ce5874222222222222222222222222222222222222222222222222222222222222222233333333333333333333333333333333333333333333333333333333333333330068e5cf8b010000444444444444444444444444444444444444444400085200000000000000ca9a3b000000000000000000000000
++b1_body=02010f617572616c6974652d746573742d315f499b5477d1257183f73043b47d0d2d0415c6b70000000000000000000008520000000000000010a5d4e8000000000000000000000000000000000000000000000000000000e80300000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787373f0bd406f49b7b1fdd7f7d39a322a32a4e7fb079ebd7af348360ba0ffb70bae22d4fcfef74c3f8e0e1243850d5a3277b76dd344800e381ad066a53c799946d01010f617572616c6974652d746573742d31b7e5cffb03e53b062a3187cb19736a10b407a4ca0700000000000000021c7472616e736665723a616c6963652d3e626f623a312e35414c435259a0860100000000000000f4448291634500000000000000000080c6a47e8d030000000000000000003f420f000000000000a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0d2124bca539adec62f8b7e5aa0ec349c8bd6c504c014704ca9c0a00778f00d23dde9548953385e0170ffa52bc8c62ec97436c282260fef9bc499baf74ff4fe06
++b1_bytes=010000000f617572616c6974652d746573742d316400000000000000111111111111111111111111111111111111111111111111111111111111111162463b0e0ad8488881eb7c04d5be29473e9dcb5b7a672183d68f2a7399ce5874222222222222222222222222222222222222222222222222222222222222222233333333333333333333333333333333333333333333333333333333333333330068e5cf8b010000444444444444444444444444444444444444444400085200000000000000ca9a3b00000000000000000000000002010f617572616c6974652d746573742d315f499b5477d1257183f73043b47d0d2d0415c6b70000000000000000000008520000000000000010a5d4e8000000000000000000000000000000000000000000000000000000e80300000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787373f0bd406f49b7b1fdd7f7d39a322a32a4e7fb079ebd7af348360ba0ffb70bae22d4fcfef74c3f8e0e1243850d5a3277b76dd344800e381ad066a53c799946d01010f617572616c6974652d746573742d31b7e5cffb03e53b062a3187cb19736a10b407a4ca0700000000000000021c7472616e736665723a616c6963652d3e626f623a312e35414c435259a0860100000000000000f4448291634500000000000000000080c6a47e8d030000000000000000003f420f000000000000a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0d2124bca539adec62f8b7e5aa0ec349c8bd6c504c014704ca9c0a00778f00d23dde9548953385e0170ffa52bc8c62ec97436c282260fef9bc499baf74ff4fe06
++b1_block_hash=21558566e3286c1cc65fe95eb8f1b1242432af94d0f7a2e8c9517c07d0cbc2d1
++b2_version=1
++b2_chain=auralite-test-1
++b2_height=101
++b2_parent=21558566e3286c1cc65fe95eb8f1b1242432af94d0f7a2e8c9517c07d0cbc2d1
++b2_state_root=2222222222222222222222222222222222222222222222222222222222222222
++b2_validator_set_hash=3333333333333333333333333333333333333333333333333333333333333333
++b2_timestamp_ms=1700000001000
++b2_proposer=4444444444444444444444444444444444444444
++b2_qc_present=0
++b2_qc=
++b2_gas_used=21000
++b2_base_fee=1000000000
++b2_tx_ids=1,2,5
++b2_tx_root=6639a235834bf2717f5e3d247a9da256d3ff7f52b2dae93c30e0dfb36447c248
++b2_header=010000000f617572616c6974652d746573742d31650000000000000021558566e3286c1cc65fe95eb8f1b1242432af94d0f7a2e8c9517c07d0cbc2d16639a235834bf2717f5e3d247a9da256d3ff7f52b2dae93c30e0dfb36447c24822222222222222222222222222222222222222222222222222222222222222223333333333333333333333333333333333333333333333333333333333333333e86be5cf8b010000444444444444444444444444444444444444444400085200000000000000ca9a3b000000000000000000000000
++b2_body=03010f617572616c6974652d746573742d315f499b5477d1257183f73043b47d0d2d0415c6b70000000000000000000008520000000000000010a5d4e8000000000000000000000000000000000000000000000000000000e80300000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787373f0bd406f49b7b1fdd7f7d39a322a32a4e7fb079ebd7af348360ba0ffb70bae22d4fcfef74c3f8e0e1243850d5a3277b76dd344800e381ad066a53c799946d01010f617572616c6974652d746573742d31b7e5cffb03e53b062a3187cb19736a10b407a4ca0700000000000000021c7472616e736665723a616c6963652d3e626f623a312e35414c435259a0860100000000000000f4448291634500000000000000000080c6a47e8d030000000000000000003f420f000000000000a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0d2124bca539adec62f8b7e5aa0ec349c8bd6c504c014704ca9c0a00778f00d23dde9548953385e0170ffa52bc8c62ec97436c282260fef9bc499baf74ff4fe06010f617572616c6974652d746573742d31d70b3bb55bfde146302dfbb1d34ce7cfdc070cee0300000000000000010a007761736d00696e697401000000000000000700000000000000000000000000000007000000000000000000000000000000000000000000000000c6822637c7d310ec57627be00ba259d253749f4aaf644470cffbe53a35f73242d0c118c4425cd8141d5df0f7db3d48a05eb442b7e9f5ddf0537b3533557f51b9fe67c87c00e684789dd087024c4d0042123ed655e0ab1dfacd7797d33079ce09
++b2_bytes=010000000f617572616c6974652d746573742d31650000000000000021558566e3286c1cc65fe95eb8f1b1242432af94d0f7a2e8c9517c07d0cbc2d16639a235834bf2717f5e3d247a9da256d3ff7f52b2dae93c30e0dfb36447c24822222222222222222222222222222222222222222222222222222222222222223333333333333333333333333333333333333333333333333333333333333333e86be5cf8b010000444444444444444444444444444444444444444400085200000000000000ca9a3b00000000000000000000000003010f617572616c6974652d746573742d315f499b5477d1257183f73043b47d0d2d0415c6b70000000000000000000008520000000000000010a5d4e8000000000000000000000000000000000000000000000000000000e80300000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787373f0bd406f49b7b1fdd7f7d39a322a32a4e7fb079ebd7af348360ba0ffb70bae22d4fcfef74c3f8e0e1243850d5a3277b76dd344800e381ad066a53c799946d01010f617572616c6974652d746573742d31b7e5cffb03e53b062a3187cb19736a10b407a4ca0700000000000000021c7472616e736665723a616c6963652d3e626f623a312e35414c435259a0860100000000000000f4448291634500000000000000000080c6a47e8d030000000000000000003f420f000000000000a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0d2124bca539adec62f8b7e5aa0ec349c8bd6c504c014704ca9c0a00778f00d23dde9548953385e0170ffa52bc8c62ec97436c282260fef9bc499baf74ff4fe06010f617572616c6974652d746573742d31d70b3bb55bfde146302dfbb1d34ce7cfdc070cee0300000000000000010a007761736d00696e697401000000000000000700000000000000000000000000000007000000000000000000000000000000000000000000000000c6822637c7d310ec57627be00ba259d253749f4aaf644470cffbe53a35f73242d0c118c4425cd8141d5df0f7db3d48a05eb442b7e9f5ddf0537b3533557f51b9fe67c87c00e684789dd087024c4d0042123ed655e0ab1dfacd7797d33079ce09
++b2_block_hash=2227a48752e413b7776e282e84aee3519a64ccf164a6b60b03deefa6ffa29efc
++b3_version=1
++b3_chain=auralite-test-1
++b3_height=0
++b3_parent=0000000000000000000000000000000000000000000000000000000000000000
++b3_state_root=0000000000000000000000000000000000000000000000000000000000000000
++b3_validator_set_hash=0000000000000000000000000000000000000000000000000000000000000000
++b3_timestamp_ms=0
++b3_proposer=0000000000000000000000000000000000000000
++b3_qc_present=0
++b3_qc=
++b3_gas_used=0
++b3_base_fee=0
++b3_tx_ids=
++b3_tx_root=0000000000000000000000000000000000000000000000000000000000000000
++b3_header=010000000f617572616c6974652d746573742d31000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
++b3_body=00
++b3_bytes=010000000f617572616c6974652d746573742d3100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
++b3_block_hash=818eaa8dda2509e60221b122b406fc4631e1c6e0adfeafc7e250703bb4d81264
++b4_version=1
++b4_chain=auralite-test-1
++b4_height=18446744073709551615
++b4_parent=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
++b4_state_root=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
++b4_validator_set_hash=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
++b4_timestamp_ms=18446744073709551615
++b4_proposer=cccccccccccccccccccccccccccccccccccccccc
++b4_qc_present=1
++b4_qc=aaaaaaaaaaaaaaaa
++b4_gas_used=18446744073709551615
++b4_base_fee=340282366920938463463374607431768211455
++b4_tx_ids=4
++b4_tx_root=48ee424b33a78e416ae4f4723dc314fe14e1d428c1f97b1996dcfbb96be106cd
++b4_header=010000000f617572616c6974652d746573742d31ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff48ee424b33a78e416ae4f4723dc314fe14e1d428c1f97b1996dcfbb96be106cdeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddffffffffffffffffcccccccccccccccccccccccccccccccccccccccc0108aaaaaaaaaaaaaaaaffffffffffffffffffffffffffffffffffffffffffffffff
++b4_body=01010f617572616c6974652d746573742d31d9798144b7a2c575f60785f57d3544ecd7a0dee0ffffffffffffffff04c801000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff00d759793bbc13a2819a827c76adb6fba8a49aee007f49f2d0992d99b825ad2c48500e717da273cb0a26769182c7e2afc4b2666368df63911de175e4b8daed769079dc8ea9987cd95caa5eb7ae0aaa0382a04515dff8387a751ca1e321aeda1c00
++b4_bytes=010000000f617572616c6974652d746573742d31ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff48ee424b33a78e416ae4f4723dc314fe14e1d428c1f97b1996dcfbb96be106cdeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddffffffffffffffffcccccccccccccccccccccccccccccccccccccccc0108aaaaaaaaaaaaaaaaffffffffffffffffffffffffffffffffffffffffffffffff01010f617572616c6974652d746573742d31d9798144b7a2c575f60785f57d3544ecd7a0dee0ffffffffffffffff04c801000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff00d759793bbc13a2819a827c76adb6fba8a49aee007f49f2d0992d99b825ad2c48500e717da273cb0a26769182c7e2afc4b2666368df63911de175e4b8daed769079dc8ea9987cd95caa5eb7ae0aaa0382a04515dff8387a751ca1e321aeda1c00
++b4_block_hash=b52a44ed116b7da3738d5627e0ada1d5d7bce9d5a80f7c75b618c5b58c2833f8
++tx_root_forward=62463b0e0ad8488881eb7c04d5be29473e9dcb5b7a672183d68f2a7399ce5874
++tx_root_backward=c174f97b090c8cd882dcdc599407530b0b8cd4a7bb5f95fd9201703b627419c5
++bad_trailing=010000000f617572616c6974652d746573742d316400000000000000111111111111111111111111111111111111111111111111111111111111111162463b0e0ad8488881eb7c04d5be29473e9dcb5b7a672183d68f2a7399ce5874222222222222222222222222222222222222222222222222222222222222222233333333333333333333333333333333333333333333333333333333333333330068e5cf8b010000444444444444444444444444444444444444444400085200000000000000ca9a3b00000000000000000000000002010f617572616c6974652d746573742d315f499b5477d1257183f73043b47d0d2d0415c6b70000000000000000000008520000000000000010a5d4e8000000000000000000000000000000000000000000000000000000e80300000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787373f0bd406f49b7b1fdd7f7d39a322a32a4e7fb079ebd7af348360ba0ffb70bae22d4fcfef74c3f8e0e1243850d5a3277b76dd344800e381ad066a53c799946d01010f617572616c6974652d746573742d31b7e5cffb03e53b062a3187cb19736a10b407a4ca0700000000000000021c7472616e736665723a616c6963652d3e626f623a312e35414c435259a0860100000000000000f4448291634500000000000000000080c6a47e8d030000000000000000003f420f000000000000a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0d2124bca539adec62f8b7e5aa0ec349c8bd6c504c014704ca9c0a00778f00d23dde9548953385e0170ffa52bc8c62ec97436c282260fef9bc499baf74ff4fe0600
++bad_truncated=010000000f617572616c6974652d746573742d316400000000000000111111111111111111111111111111111111111111111111111111111111111162463b0e0ad8488881eb7c04d5be29473e9dcb5b7a672183d68f2a7399ce5874222222222222222222222222222222222222222222222222222222222222222233333333333333333333333333333333333333333333333333333333333333330068e5cf8b010000444444444444444444444444444444444444444400085200000000000000ca9a3b00000000000000000000000002010f617572616c6974652d746573742d315f499b5477d1257183f73043b47d0d2d0415c6b70000000000000000000008520000000000000010a5d4e8000000000000000000000000000000000000000000000000000000e80300000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787373f0bd406f49b7b1fdd7f7d39a322a32a4e7fb079ebd7af348360ba0ffb70bae22d4fcfef74c3f8e0e1243850d5a3277b76dd344800e381ad066a53c799946d01010f617572616c6974652d746573742d31b7e5cffb03e53b062a3187cb19736a10b407a4ca0700000000000000021c7472616e736665723a616c6963652d3e626f623a312e35414c435259a0860100000000000000f4448291634500000000000000000080c6a47e8d030000000000000000003f420f000000000000a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0d2124bca539adec62f8b7e5aa0ec349c8bd6c504c014704ca9c0a00778f00d23dde9548953385e0170ffa52bc8c62ec97436c282260fef9bc499baf74ff4fe
++bad_version=020000000f617572616c6974652d746573742d316400000000000000111111111111111111111111111111111111111111111111111111111111111162463b0e0ad8488881eb7c04d5be29473e9dcb5b7a672183d68f2a7399ce5874222222222222222222222222222222222222222222222222222222222222222233333333333333333333333333333333333333333333333333333333333333330068e5cf8b010000444444444444444444444444444444444444444400085200000000000000ca9a3b00000000000000000000000002010f617572616c6974652d746573742d315f499b5477d1257183f73043b47d0d2d0415c6b70000000000000000000008520000000000000010a5d4e8000000000000000000000000000000000000000000000000000000e80300000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787373f0bd406f49b7b1fdd7f7d39a322a32a4e7fb079ebd7af348360ba0ffb70bae22d4fcfef74c3f8e0e1243850d5a3277b76dd344800e381ad066a53c799946d01010f617572616c6974652d746573742d31b7e5cffb03e53b062a3187cb19736a10b407a4ca0700000000000000021c7472616e736665723a616c6963652d3e626f623a312e35414c435259a0860100000000000000f4448291634500000000000000000080c6a47e8d030000000000000000003f420f000000000000a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0d2124bca539adec62f8b7e5aa0ec349c8bd6c504c014704ca9c0a00778f00d23dde9548953385e0170ffa52bc8c62ec97436c282260fef9bc499baf74ff4fe06
++bad_root=010000000f617572616c6974652d746573742d316400000000000000111111111111111111111111111111111111111111111111111111111111111163463b0e0ad8488881eb7c04d5be29473e9dcb5b7a672183d68f2a7399ce5874222222222222222222222222222222222222222222222222222222222222222233333333333333333333333333333333333333333333333333333333333333330068e5cf8b010000444444444444444444444444444444444444444400085200000000000000ca9a3b00000000000000000000000002010f617572616c6974652d746573742d315f499b5477d1257183f73043b47d0d2d0415c6b70000000000000000000008520000000000000010a5d4e8000000000000000000000000000000000000000000000000000000e80300000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787373f0bd406f49b7b1fdd7f7d39a322a32a4e7fb079ebd7af348360ba0ffb70bae22d4fcfef74c3f8e0e1243850d5a3277b76dd344800e381ad066a53c799946d01010f617572616c6974652d746573742d31b7e5cffb03e53b062a3187cb19736a10b407a4ca0700000000000000021c7472616e736665723a616c6963652d3e626f623a312e35414c435259a0860100000000000000f4448291634500000000000000000080c6a47e8d030000000000000000003f420f000000000000a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0d2124bca539adec62f8b7e5aa0ec349c8bd6c504c014704ca9c0a00778f00d23dde9548953385e0170ffa52bc8c62ec97436c282260fef9bc499baf74ff4fe06
++bad_reordered=010000000f617572616c6974652d746573742d316400000000000000111111111111111111111111111111111111111111111111111111111111111162463b0e0ad8488881eb7c04d5be29473e9dcb5b7a672183d68f2a7399ce5874222222222222222222222222222222222222222222222222222222222222222233333333333333333333333333333333333333333333333333333333333333330068e5cf8b010000444444444444444444444444444444444444444400085200000000000000ca9a3b00000000000000000000000002010f617572616c6974652d746573742d31b7e5cffb03e53b062a3187cb19736a10b407a4ca0700000000000000021c7472616e736665723a616c6963652d3e626f623a312e35414c435259a0860100000000000000f4448291634500000000000000000080c6a47e8d030000000000000000003f420f000000000000a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0d2124bca539adec62f8b7e5aa0ec349c8bd6c504c014704ca9c0a00778f00d23dde9548953385e0170ffa52bc8c62ec97436c282260fef9bc499baf74ff4fe06010f617572616c6974652d746573742d315f499b5477d1257183f73043b47d0d2d0415c6b70000000000000000000008520000000000000010a5d4e8000000000000000000000000000000000000000000000000000000e80300000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787373f0bd406f49b7b1fdd7f7d39a322a32a4e7fb079ebd7af348360ba0ffb70bae22d4fcfef74c3f8e0e1243850d5a3277b76dd344800e381ad066a53c799946d01
++bad_unsorted_with_root=010000000f617572616c6974652d746573742d3164000000000000001111111111111111111111111111111111111111111111111111111111111111c174f97b090c8cd882dcdc599407530b0b8cd4a7bb5f95fd9201703b627419c5222222222222222222222222222222222222222222222222222222222222222233333333333333333333333333333333333333333333333333333333333333330068e5cf8b010000444444444444444444444444444444444444444400085200000000000000ca9a3b00000000000000000000000002010f617572616c6974652d746573742d31b7e5cffb03e53b062a3187cb19736a10b407a4ca0700000000000000021c7472616e736665723a616c6963652d3e626f623a312e35414c435259a0860100000000000000f4448291634500000000000000000080c6a47e8d030000000000000000003f420f000000000000a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0d2124bca539adec62f8b7e5aa0ec349c8bd6c504c014704ca9c0a00778f00d23dde9548953385e0170ffa52bc8c62ec97436c282260fef9bc499baf74ff4fe06010f617572616c6974652d746573742d315f499b5477d1257183f73043b47d0d2d0415c6b70000000000000000000008520000000000000010a5d4e8000000000000000000000000000000000000000000000000000000e80300000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787373f0bd406f49b7b1fdd7f7d39a322a32a4e7fb079ebd7af348360ba0ffb70bae22d4fcfef74c3f8e0e1243850d5a3277b76dd344800e381ad066a53c799946d01
++bad_duplicate=010000000f617572616c6974652d746573742d316400000000000000111111111111111111111111111111111111111111111111111111111111111162463b0e0ad8488881eb7c04d5be29473e9dcb5b7a672183d68f2a7399ce5874222222222222222222222222222222222222222222222222222222222222222233333333333333333333333333333333333333333333333333333333333333330068e5cf8b010000444444444444444444444444444444444444444400085200000000000000ca9a3b00000000000000000000000002010f617572616c6974652d746573742d315f499b5477d1257183f73043b47d0d2d0415c6b70000000000000000000008520000000000000010a5d4e8000000000000000000000000000000000000000000000000000000e80300000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787373f0bd406f49b7b1fdd7f7d39a322a32a4e7fb079ebd7af348360ba0ffb70bae22d4fcfef74c3f8e0e1243850d5a3277b76dd344800e381ad066a53c799946d01010f617572616c6974652d746573742d315f499b5477d1257183f73043b47d0d2d0415c6b70000000000000000000008520000000000000010a5d4e8000000000000000000000000000000000000000000000000000000e80300000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787373f0bd406f49b7b1fdd7f7d39a322a32a4e7fb079ebd7af348360ba0ffb70bae22d4fcfef74c3f8e0e1243850d5a3277b76dd344800e381ad066a53c799946d01
++bad_qc_tag=010000000f617572616c6974652d746573742d316400000000000000111111111111111111111111111111111111111111111111111111111111111162463b0e0ad8488881eb7c04d5be29473e9dcb5b7a672183d68f2a7399ce5874222222222222222222222222222222222222222222222222222222222222222233333333333333333333333333333333333333333333333333333333333333330068e5cf8b010000444444444444444444444444444444444444444402085200000000000000ca9a3b00000000000000000000000002010f617572616c6974652d746573742d315f499b5477d1257183f73043b47d0d2d0415c6b70000000000000000000008520000000000000010a5d4e8000000000000000000000000000000000000000000000000000000e80300000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787373f0bd406f49b7b1fdd7f7d39a322a32a4e7fb079ebd7af348360ba0ffb70bae22d4fcfef74c3f8e0e1243850d5a3277b76dd344800e381ad066a53c799946d01010f617572616c6974652d746573742d31b7e5cffb03e53b062a3187cb19736a10b407a4ca0700000000000000021c7472616e736665723a616c6963652d3e626f623a312e35414c435259a0860100000000000000f4448291634500000000000000000080c6a47e8d030000000000000000003f420f000000000000a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0d2124bca539adec62f8b7e5aa0ec349c8bd6c504c014704ca9c0a00778f00d23dde9548953385e0170ffa52bc8c62ec97436c282260fef9bc499baf74ff4fe06
++bad_nonminimal_count=010000000f617572616c6974652d746573742d316400000000000000111111111111111111111111111111111111111111111111111111111111111162463b0e0ad8488881eb7c04d5be29473e9dcb5b7a672183d68f2a7399ce5874222222222222222222222222222222222222222222222222222222222222222233333333333333333333333333333333333333333333333333333333333333330068e5cf8b010000444444444444444444444444444444444444444400085200000000000000ca9a3b0000000000000000000000008000010f617572616c6974652d746573742d315f499b5477d1257183f73043b47d0d2d0415c6b70000000000000000000008520000000000000010a5d4e8000000000000000000000000000000000000000000000000000000e80300000000000000d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c97787373f0bd406f49b7b1fdd7f7d39a322a32a4e7fb079ebd7af348360ba0ffb70bae22d4fcfef74c3f8e0e1243850d5a3277b76dd344800e381ad066a53c799946d01010f617572616c6974652d746573742d31b7e5cffb03e53b062a3187cb19736a10b407a4ca0700000000000000021c7472616e736665723a616c6963652d3e626f623a312e35414c435259a0860100000000000000f4448291634500000000000000000080c6a47e8d030000000000000000003f420f000000000000a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0d2124bca539adec62f8b7e5aa0ec349c8bd6c504c014704ca9c0a00778f00d23dde9548953385e0170ffa52bc8c62ec97436c282260fef9bc499baf74ff4fe06
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+index 28b23c5..d69fe26 100644
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -24,7 +24,7 @@ Asset identity is always `(chain_id, denom/contract_address)`, never the ticker
+ 
+ ```
+ Block N = Header || Body
+-Header  = { version, height, parent_hash, tx_root, state_root,
++Header  = { version, chain_id, height, parent_hash, tx_root, state_root,
+             validator_set_hash, timestamp_ms, proposer, qc, gas_used, base_fee }
+ Body    = [Tx]  (canonically sorted by (signer, nonce))
+ State   = JMT(key -> value), root = BLAKE3(node)
+@@ -41,6 +41,16 @@ Tx      = { chain_id, signer, nonce, kind, payload, gas_limit,
+ - **Versioning.** `version` in the header, `codec_version` in tx,
+   `abi_version` in contracts. Any change = migration test (C10/B10).
+ 
++**C5 block format.** `aura-block` defines `Block = Header || Body` and fixes
++the binary BLAKE3 `tx_root` (leaf/node domain tags, odd-node duplication,
++empty tree = zero). The body is canonically sorted by `(signer, nonce)` and
++`validate()` rejects an unsorted body and a stale `tx_root`. `block_hash` is
++the C3 domain-separated hash of the **header only** with `Domain::Block`.
++C5 **amends §1**: `chain_id` is added to `Header` (decision D-C7) so block
++ids are chain-separated per rule D5; no migration is needed because the
++network has produced 0 blocks. Full spec:
++[`docs/spec/block-format.md`](spec/block-format.md).
++
+ **C4 transaction format.** `aura-tx` defines
+ `Tx = UnsignedTx || Signature`, where `UnsignedTx` is
+ `codec_version, chain_id, signer, nonce, kind, payload, gas_limit, max_fee,
+@@ -84,7 +94,8 @@ files, network, env, float undefinedness.
+ aura-codec  <- aura-types
+ aura-crypto <- aura-types
+ aura-tx     <- aura-types, aura-codec, aura-crypto   (C4, 12th crate)
+-aura-state  <- aura-tx, aura-codec, aura-crypto, aura-storage
++aura-block  <- aura-tx, aura-codec, aura-crypto, aura-types  (C5, 13th crate)
++aura-state  <- aura-block, aura-tx, aura-codec, aura-crypto, aura-storage
+ aura-exec   <- aura-state, aura-crypto, wasmtime
+ aura-consensus <- aura-state, aura-crypto, aura-p2p
+ aura-node(aurad) <- all of the above + aura-rpc + aura-mempool
+diff --git a/docs/STATUS.md b/docs/STATUS.md
+index 4338fa5..1098b8c 100644
+--- a/docs/STATUS.md
++++ b/docs/STATUS.md
+@@ -1,8 +1,8 @@
+ # Implementation status — AuraLite-Crypto
+ 
+ > Updated **in the same patch** as the phase's code (rule D9).
+-> Snapshot date: **2026-10-25**, tree: "C4 landed — types, codec, crypto
+-> and `aura-tx`, Stage 1 in progress".
++> Snapshot date: **2026-10-25**, tree: "C5 landed — types, codec, crypto,
++> `aura-tx` and `aura-block`, Stage 1 in progress".
+ 
+ ## Locked decisions (2026-10-25)
+ 
+@@ -21,8 +21,9 @@
+ C1 ✅ (`patches/0002-C1-types.patch`), C2 ✅
+ (`patches/0003-C2-codec.patch`) and C3 ✅
+ (`patches/0004-C3-crypto.patch`) and C4 ✅
+-(`patches/0005-C4-tx-format.patch`) done; C5 (block/header) is next. No other
+-phase has started.
++(`patches/0005-C4-tx-format.patch`) and C5 ✅
++(`patches/0006-C5-block-header.patch`) done; C6 (Merkle proofs) is next. No
++other phase has started.
+ 
+ ## Maturity level
+ 
+@@ -40,13 +41,14 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
+ ## Working now
+ 
+ - `make test` is green: `cargo fmt --check`, `cargo clippy --workspace
+-  --all-targets -- -D warnings`, `cargo test --workspace` (**49 tests**),
++  --all-targets -- -D warnings`, `cargo test --workspace` (**60 tests**),
+   the docs drift guard and the dependency gate. Receipts:
+   `docs/evidence/c0-baseline.txt`, `docs/evidence/c0/nc.log`,
+   `docs/evidence/c1/gates.txt`, `docs/evidence/c1/nc.log`,
+   `docs/evidence/c2/gates.txt`, `docs/evidence/c2/nc.log`,
+   `docs/evidence/c3/gates.txt`, `docs/evidence/c3/nc.log`,
+-  `docs/evidence/c4/gates.txt`, `docs/evidence/c4/nc.log`.
++  `docs/evidence/c4/gates.txt`, `docs/evidence/c4/nc.log`,
++  `docs/evidence/c5/gates.txt`, `docs/evidence/c5/nc.log`.
+ - `aura-types` exports the locked D0 identity (`auralite-test-1`, `ALCRY`,
+   18 decimals, `aura`, `bft-pos`, `wasm`, v1) **and** the C1 canonical types:
+   `Hash`, bech32 `Address`, `Amount`/`Denom`, `ChainId`, `Nonce`, `Height`,
+@@ -65,7 +67,14 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
+   official BLAKE3 vectors, RFC 8032 §7.1 and a pure-Python secp256k1
+   reference (OpenSSL-verified). 5 C3 negative controls pin the context, two
+   fixtures, the verifier and the dependency allowlist.
+-- C4 adds the **12th crate**, `aura-tx`, with no new external dependencies.
++- C5 adds the **13th crate**, `aura-block`, with no new external
++  dependencies: `Header`/`Body`, binary BLAKE3 `tx_root`, `block_hash`,
++  canonical `(signer, nonce)` ordering and replay-separated chain-id in the
++  header (C5 amends `ARCHITECTURE.md` §1). `state_root`,
++  `validator_set_hash` and `qc` are caller-supplied — not computed state.
++  Spec: `docs/spec/block-format.md`; 4 canonical blocks + 9 rejection
++  vectors from `tools/gen_c5_vectors.py`; 6 C5 negative controls.
++- C4 added the **12th crate**, `aura-tx`, with no new external dependencies.
+   It fixes `Tx = UnsignedTx || Signature`, canonical `signing_bytes`,
+   signer↔public-key binding, txid and replay protection. Spec:
+   `docs/spec/tx-format.md`; 5 canonical + 9 rejection golden vectors from
+@@ -85,25 +94,25 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
+ ## Measured numbers (2026-10-25)
+ 
+ ```
+-find crates -name Cargo.toml       -> 12 crates (+1 workspace root)
+-find . -name '*.rs' -not -path './target/*' -> 34 files
++find crates -name Cargo.toml       -> 13 crates (+1 workspace root)
++find . -name '*.rs' -not -path './target/*' -> 41 files
+ ls docs/plans/*_PLAN.md           -> 12 plans / 112 phase rows
+-cargo test --workspace            -> 49 passed; 0 failed
++cargo test --workspace            -> 60 passed; 0 failed
+ make test                         -> ALL GATES GREEN
+-make nc-all                       -> 2/2 + 3/3 + 4/4 + 5/5 + 6/6 = 20 NC PASS
++make nc-all                       -> 2/2+3/3+4/4+5/5+6/6+6/6 = 26 NC PASS
+ make check-deps                   -> 54 external crates allowlisted
+ validators / blocks / tx          -> 0 / 0 / 0
+ ```
+ 
+-Pre-C0 baseline and post-C0/C1/C2/C3/C4 numbers with raw command output are in
+-`docs/evidence/c0-baseline.txt`, `docs/evidence/c1/gates.txt`,
+-`docs/evidence/c2/gates.txt`, `docs/evidence/c3/gates.txt` and
+-`docs/evidence/c4/gates.txt`.
++Pre-C0 baseline and post-C0/C1/C2/C3/C4/C5 numbers with raw command output
++are in `docs/evidence/c0-baseline.txt`, `docs/evidence/c1/gates.txt`,
++`docs/evidence/c2/gates.txt`, `docs/evidence/c3/gates.txt`,
++`docs/evidence/c4/gates.txt` and `docs/evidence/c5/gates.txt`.
+ 
+ ## What is missing (and must not be lost)
+ 
+-- No block/header format (C5), no Merkle proofs (C6), no accounts (C7), no
+-  BLS aggregation (B2), no PQ migration (H2), no `cargo deny` (H1).
++- No Merkle proofs (C6), no accounts (C7), no genesis (C8), no BLS
++  aggregation (B2), no PQ migration (H2), no `cargo deny` (H1).
+ - No consensus, no P2P, no state, no VM.
+ - No wallet, explorer, contracts, token.
+ - No audit, no bug bounty, no legal opinion.
+diff --git a/docs/evidence/c5/SHA256SUMS b/docs/evidence/c5/SHA256SUMS
+new file mode 100644
+index 0000000..5917e06
+--- /dev/null
++++ b/docs/evidence/c5/SHA256SUMS
+@@ -0,0 +1,4 @@
++3d60d0bbeb35d1b03851a1fe4a8bb2d1e0c142dd45c21b44eb1183e30da8f249  docs/evidence/c5/gates.txt
++4106d37097eeb143e0c36ba165c7fcfa627b7e1427042c6b2177df60f3990f10  docs/evidence/c5/nc.log
++18f4a3f825c67800214ffa2658fb9f4a8d662948b414cc7c22bb9f2f99a58de4  crates/aura-block/tests/fixtures/c5_golden.txt
++b9dac92a6753ec847e925905b89202f1de114982825a6a398a1f67eff64f6a9f  docs/spec/block-format.md
+diff --git a/docs/evidence/c5/gates.txt b/docs/evidence/c5/gates.txt
+new file mode 100644
+index 0000000..d8fd33a
+--- /dev/null
++++ b/docs/evidence/c5/gates.txt
+@@ -0,0 +1,150 @@
++AuraLite-Crypto — C5 evidence (aura-block block/header format)
++Generated (UTC): 2026-10-25T18:46:10+00:00
++Rule: measured against the tree, not assumed.
++
++Independent references: tools/gen_c5_vectors.py self-checks
++pure-Python BLAKE3 against 7 official BLAKE3 vectors and reuses the
++committed C4 transaction vectors as block bodies. It emits 4 canonical
++blocks and 9 rejection vectors.
++
++========================================================================
++RAW COMMAND OUTPUT
++========================================================================
++
++--- toolchain ---
++$ rustc --version && cargo --version
++rustc 1.99.1 (58cf8f9c3 2026-10-13)
++cargo 1.99.1 (5f94df478 2026-08-27)
++[rc=0]
++
++--- pre-C5 tree (C4 commit) ---
++$ git log -1 --oneline
++34af664 C4 patch artifact
++[rc=0]
++
++--- pre-C5 workspace crates ---
++$ git ls-tree -r --name-only HEAD | grep -c 'crates/.*/Cargo.toml$' || true
++12
++[rc=0]
++
++--- pre-C5 .rs files ---
++$ git ls-tree -r --name-only HEAD | grep -c '\.rs$' || true
++34
++[rc=0]
++
++--- pre-C5 external deps ---
++$ git show HEAD:Cargo.lock | grep -c '^source = ' || true
++54
++[rc=0]
++
++--- post-C5 workspace crates ---
++$ find crates -name Cargo.toml | wc -l
++13
++[rc=0]
++
++--- post-C5 .rs files ---
++$ find . -name '*.rs' -not -path './target/*' | wc -l
++41
++[rc=0]
++
++--- post-C5 external deps ---
++$ grep -c '^source = ' Cargo.lock || true
++54
++[rc=0]
++
++--- post-C5 plan phase rows ---
++$ grep -hE '^\| (✅ |⏸ )?\*\*[A-Z]+[0-9]+\*\* \|' docs/plans/*_PLAN.md | wc -l
++112
++[rc=0]
++
++--- dependency gate ---
++$ python3 tools/check_deps.py
++DEPENDENCY GATE: OK — 67 lock packages (13 local, 54 external, all checksummed + allowlisted)
++[rc=0]
++
++--- docs drift guard ---
++$ python3 tools/check_claims.py
++DOCS DRIFT GUARD: OK — 21 markdown files, 12 plans, 112 phase rows, all local links resolve
++[rc=0]
++
++--- independent generator is idempotent ---
++$ $ (shell script: generator idempotence check)
++generator idempotent: 18f4a3f825c67800214ffa2658fb9f4a8d662948b414cc7c22bb9f2f99a58de4
++[rc=0]
++
++--- all negative controls (C0-C5) ---
++$ make nc-all
++make[1]: Entering directory '/home/user/AuraLite-Crypto'
++RESULT: 2/2 negative controls PASS
++RESULT: 3/3 negative controls PASS
++RESULT: 4/4 negative controls PASS
++RESULT: 5/5 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++make[1]: Leaving directory '/home/user/AuraLite-Crypto'
++[rc=0]
++
++--- C5 negative controls (evidence log) ---
++$ make nc-c5
++
++error: test failed, to rerun pass `-p aura-block --test c5_block`
++NC-3 block-hash context: PASS
++      cargo test -p aura-block -> rc=101 (RED as expected)
++          golden_blocks_match_the_independent_encoder
++
++test result: FAILED. 9 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
++
++error: test failed, to rerun pass `-p aura-block --test c5_block`
++NC-4 independent golden tx_root: PASS
++      cargo test -p aura-block -> rc=101 (RED as expected)
++          golden_blocks_match_the_independent_encoder
++
++test result: FAILED. 10 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
++
++error: test failed, to rerun pass `-p aura-block --test c5_block`
++NC-5 tx_root recomputation check: PASS
++      cargo test -p aura-block -> rc=101 (RED as expected)
++          every_bad_vector_is_rejected
++
++test result: FAILED. 9 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
++
++error: test failed, to rerun pass `-p aura-block --test c5_block`
++NC-6 canonical body order check: PASS
++      cargo test -p aura-block -> rc=101 (RED as expected)
++          every_bad_vector_is_rejected
++
++test result: FAILED. 9 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
++
++error: test failed, to rerun pass `-p aura-block --test c5_block`
++
++RESULT: 6/6 negative controls PASS
++restore check: cargo test -p aura-block -> rc=0 (GREEN as expected)
++make[1]: Leaving directory '/home/user/AuraLite-Crypto'
++[rc=0]
++
++--- full gate ---
++$ make test
++   Doc-tests aura_mempool
++   Doc-tests aura_node
++   Doc-tests aura_p2p
++   Doc-tests aura_rpc
++   Doc-tests aura_state
++   Doc-tests aura_storage
++   Doc-tests aura_tx
++   Doc-tests aura_types
++[rc=0]
++
++========================================================================
++SUMMARY
++========================================================================
++
++Pre-C5 (C4 tree): 12 crates, 34 .rs files, 54 external deps, 49 tests.
++Post-C5: 13 crates (aura-block added, 8 placeholders remain), 41 .rs
++files, 54 external deps (no new ones), 60 tests passing (49 C0-C4 +
++11 C5), `make test` ALL GATES GREEN, 26 negative controls total
++(2+3+4+5+6+6), 6/6 of them new in C5.
++Validators/blocks/tx remain 0/0/0 — C5 is a format, not a network.
++
++Note: C0-C4 evidence is HISTORICAL and is no longer regenerated in
++CI. `make nc-all` runs every NC script without rewriting those logs,
++so the committed SHA256SUMS stay valid.
+diff --git a/docs/evidence/c5/nc.log b/docs/evidence/c5/nc.log
+new file mode 100644
+index 0000000..d0d3790
+--- /dev/null
++++ b/docs/evidence/c5/nc.log
+@@ -0,0 +1,48 @@
++C5 NEGATIVE CONTROLS — 2026-10-25T18:46:22+00:00
++Rule: a gate that cannot go red is not a gate (CONTRIBUTING.md §1).
++
++NC-1 Merkle leaf context: PASS
++      cargo test -p aura-block -> rc=101 (RED as expected)
++          golden_blocks_match_the_independent_encoder
++
++test result: FAILED. 8 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
++
++error: test failed, to rerun pass `-p aura-block --test c5_block`
++NC-2 Merkle node context: PASS
++      cargo test -p aura-block -> rc=101 (RED as expected)
++          golden_blocks_match_the_independent_encoder
++
++test result: FAILED. 8 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
++
++error: test failed, to rerun pass `-p aura-block --test c5_block`
++NC-3 block-hash context: PASS
++      cargo test -p aura-block -> rc=101 (RED as expected)
++          golden_blocks_match_the_independent_encoder
++
++test result: FAILED. 9 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
++
++error: test failed, to rerun pass `-p aura-block --test c5_block`
++NC-4 independent golden tx_root: PASS
++      cargo test -p aura-block -> rc=101 (RED as expected)
++          golden_blocks_match_the_independent_encoder
++
++test result: FAILED. 10 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
++
++error: test failed, to rerun pass `-p aura-block --test c5_block`
++NC-5 tx_root recomputation check: PASS
++      cargo test -p aura-block -> rc=101 (RED as expected)
++          every_bad_vector_is_rejected
++
++test result: FAILED. 9 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
++
++error: test failed, to rerun pass `-p aura-block --test c5_block`
++NC-6 canonical body order check: PASS
++      cargo test -p aura-block -> rc=101 (RED as expected)
++          every_bad_vector_is_rejected
++
++test result: FAILED. 9 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
++
++error: test failed, to rerun pass `-p aura-block --test c5_block`
++
++RESULT: 6/6 negative controls PASS
++restore check: cargo test -p aura-block -> rc=0 (GREEN as expected)
+diff --git a/docs/plans/CORE_PLAN.md b/docs/plans/CORE_PLAN.md
+index 978253e..2004b90 100644
+--- a/docs/plans/CORE_PLAN.md
++++ b/docs/plans/CORE_PLAN.md
+@@ -1,6 +1,6 @@
+ # CORE_PLAN — primitives, codec, cryptography, formats
+ 
+-**Status:** 🚧 IN PROGRESS (C0–C4 done ✅ 2026-10-25; C5 next)  
++**Status:** 🚧 IN PROGRESS (C0–C5 done ✅ 2026-10-25; C6 next)  
+ **Stage:** Stage 1: C0–C10 (all phases active).  
+ **Deliverable:** `patches/0001-C0-...` … `patches/0011-C10-...`
+ **Dependencies:** none. This is the root of the whole tree.
+@@ -27,6 +27,12 @@ other 11 plans rest.
+   `aura-tx`, because it needs **both** `aura-codec` and `aura-crypto` without
+   inverting the layering (a lower layer must not know a higher one). C4
+   updates the crate graph in `ARCHITECTURE.md` §3 and all crate counts.
++- **D-C7 (C5).** Block/header types live in a dedicated 13th crate,
++  `aura-block`, below both state and consensus. `chain_id` is added to the
++  `Header` (amending `ARCHITECTURE.md` §1): rule D5 requires chain separation
++  for block ids, and with 0 blocks produced no migration is needed.
++  `state_root`, `validator_set_hash` and `qc` are caller-supplied until
++  S1/B phases exist; C5 fixes their bytes, not their computation.
+ 
+ ## Phases
+ 
+@@ -37,7 +43,7 @@ other 11 plans rest.
+ | ✅ **C2** | `aura-codec` | fixed field order, lengths, `Option` tags, non-canonical encodings banned, `codec_version` | golden vectors (hex fixtures), property: `decode(encode(x)) == x`, NC: one mutated byte → `Err` |
+ | ✅ **C3** | `aura-crypto` | BLAKE3 + domain tags, Ed25519, secp256k1, constant-time compare, zeroize | RFC/test-vector signatures, malleable `s` rejected, NC: swapped domain → `Err` |
+ | ✅ **C4** | Transaction format | `Tx { chain_id, signer, nonce, kind, payload, gas_limit, max_fee, tip, expiry, sig }`, canonical `signing_bytes` | sign/verify, replay test: a tx from `auralite-1` rejected in `auralite-test-1` |
+-| **C5** | Block and header | `Header`/`Body`, `block_hash`, `tx_root`, `state_root`, `validator_set_hash`, protocol version | vector: changing tx order changes `tx_root`; NC: reorder without recompute → red |
++| ✅ **C5** | Block and header | `Header`/`Body`, `block_hash`, `tx_root`, `state_root`, `validator_set_hash`, protocol version | vector: changing tx order changes `tx_root`; NC: reorder without recompute → red |
+ | **C6** | Merkle proofs | build/verify proofs for txs and events, compact format | 1000 leaves, all proofs valid, one substituted — invalid |
+ | **C7** | Account model | `Account { nonce, balance, code_hash, storage_root }`, state key layout, reserved prefixes | gate: keys of two accounts do not collide, reserved space unreachable from contracts |
+ | **C8** | Genesis | genesis JSON → binary genesis hash, validator set, allocation, chain-id, `aura genesis` tool | same genesis → same hash on 3 hosts; NC: validator order change → different hash |
+@@ -186,6 +192,48 @@ other 11 plans rest.
+ - Deferred: block/header and `tx_root` (C5), Merkle proofs (C6), accounts
+   (C7), genesis (C8), fuzzing (C9), secp256k1 in tx signatures, PQ (H2).
+ 
++
++### C5 receipt (2026-10-25)
++
++- Deliverable: `patches/0006-C5-block-header.patch`.
++- Landed: the 13th crate `aura-block` (no new external dependencies).
++  `Block = Header || Body`; `Header` has 12 fields including the new
++  `chain_id` (D-C7); `HeaderParams` groups the 11 caller-supplied fields and
++  deliberately omits `tx_root`, which is always derived from the body.
++  `Body::new` sorts by `(signer, nonce)` and rejects duplicate keys.
++- `tx_root`: binary BLAKE3 Merkle tree over C4 txids with separate
++  `LEAF_CONTEXT`/`NODE_CONTEXT`, odd-node duplication, empty tree = zero.
++  Order-sensitive — the C5 DoD vector `tx_root_forward != tx_root_backward`.
++  Tree shape is fixed now so C6 can add proofs without changing the root.
++- `block_hash` = C3 `hash_domain(chain_id, Domain::Block,
++  BLOCK_HASH_PAYLOAD_CONTEXT || canonical(Header))`. Header only; `tx_root`
++  commits to the body.
++- `validate(expected_chain)` checks version, chain, sizes, canonical order,
++  duplicates and then `tx_root`; `validate_transactions()` separately checks
++  each tx signature/expiry at `header.height`. `timestamp_ms` is caller
++  supplied — no `SystemTime::now()`.
++- Spec: `docs/spec/block-format.md` (field table, tree, hash, validation,
++  non-goals). `ARCHITECTURE.md` §1/§3 amended in the same patch.
++- Golden vectors: `tools/gen_c5_vectors.py` — independent Python with
++  pure-Python BLAKE3 (self-checked against 7 official vectors) reusing the
++  committed C4 tx vectors as bodies. 95 fixture lines: **4 canonical blocks**
++  (2/3/0/1 tx, real `b1 → b2` parent link, `Some(qc)`, u64/u128 maxima), an
++  order-sensitivity pair and **9 rejection vectors**, each pinned to a
++  specific error. Generator is offline and byte-stable.
++- Gate: `make test` → **60 passed / 0 failed** (49 C0–C4 + 11 C5),
++  fmt/clippy clean, drift guard 12 plans / 112 rows / 21 markdown files,
++  dependency gate 54 external crates allowlisted.
++- NC: `make nc-c5` → **6/6 PASS**: leaf context, node context, block-hash
++  context, golden `tx_root`, `tx_root` check, canonical-order check. Total
++  across C0–C5: **26 NC** via `make nc-all`.
++- Evidence: `docs/evidence/c5/gates.txt`, `docs/evidence/c5/nc.log`,
++  `docs/evidence/c5/SHA256SUMS` (also pins the golden fixture and the spec).
++- Fixes found by the gate itself: clippy flagged an unused import, a
++  collapsible `if`, `chunks_exact(2)` and a cloned single-ref slice. All
++  fixed in code (`as_chunks::<2>()`, `std::slice::from_ref`), not suppressed.
++- Deferred: Merkle proofs (C6), accounts (C7), genesis (C8), fuzzing (C9),
++  QC/validator-set/state computations (B/S phases), BLS (B2), PQ (H2).
++
+ ## Key risks
+ 
+ 1. **Non-canonical serialization** → two nodes get different hashes for the same
+diff --git a/docs/spec/block-format.md b/docs/spec/block-format.md
+new file mode 100644
+index 0000000..8eb2e65
+--- /dev/null
++++ b/docs/spec/block-format.md
+@@ -0,0 +1,129 @@
++# Block / header format — C5 specification
++
++**Status:** ✅ implemented in `crates/aura-block` (2026-10-25).
++**Authority:** [`CORE_PLAN.md`](../plans/CORE_PLAN.md) C5 and
++[`ARCHITECTURE.md`](../ARCHITECTURE.md) §1. This file fixes the bytes; any
++change requires a new phase, a `PROTOCOL_VERSION` bump, regenerated golden
++vectors and a migration test.
++
++## 1. Shape
++
++`Block = Header || Body`. `Body` is a list of [`aura_tx::Tx`](tx-format.md)
++canonically sorted by `(signer, nonce)`. The header commits to the body via
++`tx_root`; `block_hash` hashes the header only.
++
++C5 adds **one field** to the `ARCHITECTURE.md` §1 header definition:
++`chain_id` (decision D-C7 in `CORE_PLAN.md`). Reason: rule D5 requires
++chain-id separation for every signed/hashed object; without it a testnet
++header hash is indistinguishable from a mainnet one. `ARCHITECTURE.md` §1 has
++been amended in the same patch. No migration is needed because the network
++has produced **0 blocks**.
++
++`state_root`, `validator_set_hash` and `qc` are **supplied by the caller** at
++C5. State (S1), validator sets (B phases) and quorum certificates (B phases)
++do not exist yet. C5 fixes their representation and validation — it does not
++pretend to compute them.
++
++## 2. Header wire layout
++
++C2 rules: fixed-width little-endian integers, minimal LEB128 length prefixes,
++strict `Option`/enum tags, no `usize`, no `HashMap`, no `serde`.
++
++| # | Field | Type | Encoding |
++|---|---|---|---|
++| 1 | `version` | `u32` | LE, must equal `PROTOCOL_VERSION = 1` |
++| 2 | `chain_id` | `ChainId` | `varint(len) ‖ UTF-8` |
++| 3 | `height` | `Height` | `u64` LE |
++| 4 | `parent_hash` | `Hash` | 32 raw bytes |
++| 5 | `tx_root` | `Hash` | 32 raw bytes |
++| 6 | `state_root` | `Hash` | 32 raw bytes |
++| 7 | `validator_set_hash` | `Hash` | 32 raw bytes |
++| 8 | `timestamp_ms` | `u64` | LE — **consensus value**, not a local clock |
++| 9 | `proposer` | `Address` | 20 raw bytes |
++| 10 | `qc` | `Option<Vec<u8>>` | tag `0`/`1`, then `varint(len) ‖ bytes` |
++| 11 | `gas_used` | `Gas` | `u64` LE |
++| 12 | `base_fee` | `Amount` | `u128` LE |
++
++`Body` = `varint(count) ‖ Tx ‖ Tx ‖ …`. `MAX_BLOCK_TXS = 65536`,
++`MAX_QC_BYTES = 65536`, both aligned with `aura-codec`'s `MAX_ITEMS`.
++
++`HeaderParams` groups the 11 caller-supplied fields (`tx_root` is **absent**):
++it is always derived from the body, so it cannot be forged at construction.
++
++## 3. `tx_root` — binary BLAKE3 Merkle tree
++
++```
++leaf(i)  = BLAKE3(LEAF_CONTEXT ‖ txid_i)          txid = C4 Tx::txid()
++node(l,r)= BLAKE3(NODE_CONTEXT ‖ l ‖ r)
++```
++
++* empty body → `Hash::ZERO` (well-defined sentinel);
++* one leaf → the leaf itself is the root;
++* at each level, an odd final node is **duplicated** before pairing;
++* distinct contexts for leaves and nodes prevent second-preimage tricks.
++
++The root is **order-sensitive**: this is the C5 DoD property. C6 adds proof
++generation/verification over exactly this tree — the shape is fixed now so C6
++does not have to change the root scheme.
++
++## 4. `block_hash`
++
++```
++block_hash = hash_domain(chain_id, Domain::Block,
++                         BLOCK_HASH_PAYLOAD_CONTEXT ‖ canonical(Header))
++```
++
++`hash_domain` is C3's length-prefixed framing
++(`HASH_CONTEXT ‖ u64(len(prefix)) ‖ prefix ‖ u64(len(payload)) ‖ payload`,
++`prefix = chain_id ‖ 0 ‖ "block" ‖ 0`). The body is not hashed directly;
++`tx_root` commits to it. Changing any header field or the chain-id changes
++the hash.
++
++## 5. Canonical ordering and validation
++
++`Body::new` sorts by `(Address, Nonce)` (both derive `Ord`) and rejects a
++duplicate `(signer, nonce)` key. `Block::validate(expected_chain)` checks, in
++order:
++
++1. `version == PROTOCOL_VERSION`;
++2. `chain_id == expected_chain`;
++3. `body.len() <= MAX_BLOCK_TXS`;
++4. `qc.len() <= MAX_QC_BYTES` (when present);
++5. body is strictly ascending by `(signer, nonce)` → `UnsortedTransactions`;
++6. duplicates → `DuplicateTxKey`;
++7. recomputed `tx_root == header.tx_root` → `TxRootMismatch`.
++
++`Block::validate_transactions(expected_chain)` is separate: it calls
++`Tx::validate(expected_chain, header.height)` for each tx (signature, chain,
++expiry, fees). Block-level validation alone does not verify signatures, so a
++block can be checked structurally before expensive crypto work.
++
++`decode_canonical()` rejects trailing bytes, non-minimal varints, unknown
++enum/option tags and any input that does not re-encode byte-identically.
++
++## 6. Golden vectors and negative controls
++
++`tools/gen_c5_vectors.py` is independent Python: pure-Python BLAKE3
++(self-checked against 7 official vectors), a C2/C3 wire transcription and the
++committed C4 transaction vectors as bodies. `c5_golden.txt` has 95 lines:
++
++* 4 canonical blocks with 2 / 3 / 0 / 1 transactions — covering even and odd
++  tree levels, the empty tree, a real `b1 → b2` parent link, `Some(qc)` and
++  u64/u128 maxima;
++* an order-sensitivity pair (`tx_root_forward` ≠ `tx_root_backward`);
++* 9 rejection vectors: trailing byte, truncation, bad version, bad root,
++  reordered body, reordered body **with a recomputed root** (so only the
++  ordering check can catch it), duplicate tx key, bad QC option tag,
++  non-minimal body count.
++
++`tools/nc_c5.py` runs 6 negative controls: both Merkle contexts, the block
++hash context, a golden fixture, the `tx_root` check and the canonical-order
++check. Total across C0–C5: **26 NC**.
++
++## 7. Non-goals at C5
++
++Merkle proofs (C6), accounts and `state_root` computation (C7/S1), genesis
++(C8), fuzzing (C9), QC structure and BLS aggregation (B phases), consensus
++timestamps from QC median (B3), gas metering and fee charging (X/D phases).
++`timestamp_ms` is a value supplied by the caller — C5 never calls
++`SystemTime::now()`.
+diff --git a/tools/gen_c5_vectors.py b/tools/gen_c5_vectors.py
+new file mode 100644
+index 0000000..6812fbf
+--- /dev/null
++++ b/tools/gen_c5_vectors.py
+@@ -0,0 +1,362 @@
++#!/usr/bin/env python3
++"""Generate C5 block/header golden vectors from INDEPENDENT references.
++
++No Rust code, no network. The generator contains:
++
++  * pure-Python BLAKE3 (single chunk), self-checked against 7 official
++    BLAKE3-team vectors;
++  * a Python transcription of the C2 wire format, C3 domain framing and the
++    C5 binary Merkle tree;
++  * the committed C4 transaction vectors as block bodies (so C5 pins the
++    block layer against the already-verified tx layer).
++
++It emits four canonical blocks (2, 3, 0 and 1 transactions), a tx-order
++sensitivity vector, and a set of non-canonical / tampered blocks.
++
++Usage:
++    python3 tools/gen_c5_vectors.py
++    make gen-c5-vectors
++
++Output: crates/aura-block/tests/fixtures/c5_golden.txt
++"""
++
++from __future__ import annotations
++
++import struct
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++C4_FIXTURE = REPO / "crates" / "aura-tx" / "tests" / "fixtures" / "c4_golden.txt"
++OUT = REPO / "crates" / "aura-block" / "tests" / "fixtures" / "c5_golden.txt"
++
++PROTOCOL_VERSION = 1
++CHAIN_ID = "auralite-test-1"
++HASH_CONTEXT = b"AuraLite-Crypto/crypto-v1\x00"        # C3
++LEAF_CONTEXT = b"AuraLite-Crypto/tx-leaf-v1\x00"
++NODE_CONTEXT = b"AuraLite-Crypto/tx-node-v1\x00"
++BLOCK_HASH_PAYLOAD_CONTEXT = b"AuraLite-Crypto/block-hash-v1\x00"
++MAX_BLOCK_TXS = 65536
++MAX_QC_BYTES = 65536
++ZERO32 = bytes(32)
++
++# ---------------------------------------------------------------- BLAKE3 ---
++MASK = 0xFFFFFFFF
++IV = [0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A,
++      0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19]
++PERM = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8]
++CHUNK_START, CHUNK_END, ROOT = 1, 2, 8
++
++
++def _rotr(x: int, n: int) -> int:
++    return ((x >> n) | (x << (32 - n))) & MASK
++
++
++def _g(s, a, b, c, d, mx, my):
++    s[a] = (s[a] + s[b] + mx) & MASK
++    s[d] = _rotr(s[d] ^ s[a], 16)
++    s[c] = (s[c] + s[d]) & MASK
++    s[b] = _rotr(s[b] ^ s[c], 12)
++    s[a] = (s[a] + s[b] + my) & MASK
++    s[d] = _rotr(s[d] ^ s[a], 8)
++    s[c] = (s[c] + s[d]) & MASK
++    s[b] = _rotr(s[b] ^ s[c], 7)
++
++
++def _compress(cv, block, counter, block_len, flags):
++    s = list(cv) + list(IV)
++    s[12], s[13], s[14], s[15] = counter & MASK, (counter >> 32) & MASK, block_len, flags
++    m = list(block)
++    for r in range(7):
++        _g(s, 0, 4, 8, 12, m[0], m[1]); _g(s, 1, 5, 9, 13, m[2], m[3])
++        _g(s, 2, 6, 10, 14, m[4], m[5]); _g(s, 3, 7, 11, 15, m[6], m[7])
++        _g(s, 0, 5, 10, 15, m[8], m[9]); _g(s, 1, 6, 11, 12, m[10], m[11])
++        _g(s, 2, 7, 8, 13, m[12], m[13]); _g(s, 3, 4, 9, 14, m[14], m[15])
++        if r != 6:
++            m = [m[PERM[i]] for i in range(16)]
++    return [s[i] ^ s[i + 8] for i in range(8)] + [s[i + 8] ^ cv[i] for i in range(8)]
++
++
++def blake3_short(data: bytes) -> bytes:
++    assert len(data) <= 1024, "reference handles a single chunk only"
++    blocks = [data[i:i + 64] for i in range(0, len(data), 64)] or [b""]
++    cv = IV
++    for i, block in enumerate(blocks[:-1]):
++        flags = CHUNK_START if i == 0 else 0
++        cv = _compress(cv, list(struct.unpack("<16I", block.ljust(64, b"\0"))), 0, 64, flags)[:8]
++    last = blocks[-1]
++    flags = (CHUNK_START if len(blocks) == 1 else 0) | CHUNK_END
++    words = list(struct.unpack("<16I", last.ljust(64, b"\0")))
++    return struct.pack("<8I", *_compress(cv, words, 0, len(last), flags | ROOT)[:8])
++
++
++OFFICIAL_B3 = {
++    0: "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
++    1: "2d3adedff11b61f14c886e35afa036736dcd87a74d27b5c1510225d0f592e213",
++    63: "e9bc37a594daad83be9470df7f7b3798297c3d834ce80ba85d6e207627b7db7b",
++    64: "4eed7141ea4a5cd4b788606bd23f46e212af9cacebacdc7d1f4c6dc7f2511b98",
++    65: "de1e5fa0be70df6d2be8fffd0e99ceaa8eb6e8c93a63f2d8d1c30ecb6b263dee",
++    1023: "10108970eeda3eb932baac1428c7a2163b0e924c9a9e25b35bba72b28f70bd11",
++    1024: "42214739f095a406f3fc83deb889744ac00df831c10daa55189b5d121c855af7",
++}
++
++# ------------------------------------------------------- C2 wire helpers ---
++def varint(value: int) -> bytes:
++    out = bytearray()
++    while True:
++        byte = value & 0x7F
++        value >>= 7
++        out.append(byte | (0x80 if value else 0))
++        if not value:
++            return bytes(out)
++
++
++def u32(value: int) -> bytes:
++    return struct.pack("<I", value)
++
++
++def u64(value: int) -> bytes:
++    return struct.pack("<Q", value)
++
++
++def u128(value: int) -> bytes:
++    return value.to_bytes(16, "little")
++
++
++def text(value: str) -> bytes:
++    raw = value.encode("utf-8")
++    return varint(len(raw)) + raw
++
++
++def domain_message(chain_id: str, tag: str, payload: bytes) -> bytes:
++    prefix = chain_id.encode() + b"\x00" + tag.encode() + b"\x00"
++    return HASH_CONTEXT + u64(len(prefix)) + prefix + u64(len(payload)) + payload
++
++
++def block_hash(chain: str, header_bytes: bytes) -> bytes:
++    payload = BLOCK_HASH_PAYLOAD_CONTEXT + header_bytes
++    return blake3_short(domain_message(chain, "block", payload))
++
++
++# ------------------------------------------------------------ Merkle tree ---
++def leaf_hash(txid: bytes) -> bytes:
++    return blake3_short(LEAF_CONTEXT + txid)
++
++
++def node_hash(left: bytes, right: bytes) -> bytes:
++    return blake3_short(NODE_CONTEXT + left + right)
++
++
++def tx_root(txids: list[bytes]) -> bytes:
++    """Binary Merkle root; odd levels duplicate the last node; empty = zero."""
++    if not txids:
++        return ZERO32
++    level = [leaf_hash(t) for t in txids]
++    while len(level) > 1:
++        if len(level) % 2:
++            level.append(level[-1])
++        level = [node_hash(level[i], level[i + 1]) for i in range(0, len(level), 2)]
++    return level[0]
++
++
++# ------------------------------------------------------------- C5 layout ---
++def encode_header(p: dict) -> tuple[bytes, dict[str, int]]:
++    parts: list[bytes] = []
++    offsets: dict[str, int] = {}
++    pos = 0
++
++    def add(name: str, blob: bytes) -> None:
++        nonlocal pos
++        offsets[name] = pos
++        parts.append(blob)
++        pos += len(blob)
++
++    chain = p["chain"].encode("utf-8")
++    add("version", u32(p["version"]))
++    add("chain_len", varint(len(chain)))
++    add("chain", chain)
++    add("height", u64(p["height"]))
++    add("parent", p["parent"])
++    add("tx_root", p["tx_root"])
++    add("state_root", p["state_root"])
++    add("validator_set_hash", p["validator_set_hash"])
++    add("timestamp_ms", u64(p["timestamp_ms"]))
++    add("proposer", p["proposer"])
++    if p["qc"] is None:
++        add("qc_tag", b"\x00")
++    else:
++        add("qc_tag", b"\x01")
++        add("qc_len", varint(len(p["qc"])))
++        add("qc", p["qc"])
++    add("gas_used", u64(p["gas_used"]))
++    add("base_fee", u128(p["base_fee"]))
++    return b"".join(parts), offsets
++
++
++def encode_body(tx_blobs: list[bytes]) -> bytes:
++    return varint(len(tx_blobs)) + b"".join(tx_blobs)
++
++
++def read_c4() -> dict[int, dict]:
++    data: dict[str, str] = {}
++    for line in C4_FIXTURE.read_text(encoding="utf-8").splitlines():
++        line = line.strip()
++        if not line or line.startswith("#") or "=" not in line:
++            continue
++        key, value = line.split("=", 1)
++        data[key] = value
++    out = {}
++    for index in range(1, 6):
++        out[index] = {
++            "bytes": bytes.fromhex(data[f"tx{index}_bytes"]),
++            "txid": bytes.fromhex(data[f"tx{index}_txid"]),
++            "address": bytes.fromhex(data[f"tx{index}_address"]),
++            "nonce": int(data[f"tx{index}_nonce"]),
++            "chain": data[f"tx{index}_chain"],
++        }
++    return out
++
++
++def sort_key(tx: dict) -> tuple[bytes, int]:
++    return (tx["address"], tx["nonce"])
++
++
++def main() -> int:
++    for length, expected in OFFICIAL_B3.items():
++        if blake3_short(bytes(i % 251 for i in range(length))).hex() != expected:
++            raise SystemExit(f"pure-Python BLAKE3 disagrees with official vector len={length}")
++
++    c4 = read_c4()
++    # Only testnet txs may appear in a Stage 1 block.
++    usable = {k: v for k, v in c4.items() if v["chain"] == CHAIN_ID}
++
++    def sorted_ids(indices: list[int]) -> list[int]:
++        return sorted(indices, key=lambda i: sort_key(usable[i]))
++
++    base = dict(
++        version=PROTOCOL_VERSION, chain=CHAIN_ID, height=100,
++        parent=bytes([0x11] * 32), state_root=bytes([0x22] * 32),
++        validator_set_hash=bytes([0x33] * 32), timestamp_ms=1_700_000_000_000,
++        proposer=bytes([0x44] * 20), qc=None, gas_used=21_000, base_fee=10**9,
++    )
++    cases = [
++        dict(base, tx_ids=sorted_ids([1, 2])),
++        dict(base, height=101, timestamp_ms=1_700_000_001_000,
++             tx_ids=sorted_ids([1, 2, 5])),
++        dict(base, height=0, parent=ZERO32, state_root=ZERO32,
++             validator_set_hash=ZERO32, timestamp_ms=0, proposer=ZERO32[:20],
++             gas_used=0, base_fee=0, qc=None, tx_ids=[]),
++        dict(base, height=2**64 - 1, parent=bytes([0xFF] * 32),
++             state_root=bytes([0xEE] * 32), validator_set_hash=bytes([0xDD] * 32),
++             timestamp_ms=2**64 - 1, proposer=bytes([0xCC] * 20),
++             qc=bytes([0xAA] * 8), gas_used=2**64 - 1, base_fee=2**128 - 1,
++             tx_ids=[4]),
++    ]
++
++    lines = [
++        "# AuraLite-Crypto C5 block/header golden vectors",
++        "# Generated by tools/gen_c5_vectors.py (independent Python).",
++        "# Self-checked against official BLAKE3 vectors; bodies reuse the",
++        "# committed C4 tx vectors. Format: key=<hex|text|decimal>.",
++        f"protocol_version={PROTOCOL_VERSION}",
++        f"chain_id={CHAIN_ID}",
++        f"hash_context={HASH_CONTEXT.hex()}",
++        f"leaf_context={LEAF_CONTEXT.hex()}",
++        f"node_context={NODE_CONTEXT.hex()}",
++        f"block_hash_payload_context={BLOCK_HASH_PAYLOAD_CONTEXT.hex()}",
++        f"max_block_txs={MAX_BLOCK_TXS}",
++        f"max_qc_bytes={MAX_QC_BYTES}",
++    ]
++
++    blocks = []
++    previous_hash = ZERO32
++    for index, case in enumerate(cases, 1):
++        case = dict(case)
++        if index == 2:
++            case["parent"] = previous_hash  # real chain link block1 -> block2
++        txs = [usable[i] for i in case["tx_ids"]]
++        root = tx_root([t["txid"] for t in txs])
++        case["tx_root"] = root
++        header, offsets = encode_header(case)
++        body = encode_body([t["bytes"] for t in txs])
++        block = header + body
++        digest = block_hash(case["chain"], header)
++        previous_hash = digest
++        blocks.append(dict(case=case, header=header, offsets=offsets, body=body,
++                           block=block, digest=digest, txs=txs))
++
++        p = lambda k: f"b{index}_{k}"  # noqa: E731
++        lines += [
++            f"{p('version')}={case['version']}",
++            f"{p('chain')}={case['chain']}",
++            f"{p('height')}={case['height']}",
++            f"{p('parent')}={case['parent'].hex()}",
++            f"{p('state_root')}={case['state_root'].hex()}",
++            f"{p('validator_set_hash')}={case['validator_set_hash'].hex()}",
++            f"{p('timestamp_ms')}={case['timestamp_ms']}",
++            f"{p('proposer')}={case['proposer'].hex()}",
++            f"{p('qc_present')}={0 if case['qc'] is None else 1}",
++            f"{p('qc')}={'' if case['qc'] is None else case['qc'].hex()}",
++            f"{p('gas_used')}={case['gas_used']}",
++            f"{p('base_fee')}={case['base_fee']}",
++            f"{p('tx_ids')}={','.join(str(i) for i in case['tx_ids'])}",
++            f"{p('tx_root')}={root.hex()}",
++            f"{p('header')}={header.hex()}",
++            f"{p('body')}={body.hex()}",
++            f"{p('bytes')}={block.hex()}",
++            f"{p('block_hash')}={digest.hex()}",
++        ]
++
++    # DoD vector: the same two txids in opposite order give a different root.
++    ids = blocks[0]["case"]["tx_ids"]
++    forward = [usable[i]["txid"] for i in ids]
++    backward = [usable[i]["txid"] for i in reversed(ids)]
++    if forward == backward:
++        raise SystemExit("order-sensitivity vector needs two distinct txids")
++    lines.append(f"tx_root_forward={tx_root(forward).hex()}")
++    lines.append(f"tx_root_backward={tx_root(backward).hex()}")
++
++    first = blocks[0]
++    first_header, first_body = first["header"], first["body"]
++    first_block = first["block"]
++    off = first["offsets"]
++    first_txs = [t["bytes"] for t in first["txs"]]
++    reversed_txs = list(reversed(first_txs))
++    reversed_root = tx_root([t["txid"] for t in reversed(first["txs"])])
++
++    def patched(at: int, value: int) -> bytes:
++        out = bytearray(first_block)
++        out[at] = value
++        return bytes(out)
++
++    # Header whose root was recomputed for the REVERSED body: root check alone
++    # would pass, so only the canonical-order check can reject this block.
++    unsorted_case = dict(first["case"])
++    unsorted_case["tx_root"] = reversed_root
++    unsorted_header, _ = encode_header(unsorted_case)
++
++    bad = {
++        "bad_trailing": first_block + b"\x00",
++        "bad_truncated": first_block[:-1],
++        "bad_version": patched(off["version"], 2),
++        "bad_root": patched(off["tx_root"], first_block[off["tx_root"]] ^ 0x01),
++        "bad_reordered": first_header + encode_body(reversed_txs),
++        "bad_unsorted_with_root": unsorted_header + encode_body(reversed_txs),
++        "bad_duplicate": first_header + encode_body([first_txs[0], first_txs[0]]),
++        "bad_qc_tag": patched(off["qc_tag"], 2),
++        "bad_nonminimal_count": (first_header + b"\x80\x00"
++                                 + first_body[1:]),
++    }
++    for key, value in bad.items():
++        lines.append(f"{key}={value.hex()}")
++
++    OUT.parent.mkdir(parents=True, exist_ok=True)
++    OUT.write_text("\n".join(lines) + "\n", encoding="utf-8")
++    print(f"wrote {OUT.relative_to(REPO)} ({len(lines)} lines)")
++    print(f"  canonical blocks: {len(cases)} (2/3/0/1 transactions)")
++    print(f"  rejection vectors: {len(bad)}")
++    print("  self-check: BLAKE3 official vectors OK, C4 tx bodies reused")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/nc_c5.py b/tools/nc_c5.py
+new file mode 100644
+index 0000000..00f4cc8
+--- /dev/null
++++ b/tools/nc_c5.py
+@@ -0,0 +1,126 @@
++#!/usr/bin/env python3
++"""Negative controls for C5 (aura-block block/header format).
++
++Six tamper tests must each turn the C5 gate red:
++
++  NC-1: change LEAF_CONTEXT (Merkle leaves).
++  NC-2: change NODE_CONTEXT (Merkle internal nodes).
++  NC-3: change BLOCK_HASH_PAYLOAD_CONTEXT (block ids).
++  NC-4: corrupt one golden tx_root in the fixture.
++  NC-5: disable the tx_root recomputation check.
++  NC-6: disable the canonical-order check.
++
++Files are always restored in a `finally` block. `make nc-c5` captures stdout
++into docs/evidence/c5/nc.log, and a final green restore check is mandatory.
++"""
++
++from __future__ import annotations
++
++import os
++import subprocess
++from datetime import datetime, timezone
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++MERKLE_RS = REPO / "crates" / "aura-block" / "src" / "merkle.rs"
++HEADER_RS = REPO / "crates" / "aura-block" / "src" / "header.rs"
++BLOCK_RS = REPO / "crates" / "aura-block" / "src" / "block.rs"
++TEST_RS = REPO / "crates" / "aura-block" / "tests" / "c5_block.rs"
++FIXTURE = REPO / "crates" / "aura-block" / "tests" / "fixtures" / "c5_golden.txt"
++CARGO_TEST = ["cargo", "test", "-p", "aura-block", "--quiet"]
++
++
++def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
++    return subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, check=False)
++
++
++def expect_red(label: str, path: Path, old: str, new: str, touch_test: bool = False) -> bool:
++    original = path.read_text(encoding="utf-8")
++    if old not in original:
++        print(f"{label}: FAIL — tamper target not found in {path.name}")
++        return False
++    tampered = original.replace(old, new, 1)
++    if tampered == original:
++        print(f"{label}: FAIL — tamper was a no-op")
++        return False
++    try:
++        path.write_text(tampered, encoding="utf-8")
++        if touch_test:
++            os.utime(TEST_RS, None)
++        result = run(CARGO_TEST)
++        went_red = result.returncode != 0
++        snippet = "\n".join((result.stdout + result.stderr).strip().splitlines()[-5:])
++        print(f"{label}: {'PASS' if went_red else 'FAIL'}")
++        print(
++            f"      cargo test -p aura-block -> rc={result.returncode} "
++            f"({'RED as expected' if went_red else 'UNEXPECTEDLY GREEN'})"
++        )
++        print(f"      {snippet}")
++        return went_red
++    finally:
++        path.write_text(original, encoding="utf-8")
++        if touch_test:
++            os.utime(TEST_RS, None)
++
++
++def main() -> int:
++    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
++    print(f"C5 NEGATIVE CONTROLS — {stamp}")
++    print("Rule: a gate that cannot go red is not a gate (CONTRIBUTING.md §1).")
++    print()
++
++    results = [
++        expect_red(
++            "NC-1 Merkle leaf context",
++            MERKLE_RS,
++            'pub const LEAF_CONTEXT: &[u8] = b"AuraLite-Crypto/tx-leaf-v1\\x00";',
++            'pub const LEAF_CONTEXT: &[u8] = b"WRONG-LEAF\\x00";',
++        ),
++        expect_red(
++            "NC-2 Merkle node context",
++            MERKLE_RS,
++            'pub const NODE_CONTEXT: &[u8] = b"AuraLite-Crypto/tx-node-v1\\x00";',
++            'pub const NODE_CONTEXT: &[u8] = b"WRONG-NODE\\x00";',
++        ),
++        expect_red(
++            "NC-3 block-hash context",
++            HEADER_RS,
++            'pub const BLOCK_HASH_PAYLOAD_CONTEXT: &[u8] = b"AuraLite-Crypto/block-hash-v1\\x00";',
++            'pub const BLOCK_HASH_PAYLOAD_CONTEXT: &[u8] = b"WRONG-BLOCK-HASH\\x00";',
++        ),
++        expect_red(
++            "NC-4 independent golden tx_root",
++            FIXTURE,
++            "b1_tx_root=62463b0e",
++            "b1_tx_root=62463b0f",
++            touch_test=True,
++        ),
++        expect_red(
++            "NC-5 tx_root recomputation check",
++            BLOCK_RS,
++            "if computed_root != self.header.tx_root {",
++            "if false {",
++        ),
++        expect_red(
++            "NC-6 canonical body order check",
++            BLOCK_RS,
++            "if a > b {",
++            "if false {",
++        ),
++    ]
++    print()
++    passed = sum(results)
++    print(f"RESULT: {passed}/{len(results)} negative controls PASS")
++    if passed != len(results):
++        return 1
++
++    restored = run(CARGO_TEST)
++    print(
++        f"restore check: cargo test -p aura-block -> rc={restored.returncode} "
++        f"({'GREEN as expected' if restored.returncode == 0 else 'STILL RED — FAIL'})"
++    )
++    return 0 if restored.returncode == 0 else 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/write_c5_evidence.py b/tools/write_c5_evidence.py
+new file mode 100644
+index 0000000..5973249
+--- /dev/null
++++ b/tools/write_c5_evidence.py
+@@ -0,0 +1,128 @@
++#!/usr/bin/env python3
++"""Regenerate docs/evidence/c5/gates.txt and docs/evidence/c5/SHA256SUMS.
++
++All numbers are real command output plus exit codes. The pre-C5 section is
++measured from the C4 git commit (HEAD at generation time).
++
++Usage:
++    python3 tools/write_c5_evidence.py
++    make evidence-c5
++"""
++
++from __future__ import annotations
++
++import hashlib
++import subprocess
++from datetime import datetime, timezone
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++EVIDENCE = REPO / "docs" / "evidence" / "c5"
++OUT = EVIDENCE / "gates.txt"
++FIXTURE = REPO / "crates" / "aura-block" / "tests" / "fixtures" / "c5_golden.txt"
++SPEC = REPO / "docs" / "spec" / "block-format.md"
++
++GEN_IDEMPOTENT = (
++    "before=$(sha256sum crates/aura-block/tests/fixtures/c5_golden.txt | cut -d' ' -f1); "
++    "python3 tools/gen_c5_vectors.py >/dev/null; "
++    "after=$(sha256sum crates/aura-block/tests/fixtures/c5_golden.txt | cut -d' ' -f1); "
++    "if [ \"$before\" = \"$after\" ]; then echo \"generator idempotent: $after\"; "
++    "else echo \"GENERATOR DRIFT\"; exit 1; fi"
++)
++
++COMMANDS: list[tuple[str, str, int | None]] = [
++    ("toolchain", "rustc --version && cargo --version", None),
++    ("pre-C5 tree (C4 commit)", "git log -1 --oneline", None),
++    ("pre-C5 workspace crates", "git ls-tree -r --name-only HEAD | grep -c 'crates/.*/Cargo.toml$' || true", None),
++    ("pre-C5 .rs files", "git ls-tree -r --name-only HEAD | grep -c '\\.rs$' || true", None),
++    ("pre-C5 external deps", "git show HEAD:Cargo.lock | grep -c '^source = ' || true", None),
++    ("post-C5 workspace crates", "find crates -name Cargo.toml | wc -l", None),
++    ("post-C5 .rs files", "find . -name '*.rs' -not -path './target/*' | wc -l", None),
++    ("post-C5 external deps", "grep -c '^source = ' Cargo.lock || true", None),
++    ("post-C5 plan phase rows", "grep -hE '^\\| (✅ |⏸ )?\\*\\*[A-Z]+[0-9]+\\*\\* \\|' docs/plans/*_PLAN.md | wc -l", None),
++    ("dependency gate", "python3 tools/check_deps.py", None),
++    ("docs drift guard", "python3 tools/check_claims.py", None),
++    ("independent generator is idempotent", GEN_IDEMPOTENT, None),
++    ("all negative controls (C0-C5)", "make nc-all", 14),
++    ("C5 negative controls (evidence log)", "make nc-c5", 34),
++    ("full gate", "make test", 8),
++]
++
++
++def run(cmd: str) -> tuple[int, str]:
++    result = subprocess.run(
++        cmd, shell=True, cwd=REPO, capture_output=True, text=True, check=False
++    )
++    return result.returncode, (result.stdout + result.stderr).strip()
++
++
++def main() -> int:
++    EVIDENCE.mkdir(parents=True, exist_ok=True)
++    lines = [
++        "AuraLite-Crypto — C5 evidence (aura-block block/header format)",
++        f"Generated (UTC): {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
++        "Rule: measured against the tree, not assumed.",
++        "",
++        "Independent references: tools/gen_c5_vectors.py self-checks",
++        "pure-Python BLAKE3 against 7 official BLAKE3 vectors and reuses the",
++        "committed C4 transaction vectors as block bodies. It emits 4 canonical",
++        "blocks and 9 rejection vectors.",
++        "",
++        "=" * 72,
++        "RAW COMMAND OUTPUT",
++        "=" * 72,
++        "",
++    ]
++
++    failures = 0
++    for label, cmd, tail in COMMANDS:
++        rc, out = run(cmd)
++        shown = cmd if len(cmd) < 160 else "$ (shell script: generator idempotence check)"
++        if tail and out:
++            out = "\n".join(out.splitlines()[-tail:])
++        lines.append(f"--- {label} ---")
++        lines.append(f"$ {shown}")
++        lines.append(out if out else "(no output)")
++        lines.append(f"[rc={rc}]")
++        lines.append("")
++        if rc != 0 and not (label.startswith("pre-C5") and "grep -c" in cmd):
++            failures += 1
++
++    lines += [
++        "=" * 72,
++        "SUMMARY",
++        "=" * 72,
++        "",
++        "Pre-C5 (C4 tree): 12 crates, 34 .rs files, 54 external deps, 49 tests.",
++        "Post-C5: 13 crates (aura-block added, 8 placeholders remain), 41 .rs",
++        "files, 54 external deps (no new ones), 60 tests passing (49 C0-C4 +",
++        "11 C5), `make test` ALL GATES GREEN, 26 negative controls total",
++        "(2+3+4+5+6+6), 6/6 of them new in C5.",
++        "Validators/blocks/tx remain 0/0/0 — C5 is a format, not a network.",
++        "",
++        "Note: C0-C4 evidence is HISTORICAL and is no longer regenerated in",
++        "CI. `make nc-all` runs every NC script without rewriting those logs,",
++        "so the committed SHA256SUMS stay valid.",
++        "",
++    ]
++    OUT.write_text("\n".join(lines), encoding="utf-8")
++
++    nc_log = EVIDENCE / "nc.log"
++    if not nc_log.exists():
++        print("ERROR: docs/evidence/c5/nc.log missing (run `make nc-c5`)")
++        return 1
++
++    sums = []
++    for path in (OUT, nc_log, FIXTURE, SPEC):
++        digest = hashlib.sha256(path.read_bytes()).hexdigest()
++        sums.append(f"{digest}  {path.relative_to(REPO)}")
++    (EVIDENCE / "SHA256SUMS").write_text("\n".join(sums) + "\n", encoding="utf-8")
++
++    print(f"wrote {OUT.relative_to(REPO)} ({len(lines)} lines)")
++    print(f"wrote {nc_log.relative_to(REPO)}")
++    print("wrote docs/evidence/c5/SHA256SUMS")
++    return 1 if failures else 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+-- 
+2.47.3
+

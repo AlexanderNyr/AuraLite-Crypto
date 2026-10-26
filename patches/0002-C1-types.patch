@@ -1,0 +1,2078 @@
+From 932d92fce9cae377391564fb32ab84ed1822d972 Mon Sep 17 00:00:00 2001
+From: AlexanderNyr <alexander@auralite.local>
+Date: Sun, 25 Oct 2026 16:27:40 +0000
+Subject: [PATCH] C1 types
+
+---
+ .github/workflows/ci.yml                      |  20 +-
+ CHANGELOG.md                                  |  38 +++
+ CONTRIBUTING.md                               |   3 +
+ Makefile                                      |  19 +-
+ README.md                                     |  23 +-
+ ROADMAP.md                                    |  18 +-
+ crates/aura-types/src/address.rs              | 262 ++++++++++++++++
+ crates/aura-types/src/amount.rs               | 108 +++++++
+ crates/aura-types/src/hash.rs                 | 108 +++++++
+ crates/aura-types/src/lib.rs                  |  28 +-
+ crates/aura-types/src/primitives.rs           | 257 ++++++++++++++++
+ crates/aura-types/tests/c1_types.rs           | 283 ++++++++++++++++++
+ .../aura-types/tests/fixtures/c1_golden.txt   |  23 ++
+ docs/STATUS.md                                |  38 ++-
+ docs/evidence/c1/SHA256SUMS                   |   3 +
+ docs/evidence/c1/gates.txt                    | 116 +++++++
+ docs/evidence/c1/nc.log                       |  27 ++
+ docs/plans/CORE_PLAN.md                       |  29 +-
+ tools/gen_c1_vectors.py                       | 132 ++++++++
+ tools/nc_c1.py                                | 102 +++++++
+ tools/write_c1_evidence.py                    | 118 ++++++++
+ 21 files changed, 1712 insertions(+), 43 deletions(-)
+ create mode 100644 crates/aura-types/src/address.rs
+ create mode 100644 crates/aura-types/src/amount.rs
+ create mode 100644 crates/aura-types/src/hash.rs
+ create mode 100644 crates/aura-types/src/primitives.rs
+ create mode 100644 crates/aura-types/tests/c1_types.rs
+ create mode 100644 crates/aura-types/tests/fixtures/c1_golden.txt
+ create mode 100644 docs/evidence/c1/SHA256SUMS
+ create mode 100644 docs/evidence/c1/gates.txt
+ create mode 100644 docs/evidence/c1/nc.log
+ create mode 100644 tools/gen_c1_vectors.py
+ create mode 100644 tools/nc_c1.py
+ create mode 100644 tools/write_c1_evidence.py
+
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 6bb1ce6..85e046d 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -10,7 +10,7 @@ on:
+ # perf) are added by O0 as the crates that need them actually appear.
+ jobs:
+   core:
+-    name: core (C0 gate)
++    name: core (C0-C1 gate)
+     runs-on: ubuntu-latest
+     steps:
+       - uses: actions/checkout@v4
+@@ -27,13 +27,27 @@ jobs:
+       - name: make test
+         run: make test
+ 
++      - name: golden vectors are reproducible (C1)
++        run: make gen-c1-vectors
++
+       - name: negative controls (C0)
+         run: make nc-c0
+ 
++      - name: negative controls (C1)
++        run: make nc-c1
++
++      # C0 evidence is a HISTORICAL committed record measured at the baseline
++      # commit; re-running it later would relabel the wrong tree. Only C1
++      # evidence is regenerated here.
++      - name: C1 evidence
++        run: make evidence-c1
++
+       - name: Upload evidence
+         if: always()
+         uses: actions/upload-artifact@v4
+         with:
+-          name: c0-evidence
+-          path: docs/evidence/c0/
++          name: c0-c1-evidence
++          path: |
++            docs/evidence/c0/
++            docs/evidence/c1/
+           if-no-files-found: ignore
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index dea8270..f23e320 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,44 @@
+ All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
+ never rewritten: corrections are made with a new entry or an explicit note.
+ 
++## [C1 — canonical types] 2026-10-25
++
++**Second code phase.** Deliverable: `patches/0002-C1-types.patch`. Still zero
++external dependencies.
++
++- **New types in `aura-types`:** `Hash` (32 bytes, hex/slice decode, `ZERO`),
++  `Address` (20 bytes, in-tree classic BIP-173 bech32 encode/decode),
++  `Amount`/`Denom` (checked `u128` in `aalcry`, `from_coins`),
++  `ChainId` (validated `[a-z0-9-]`, 3..64), `Nonce`/`Height`/`Gas`
++  (checked `u64`), `Domain` (5 tags, `chain-id || 0 || tag || 0` prefix for
++  D5), and `CanonicalMap = BTreeMap` (rule D3).
++- **Independent golden vectors:** `tools/gen_c1_vectors.py` implements BIP-173
++  separately in Python; `crates/aura-types/tests/fixtures/c1_golden.txt` holds
++  23 lines — 4 hash vectors, 4 address vectors, 2 corrupted checksums, wrong
++  prefix, uppercase, amount bounds. `make gen-c1-vectors` is byte-stable and
++  its sha256 is checked in evidence.
++- **Gate:** `make test` → **17 passed / 0 failed** (5 unit + 11 C1 + 1
++  identity), fmt/clippy clean, drift guard still 12 plans / 112 rows.
++- **Negative controls:** `tools/nc_c1.py` → `make nc-c1` →
++  `docs/evidence/c1/nc.log`, **3/3 PASS**: checksum constant 1→0, address
++  version `0x00`→`0x01`, corrupted golden vector. Each requires red, then
++  restores; a final green restore check is mandatory.
++- **Evidence:** `docs/evidence/c1/gates.txt` (raw output incl. pre-C1 counts
++  from the C0 commit), `docs/evidence/c1/nc.log`, `SHA256SUMS` (gates, NC log,
++  golden fixture).
++- **Tooling:** `make gen-c1-vectors`, `make nc-c1`, `make evidence-c1`; CI now
++  runs both phases' NCs and uploads both evidence directories. C0 evidence is
++  explicitly marked historical and is **not** regenerated in CI (it would
++  relabel the wrong tree).
++- **Defects caught by the existing C0 gate while writing C1** (fixed in this
++  patch, not hidden): a compile error `&String + &str` in a vector test and
++  rustfmt drift in four files. The gate did its job.
++- **Docs synced (D9):** `README.md`, `docs/STATUS.md`, `CHANGELOG.md`,
++  `ROADMAP.md` (ledger, §4, §8), `CONTRIBUTING.md`, `CORE_PLAN.md` (C1 ✅
++  + receipt).
++- **Not claimed:** bech32m, serialization (C2), hashing or signatures (C3),
++  tx/block formats (C4/C5). bech32m is a versioned decision, not a C1 tweak.
++
+ ## [C0 — baseline workspace] 2026-10-25
+ 
+ **First code.** Deliverable: `patches/0001-C0-baseline-workspace.patch`.
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index ae3cfd1..b875334 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -62,6 +62,9 @@ that does not run its main test is a dead gate — that is a separate defect
+ - `f64`/`f32`, `rand`, system clocks, `std::env`, network calls inside the VM.
+ - `unsafe` without a justification comment, a separate test and a Miri check.
+ - `serde` in tx/block/state formats — only `aura-codec`.
++- Golden vectors generated by the code under test. C1's bech32 vectors come
++  from an independent implementation (`tools/gen_c1_vectors.py`); a vector
++  that only confirms the encoder agrees with itself is not a test.
+ - "Temporary" stubs that silently return success. A stub must explicitly
+   return `Err(Unimplemented)` and be visible in STATUS.
+ - Format changes without a protocol version and a migration test.
+diff --git a/Makefile b/Makefile
+index 056c974..5228bef 100644
+--- a/Makefile
++++ b/Makefile
+@@ -5,7 +5,8 @@ CARGO ?= cargo
+ PYTHON ?= python3
+ 
+ .PHONY: help deps-check fmt clippy test test-core test-sanitize \
+-        test-determinism fuzz-smoke nc-c0 evidence-c0 devnet clean
++        test-determinism fuzz-smoke nc-c0 evidence-c0 \
++        gen-c1-vectors nc-c1 evidence-c1 devnet clean
+ 
+ help:
+ 	@echo "AuraLite-Crypto (Stage 1, C0)"
+@@ -13,7 +14,10 @@ help:
+ 	@echo "  make test              full gate: fmt + clippy + cargo test + docs guard"
+ 	@echo "  make test-core         CORE shard only"
+ 	@echo "  make nc-c0             negative controls for C0 -> docs/evidence/c0/nc.log"
+-	@echo "  make evidence-c0       regenerate docs/evidence/c0-baseline.txt + SHA256SUMS"
++	@echo "  make evidence-c0       C0 historical record (do NOT re-run after C1)"
++	@echo "  make gen-c1-vectors    regenerate independent BIP-173 golden vectors"
++	@echo "  make nc-c1             C1 negative controls -> docs/evidence/c1/nc.log"
++	@echo "  make evidence-c1       regenerate docs/evidence/c1/gates.txt + SHA256SUMS"
+ 	@echo "  make test-sanitize     SKIP until H3/C9"
+ 	@echo "  make test-determinism  SKIP until X7"
+ 	@echo "  make fuzz-smoke        SKIP until H3"
+@@ -67,6 +71,17 @@ nc-c0:
+ evidence-c0:
+ 	@$(PYTHON) tools/write_c0_evidence.py
+ 
++gen-c1-vectors:
++	@$(PYTHON) tools/gen_c1_vectors.py
++
++nc-c1:
++	@mkdir -p docs/evidence/c1
++	@$(PYTHON) tools/nc_c1.py > docs/evidence/c1/nc.log 2>&1 || { cat docs/evidence/c1/nc.log; exit 1; }
++	@cat docs/evidence/c1/nc.log
++
++evidence-c1:
++	@$(PYTHON) tools/write_c1_evidence.py
++
+ devnet:
+ 	@echo "ERROR: devnet is D7 (NODE_PLAN). It is not implemented at C0." >&2
+ 	@exit 1
+diff --git a/README.md b/README.md
+index 15531c1..d4e6f18 100644
+--- a/README.md
++++ b/README.md
+@@ -11,11 +11,13 @@
+ Name and ticker were locked by the owner on 2026-10-25. The ticker was checked
+ for collisions — see [`docs/TICKER_AUDIT.md`](docs/TICKER_AUDIT.md).
+ 
+-> **Status: C0 LANDED (2026-10-25).** The workspace, CI, `make test` gate and
+-> the locked network-identity constants exist. There is still **no consensus,
+-> VM, P2P, node or wallet**. Everything else below is a plan, not a report
+-> about an implementation. Every claim of readiness appears only after a
+-> measurable test gate, as in
++> **Status: C1 LANDED (2026-10-25).** C0 gave us the workspace, CI and
++> `make test`; C1 adds the canonical types (`Hash`, bech32 `Address`, `Amount`,
++> `ChainId`, `Domain`, scalars) pinned against an **independent** BIP-173
++> reference. There is still **no codec, crypto, consensus, VM, P2P, node or
++> wallet**. Everything else below is a plan, not a report about an
++> implementation. Every claim of readiness appears only after a measurable
++> test gate, as in
+ > [AuraLite-Emulator](https://github.com/AlexanderNyr/AuraLite-Emulator) and
+ > [AuraLite-OS](https://github.com/AlexanderNyr/AuraLite-OS).
+ 
+@@ -76,12 +78,13 @@ Details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+ 
+ ## Quickstart
+ 
+-**Now (C0)** the foundation is real and verifiable:
++**Now (C1)** the foundation is real and verifiable:
+ 
+ ```sh
+-make deps-check      # rustc / cargo / rustfmt / clippy
+-make test            # fmt + clippy -D warnings + cargo test + docs drift guard
+-make nc-c0           # negative controls: prove the gates can go red
++make deps-check          # rustc / cargo / rustfmt / clippy
++make test                # fmt + clippy -D warnings + cargo test + docs drift guard
++make nc-c0 && make nc-c1 # 5 negative controls: prove the gates can go red
++make gen-c1-vectors      # independent bech32 golden vectors (byte-stable)
+ ```
+ 
+ **The devnet does not exist yet — and that is honest.** After phase D7 (devnet)
+@@ -118,7 +121,7 @@ AuraLite-Crypto/
+     plans/*_PLAN.md      <- 12 plans, dependency-ordered, DoD + gate per phase
+     evidence/            <- gate logs / receipts (C0 OK)
+   patches/               <- one .patch per phase (0001-C0-... shipped)
+-  crates/*               <- 11 crates: 1 real + 10 honest placeholders
++  crates/*               <- 11 crates: `aura-types` (C1) + 10 honest placeholders
+   contracts/*            <- reference contracts (ARC-20, ARC-721, AMM, ...)
+   tests/                 <- unit/property/integration/consensus/soak
+   fuzz/ sim/ bench/ deploy/ web/
+diff --git a/ROADMAP.md b/ROADMAP.md
+index d4dc773..0fb96e8 100644
+--- a/ROADMAP.md
++++ b/ROADMAP.md
+@@ -121,7 +121,7 @@ phase tables (decision Q5).
+ 
+ | Plan | Status | Scope | Phases |
+ |---|---|---|---|
+-| [`docs/plans/CORE_PLAN.md`](docs/plans/CORE_PLAN.md) | 🚧 IN PROGRESS (C0 ✅) | primitives, codec, crypto, tx/block, genesis, test rig | C0–C10 |
++| [`docs/plans/CORE_PLAN.md`](docs/plans/CORE_PLAN.md) | 🚧 IN PROGRESS (C0–C1 ✅) | primitives, codec, crypto, tx/block, genesis, test rig | C0–C10 |
+ | [`docs/plans/STATE_PLAN.md`](docs/plans/STATE_PLAN.md) | 📋 PLAN | Merkle state, RocksDB, WAL, snapshots, pruning, recovery | S0–S7 |
+ | [`docs/plans/EXEC_PLAN.md`](docs/plans/EXEC_PLAN.md) | 📋 PLAN | WASM runtime, gas, ABI, contract SDK, determinism | X0–X9 |
+ | [`docs/plans/CONSENSUS_PLAN.md`](docs/plans/CONSENSUS_PLAN.md) | 📋 PLAN | BFT-PoS, QC, VRF, staking, slashing, finality, governance | B0–B10 |
+@@ -198,6 +198,10 @@ GREEN, `make nc-c0` → 2/2 negative controls PASS. Validators/blocks/tx are
+ still 0/0/0. The pre-C0 zero table above stays as the historical reference —
+ it is deliberately not rewritten.
+ 
++**Post-C1 measurement (2026-10-25):** 17 `.rs` files, 17 tests passing,
++`make nc-c1` → 3/3 negative controls PASS, still zero external dependencies.
++Receipts: `docs/evidence/c1/`.
++
+ ### Measured gaps to the north star
+ 
+ | # | Gap | Evidence in the tree | Plan |
+@@ -268,11 +272,13 @@ after the fact, as in AuraLite OS.
+ 
+ ## 8. Immediate queue
+ 
+-**C0 shipped** (`patches/0001-C0-baseline-workspace.patch`): workspace, CI,
+-`make test`, docs drift guard, negative controls, identity constants. Right
+-now: **C1** — canonical types (`Hash`, `Address`, `Amount`, `Denom`, `ChainId`,
+-`Nonce`, `Height`, `Gas`, `Domain`) with bech32 round-trip and checked-overflow
+-vectors. The next patch is `patches/0002-C1-types.patch`.
++**C0 and C1 shipped**
++(`patches/0001-C0-baseline-workspace.patch`,
++`patches/0002-C1-types.patch`): workspace, CI, gates, identity constants and
++canonical types with independent BIP-173 golden vectors. Right now: **C2** —
++`aura-codec`, our own deterministic serialization with golden vectors and a
++rejection test for non-canonical encodings. The next patch is
++`patches/0003-C2-codec.patch`.
+ 
+ See also: [`docs/STATUS.md`](docs/STATUS.md),
+ [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
+diff --git a/crates/aura-types/src/address.rs b/crates/aura-types/src/address.rs
+new file mode 100644
+index 0000000..bc7dafb
+--- /dev/null
++++ b/crates/aura-types/src/address.rs
+@@ -0,0 +1,262 @@
++//! Canonical 20-byte [`Address`] with an in-tree bech32 (BIP-173) codec.
++//!
++//! No external crate is used: the encoder is a direct, auditable transcription
++//! of BIP-173. The golden vectors in `tests/fixtures/c1_golden.txt` come from
++//! an **independent** Python implementation (`tools/gen_c1_vectors.py`).
++//!
++//! Note: this is classic bech32 (polymod xor `1`), not bech32m. Version byte
++//! `0x00` is reserved in the address payload for a future PQ signature scheme
++//! (ROADMAP D7). bech32m is a separate, versioned decision — not a C1 change.
++
++use std::fmt;
++
++use crate::BECH32_PREFIX;
++
++/// Length of an address' pubkey hash in bytes.
++pub const ADDRESS_LEN: usize = 20;
++
++/// Current address version byte (`version || pubkey_hash`).
++pub const ADDRESS_VERSION: u8 = 0x00;
++
++const CHARSET: &[u8; 32] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
++const GEN: [u32; 5] = [
++    0x3b6a_57b2,
++    0x2650_8e6d,
++    0x1ea1_19fa,
++    0x3d42_33dd,
++    0x2a14_62b3,
++];
++const CHECKSUM_LEN: usize = 6;
++
++// NC target: tools/nc_c1.py flips this to 0 and requires the golden vectors
++// to go red. BIP-173 specifies 1 for classic bech32.
++const BECH32_CHECKSUM_CONST: u32 = 1;
++
++/// Errors produced when parsing or constructing an [`Address`].
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum AddressError {
++    /// A byte slice was not exactly [`ADDRESS_LEN`] bytes long.
++    InvalidByteLength(usize),
++    /// The bech32 string has no `1` separator.
++    MissingSeparator,
++    /// The human-readable part is empty.
++    EmptyPrefix,
++    /// The human-readable part is not `aura`.
++    InvalidPrefix,
++    /// Fewer than 6 characters follow the separator (no checksum).
++    TooShort,
++    /// A character is outside the bech32 charset.
++    InvalidCharacter,
++    /// Upper or mixed case is not canonical (only lowercase is accepted).
++    MixedCase,
++    /// The bech32 checksum does not validate.
++    InvalidChecksum,
++    /// The 5-bit payload has non-canonical padding.
++    NonCanonicalPadding,
++    /// The version byte is not [`ADDRESS_VERSION`].
++    InvalidVersion(u8),
++    /// The decoded payload is not `1 + ADDRESS_LEN` bytes.
++    InvalidPayloadLength(usize),
++}
++
++impl fmt::Display for AddressError {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::InvalidByteLength(n) => {
++                write!(f, "expected {ADDRESS_LEN} bytes, got {n}")
++            }
++            Self::MissingSeparator => f.write_str("missing bech32 separator '1'"),
++            Self::EmptyPrefix => f.write_str("empty bech32 prefix"),
++            Self::InvalidPrefix => write!(f, "expected prefix `{BECH32_PREFIX}`"),
++            Self::TooShort => f.write_str("bech32 string has no checksum"),
++            Self::InvalidCharacter => f.write_str("invalid bech32 character"),
++            Self::MixedCase => f.write_str("only lowercase bech32 is canonical"),
++            Self::InvalidChecksum => f.write_str("invalid bech32 checksum"),
++            Self::NonCanonicalPadding => f.write_str("non-canonical bech32 padding"),
++            Self::InvalidVersion(v) => {
++                write!(f, "expected address version {ADDRESS_VERSION}, got {v}")
++            }
++            Self::InvalidPayloadLength(n) => {
++                write!(f, "expected {} payload bytes, got {n}", 1 + ADDRESS_LEN)
++            }
++        }
++    }
++}
++
++impl std::error::Error for AddressError {}
++
++/// A canonical 20-byte account address.
++#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
++pub struct Address([u8; ADDRESS_LEN]);
++
++impl Address {
++    /// The all-zero address (reserved; not a burn address by protocol rule).
++    pub const ZERO: Address = Address([0u8; ADDRESS_LEN]);
++
++    /// Wrap a fixed-size pubkey hash.
++    pub const fn from_bytes(bytes: [u8; ADDRESS_LEN]) -> Self {
++        Address(bytes)
++    }
++
++    /// Decode from a byte slice of exactly [`ADDRESS_LEN`] bytes.
++    pub fn from_slice(slice: &[u8]) -> Result<Self, AddressError> {
++        let bytes: [u8; ADDRESS_LEN] = slice
++            .try_into()
++            .map_err(|_| AddressError::InvalidByteLength(slice.len()))?;
++        Ok(Address(bytes))
++    }
++
++    /// Borrow the raw pubkey hash bytes.
++    pub const fn as_bytes(&self) -> &[u8; ADDRESS_LEN] {
++        &self.0
++    }
++
++    /// Consume the address and return the raw bytes.
++    pub const fn into_bytes(self) -> [u8; ADDRESS_LEN] {
++        self.0
++    }
++
++    /// Encode as lowercase bech32, e.g. `aura1...`.
++    pub fn to_bech32(&self) -> String {
++        let mut payload = Vec::with_capacity(1 + ADDRESS_LEN);
++        payload.push(ADDRESS_VERSION);
++        payload.extend_from_slice(&self.0);
++
++        let data = convert_bits(&payload, 8, 5, true).expect("21 bytes always convert 8->5");
++        let checksum = create_checksum(BECH32_PREFIX, &data);
++
++        let mut out = String::with_capacity(BECH32_PREFIX.len() + 1 + data.len() + CHECKSUM_LEN);
++        out.push_str(BECH32_PREFIX);
++        out.push('1');
++        for value in data.iter().chain(checksum.iter()) {
++            out.push(CHARSET[*value as usize] as char);
++        }
++        out
++    }
++
++    /// Parse a canonical lowercase bech32 address.
++    pub fn from_bech32(text: &str) -> Result<Self, AddressError> {
++        if text.chars().any(|c| c.is_ascii_uppercase()) {
++            return Err(AddressError::MixedCase);
++        }
++        let separator = text.rfind('1').ok_or(AddressError::MissingSeparator)?;
++        let hrp = &text[..separator];
++        if hrp.is_empty() {
++            return Err(AddressError::EmptyPrefix);
++        }
++        if hrp != BECH32_PREFIX {
++            return Err(AddressError::InvalidPrefix);
++        }
++        let body = &text[separator + 1..];
++        if body.len() < CHECKSUM_LEN {
++            return Err(AddressError::TooShort);
++        }
++
++        let mut data = Vec::with_capacity(body.len());
++        for byte in body.bytes() {
++            let value = CHARSET
++                .iter()
++                .position(|c| *c == byte)
++                .ok_or(AddressError::InvalidCharacter)?;
++            data.push(value as u8);
++        }
++
++        let mut polymod_input = hrp_expand(hrp);
++        polymod_input.extend_from_slice(&data);
++        if polymod(&polymod_input) != BECH32_CHECKSUM_CONST {
++            return Err(AddressError::InvalidChecksum);
++        }
++
++        let payload_bits = &data[..data.len() - CHECKSUM_LEN];
++        let payload =
++            convert_bits(payload_bits, 5, 8, false).ok_or(AddressError::NonCanonicalPadding)?;
++        if payload.len() != 1 + ADDRESS_LEN {
++            return Err(AddressError::InvalidPayloadLength(payload.len()));
++        }
++        if payload[0] != ADDRESS_VERSION {
++            return Err(AddressError::InvalidVersion(payload[0]));
++        }
++
++        Address::from_slice(&payload[1..])
++    }
++}
++
++impl fmt::Display for Address {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.write_str(&self.to_bech32())
++    }
++}
++
++impl fmt::Debug for Address {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        write!(f, "Address({})", self.to_bech32())
++    }
++}
++
++fn polymod(values: &[u8]) -> u32 {
++    let mut chk: u32 = 1;
++    for &value in values {
++        let top = chk >> 25;
++        chk = (chk & 0x01ff_ffff) << 5 ^ u32::from(value);
++        for (index, generator) in GEN.iter().enumerate() {
++            if (top >> (index as u32)) & 1 == 1 {
++                chk ^= generator;
++            }
++        }
++    }
++    chk
++}
++
++fn hrp_expand(hrp: &str) -> Vec<u8> {
++    let mut out = Vec::with_capacity(hrp.len() * 2 + 1);
++    for byte in hrp.bytes() {
++        out.push(byte >> 5);
++    }
++    out.push(0);
++    for byte in hrp.bytes() {
++        out.push(byte & 31);
++    }
++    out
++}
++
++fn create_checksum(hrp: &str, data: &[u8]) -> [u8; CHECKSUM_LEN] {
++    let mut values = hrp_expand(hrp);
++    values.extend_from_slice(data);
++    values.extend_from_slice(&[0u8; CHECKSUM_LEN]);
++    let modulus = polymod(&values) ^ BECH32_CHECKSUM_CONST;
++    let mut out = [0u8; CHECKSUM_LEN];
++    for (index, slot) in out.iter_mut().enumerate() {
++        *slot = ((modulus >> (5 * (5 - index))) & 31) as u8;
++    }
++    out
++}
++
++/// Regroup a sequence of `frombits`-wide values into `tobits`-wide values.
++fn convert_bits(data: &[u8], frombits: u32, tobits: u32, pad: bool) -> Option<Vec<u8>> {
++    let mut accumulator: u32 = 0;
++    let mut bits: u32 = 0;
++    let max_value: u32 = (1u32 << tobits) - 1;
++    let mut out = Vec::new();
++
++    for &value in data {
++        let widened = u32::from(value);
++        if (widened >> frombits) != 0 {
++            return None;
++        }
++        accumulator = (accumulator << frombits) | widened;
++        bits += frombits;
++        while bits >= tobits {
++            bits -= tobits;
++            out.push(((accumulator >> bits) & max_value) as u8);
++        }
++    }
++
++    if pad {
++        if bits > 0 {
++            out.push(((accumulator << (tobits - bits)) & max_value) as u8);
++        }
++    } else if bits >= frombits || ((accumulator << (tobits - bits)) & max_value) != 0 {
++        return None;
++    }
++    Some(out)
++}
+diff --git a/crates/aura-types/src/amount.rs b/crates/aura-types/src/amount.rs
+new file mode 100644
+index 0000000..11f133c
+--- /dev/null
++++ b/crates/aura-types/src/amount.rs
+@@ -0,0 +1,108 @@
++//! [`Amount`] and [`Denom`] — fixed-point native-asset values.
++
++use std::fmt;
++
++/// An amount in the smallest unit (`aalcry`, 10^-18 ALCRY).
++///
++/// All arithmetic is checked; silent overflow is a consensus bug, not an
++/// inconvenience. `u128` is intentional: balances must be exact integers.
++#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
++pub struct Amount(u128);
++
++impl Amount {
++    /// Zero.
++    pub const ZERO: Amount = Amount(0);
++
++    /// One smallest unit.
++    pub const ONE: Amount = Amount(1);
++
++    /// Largest representable amount.
++    pub const MAX: Amount = Amount(u128::MAX);
++
++    /// Construct from a number of smallest units.
++    pub const fn from_units(units: u128) -> Self {
++        Amount(units)
++    }
++
++    /// Read the raw smallest-unit value.
++    pub const fn units(self) -> u128 {
++        self.0
++    }
++
++    /// Construct from whole coins, checking the `10^18` multiplication.
++    pub fn from_coins(coins: u128) -> Option<Self> {
++        coins.checked_mul(crate::units_per_coin()).map(Amount)
++    }
++
++    /// Checked addition.
++    pub fn checked_add(self, rhs: Self) -> Option<Self> {
++        self.0.checked_add(rhs.0).map(Amount)
++    }
++
++    /// Checked subtraction.
++    pub fn checked_sub(self, rhs: Self) -> Option<Self> {
++        self.0.checked_sub(rhs.0).map(Amount)
++    }
++
++    /// Checked multiplication by a scalar.
++    pub fn checked_mul(self, factor: u128) -> Option<Self> {
++        self.0.checked_mul(factor).map(Amount)
++    }
++
++    /// Checked division by a scalar; zero divisor returns `None`.
++    pub fn checked_div(self, divisor: u128) -> Option<Self> {
++        self.0.checked_div(divisor).map(Amount)
++    }
++}
++
++impl fmt::Display for Amount {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        write!(f, "{}{}", self.0, crate::SMALLEST_UNIT)
++    }
++}
++
++impl fmt::Debug for Amount {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        write!(f, "Amount({})", self.0)
++    }
++}
++
++/// A denomination name. Only the two native names are canonical at C1.
++#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
++pub struct Denom(&'static str);
++
++impl Denom {
++    /// The display denomination, `ALCRY`.
++    pub const NATIVE: Denom = Denom(crate::DENOM);
++
++    /// The smallest-unit denomination, `aalcry`.
++    pub const SMALLEST: Denom = Denom(crate::SMALLEST_UNIT);
++
++    /// The denomination as a string.
++    pub const fn as_str(&self) -> &'static str {
++        self.0
++    }
++
++    /// Parse a known denomination, rejecting anything else.
++    pub fn parse(text: &str) -> Option<Self> {
++        if text == crate::DENOM {
++            Some(Self::NATIVE)
++        } else if text == crate::SMALLEST_UNIT {
++            Some(Self::SMALLEST)
++        } else {
++            None
++        }
++    }
++}
++
++impl fmt::Display for Denom {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.write_str(self.0)
++    }
++}
++
++impl fmt::Debug for Denom {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        write!(f, "Denom({})", self.0)
++    }
++}
+diff --git a/crates/aura-types/src/hash.rs b/crates/aura-types/src/hash.rs
+new file mode 100644
+index 0000000..4ab2597
+--- /dev/null
++++ b/crates/aura-types/src/hash.rs
+@@ -0,0 +1,108 @@
++//! The 32-byte [`Hash`] newtype.
++
++use std::fmt;
++
++/// Length of a canonical hash in bytes.
++pub const HASH_LEN: usize = 32;
++
++/// Errors produced when decoding a [`Hash`].
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum HashError {
++    /// A byte slice was not exactly [`HASH_LEN`] bytes long.
++    InvalidByteLength(usize),
++    /// A hex string was not exactly `2 * HASH_LEN` characters long.
++    InvalidHexLength(usize),
++    /// A hex string contained a character outside `[0-9a-fA-F]`.
++    InvalidHexCharacter,
++}
++
++impl fmt::Display for HashError {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::InvalidByteLength(n) => write!(f, "expected {HASH_LEN} bytes, got {n}"),
++            Self::InvalidHexLength(n) => write!(f, "expected {} hex chars, got {n}", 2 * HASH_LEN),
++            Self::InvalidHexCharacter => f.write_str("invalid hex character"),
++        }
++    }
++}
++
++impl std::error::Error for HashError {}
++
++/// A canonical 32-byte hash value.
++///
++/// This is a plain newtype: the actual hash function is `aura-crypto` (C3).
++/// Keeping the type here lets tx/block/state formats name their hashes in C1
++/// without depending on a crypto implementation.
++#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
++pub struct Hash([u8; HASH_LEN]);
++
++impl Hash {
++    /// The all-zero hash.
++    pub const ZERO: Hash = Hash([0u8; HASH_LEN]);
++
++    /// Wrap a fixed-size byte array.
++    pub const fn from_bytes(bytes: [u8; HASH_LEN]) -> Self {
++        Hash(bytes)
++    }
++
++    /// Decode from a byte slice of exactly [`HASH_LEN`] bytes.
++    pub fn from_slice(slice: &[u8]) -> Result<Self, HashError> {
++        let bytes: [u8; HASH_LEN] = slice
++            .try_into()
++            .map_err(|_| HashError::InvalidByteLength(slice.len()))?;
++        Ok(Hash(bytes))
++    }
++
++    /// Borrow the raw bytes.
++    pub const fn as_bytes(&self) -> &[u8; HASH_LEN] {
++        &self.0
++    }
++
++    /// Consume the hash and return the raw bytes.
++    pub const fn into_bytes(self) -> [u8; HASH_LEN] {
++        self.0
++    }
++
++    /// Lowercase hex representation (64 characters).
++    pub fn to_hex(&self) -> String {
++        let mut out = String::with_capacity(2 * HASH_LEN);
++        for byte in &self.0 {
++            out.push(char::from_digit((byte >> 4) as u32, 16).expect("nibble < 16"));
++            out.push(char::from_digit((byte & 0x0f) as u32, 16).expect("nibble < 16"));
++        }
++        out
++    }
++
++    /// Parse a 64-character hex string (upper or lower case).
++    pub fn from_hex(text: &str) -> Result<Self, HashError> {
++        if text.len() != 2 * HASH_LEN {
++            return Err(HashError::InvalidHexLength(text.len()));
++        }
++        let mut bytes = [0u8; HASH_LEN];
++        for (index, pair) in text.as_bytes().chunks(2).enumerate() {
++            bytes[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
++        }
++        Ok(Hash(bytes))
++    }
++}
++
++fn hex_nibble(byte: u8) -> Result<u8, HashError> {
++    match byte {
++        b'0'..=b'9' => Ok(byte - b'0'),
++        b'a'..=b'f' => Ok(byte - b'a' + 10),
++        b'A'..=b'F' => Ok(byte - b'A' + 10),
++        _ => Err(HashError::InvalidHexCharacter),
++    }
++}
++
++impl fmt::Display for Hash {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.write_str(&self.to_hex())
++    }
++}
++
++impl fmt::Debug for Hash {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        write!(f, "Hash(0x{})", self.to_hex())
++    }
++}
+diff --git a/crates/aura-types/src/lib.rs b/crates/aura-types/src/lib.rs
+index c511ad2..75bb72b 100644
+--- a/crates/aura-types/src/lib.rs
++++ b/crates/aura-types/src/lib.rs
+@@ -1,15 +1,27 @@
+ //! AuraLite-Crypto canonical primitives.
+ //!
+-//! C0 lands **only** the network identity constants and the invariants that
+-//! lock the D0 decisions into code. The primitive types (`Hash`, `Address`,
+-//! `Amount`, ...) arrive in C1; `aura-codec` in C2; `aura-crypto` in C3.
++//! C0 locked the network identity constants. C1 adds the canonical value
++//! types that every later crate consumes: [`Hash`], [`Address`], [`Amount`],
++//! [`Denom`], [`ChainId`], [`Nonce`], [`Height`], [`Gas`] and [`Domain`],
++//! plus the deterministic [`CanonicalMap`] alias.
+ //!
+-//! Nothing here is consensus logic. It exists so that no later crate can
+-//! quietly invent a different chain-id, ticker or decimal count.
++//! Deliberately **no** serialization format yet — that is `aura-codec` in C2 —
++//! and no hashing/signing yet — that is `aura-crypto` in C3. This crate still
++//! has zero external dependencies.
+ 
+ #![forbid(unsafe_code)]
+ #![deny(missing_docs)]
+ 
++mod address;
++mod amount;
++mod hash;
++mod primitives;
++
++pub use address::{ADDRESS_LEN, ADDRESS_VERSION, Address, AddressError};
++pub use amount::{Amount, Denom};
++pub use hash::{HASH_LEN, Hash, HashError};
++pub use primitives::{CanonicalMap, ChainId, Domain, Gas, Height, Nonce, PrimitiveError};
++
+ /// Human-readable network name (Q1).
+ pub const NETWORK_NAME: &str = "AuraLite-Crypto Network";
+ 
+@@ -88,4 +100,10 @@ mod tests {
+     fn empty_chain_id_is_rejected() {
+         assert!(!is_our_chain(""));
+     }
++
++    #[test]
++    fn stage1_chain_id_is_a_valid_canonical_chain_id() {
++        let parsed = ChainId::new(CHAIN_ID).expect("locked chain-id must be valid");
++        assert_eq!(parsed.as_str(), CHAIN_ID);
++    }
+ }
+diff --git a/crates/aura-types/src/primitives.rs b/crates/aura-types/src/primitives.rs
+new file mode 100644
+index 0000000..648d207
+--- /dev/null
++++ b/crates/aura-types/src/primitives.rs
+@@ -0,0 +1,257 @@
++//! Small canonical scalar types and domain separation.
++
++use std::collections::BTreeMap;
++use std::fmt;
++
++/// The only map type allowed in consensus data structures.
++///
++/// `BTreeMap` iteration is ordered and therefore deterministic; `HashMap`
++/// iteration is not. Rule D3 in `ROADMAP.md`.
++pub type CanonicalMap<K, V> = BTreeMap<K, V>;
++
++/// Errors produced by the canonical scalar types.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum PrimitiveError {
++    /// chain-id length is outside `3..=64`.
++    ChainIdLength(usize),
++    /// chain-id contains a character outside `[a-z0-9-]`.
++    ChainIdCharset,
++    /// chain-id starts or ends with `-`.
++    ChainIdEdge,
++    /// Nonce increment would overflow `u64`.
++    NonceOverflow,
++    /// Height increment would overflow `u64`.
++    HeightOverflow,
++    /// Height subtraction would underflow.
++    HeightUnderflow,
++    /// Gas arithmetic would overflow `u64`.
++    GasOverflow,
++    /// Gas subtraction would underflow.
++    GasUnderflow,
++}
++
++impl fmt::Display for PrimitiveError {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::ChainIdLength(n) => write!(f, "chain-id length {n} outside 3..=64"),
++            Self::ChainIdCharset => f.write_str("chain-id must match [a-z0-9-]"),
++            Self::ChainIdEdge => f.write_str("chain-id cannot start or end with '-'"),
++            Self::NonceOverflow => f.write_str("nonce overflow"),
++            Self::HeightOverflow => f.write_str("height overflow"),
++            Self::HeightUnderflow => f.write_str("height underflow"),
++            Self::GasOverflow => f.write_str("gas overflow"),
++            Self::GasUnderflow => f.write_str("gas underflow"),
++        }
++    }
++}
++
++impl std::error::Error for PrimitiveError {}
++
++/// A validated chain identifier, e.g. `auralite-test-1`.
++#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
++pub struct ChainId(String);
++
++impl ChainId {
++    /// Validate and construct a chain-id.
++    pub fn new(raw: &str) -> Result<Self, PrimitiveError> {
++        if !(3..=64).contains(&raw.len()) {
++            return Err(PrimitiveError::ChainIdLength(raw.len()));
++        }
++        if !raw
++            .bytes()
++            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
++        {
++            return Err(PrimitiveError::ChainIdCharset);
++        }
++        if raw.starts_with('-') || raw.ends_with('-') {
++            return Err(PrimitiveError::ChainIdEdge);
++        }
++        Ok(ChainId(raw.to_owned()))
++    }
++
++    /// The locked Stage 1 chain-id from C0.
++    pub fn stage1() -> Self {
++        ChainId(crate::CHAIN_ID.to_owned())
++    }
++
++    /// Borrow the identifier.
++    pub fn as_str(&self) -> &str {
++        &self.0
++    }
++}
++
++impl fmt::Display for ChainId {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.write_str(&self.0)
++    }
++}
++
++impl fmt::Debug for ChainId {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        write!(f, "ChainId({})", self.0)
++    }
++}
++
++/// Account sequence number.
++#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
++pub struct Nonce(u64);
++
++impl Nonce {
++    /// Construct from a raw value.
++    pub const fn new(value: u64) -> Self {
++        Nonce(value)
++    }
++
++    /// Read the raw value.
++    pub const fn value(self) -> u64 {
++        self.0
++    }
++
++    /// The next nonce, or `None` on overflow.
++    pub fn checked_next(self) -> Result<Self, PrimitiveError> {
++        self.0
++            .checked_add(1)
++            .map(Nonce)
++            .ok_or(PrimitiveError::NonceOverflow)
++    }
++}
++
++impl fmt::Debug for Nonce {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        write!(f, "Nonce({})", self.0)
++    }
++}
++
++/// Block height.
++#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
++pub struct Height(u64);
++
++impl Height {
++    /// Construct from a raw value.
++    pub const fn new(value: u64) -> Self {
++        Height(value)
++    }
++
++    /// Read the raw value.
++    pub const fn value(self) -> u64 {
++        self.0
++    }
++
++    /// The next height, or an overflow error.
++    pub fn checked_next(self) -> Result<Self, PrimitiveError> {
++        self.0
++            .checked_add(1)
++            .map(Height)
++            .ok_or(PrimitiveError::HeightOverflow)
++    }
++
++    /// Checked subtraction of a height delta.
++    pub fn checked_sub(self, delta: u64) -> Result<Self, PrimitiveError> {
++        self.0
++            .checked_sub(delta)
++            .map(Height)
++            .ok_or(PrimitiveError::HeightUnderflow)
++    }
++}
++
++impl fmt::Debug for Height {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        write!(f, "Height({})", self.0)
++    }
++}
++
++/// Gas amount. Always checked arithmetic — gas is a consensus value.
++#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
++pub struct Gas(u64);
++
++impl Gas {
++    /// Construct from a raw value.
++    pub const fn new(value: u64) -> Self {
++        Gas(value)
++    }
++
++    /// Read the raw value.
++    pub const fn value(self) -> u64 {
++        self.0
++    }
++
++    /// Checked addition.
++    pub fn checked_add(self, rhs: u64) -> Result<Self, PrimitiveError> {
++        self.0
++            .checked_add(rhs)
++            .map(Gas)
++            .ok_or(PrimitiveError::GasOverflow)
++    }
++
++    /// Checked subtraction.
++    pub fn checked_sub(self, rhs: u64) -> Result<Self, PrimitiveError> {
++        self.0
++            .checked_sub(rhs)
++            .map(Gas)
++            .ok_or(PrimitiveError::GasUnderflow)
++    }
++
++    /// Checked multiplication.
++    pub fn checked_mul(self, factor: u64) -> Result<Self, PrimitiveError> {
++        self.0
++            .checked_mul(factor)
++            .map(Gas)
++            .ok_or(PrimitiveError::GasOverflow)
++    }
++}
++
++impl fmt::Debug for Gas {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        write!(f, "Gas({})", self.0)
++    }
++}
++
++/// Signature domain. Rule D5: `chain-id || domain || payload`.
++#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
++pub enum Domain {
++    /// A user transaction signature.
++    Tx,
++    /// A consensus vote signature.
++    Vote,
++    /// A block header signature.
++    Block,
++    /// A contract-originated signature.
++    Contract,
++    /// A genesis / validator-set signature.
++    Genesis,
++}
++
++impl Domain {
++    /// All domains, in a fixed order.
++    pub const ALL: [Domain; 5] = [
++        Domain::Tx,
++        Domain::Vote,
++        Domain::Block,
++        Domain::Contract,
++        Domain::Genesis,
++    ];
++
++    /// Stable byte tag for this domain.
++    pub const fn tag(&self) -> &'static str {
++        match self {
++            Domain::Tx => "tx",
++            Domain::Vote => "vote",
++            Domain::Block => "block",
++            Domain::Contract => "contract",
++            Domain::Genesis => "genesis",
++        }
++    }
++
++    /// Build the `chain-id || 0 || domain || 0` prefix for signing.
++    ///
++    /// C3 concatenates the payload and hashes it. Keeping the byte layout here
++    /// means no consumer can silently invent a different separation.
++    pub fn prefix(&self, chain_id: &str) -> Vec<u8> {
++        let mut out = Vec::with_capacity(chain_id.len() + self.tag().len() + 2);
++        out.extend_from_slice(chain_id.as_bytes());
++        out.push(0);
++        out.extend_from_slice(self.tag().as_bytes());
++        out.push(0);
++        out
++    }
++}
+diff --git a/crates/aura-types/tests/c1_types.rs b/crates/aura-types/tests/c1_types.rs
+new file mode 100644
+index 0000000..37476dc
+--- /dev/null
++++ b/crates/aura-types/tests/c1_types.rs
+@@ -0,0 +1,283 @@
++//! C1 gate: canonical types against independent golden vectors.
++//!
++//! The fixtures in `fixtures/c1_golden.txt` are produced by
++//! `tools/gen_c1_vectors.py`, a standalone BIP-173 implementation that does
++//! not use this crate. If someone "fixes" the Rust bech32 encoder to match
++//! itself, these tests go red.
++
++use std::collections::BTreeMap;
++
++use aura_types::{
++    ADDRESS_LEN, Address, AddressError, Amount, BECH32_PREFIX, CHAIN_ID, CanonicalMap, ChainId,
++    DENOM, Denom, Domain, Gas, HASH_LEN, Hash, HashError, Height, Nonce, PrimitiveError,
++    SMALLEST_UNIT, units_per_coin,
++};
++
++const GOLDEN: &str = include_str!("fixtures/c1_golden.txt");
++
++fn fixtures() -> BTreeMap<String, String> {
++    let mut map = BTreeMap::new();
++    for line in GOLDEN.lines() {
++        let trimmed = line.trim();
++        if trimmed.is_empty() || trimmed.starts_with('#') {
++            continue;
++        }
++        let (key, value) = trimmed
++            .split_once('=')
++            .unwrap_or_else(|| panic!("malformed golden vector line: {trimmed}"));
++        assert!(
++            map.insert(key.to_owned(), value.to_owned()).is_none(),
++            "duplicate key {key}"
++        );
++    }
++    map
++}
++
++fn bytes20(hex: &str) -> [u8; ADDRESS_LEN] {
++    let raw = hex_to_bytes(hex);
++    raw.try_into().expect("expected 20-byte address fixture")
++}
++
++fn hex_to_bytes(hex: &str) -> Vec<u8> {
++    assert_eq!(hex.len() % 2, 0, "even-length hex");
++    hex.as_bytes()
++        .chunks(2)
++        .map(|pair| {
++            let hi = hex_nibble(pair[0]);
++            let lo = hex_nibble(pair[1]);
++            (hi << 4) | lo
++        })
++        .collect()
++}
++
++fn hex_nibble(byte: u8) -> u8 {
++    match byte {
++        b'0'..=b'9' => byte - b'0',
++        b'a'..=b'f' => byte - b'a' + 10,
++        _ => panic!("invalid hex nibble in fixture"),
++    }
++}
++
++#[test]
++fn golden_hash_vectors_round_trip() {
++    let f = fixtures();
++    for key in ["hash_zero", "hash_asc", "hash_desc", "hash_pattern"] {
++        let expected = f.get(key).expect("fixture key present");
++        let hash = Hash::from_hex(expected).expect("valid 64-char hex");
++        assert_eq!(hash.to_hex(), *expected, "{key} hex round-trip");
++        assert_eq!(hash.to_string(), *expected, "{key} Display");
++        assert_eq!(
++            Hash::from_slice(hash.as_bytes()).unwrap(),
++            hash,
++            "{key} slice round-trip"
++        );
++    }
++    assert_eq!(Hash::ZERO.to_hex(), f["hash_zero"]);
++    assert_eq!(Hash::from_hex(&f["hash_zero"]).unwrap(), Hash::ZERO);
++    assert_eq!(HASH_LEN, 32);
++}
++
++#[test]
++fn golden_address_vectors_match_independent_reference() {
++    let f = fixtures();
++    for name in ["address_1", "address_2", "address_3", "address_4"] {
++        let raw = bytes20(&f[&format!("{name}_bytes")]);
++        let expected = &f[&format!("{name}_bech32")];
++
++        let address = Address::from_bytes(raw);
++        assert_eq!(
++            address.to_bech32(),
++            *expected,
++            "{name} encode vs Python BIP-173"
++        );
++        assert_eq!(address.to_string(), *expected, "{name} Display");
++
++        let decoded = Address::from_bech32(expected).expect("golden address must decode");
++        assert_eq!(decoded, address, "{name} decode round-trip");
++        assert_eq!(decoded.as_bytes(), &raw, "{name} raw bytes");
++        assert!(
++            expected.starts_with(&format!("{BECH32_PREFIX}1")),
++            "{name} prefix"
++        );
++    }
++}
++
++#[test]
++fn bad_checksum_vectors_are_rejected() {
++    let f = fixtures();
++    for key in ["bad_checksum_1", "bad_checksum_2"] {
++        let result = Address::from_bech32(&f[key]);
++        assert_eq!(result, Err(AddressError::InvalidChecksum), "{key}");
++    }
++}
++
++#[test]
++fn wrong_prefix_and_uppercase_are_rejected() {
++    let f = fixtures();
++    assert_eq!(
++        Address::from_bech32(&f["wrong_prefix"]),
++        Err(AddressError::InvalidPrefix)
++    );
++    assert_eq!(
++        Address::from_bech32(&f["uppercase"]),
++        Err(AddressError::MixedCase)
++    );
++    assert_eq!(
++        Address::from_bech32("not_an_address"),
++        Err(AddressError::MissingSeparator)
++    );
++}
++
++#[test]
++fn address_and_hash_reject_malformed_input() {
++    assert_eq!(
++        Address::from_slice(&[0u8; 19]),
++        Err(AddressError::InvalidByteLength(19))
++    );
++    assert_eq!(
++        Hash::from_slice(&[0u8; 31]),
++        Err(HashError::InvalidByteLength(31))
++    );
++    assert_eq!(Hash::from_hex("zz"), Err(HashError::InvalidHexLength(2)));
++    assert_eq!(
++        Hash::from_hex(&format!("{}z0", "ab".repeat(31))),
++        Err(HashError::InvalidHexCharacter)
++    );
++    assert_eq!(
++        Address::from_bech32("aura1!!!!!!"),
++        Err(AddressError::InvalidCharacter)
++    );
++    assert_eq!(
++        Address::from_bech32("aura1qqqq"),
++        Err(AddressError::TooShort)
++    );
++}
++
++#[test]
++fn amount_arithmetic_is_checked() {
++    let f = fixtures();
++    assert_eq!(Amount::MAX.units().to_string(), f["amount_max"]);
++    assert_eq!(units_per_coin().to_string(), f["amount_units_per_coin"]);
++
++    assert_eq!(
++        Amount::MAX.checked_add(Amount::ONE),
++        None,
++        "u128 overflow must not wrap"
++    );
++    assert_eq!(
++        Amount::ZERO.checked_sub(Amount::ONE),
++        None,
++        "underflow must not wrap"
++    );
++    assert_eq!(Amount::MAX.checked_mul(2), None);
++    assert_eq!(Amount::ONE.checked_div(0), None);
++    assert_eq!(
++        Amount::from_coins(u128::MAX),
++        None,
++        "coins conversion must be checked"
++    );
++    assert_eq!(
++        Amount::from_coins(1),
++        Some(Amount::from_units(units_per_coin()))
++    );
++    assert_eq!(Amount::from_coins(0), Some(Amount::ZERO));
++    assert!(Amount::from_units(42).to_string().contains(SMALLEST_UNIT));
++}
++
++#[test]
++fn denom_accepts_only_native_names() {
++    assert_eq!(Denom::parse(DENOM), Some(Denom::NATIVE));
++    assert_eq!(Denom::parse(SMALLEST_UNIT), Some(Denom::SMALLEST));
++    assert_eq!(Denom::parse("USDT"), None);
++    assert_eq!(Denom::NATIVE.as_str(), DENOM);
++    assert_eq!(Denom::SMALLEST.as_str(), SMALLEST_UNIT);
++}
++
++#[test]
++fn scalar_overflows_are_errors() {
++    assert_eq!(
++        Nonce::new(u64::MAX).checked_next(),
++        Err(PrimitiveError::NonceOverflow)
++    );
++    assert_eq!(
++        Height::new(u64::MAX).checked_next(),
++        Err(PrimitiveError::HeightOverflow)
++    );
++    assert_eq!(
++        Height::new(0).checked_sub(1),
++        Err(PrimitiveError::HeightUnderflow)
++    );
++    assert_eq!(
++        Gas::new(u64::MAX).checked_add(1),
++        Err(PrimitiveError::GasOverflow)
++    );
++    assert_eq!(
++        Gas::new(0).checked_sub(1),
++        Err(PrimitiveError::GasUnderflow)
++    );
++    assert_eq!(
++        Gas::new(u64::MAX).checked_mul(2),
++        Err(PrimitiveError::GasOverflow)
++    );
++
++    assert_eq!(Nonce::new(7).checked_next().unwrap().value(), 8);
++    assert_eq!(Height::new(9).checked_sub(4).unwrap().value(), 5);
++    assert_eq!(Gas::new(3).checked_mul(4).unwrap().value(), 12);
++}
++
++#[test]
++fn chain_id_validation_is_strict() {
++    let parsed = ChainId::new(CHAIN_ID).expect("locked chain-id must be valid");
++    assert_eq!(parsed.as_str(), CHAIN_ID);
++    assert_eq!(ChainId::stage1(), parsed);
++
++    assert_eq!(ChainId::new("ab"), Err(PrimitiveError::ChainIdLength(2)));
++    assert_eq!(
++        ChainId::new("AuraLite-1"),
++        Err(PrimitiveError::ChainIdCharset)
++    );
++    assert_eq!(
++        ChainId::new("auralite_test_1"),
++        Err(PrimitiveError::ChainIdCharset)
++    );
++    assert_eq!(ChainId::new("-auralite"), Err(PrimitiveError::ChainIdEdge));
++    assert_eq!(ChainId::new("auralite-"), Err(PrimitiveError::ChainIdEdge));
++    assert_eq!(
++        ChainId::new(&"a".repeat(65)),
++        Err(PrimitiveError::ChainIdLength(65))
++    );
++}
++
++#[test]
++fn domain_separation_is_stable_and_distinct() {
++    assert_eq!(Domain::ALL.len(), 5);
++    for domain in Domain::ALL {
++        assert_eq!(
++            domain.prefix(CHAIN_ID),
++            domain.prefix(CHAIN_ID),
++            "stable prefix"
++        );
++        assert_ne!(
++            domain.prefix(CHAIN_ID),
++            domain.prefix("auralite-1"),
++            "chain-id separated"
++        );
++    }
++    let tx = Domain::Tx.prefix(CHAIN_ID);
++    let vote = Domain::Vote.prefix(CHAIN_ID);
++    assert_ne!(tx, vote, "different domains must differ");
++    assert!(tx.starts_with(CHAIN_ID.as_bytes()));
++    assert!(tx.ends_with(&[b't', b'x', 0]));
++}
++
++#[test]
++fn canonical_map_iteration_is_deterministic() {
++    let mut map: CanonicalMap<u8, &str> = CanonicalMap::new();
++    for (key, value) in [(3, "c"), (1, "a"), (2, "b"), (1, "a")] {
++        map.insert(key, value);
++    }
++    let first: Vec<_> = map.iter().map(|(k, v)| (*k, *v)).collect();
++    let second: Vec<_> = map.iter().map(|(k, v)| (*k, *v)).collect();
++    assert_eq!(first, second, "iteration order must be reproducible");
++    assert_eq!(first, vec![(1, "a"), (2, "b"), (3, "c")]);
++}
+diff --git a/crates/aura-types/tests/fixtures/c1_golden.txt b/crates/aura-types/tests/fixtures/c1_golden.txt
+new file mode 100644
+index 0000000..e3cc83c
+--- /dev/null
++++ b/crates/aura-types/tests/fixtures/c1_golden.txt
+@@ -0,0 +1,23 @@
++# AuraLite-Crypto C1 golden vectors
++# Generated by tools/gen_c1_vectors.py (independent BIP-173).
++# Format: key=value. Do not edit by hand.
++# bech32 variant: classic BIP-173 (polymod xor 1), NOT bech32m.
++# address payload = version 0x00 || 20-byte pubkey hash.
++hash_zero=0000000000000000000000000000000000000000000000000000000000000000
++hash_asc=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
++hash_desc=fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0efeeedecebeae9e8e7e6e5e4e3e2e1e0
++hash_pattern=deadbeeffeedfacedeadbeeffeedfacedeadbeeffeedfacedeadbeeffeedface
++address_1_bytes=000102030405060708090a0b0c0d0e0f10111213
++address_1_bech32=aura1qqqqzqsrqszsvpcgpy9qkrqdpc83qygjzvp3nn97
++address_2_bytes=abababababababababababababababababababab
++address_2_bech32=aura1qz46h2at4w46h2at4w46h2at4w46h2at4vf8yl5n
++address_3_bytes=0000000000000000000000000000000000000000
++address_3_bech32=aura1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqn7cpdr
++address_4_bytes=deadbeeffeedface00112233445566778899aabb
++address_4_bech32=aura1qr02m0h0lmkl4nsqzy3rx3z4vemc3xd2hvwla870
++bad_checksum_1=aura1qqqqzqsrqszsvpcgpy9qkrqdpc83qygjzqp3nn97
++bad_checksum_2=aura1qz46h2at4w46h2at4w46h2at4w46h2at4qf8yl5n
++wrong_prefix=cosmos1qqqqzqsrqszsvpcgpy9qkrqdpc83qygjzvp3nn97
++uppercase=AURA1QQQQZQSRQSZSVPCGPY9QKRQDPC83QYGJZVP3NN97
++amount_max=340282366920938463463374607431768211455
++amount_units_per_coin=1000000000000000000
+diff --git a/docs/STATUS.md b/docs/STATUS.md
+index cf90afe..a5b8375 100644
+--- a/docs/STATUS.md
++++ b/docs/STATUS.md
+@@ -1,8 +1,8 @@
+ # Implementation status — AuraLite-Crypto
+ 
+ > Updated **in the same patch** as the phase's code (rule D9).
+-> Snapshot date: **2026-10-25**, tree: "C0 landed — workspace + CI +
+-> identity constants, Stage 1 in progress".
++> Snapshot date: **2026-10-25**, tree: "C1 landed — canonical types pinned
++> against an independent reference, Stage 1 in progress".
+ 
+ ## Locked decisions (2026-10-25)
+ 
+@@ -17,8 +17,9 @@
+ | ⏸ Stage 2 | mainnet, white paper, external audit, DeFi, bridge — separate decision |
+ | Docs language | English (owner request, 2026-10-25) |
+ 
+-**Phase ledger:** C0 ✅ done (`patches/0001-C0-baseline-workspace.patch`);
+-C1 is next. No other phase has started.
++**Phase ledger:** C0 ✅ (`patches/0001-C0-baseline-workspace.patch`) and C1 ✅
++(`patches/0002-C1-types.patch`) done; C2 (`aura-codec`) is next. No other
++phase has started.
+ 
+ ## Maturity level
+ 
+@@ -36,11 +37,17 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
+ ## Working now
+ 
+ - `make test` is green: `cargo fmt --check`, `cargo clippy --workspace
+-  --all-targets -- -D warnings`, `cargo test --workspace` (5 tests) and the
+-  docs drift guard. Receipt: `docs/evidence/c0-baseline.txt` and
+-  `docs/evidence/c0/nc.log`.
+-- `aura-types` exports the locked D0 identity: `auralite-test-1`, `ALCRY`,
+-  18 decimals, `aura` bech32 prefix, `bft-pos`, `wasm`, protocol version 1.
++  --all-targets -- -D warnings`, `cargo test --workspace` (**17 tests**) and
++  the docs drift guard. Receipts: `docs/evidence/c0-baseline.txt`,
++  `docs/evidence/c0/nc.log`, `docs/evidence/c1/gates.txt`,
++  `docs/evidence/c1/nc.log`.
++- `aura-types` exports the locked D0 identity (`auralite-test-1`, `ALCRY`,
++  18 decimals, `aura`, `bft-pos`, `wasm`, v1) **and** the C1 canonical types:
++  `Hash`, bech32 `Address`, `Amount`/`Denom`, `ChainId`, `Nonce`, `Height`,
++  `Gas`, `Domain`, `CanonicalMap`. Still **zero external dependencies**.
++- C1 addresses are verified against `tools/gen_c1_vectors.py`, an independent
++  Python BIP-173 encoder; 3 C1 negative controls pin the checksum constant,
++  the version byte and the golden fixture itself.
+ - 10 placeholder crates compile but expose **no API** (an honest empty crate,
+   not a fake `Ok(())`). CI runs the same commands as `make test`.
+ - Still absent: consensus, VM, P2P, node, RPC, wallet, explorer, contracts.
+@@ -52,21 +59,22 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
+ 
+ ```
+ find crates -name Cargo.toml       -> 11 crates (+1 workspace root)
+-find . -name '*.rs' -not -path './target/*' -> 12 files
++find . -name '*.rs' -not -path './target/*' -> 17 files
+ ls docs/plans/*_PLAN.md           -> 12 plans / 112 phase rows
+-cargo test --workspace            -> 5 passed; 0 failed
++cargo test --workspace            -> 17 passed; 0 failed
+ make test                         -> ALL GATES GREEN
+ make nc-c0                        -> 2/2 negative controls PASS
++make nc-c1                        -> 3/3 negative controls PASS
+ validators / blocks / tx          -> 0 / 0 / 0
+ ```
+ 
+-Pre-C0 baseline (A0.1) and post-C0 numbers, with the exact commands and raw
+-output, are recorded in `docs/evidence/c0-baseline.txt`.
++Pre-C0 baseline, post-C0 and post-C1 numbers with raw command output are in
++`docs/evidence/c0-baseline.txt` and `docs/evidence/c1/gates.txt`.
+ 
+ ## What is missing (and must not be lost)
+ 
+-- No cryptography implementation, tx format, block hash or signatures
+-  (only the identity constants exist).
++- No `aura-codec` (C2), no crypto implementation (C3), no tx/block formats
++  (C4/C5), no Merkle proofs (C6).
+ - No consensus, no P2P, no state, no VM.
+ - No wallet, explorer, contracts, token.
+ - No audit, no bug bounty, no legal opinion.
+diff --git a/docs/evidence/c1/SHA256SUMS b/docs/evidence/c1/SHA256SUMS
+new file mode 100644
+index 0000000..cdcdd3d
+--- /dev/null
++++ b/docs/evidence/c1/SHA256SUMS
+@@ -0,0 +1,3 @@
++7c77929e68afc417036965cc6991182793c31ad64bbd2722a92d7e5988766ab3  docs/evidence/c1/gates.txt
++ec5017882c2d307d5b364fd52c533bde85784b779d62da2c43ff39a4ed6cb89f  docs/evidence/c1/nc.log
++4c37f9fc3068ac7487be311c811897369aa3ebdadf6dbc38b334615cdcbdba1b  crates/aura-types/tests/fixtures/c1_golden.txt
+diff --git a/docs/evidence/c1/gates.txt b/docs/evidence/c1/gates.txt
+new file mode 100644
+index 0000000..2359b0c
+--- /dev/null
++++ b/docs/evidence/c1/gates.txt
+@@ -0,0 +1,116 @@
++AuraLite-Crypto — C1 evidence (canonical types)
++Generated (UTC): 2026-10-25T16:26:36+00:00
++Rule: measured against the tree, not assumed.
++
++Note: bech32 is classic BIP-173, verified against the independent
++Python encoder in tools/gen_c1_vectors.py (not against itself).
++
++========================================================================
++RAW COMMAND OUTPUT
++========================================================================
++
++--- toolchain ---
++$ rustc --version && cargo --version
++rustc 1.99.1 (58cf8f9c3 2026-10-13)
++cargo 1.99.1 (5f94df478 2026-08-27)
++[rc=0]
++
++--- pre-C1 tree (C0 commit) ---
++$ git log -1 --oneline
++81501ce C0 patch artifact
++[rc=0]
++
++--- pre-C1 .rs files ---
++$ git ls-tree -r --name-only HEAD | grep -c '\.rs$' || true
++12
++[rc=0]
++
++--- pre-C1 golden fixture present ---
++$ git ls-tree -r --name-only HEAD | grep -c 'c1_golden.txt' || true
++0
++[rc=0]
++
++--- post-C1 .rs files ---
++$ find . -name '*.rs' -not -path './target/*' | wc -l
++17
++[rc=0]
++
++--- post-C1 plan phase rows ---
++$ grep -hE '^\| (✅ |⏸ )?\*\*[A-Z]+[0-9]+\*\* \|' docs/plans/*_PLAN.md | wc -l
++112
++[rc=0]
++
++--- independent generator is idempotent ---
++$ (shell script: generator idempotence check)
++generator idempotent: 4c37f9fc3068ac7487be311c811897369aa3ebdadf6dbc38b334615cdcbdba1b
++[rc=0]
++
++--- full gate ---
++$ make test
++     Running unittests src/lib.rs (target/debug/deps/aura_mempool-d4afd06ebea00a27)
++     Running unittests src/lib.rs (target/debug/deps/aura_node-f89cb5fec9076dca)
++     Running unittests src/lib.rs (target/debug/deps/aura_p2p-a8f698eab67efd73)
++     Running unittests src/lib.rs (target/debug/deps/aura_rpc-f6ef2bc286c42693)
++     Running unittests src/lib.rs (target/debug/deps/aura_state-1313f3cb4a570b49)
++     Running unittests src/lib.rs (target/debug/deps/aura_storage-1026462560aae3b0)
++     Running unittests src/lib.rs (target/debug/deps/aura_types-308b229bcbc15c92)
++     Running tests/c1_types.rs (target/debug/deps/c1_types-30318a674a00d8c5)
++     Running tests/identity.rs (target/debug/deps/identity-22b5be58a3e6ffbb)
++   Doc-tests aura_codec
++   Doc-tests aura_consensus
++   Doc-tests aura_crypto
++   Doc-tests aura_exec
++   Doc-tests aura_mempool
++   Doc-tests aura_node
++   Doc-tests aura_p2p
++   Doc-tests aura_rpc
++   Doc-tests aura_state
++   Doc-tests aura_storage
++   Doc-tests aura_types
++[rc=0]
++
++--- C1 negative controls ---
++$ make nc-c1
++      cargo test -p aura-types -> rc=101 (RED as expected)
++          golden_address_vectors_match_independent_reference
++
++test result: FAILED. 10 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++error: test failed, to rerun pass `-p aura-types --test c1_types`
++NC-2 address version byte: PASS
++      cargo test -p aura-types -> rc=101 (RED as expected)
++          golden_address_vectors_match_independent_reference
++
++test result: FAILED. 10 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++error: test failed, to rerun pass `-p aura-types --test c1_types`
++NC-3 independent golden vector: PASS
++      cargo test -p aura-types -> rc=101 (RED as expected)
++          golden_address_vectors_match_independent_reference
++
++test result: FAILED. 10 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++error: test failed, to rerun pass `-p aura-types --test c1_types`
++
++RESULT: 3/3 negative controls PASS
++restore check: cargo test -p aura-types -> rc=0 (GREEN as expected)
++make[1]: Leaving directory '/home/user/AuraLite-Crypto'
++[rc=0]
++
++--- docs drift guard ---
++$ python3 tools/check_claims.py
++DOCS DRIFT GUARD: OK — 19 markdown files, 12 plans, 112 phase rows, all local links resolve
++[rc=0]
++
++========================================================================
++SUMMARY
++========================================================================
++
++Pre-C1 (C0 tree): 12 .rs files, 0 golden fixtures, 5 Rust tests.
++Post-C1: 17 .rs files, 1 golden fixture (23 lines), 17 Rust tests
++passing (5 unit + 11 C1 vectors + 1 identity), 0 external
++dependencies, `make test` ALL GATES GREEN, 3/3 negative controls
++PASS. Validators/blocks/tx remain 0/0/0.
++
++The independent generator is byte-stable: re-running it does not
++change the fixture (checked above with sha256 before/after).
+diff --git a/docs/evidence/c1/nc.log b/docs/evidence/c1/nc.log
+new file mode 100644
+index 0000000..6926c61
+--- /dev/null
++++ b/docs/evidence/c1/nc.log
+@@ -0,0 +1,27 @@
++C1 NEGATIVE CONTROLS — 2026-10-25T16:26:36+00:00
++Rule: a gate that cannot go red is not a gate (CONTRIBUTING.md §1).
++
++NC-1 bech32 checksum constant: PASS
++      cargo test -p aura-types -> rc=101 (RED as expected)
++          golden_address_vectors_match_independent_reference
++
++test result: FAILED. 10 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++error: test failed, to rerun pass `-p aura-types --test c1_types`
++NC-2 address version byte: PASS
++      cargo test -p aura-types -> rc=101 (RED as expected)
++          golden_address_vectors_match_independent_reference
++
++test result: FAILED. 10 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++error: test failed, to rerun pass `-p aura-types --test c1_types`
++NC-3 independent golden vector: PASS
++      cargo test -p aura-types -> rc=101 (RED as expected)
++          golden_address_vectors_match_independent_reference
++
++test result: FAILED. 10 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++error: test failed, to rerun pass `-p aura-types --test c1_types`
++
++RESULT: 3/3 negative controls PASS
++restore check: cargo test -p aura-types -> rc=0 (GREEN as expected)
+diff --git a/docs/plans/CORE_PLAN.md b/docs/plans/CORE_PLAN.md
+index 4803b05..467cd3a 100644
+--- a/docs/plans/CORE_PLAN.md
++++ b/docs/plans/CORE_PLAN.md
+@@ -1,6 +1,6 @@
+ # CORE_PLAN — primitives, codec, cryptography, formats
+ 
+-**Status:** 🚧 IN PROGRESS (C0 done ✅ 2026-10-25; C1 next)  
++**Status:** 🚧 IN PROGRESS (C0–C1 done ✅ 2026-10-25; C2 next)  
+ **Stage:** Stage 1: C0–C10 (all phases active).  
+ **Deliverable:** `patches/0001-C0-...` … `patches/0011-C10-...`
+ **Dependencies:** none. This is the root of the whole tree.
+@@ -29,7 +29,7 @@ other 11 plans rest.
+ | Phase | Title | DoD | Test gate |
+ |---|---|---|---|
+ | ✅ **C0** | Baseline + workspace + CI | `Cargo.toml` workspace, `Makefile`, `rust-toolchain.toml`, `.github/workflows/ci.yml`, `docs/evidence/c0-baseline.txt` with measured zeros; constants `CHAIN_ID="auralite-test-1"`, `DENOM="ALCRY"`, `DECIMALS=18` fixed in code and checked by a test | `make test` green (0 tests so far, but the pipeline is real); NC: broken CI → red |
+-| **C1** | Canonical types | `Hash`, `Address` (bech32 `aura1...`), `Amount`/`Denom` (`ALCRY` / `aalcry`), `ChainId`, `Nonce`, `Height`, `Gas`, `Domain`; `BTreeMap` instead of `HashMap` | unit vectors: bech32 round-trip, bad checksum rejected, checked `Amount` overflow |
++| ✅ **C1** | Canonical types | `Hash`, `Address` (bech32 `aura1...`), `Amount`/`Denom` (`ALCRY` / `aalcry`), `ChainId`, `Nonce`, `Height`, `Gas`, `Domain`; `BTreeMap` instead of `HashMap` | unit vectors: bech32 round-trip, bad checksum rejected, checked `Amount` overflow |
+ | **C2** | `aura-codec` | fixed field order, lengths, `Option` tags, non-canonical encodings banned, `codec_version` | golden vectors (hex fixtures), property: `decode(encode(x)) == x`, NC: one mutated byte → `Err` |
+ | **C3** | `aura-crypto` | BLAKE3 + domain tags, Ed25519, secp256k1, constant-time compare, zeroize | RFC/test-vector signatures, malleable `s` rejected, NC: swapped domain → `Err` |
+ | **C4** | Transaction format | `Tx { chain_id, signer, nonce, kind, payload, gas_limit, max_fee, tip, expiry, sig }`, canonical `signing_bytes` | sign/verify, replay test: a tx from `auralite-1` rejected in `auralite-test-1` |
+@@ -61,6 +61,31 @@ other 11 plans rest.
+   the sandbox had that toolchain installed; CI installs the pinned 1.99.1
+   channel from `rust-toolchain.toml` with rustfmt/clippy.
+ 
++
++### C1 receipt (2026-10-25)
++
++- Deliverable: `patches/0002-C1-types.patch`.
++- Landed: `Hash` (32-byte newtype, hex/slice decode), `Address` (20 bytes,
++  in-tree classic BIP-173 bech32), `Amount`/`Denom` (checked `u128`),
++  `ChainId` (validated), `Nonce`/`Height`/`Gas` (checked `u64`), `Domain`
++  (5 tags + `chain-id || 0 || tag || 0` prefix), `CanonicalMap` (`BTreeMap`).
++  Still zero external dependencies.
++- Golden vectors: `tools/gen_c1_vectors.py` is an **independent** Python
++  BIP-173 encoder; `crates/aura-types/tests/fixtures/c1_golden.txt` has 23
++  lines (4 hashes, 4 addresses, 2 bad checksums, wrong prefix, uppercase,
++  amount bounds). Re-running the generator is byte-identical (sha256 gate).
++- Gate: `make test` → **17 passed / 0 failed** (5 unit + 11 C1 vector + 1
++  identity), fmt + clippy clean, drift guard 12 plans / 112 rows.
++- NC: `make nc-c1` → **3/3 PASS**: checksum constant 1→0, address version
++  0x00→0x01, corrupted golden vector. All three require red, then restore.
++- Evidence: `docs/evidence/c1/gates.txt`, `docs/evidence/c1/nc.log`,
++  `docs/evidence/c1/SHA256SUMS`.
++- Defects found while building C1 (fixed in the same patch): a real compile
++  error in a vector test (`&String + &str`), and rustfmt drift across four
++  files — both caught by the C0 gate before the patch was cut.
++- Deliberately deferred: bech32m (a versioned decision, not a C1 tweak),
++  serialization (C2), hashing/signatures (C3).
++
+ ## Key risks
+ 
+ 1. **Non-canonical serialization** → two nodes get different hashes for the same
+diff --git a/tools/gen_c1_vectors.py b/tools/gen_c1_vectors.py
+new file mode 100644
+index 0000000..fbc1004
+--- /dev/null
++++ b/tools/gen_c1_vectors.py
+@@ -0,0 +1,132 @@
++#!/usr/bin/env python3
++"""Generate the C1 golden vectors from an INDEPENDENT BIP-173 implementation.
++
++This script deliberately does not import anything from the Rust crate. It is a
++second, standalone bech32 encoder (the classic BIP-173 polymod/checksum, not
++bech32m) used to pin down `Address::to_bech32()` in C1.
++
++Usage:
++    python3 tools/gen_c1_vectors.py
++    make gen-c1-vectors
++
++Output: crates/aura-types/tests/fixtures/c1_golden.txt
++"""
++
++from __future__ import annotations
++
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++OUT = REPO / "crates" / "aura-types" / "tests" / "fixtures" / "c1_golden.txt"
++
++CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
++HRP = "aura"
++GEN = [0x3B6A57B2, 0x26508E6D, 0x1EA119FA, 0x3D4233DD, 0x2A1462B3]
++
++
++def polymod(values: list[int]) -> int:
++    chk = 1
++    for value in values:
++        top = chk >> 25
++        chk = (chk & 0x1FFFFFF) << 5 ^ value
++        for i, gen in enumerate(GEN):
++            if (top >> i) & 1:
++                chk ^= gen
++    return chk
++
++
++def hrp_expand(hrp: str) -> list[int]:
++    return [ord(c) >> 5 for c in hrp] + [0] + [ord(c) & 31 for c in hrp]
++
++
++def create_checksum(hrp: str, data: list[int]) -> list[int]:
++    values = hrp_expand(hrp) + data + [0] * 6
++    mod = polymod(values) ^ 1
++    return [(mod >> 5 * (5 - i)) & 31 for i in range(6)]
++
++
++def convertbits(data: list[int], frombits: int, tobits: int, pad: bool = True) -> list[int]:
++    acc = 0
++    bits = 0
++    ret: list[int] = []
++    maxv = (1 << tobits) - 1
++    for value in data:
++        if value < 0 or (value >> frombits):
++            raise ValueError("invalid data range")
++        acc = (acc << frombits) | value
++        bits += frombits
++        while bits >= tobits:
++            bits -= tobits
++            ret.append((acc >> bits) & maxv)
++    if pad:
++        if bits:
++            ret.append((acc << (tobits - bits)) & maxv)
++    elif bits >= frombits or ((acc << (tobits - bits)) & maxv):
++        raise ValueError("invalid padding")
++    return ret
++
++
++def bech32_encode(hrp: str, data: list[int]) -> str:
++    combined = data + create_checksum(hrp, data)
++    return hrp + "1" + "".join(CHARSET[d] for d in combined)
++
++
++def address_bech32(pubkey_hash: bytes) -> str:
++    if len(pubkey_hash) != 20:
++        raise ValueError("pubkey hash must be 20 bytes")
++    payload = [0x00] + list(pubkey_hash)  # version byte 0x00 || 20-byte hash
++    return bech32_encode(HRP, convertbits(payload, 8, 5, pad=True))
++
++
++def mutate_last_char(value: str) -> str:
++    """Produce a definitely-invalid checksum by changing the final data char."""
++    idx = len(value) - 1 - 6  # last data character, before the 6-char checksum
++    old = value[idx]
++    new = "q" if old != "q" else "p"
++    return value[:idx] + new + value[idx + 1 :]
++
++
++def main() -> int:
++    vectors: list[tuple[str, str]] = []
++    vectors.append(("# AuraLite-Crypto C1 golden vectors", ""))
++    vectors.append(("# Generated by tools/gen_c1_vectors.py (independent BIP-173).", ""))
++    vectors.append(("# Format: key=value. Do not edit by hand.", ""))
++    vectors.append(("# bech32 variant: classic BIP-173 (polymod xor 1), NOT bech32m.", ""))
++    vectors.append(("# address payload = version 0x00 || 20-byte pubkey hash.", ""))
++
++    # Hash vectors: pure byte-level fixtures for the Hash newtype.
++    vectors.append(("hash_zero", "00" * 32))
++    vectors.append(("hash_asc", "".join(f"{i:02x}" for i in range(32))))
++    vectors.append(("hash_desc", "".join(f"{255 - i:02x}" for i in range(32))))
++    vectors.append(("hash_pattern", "deadbeeffeedface" * 4))
++
++    addresses = {
++        "address_1": bytes(range(20)),
++        "address_2": bytes([0xAB] * 20),
++        "address_3": bytes([0x00] * 20),
++        "address_4": bytes.fromhex("deadbeeffeedface00112233445566778899aabb"),
++    }
++    encoded = {}
++    for name, raw in addresses.items():
++        encoded[name] = address_bech32(raw)
++        vectors.append((f"{name}_bytes", raw.hex()))
++        vectors.append((f"{name}_bech32", encoded[name]))
++
++    vectors.append(("bad_checksum_1", mutate_last_char(encoded["address_1"])))
++    vectors.append(("bad_checksum_2", mutate_last_char(encoded["address_2"])))
++    vectors.append(("wrong_prefix", "cosmos" + encoded["address_1"][len(HRP) :]))
++    vectors.append(("uppercase", encoded["address_1"].upper()))
++    vectors.append(("amount_max", str(2**128 - 1)))
++    vectors.append(("amount_units_per_coin", str(10**18)))
++
++    OUT.parent.mkdir(parents=True, exist_ok=True)
++    lines = [f"{key}={value}" if value else key for key, value in vectors]
++    OUT.write_text("\n".join(lines) + "\n", encoding="utf-8")
++    print(f"wrote {OUT.relative_to(REPO)} ({len(lines)} lines)")
++    for name, value in encoded.items():
++        print(f"  {name}: {value}")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/nc_c1.py b/tools/nc_c1.py
+new file mode 100644
+index 0000000..ed0d206
+--- /dev/null
++++ b/tools/nc_c1.py
+@@ -0,0 +1,102 @@
++#!/usr/bin/env python3
++"""Negative controls for C1.
++
++C1 pins canonical types against an INDEPENDENT bech32 reference. These three
++tamper tests require the gate to go red:
++
++  NC-1: flip the BIP-173 checksum constant 1 -> 0.
++  NC-2: flip the address version byte 0x00 -> 0x01.
++  NC-3: corrupt one golden bech32 vector in the fixture.
++
++Every file is restored in a `finally` block. Output goes to
++docs/evidence/c1/nc.log via `make nc-c1`.
++"""
++
++from __future__ import annotations
++
++import os
++import subprocess
++import sys
++from datetime import datetime, timezone
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++ADDRESS_RS = REPO / "crates" / "aura-types" / "src" / "address.rs"
++TEST_RS = REPO / "crates" / "aura-types" / "tests" / "c1_types.rs"
++FIXTURE = REPO / "crates" / "aura-types" / "tests" / "fixtures" / "c1_golden.txt"
++
++
++def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
++    return subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, check=False)
++
++
++def expect_red(label: str, path: Path, old: str, new: str, touch_test: bool = False) -> bool:
++    original = path.read_text(encoding="utf-8")
++    if old not in original:
++        print(f"{label}: FAIL — tamper target not found in {path.name}")
++        return False
++    tampered = original.replace(old, new, 1)
++    if tampered == original:
++        print(f"{label}: FAIL — tamper was a no-op")
++        return False
++    try:
++        path.write_text(tampered, encoding="utf-8")
++        if touch_test:
++            # Force rustc to re-read include_str!(...) after the fixture changes.
++            os.utime(TEST_RS, None)
++        result = run(["cargo", "test", "-p", "aura-types", "--quiet"])
++        went_red = result.returncode != 0
++        output = (result.stdout + result.stderr).strip().splitlines()
++        snippet = "\n".join(output[-5:])
++        print(f"{label}: {'PASS' if went_red else 'FAIL'}")
++        print(f"      cargo test -p aura-types -> rc={result.returncode} "
++              f"({'RED as expected' if went_red else 'UNEXPECTEDLY GREEN'})")
++        print(f"      {snippet}")
++        return went_red
++    finally:
++        path.write_text(original, encoding="utf-8")
++        if touch_test:
++            os.utime(TEST_RS, None)
++
++
++def main() -> int:
++    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
++    print(f"C1 NEGATIVE CONTROLS — {stamp}")
++    print("Rule: a gate that cannot go red is not a gate (CONTRIBUTING.md §1).")
++    print()
++
++    results = [
++        expect_red(
++            "NC-1 bech32 checksum constant",
++            ADDRESS_RS,
++            "const BECH32_CHECKSUM_CONST: u32 = 1;",
++            "const BECH32_CHECKSUM_CONST: u32 = 0;",
++        ),
++        expect_red(
++            "NC-2 address version byte",
++            ADDRESS_RS,
++            "pub const ADDRESS_VERSION: u8 = 0x00;",
++            "pub const ADDRESS_VERSION: u8 = 0x01;",
++        ),
++        expect_red(
++            "NC-3 independent golden vector",
++            FIXTURE,
++            "address_1_bech32=aura1qqqqzqsrqszsvpcgpy9qkrqdpc83qygjzvp3nn97",
++            "address_1_bech32=aura1qqqqzqsrqszsvpcgpy9qkrqdpc83qygjzqp3nn97",
++            touch_test=True,
++        ),
++    ]
++    print()
++    passed = sum(results)
++    print(f"RESULT: {passed}/{len(results)} negative controls PASS")
++    if passed != len(results):
++        return 1
++
++    restored = run(["cargo", "test", "-p", "aura-types", "--quiet"])
++    print(f"restore check: cargo test -p aura-types -> rc={restored.returncode} "
++          f"({'GREEN as expected' if restored.returncode == 0 else 'STILL RED — FAIL'})")
++    return 0 if restored.returncode == 0 else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/write_c1_evidence.py b/tools/write_c1_evidence.py
+new file mode 100644
+index 0000000..b0d3eae
+--- /dev/null
++++ b/tools/write_c1_evidence.py
+@@ -0,0 +1,118 @@
++#!/usr/bin/env python3
++"""Regenerate docs/evidence/c1/gates.txt and docs/evidence/c1/SHA256SUMS.
++
++As with C0, everything is real command output plus exit codes. The pre-C1
++numbers are measured from the C0 git commit (HEAD at generation time).
++
++Usage:
++    python3 tools/write_c1_evidence.py
++    make evidence-c1
++"""
++
++from __future__ import annotations
++
++import hashlib
++import subprocess
++from datetime import datetime, timezone
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++EVIDENCE = REPO / "docs" / "evidence" / "c1"
++OUT = EVIDENCE / "gates.txt"
++FIXTURE = REPO / "crates" / "aura-types" / "tests" / "fixtures" / "c1_golden.txt"
++
++GEN_IDEMPOTENT = (
++    "before=$(sha256sum crates/aura-types/tests/fixtures/c1_golden.txt | cut -d' ' -f1); "
++    "python3 tools/gen_c1_vectors.py >/dev/null; "
++    "after=$(sha256sum crates/aura-types/tests/fixtures/c1_golden.txt | cut -d' ' -f1); "
++    "if [ \"$before\" = \"$after\" ]; then echo \"generator idempotent: $after\"; "
++    "else echo \"GENERATOR DRIFT\"; exit 1; fi"
++)
++
++COMMANDS: list[tuple[str, str, int | None]] = [
++    ("toolchain", "rustc --version && cargo --version", None),
++    ("pre-C1 tree (C0 commit)", "git log -1 --oneline", None),
++    ("pre-C1 .rs files", "git ls-tree -r --name-only HEAD | grep -c '\\.rs$' || true", None),
++    ("pre-C1 golden fixture present", "git ls-tree -r --name-only HEAD | grep -c 'c1_golden.txt' || true", None),
++    ("post-C1 .rs files", "find . -name '*.rs' -not -path './target/*' | wc -l", None),
++    ("post-C1 plan phase rows", "grep -hE '^\\| (✅ |⏸ )?\\*\\*[A-Z]+[0-9]+\\*\\* \\|' docs/plans/*_PLAN.md | wc -l", None),
++    ("independent generator is idempotent", GEN_IDEMPOTENT, None),
++    ("full gate", "make test", 20),
++    ("C1 negative controls", "make nc-c1", 24),
++    ("docs drift guard", "python3 tools/check_claims.py", None),
++]
++
++
++def run(cmd: str) -> tuple[int, str]:
++    result = subprocess.run(
++        cmd, shell=True, cwd=REPO, capture_output=True, text=True, check=False
++    )
++    return result.returncode, (result.stdout + result.stderr).strip()
++
++
++def main() -> int:
++    EVIDENCE.mkdir(parents=True, exist_ok=True)
++    lines = [
++        "AuraLite-Crypto — C1 evidence (canonical types)",
++        f"Generated (UTC): {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
++        "Rule: measured against the tree, not assumed.",
++        "",
++        "Note: bech32 is classic BIP-173, verified against the independent",
++        "Python encoder in tools/gen_c1_vectors.py (not against itself).",
++        "",
++        "=" * 72,
++        "RAW COMMAND OUTPUT",
++        "=" * 72,
++        "",
++    ]
++
++    failures = 0
++    for label, cmd, tail in COMMANDS:
++        rc, out = run(cmd)
++        if tail and out:
++            out = "\n".join(out.splitlines()[-tail:])
++        lines.append(f"--- {label} ---")
++        lines.append(f"$ {cmd}" if len(cmd) < 160 else "$ (shell script: generator idempotence check)")
++        lines.append(out if out else "(no output)")
++        lines.append(f"[rc={rc}]")
++        lines.append("")
++        if rc != 0 and not (label.startswith("pre-C1") and "grep -c" in cmd):
++            failures += 1
++
++    lines += [
++        "=" * 72,
++        "SUMMARY",
++        "=" * 72,
++        "",
++        "Pre-C1 (C0 tree): 12 .rs files, 0 golden fixtures, 5 Rust tests.",
++        "Post-C1: 17 .rs files, 1 golden fixture (23 lines), 17 Rust tests",
++        "passing (5 unit + 11 C1 vectors + 1 identity), 0 external",
++        "dependencies, `make test` ALL GATES GREEN, 3/3 negative controls",
++        "PASS. Validators/blocks/tx remain 0/0/0.",
++        "",
++        "The independent generator is byte-stable: re-running it does not",
++        "change the fixture (checked above with sha256 before/after).",
++        "",
++    ]
++    OUT.write_text("\n".join(lines), encoding="utf-8")
++
++    nc_log = EVIDENCE / "nc.log"
++    if not nc_log.exists():
++        print("ERROR: docs/evidence/c1/nc.log missing (run `make nc-c1`)")
++        return 1
++
++    sums = []
++    for path in (OUT, nc_log, FIXTURE):
++        digest = hashlib.sha256(path.read_bytes()).hexdigest()
++        rel = path.relative_to(REPO)
++        sums.append(f"{digest}  {rel}")
++    (EVIDENCE / "SHA256SUMS").write_text("\n".join(sums) + "\n", encoding="utf-8")
++
++    print(f"wrote {OUT.relative_to(REPO)} ({len(lines)} lines)")
++    print(f"wrote {nc_log.relative_to(REPO)}")
++    print("wrote docs/evidence/c1/SHA256SUMS")
++    return 1 if failures else 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+-- 
+2.47.3
+

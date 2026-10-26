@@ -1,0 +1,2259 @@
+From 3ff245c81476f2e4fc7dec68e3d0d230c2099f09 Mon Sep 17 00:00:00 2001
+From: AlexanderNyr <alexander@auralite.local>
+Date: Sun, 25 Oct 2026 19:55:30 +0000
+Subject: [PATCH] C6 merkle proofs
+
+---
+ .github/workflows/ci.yml                      |  19 +-
+ CHANGELOG.md                                  |  60 +++
+ CONTRIBUTING.md                               |   2 +
+ Makefile                                      |  19 +-
+ README.md                                     |  31 +-
+ ROADMAP.md                                    |  27 +-
+ crates/aura-block/src/error.rs                |  49 +++
+ crates/aura-block/src/lib.rs                  |   8 +-
+ crates/aura-block/src/merkle.rs               |  20 +-
+ crates/aura-block/src/proof.rs                | 273 ++++++++++++++
+ crates/aura-block/tests/c6_merkle.rs          | 351 ++++++++++++++++++
+ .../aura-block/tests/fixtures/c6_golden.txt   |  69 ++++
+ docs/ARCHITECTURE.md                          |   8 +
+ docs/STATUS.md                                |  34 +-
+ docs/evidence/c6/SHA256SUMS                   |   4 +
+ docs/evidence/c6/gates.txt                    | 164 ++++++++
+ docs/evidence/c6/nc.log                       |  48 +++
+ docs/plans/CORE_PLAN.md                       |  55 ++-
+ docs/spec/merkle-proof-format.md              | 113 ++++++
+ tools/gen_c6_vectors.py                       | 272 ++++++++++++++
+ tools/nc_c6.py                                | 124 +++++++
+ tools/write_c6_evidence.py                    | 130 +++++++
+ 22 files changed, 1814 insertions(+), 66 deletions(-)
+ create mode 100644 crates/aura-block/src/proof.rs
+ create mode 100644 crates/aura-block/tests/c6_merkle.rs
+ create mode 100644 crates/aura-block/tests/fixtures/c6_golden.txt
+ create mode 100644 docs/evidence/c6/SHA256SUMS
+ create mode 100644 docs/evidence/c6/gates.txt
+ create mode 100644 docs/evidence/c6/nc.log
+ create mode 100644 docs/spec/merkle-proof-format.md
+ create mode 100644 tools/gen_c6_vectors.py
+ create mode 100644 tools/nc_c6.py
+ create mode 100644 tools/write_c6_evidence.py
+
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 9a323d5..0d2162e 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -10,7 +10,7 @@ on:
+ # perf) are added by O0 as the crates that need them actually appear.
+ jobs:
+   core:
+-    name: core (C0-C5 gate)
++    name: core (C0-C6 gate)
+     runs-on: ubuntu-latest
+     steps:
+       - uses: actions/checkout@v4
+@@ -27,25 +27,25 @@ jobs:
+       - name: make test
+         run: make test
+ 
+-      - name: golden vectors are reproducible (C1 + C2 + C3 + C4 + C5)
+-        run: make gen-c1-vectors && make gen-c2-vectors && make gen-c3-vectors && make gen-c4-vectors && make gen-c5-vectors
++      - name: golden vectors are reproducible (C1-C6)
++        run: make gen-c1-vectors && make gen-c2-vectors && make gen-c3-vectors && make gen-c4-vectors && make gen-c5-vectors && make gen-c6-vectors
+ 
+-      # nc-all runs all 26 NCs without rewriting the historical C0-C4 logs,
++      # nc-all runs all 32 NCs without rewriting the historical C0-C5 logs,
+       # so those committed SHA256SUMS remain valid in the uploaded artifact.
+-      - name: negative controls (C0-C5, 26 total)
++      - name: negative controls (C0-C6, 32 total)
+         run: make nc-all
+ 
+-      # Only the CURRENT phase's evidence is regenerated. C0-C4 evidence is a
++      # Only the CURRENT phase's evidence is regenerated. C0-C5 evidence is a
+       # HISTORICAL committed record measured at its own commit; regenerating
+       # it later would relabel the wrong tree.
+-      - name: current phase evidence (C5)
+-        run: make evidence-c5
++      - name: current phase evidence (C6)
++        run: make evidence-c6
+ 
+       - name: Upload evidence
+         if: always()
+         uses: actions/upload-artifact@v4
+         with:
+-          name: c0-c5-evidence
++          name: c0-c6-evidence
+           path: |
+             docs/evidence/c0/
+             docs/evidence/c1/
+@@ -53,4 +53,5 @@ jobs:
+             docs/evidence/c3/
+             docs/evidence/c4/
+             docs/evidence/c5/
++            docs/evidence/c6/
+           if-no-files-found: ignore
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index f9e5c8d..602574d 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,66 @@
+ All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
+ never rewritten: corrections are made with a new entry or an explicit note.
+ 
++## [C6 — Merkle proofs] 2026-10-25
++
++**Seventh code phase.** Deliverable:
++`patches/0007-C6-merkle-proofs.patch`. **No new crate and no new external
++dependency** — the proof module lives inside `aura-block`.
++
++- **Compact inclusion proofs:** `MerkleProof = varint(index) ||
++  varint(total) || leaf[32] || varint(sibling_count) || sibling[32]*count`.
++  Sibling direction is derived from `index >> level`, so no direction bits are
++  stored. `MAX_PROOF_DEPTH = 64`; minimal LEB128 varints and
++  `decode_canonical()` reject non-canonical encodings. For 1000 leaves the
++  depth is 10 and a proof is ~358 bytes.
++- **Two leaf kinds, one tree shape.** Transaction leaves are the C5
++  `leaf_hash(txid)`; event leaves are
++  `BLAKE3(EVENT_LEAF_CONTEXT || u64(len) || event)`, so a tx leaf cannot be
++  replayed as an event leaf and ambiguous concatenations cannot collide.
++  `verify_tx_inclusion` / `verify_event_inclusion` bind the supplied value to
++  `proof.leaf` before checking the path — without that, a proof would only
++  show that *some* hash is in the tree.
++- **C5 tree unchanged.** `compute_tx_root` now delegates to `build_tx_tree`;
++  root and proof share one padded-level implementation, so they cannot
++  disagree. A regression test compares the C5 root of four real C4
++  transactions with the C6 tree root. The C5 and C6 generators agree on
++  `LEAF_CONTEXT`/`NODE_CONTEXT` — pinned by a test.
++- **Spec:** `docs/spec/merkle-proof-format.md` (tree construction, wire
++  format, verification order, vectors, non-goals).
++- **Independent golden vectors:** `tools/gen_c6_vectors.py` — pure-Python
++  BLAKE3 (self-checked against 7 official BLAKE3 vectors) plus a
++  transcription of the C5 tree and C6 encoding. 69 fixture lines: roots and
++  depths for **1/2/3/5/8/1000** tx leaves, roots for 1/3/5 event leaves,
++  **34 canonical proofs** and **11 rejection vectors**, each pinned to a
++  specific error. Generator is offline and byte-stable.
++- **C6 DoD gate:** 1000 leaves, all **1000** proofs generated and verified,
++  then one substituted leaf rejected — both by leaf binding (`LeafMismatch`)
++  and by the reconstructed root (`RootMismatch`).
++- **Gate:** `make test` → **71 passed / 0 failed** (60 C0–C5 + 11 C6),
++  fmt/clippy clean, drift guard 12 plans / 112 rows / 22 markdown files,
++  dependency gate 54 external crates allowlisted.
++- **Negative controls:** `tools/nc_c6.py` → `make nc-c6` →
++  `docs/evidence/c6/nc.log`, **6/6 PASS**: event-leaf context, golden root,
++  leaf/value binding, sibling-count check, sibling direction, root
++  comparison. Total C0–C6: **32 NC**.
++- **Gate-found fixes:** clippy required `u64::div_ceil`,
++  `is_multiple_of(2)` and an iterator instead of an index loop. All fixed in
++  code, not suppressed.
++- **Tooling / CI:** `make nc-all` now covers C0–C6 (32 NC) without rewriting
++  historical logs; CI regenerates only `make evidence-c6`. New targets:
++  `make gen-c6-vectors`, `make nc-c6`, `make evidence-c6`.
++- **Evidence:** `docs/evidence/c6/gates.txt` (pre-C6 counts from the C5
++  commit, the 1000-leaf gate, raw output), `docs/evidence/c6/nc.log`,
++  `SHA256SUMS` (also pins the golden fixture and the spec).
++- **Docs synced (D9):** `README.md`, `docs/STATUS.md`,
++  `docs/ARCHITECTURE.md` (C6 block), `CHANGELOG.md`, `ROADMAP.md` (ledger,
++  §4, §8), `CONTRIBUTING.md`, `CORE_PLAN.md` (C6 ✅, decision D-C8 +
++  receipt), and the new `docs/spec/merkle-proof-format.md`.
++- **Not claimed:** accounts and state key layout (C7), genesis (C8), test rig
++  and fuzzing (C9), batch/multiproofs, sparse state trees (S1), proof serving
++  over RPC (N/D phases), `cargo deny` (H1). Validators/blocks/tx remain
++  **0/0/0**.
++
+ ## [C5 — block and header] 2026-10-25
+ 
+ **Sixth code phase.** Deliverable: `patches/0006-C5-block-header.patch`.
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index 79c6497..7107e00 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -107,5 +107,7 @@ that does not run its main test is a dead gate — that is a separate defect
+       `docs/spec/tx-format.md` + golden vectors updated in the same patch.
+ - [ ] Block wire format unchanged, or `PROTOCOL_VERSION` bumped and
+       `docs/spec/block-format.md` + golden vectors updated in the same patch.
++- [ ] Merkle proof format unchanged, or `docs/spec/merkle-proof-format.md`
++      and `tools/gen_c6_vectors.py` updated in the same patch.
+ - [ ] No new `unsafe` without justification.
+ - [ ] The north star was not pushed aside by a "temporary" solution.
+diff --git a/Makefile b/Makefile
+index e8e43eb..85e4be2 100644
+--- a/Makefile
++++ b/Makefile
+@@ -10,7 +10,8 @@ PYTHON ?= python3
+         gen-c2-vectors nc-c2 evidence-c2 \
+         check-deps record-c3-deps gen-c3-vectors nc-c3 evidence-c3 \
+         nc-all gen-c4-vectors nc-c4 evidence-c4 \
+-        gen-c5-vectors nc-c5 evidence-c5 devnet clean
++        gen-c5-vectors nc-c5 evidence-c5 \
++        gen-c6-vectors nc-c6 evidence-c6 devnet clean
+ 
+ help:
+ 	@echo "AuraLite-Crypto (Stage 1, C0)"
+@@ -37,6 +38,9 @@ help:
+ 	@echo "  make gen-c5-vectors    regenerate independent block golden vectors"
+ 	@echo "  make nc-c5             C5 negative controls -> docs/evidence/c5/nc.log"
+ 	@echo "  make evidence-c5       regenerate docs/evidence/c5/gates.txt + SHA256SUMS"
++	@echo "  make gen-c6-vectors    regenerate independent Merkle-proof vectors"
++	@echo "  make nc-c6             C6 negative controls -> docs/evidence/c6/nc.log"
++	@echo "  make evidence-c6       regenerate docs/evidence/c6/gates.txt + SHA256SUMS"
+ 	@echo "  make test-sanitize     SKIP until H3/C9"
+ 	@echo "  make test-determinism  SKIP until X7"
+ 	@echo "  make fuzz-smoke        SKIP until H3"
+@@ -135,7 +139,7 @@ evidence-c3:
+ # Runs every NC script WITHOUT rewriting the historical C0-C3 evidence logs,
+ # so their committed SHA256SUMS stay valid. CI uses this instead of nc-cX.
+ nc-all:
+-	@for phase in 0 1 2 3 4 5; do \
++	@for phase in 0 1 2 3 4 5 6; do \
+ 	    $(PYTHON) tools/nc_c$$phase.py > /tmp/aura-nc-c$$phase.log 2>&1 || \
+ 	      { echo "C$$phase NEGATIVE CONTROLS FAILED"; tail -30 /tmp/aura-nc-c$$phase.log; exit 1; }; \
+ 	    grep '^RESULT:' /tmp/aura-nc-c$$phase.log; \
+@@ -163,6 +167,17 @@ nc-c5:
+ evidence-c5:
+ 	@$(PYTHON) tools/write_c5_evidence.py
+ 
++gen-c6-vectors:
++	@$(PYTHON) tools/gen_c6_vectors.py
++
++nc-c6:
++	@mkdir -p docs/evidence/c6
++	@$(PYTHON) tools/nc_c6.py > docs/evidence/c6/nc.log 2>&1 || { cat docs/evidence/c6/nc.log; exit 1; }
++	@cat docs/evidence/c6/nc.log
++
++evidence-c6:
++	@$(PYTHON) tools/write_c6_evidence.py
++
+ devnet:
+ 	@echo "ERROR: devnet is D7 (NODE_PLAN). It is not implemented at C0." >&2
+ 	@exit 1
+diff --git a/README.md b/README.md
+index 951f8da..9551e82 100644
+--- a/README.md
++++ b/README.md
+@@ -11,16 +11,15 @@
+ Name and ticker were locked by the owner on 2026-10-25. The ticker was checked
+ for collisions — see [`docs/TICKER_AUDIT.md`](docs/TICKER_AUDIT.md).
+ 
+-> **Status: C5 LANDED (2026-10-25).** C0 gave us the workspace, CI and
+-> `make test`; C1 added the canonical types; C2 `aura-codec`; C3
+-> `aura-crypto`; C4 `aura-tx`; C5 adds `aura-block` — the canonical
+-> `Header`/`Body`, a binary BLAKE3 `tx_root`, `block_hash` and a body sorted
+-> by `(signer, nonce)`. Reordering transactions changes `tx_root`; a block
+-> whose root was not recomputed is rejected. There is still **no consensus,
+-> VM, P2P, node or wallet**, and `state_root`/`validator_set_hash`/`qc` are
+-> caller-supplied values, not computed state. Everything else below is a plan,
+-> not a report about an implementation. Every claim of readiness appears only
+-> after a measurable test gate, as in
++> **Status: C6 LANDED (2026-10-25).** C0 gave us the workspace, CI and
++> `make test`; C1 the canonical types; C2 `aura-codec`; C3 `aura-crypto`; C4
++> `aura-tx`; C5 `aura-block`; C6 adds compact **Merkle inclusion proofs**
++> for transactions and events over the same C5 tree. 1000-leaf gate: all
++> 1000 proofs verify, one substituted leaf is rejected. There is still **no
++> consensus, VM, P2P, node or wallet**, and `state_root`/`validator_set_hash`/
++> `qc` are caller-supplied values, not computed state. Everything else below
++> is a plan, not a report about an implementation. Every claim of readiness
++> appears only after a measurable test gate, as in
+ > [AuraLite-Emulator](https://github.com/AlexanderNyr/AuraLite-Emulator) and
+ > [AuraLite-OS](https://github.com/AlexanderNyr/AuraLite-OS).
+ 
+@@ -81,14 +80,14 @@ Details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+ 
+ ## Quickstart
+ 
+-**Now (C5)** the foundation is real and verifiable:
++**Now (C6)** the foundation is real and verifiable:
+ 
+ ```sh
+ make deps-check          # rustc / cargo / rustfmt / clippy
+ make test                # fmt + clippy + cargo test + drift + dependency gate
+-make nc-all              # all 26 negative controls (C0-C5), no historical log churn
+-make gen-c5-vectors      # independent block vectors (self-checked BLAKE3)
+-make evidence-c5         # current phase gate + receipts
++make nc-all              # all 32 negative controls (C0-C6), no historical log churn
++make gen-c6-vectors      # independent Merkle-proof vectors (self-checked BLAKE3)
++make evidence-c6         # current phase gate + receipts
+ ```
+ 
+ **The devnet does not exist yet — and that is honest.** After phase D7 (devnet)
+@@ -123,8 +122,8 @@ AuraLite-Crypto/
+     ARCHITECTURE.md      <- invariants and data flow
+     TICKER_AUDIT.md      <- measured ticker collision audit
+     plans/*_PLAN.md      <- 12 plans, dependency-ordered, DoD + gate per phase
+-    evidence/            <- gate logs / receipts (C0-C4)
+-    spec/                <- tx (C4) + block (C5) specs, dependency allowlist
++    evidence/            <- gate logs / receipts (C0-C6)
++    spec/                <- tx/block/proof specs (C4-C6), dependency allowlist
+   patches/               <- one .patch per phase (0001-C0-... shipped)
+   crates/*               <- 13 crates: types, codec, crypto, tx, block + 8 placeholders
+   contracts/*            <- reference contracts (ARC-20, ARC-721, AMM, ...)
+diff --git a/ROADMAP.md b/ROADMAP.md
+index 6c489da..1104e15 100644
+--- a/ROADMAP.md
++++ b/ROADMAP.md
+@@ -121,7 +121,7 @@ phase tables (decision Q5).
+ 
+ | Plan | Status | Scope | Phases |
+ |---|---|---|---|
+-| [`docs/plans/CORE_PLAN.md`](docs/plans/CORE_PLAN.md) | 🚧 IN PROGRESS (C0–C5 ✅) | primitives, codec, crypto, tx/block, genesis, test rig | C0–C10 |
++| [`docs/plans/CORE_PLAN.md`](docs/plans/CORE_PLAN.md) | 🚧 IN PROGRESS (C0–C6 ✅) | primitives, codec, crypto, tx/block, genesis, test rig | C0–C10 |
+ | [`docs/plans/STATE_PLAN.md`](docs/plans/STATE_PLAN.md) | 📋 PLAN | Merkle state, RocksDB, WAL, snapshots, pruning, recovery | S0–S7 |
+ | [`docs/plans/EXEC_PLAN.md`](docs/plans/EXEC_PLAN.md) | 📋 PLAN | WASM runtime, gas, ABI, contract SDK, determinism | X0–X9 |
+ | [`docs/plans/CONSENSUS_PLAN.md`](docs/plans/CONSENSUS_PLAN.md) | 📋 PLAN | BFT-PoS, QC, VRF, staking, slashing, finality, governance | B0–B10 |
+@@ -224,6 +224,12 @@ files, 60 tests passing, `make nc-all` → **26/26 negative controls PASS**,
+ covers 21 markdown files. Receipts: `docs/evidence/c5/`. Validators/blocks/tx
+ are still 0/0/0 — C5 is a format, not a network.
+ 
++**Post-C6 measurement (2026-10-25):** still 13 crates (proof module inside
++`aura-block`), 43 `.rs` files, 71 tests passing, `make nc-all` → **32/32
++negative controls PASS**, 6/6 new in C6, still 54 external crates, drift guard
++now covers 22 markdown files. The 1000-leaf DoD gate verifies all proofs and
++rejects one substituted leaf. Receipts: `docs/evidence/c6/`.
++
+ ### Measured gaps to the north star
+ 
+ | # | Gap | Evidence in the tree | Plan |
+@@ -298,18 +304,19 @@ after the fact, as in AuraLite OS.
+ 
+ ## 8. Immediate queue
+ 
+-**C0, C1, C2, C3, C4 and C5 shipped**
++**C0, C1, C2, C3, C4, C5 and C6 shipped**
+ (`patches/0001-C0-baseline-workspace.patch`,
+ `patches/0002-C1-types.patch`, `patches/0003-C2-codec.patch`,
+ `patches/0004-C3-crypto.patch`, `patches/0005-C4-tx-format.patch`,
+-`patches/0006-C5-block-header.patch`): workspace, CI, gates, identity
+-constants, canonical types, `aura-codec`, `aura-crypto`, the `aura-tx`
+-transaction format and the `aura-block` block format — all pinned against
+-independent references and guarded by 26 negative controls. Right now:
+-**C6** — Merkle proofs: build/verify proofs for transactions and events in a
+-compact format over the C5 tree, with 1000 leaves, all proofs valid and one
+-substituted leaf rejected. The next patch is
+-`patches/0007-C6-merkle-proofs.patch`.
++`patches/0006-C5-block-header.patch`, `patches/0007-C6-merkle-proofs.patch`):
++workspace, CI, gates, identity constants, canonical types, `aura-codec`,
++`aura-crypto`, the `aura-tx` transaction format, the `aura-block` block format
++and compact Merkle proofs — all pinned against independent references and
++guarded by 32 negative controls. Right now: **C7** — the account model:
++`Account { nonce, balance, code_hash, storage_root }`, a state key layout with
++reserved prefixes, and gates proving two account keys cannot collide and
++reserved space is unreachable from contracts. The next patch is
++`patches/0008-C7-account-model.patch`.
+ 
+ See also: [`docs/STATUS.md`](docs/STATUS.md),
+ [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
+diff --git a/crates/aura-block/src/error.rs b/crates/aura-block/src/error.rs
+index a98ef7b..37fd718 100644
+--- a/crates/aura-block/src/error.rs
++++ b/crates/aura-block/src/error.rs
+@@ -73,3 +73,52 @@ impl From<TxError> for BlockError {
+         BlockError::InvalidTransaction(error)
+     }
+ }
++
++/// Errors produced by Merkle proof generation and verification (C6).
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum MerkleError {
++    /// Cannot prove or verify anything in an empty tree.
++    EmptyTree,
++    /// Leaf index is outside the tree. Tuple is `(index, total)`.
++    IndexOutOfBounds(u64, u64),
++    /// Proof has the wrong number of siblings. Tuple is `(got, expected)`.
++    WrongSiblingCount(usize, usize),
++    /// The leaf hash does not match the value being proven.
++    LeafMismatch,
++    /// The reconstructed root does not match the expected root.
++    /// Tuple is `(computed, expected)`.
++    RootMismatch(Hash, Hash),
++    /// Canonical decoding failed (structural).
++    Decode(CodecError),
++}
++
++impl fmt::Display for MerkleError {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::EmptyTree => f.write_str("cannot prove an empty Merkle tree"),
++            Self::IndexOutOfBounds(index, total) => {
++                write!(f, "leaf index {index} is out of bounds for {total} leaves")
++            }
++            Self::WrongSiblingCount(got, expected) => {
++                write!(f, "proof has {got} siblings, expected {expected}")
++            }
++            Self::LeafMismatch => f.write_str("proof leaf does not match the supplied value"),
++            Self::RootMismatch(computed, expected) => {
++                write!(
++                    f,
++                    "root mismatch: computed {}, expected {}",
++                    computed, expected
++                )
++            }
++            Self::Decode(error) => write!(f, "canonical decode failed: {error}"),
++        }
++    }
++}
++
++impl std::error::Error for MerkleError {}
++
++impl From<CodecError> for MerkleError {
++    fn from(error: CodecError) -> Self {
++        MerkleError::Decode(error)
++    }
++}
+diff --git a/crates/aura-block/src/lib.rs b/crates/aura-block/src/lib.rs
+index 00581f9..8f09aa3 100644
+--- a/crates/aura-block/src/lib.rs
++++ b/crates/aura-block/src/lib.rs
+@@ -28,9 +28,15 @@ mod body;
+ mod error;
+ mod header;
+ mod merkle;
++mod proof;
+ 
+ pub use block::Block;
+ pub use body::{Body, MAX_BLOCK_TXS};
+-pub use error::BlockError;
++pub use error::{BlockError, MerkleError};
+ pub use header::{BLOCK_HASH_PAYLOAD_CONTEXT, Header, HeaderParams, MAX_QC_BYTES};
+ pub use merkle::{LEAF_CONTEXT, NODE_CONTEXT, compute_tx_root, leaf_hash, node_hash};
++pub use proof::{
++    EVENT_LEAF_CONTEXT, MAX_PROOF_DEPTH, MerkleProof, MerkleTree, build_event_tree,
++    build_tree_from_leaf_hashes, build_tx_tree, event_leaf_hash, tree_depth,
++    verify_event_inclusion, verify_proof, verify_tx_inclusion,
++};
+diff --git a/crates/aura-block/src/merkle.rs b/crates/aura-block/src/merkle.rs
+index 91defba..53844f0 100644
+--- a/crates/aura-block/src/merkle.rs
++++ b/crates/aura-block/src/merkle.rs
+@@ -41,22 +41,14 @@ pub fn node_hash(left: &Hash, right: &Hash) -> Hash {
+ /// Rules: an empty body yields [`Hash::ZERO`]; a single leaf is the root; at
+ /// each level an odd final node is duplicated before pairing. The result is
+ /// order-sensitive — that is the C5 DoD property.
++///
++/// Since C6 both the root and the proofs come from the same
++/// [`crate::build_tx_tree`] implementation, so a root and a proof can never
++/// disagree about the tree shape.
+ pub fn compute_tx_root(txs: &[Tx]) -> Hash {
+     if txs.is_empty() {
+         return Hash::ZERO;
+     }
+-    let mut level: Vec<Hash> = txs.iter().map(|tx| leaf_hash(&tx.txid())).collect();
+-    while level.len() > 1 {
+-        if level.len() % 2 == 1 {
+-            let last = *level.last().expect("non-empty level");
+-            level.push(last);
+-        }
+-        level = level
+-            .as_chunks::<2>()
+-            .0
+-            .iter()
+-            .map(|pair| node_hash(&pair[0], &pair[1]))
+-            .collect();
+-    }
+-    level[0]
++    let txids: Vec<Hash> = txs.iter().map(|tx| tx.txid()).collect();
++    crate::proof::build_tx_tree(&txids).root()
+ }
+diff --git a/crates/aura-block/src/proof.rs b/crates/aura-block/src/proof.rs
+new file mode 100644
+index 0000000..6a0ebe9
+--- /dev/null
++++ b/crates/aura-block/src/proof.rs
+@@ -0,0 +1,273 @@
++//! Compact Merkle inclusion proofs (C6).
++//!
++//! The tree shape is the C5 tree: leaves are `leaf_hash(txid)` (or
++//! `event_leaf_hash(event)` for the event tree), internal nodes are
++//! `node_hash(left, right)`, and an odd final node is duplicated at every
++//! level. C6 adds proof generation and verification over that same tree —
++//! the `tx_root` scheme is unchanged.
++//!
++//! A proof is `varint(index) || varint(total) || leaf[32] ||
++//! varint(sibling_count) || sibling[32] * count`. Sibling direction is
++//! derived from the index at each level, so no direction bits are stored.
++//! For 1000 leaves the depth is 10, i.e. ~330 bytes per proof.
++
++use aura_codec::{
++    CodecError, Decode, Encode, Reader, Writer, decode_canonical, encode_to_bytes, read_varint,
++    write_varint,
++};
++use aura_crypto::blake3_hash;
++use aura_types::Hash;
++
++use crate::error::MerkleError;
++use crate::merkle::{leaf_hash, node_hash};
++
++/// Domain tag for event leaves. Separate from [`crate::LEAF_CONTEXT`] so a
++/// transaction leaf can never be replayed as an event leaf.
++///
++/// NC target: `tools/nc_c6.py` changes this constant and requires the C6
++/// event vectors to go red.
++pub const EVENT_LEAF_CONTEXT: &[u8] = b"AuraLite-Crypto/event-leaf-v1\x00";
++
++/// Maximum proof depth. A `u64` leaf count needs at most 64 levels.
++pub const MAX_PROOF_DEPTH: usize = 64;
++
++/// Hash an event into a leaf: length-prefixed so boundaries are unambiguous.
++pub fn event_leaf_hash(event: &[u8]) -> Hash {
++    let mut input = Vec::with_capacity(EVENT_LEAF_CONTEXT.len() + 8 + event.len());
++    input.extend_from_slice(EVENT_LEAF_CONTEXT);
++    input.extend_from_slice(&(event.len() as u64).to_le_bytes());
++    input.extend_from_slice(event);
++    blake3_hash(&input)
++}
++
++/// Number of sibling hashes a proof for `total` leaves must carry.
++pub fn tree_depth(total: u64) -> usize {
++    let mut len = total;
++    let mut depth = 0usize;
++    while len > 1 {
++        len = len.div_ceil(2);
++        depth += 1;
++    }
++    depth
++}
++
++/// In-memory Merkle tree. Levels are padded (odd final node duplicated), so
++/// `prove()` can always find `position ^ 1`.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct MerkleTree {
++    total: usize,
++    levels: Vec<Vec<Hash>>,
++}
++
++impl MerkleTree {
++    /// Original (unpadded) number of leaves.
++    pub fn len(&self) -> usize {
++        self.total
++    }
++
++    /// True if the tree has no leaves.
++    pub fn is_empty(&self) -> bool {
++        self.total == 0
++    }
++
++    /// The Merkle root, or [`Hash::ZERO`] for an empty tree.
++    pub fn root(&self) -> Hash {
++        match self.levels.last() {
++            Some(level) => level[0],
++            None => Hash::ZERO,
++        }
++    }
++
++    /// Build an inclusion proof for one leaf index.
++    pub fn prove(&self, index: usize) -> Result<MerkleProof, MerkleError> {
++        if self.total == 0 {
++            return Err(MerkleError::EmptyTree);
++        }
++        if index >= self.total {
++            return Err(MerkleError::IndexOutOfBounds(
++                index as u64,
++                self.total as u64,
++            ));
++        }
++        let mut siblings = Vec::with_capacity(self.levels.len().saturating_sub(1));
++        let mut position = index;
++        for level in 0..self.levels.len().saturating_sub(1) {
++            let nodes = &self.levels[level];
++            siblings.push(nodes[position ^ 1]);
++            position /= 2;
++        }
++        Ok(MerkleProof {
++            index: index as u64,
++            total: self.total as u64,
++            leaf: self.levels[0][index],
++            siblings,
++        })
++    }
++}
++
++/// Build a tree from pre-hashed leaves (single source of tree shape).
++pub fn build_tree_from_leaf_hashes(leaf_hashes: &[Hash]) -> MerkleTree {
++    if leaf_hashes.is_empty() {
++        return MerkleTree {
++            total: 0,
++            levels: Vec::new(),
++        };
++    }
++    let total = leaf_hashes.len();
++    let mut levels: Vec<Vec<Hash>> = Vec::new();
++    let mut current = leaf_hashes.to_vec();
++    loop {
++        if current.len() > 1 && current.len() % 2 == 1 {
++            current.push(*current.last().expect("non-empty level"));
++        }
++        levels.push(current.clone());
++        if current.len() == 1 {
++            break;
++        }
++        current = current
++            .as_chunks::<2>()
++            .0
++            .iter()
++            .map(|pair| node_hash(&pair[0], &pair[1]))
++            .collect();
++    }
++    MerkleTree { total, levels }
++}
++
++/// Build a transaction tree from txids.
++pub fn build_tx_tree(txids: &[Hash]) -> MerkleTree {
++    build_tree_from_leaf_hashes(&txids.iter().map(leaf_hash).collect::<Vec<_>>())
++}
++
++/// Build an event tree from raw event bytes.
++pub fn build_event_tree(events: &[Vec<u8>]) -> MerkleTree {
++    build_tree_from_leaf_hashes(
++        &events
++            .iter()
++            .map(|event| event_leaf_hash(event))
++            .collect::<Vec<_>>(),
++    )
++}
++
++/// A compact inclusion proof.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct MerkleProof {
++    /// Leaf index in the original (unpadded) tree.
++    pub index: u64,
++    /// Total number of leaves in the original tree.
++    pub total: u64,
++    /// Hash of the leaf being proven.
++    pub leaf: Hash,
++    /// Sibling hashes, bottom-up.
++    pub siblings: Vec<Hash>,
++}
++
++impl MerkleProof {
++    /// Canonical wire bytes.
++    pub fn to_bytes(&self) -> Vec<u8> {
++        encode_to_bytes(self)
++    }
++
++    /// Decode with full C2 canonicality.
++    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, MerkleError> {
++        Ok(decode_canonical::<MerkleProof>(bytes)?)
++    }
++}
++
++impl Encode for MerkleProof {
++    fn encode(&self, writer: &mut Writer) {
++        write_varint(writer, self.index);
++        write_varint(writer, self.total);
++        writer.push_bytes(self.leaf.as_bytes());
++        write_varint(writer, self.siblings.len() as u64);
++        for sibling in &self.siblings {
++            writer.push_bytes(sibling.as_bytes());
++        }
++    }
++}
++
++impl Decode for MerkleProof {
++    fn decode(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
++        let index = read_varint(reader)?;
++        let total = read_varint(reader)?;
++        let leaf = Hash::decode(reader)?;
++        let count = read_varint(reader)?;
++        if count > MAX_PROOF_DEPTH as u64 {
++            return Err(CodecError::TooManyItems(count as usize));
++        }
++        let mut siblings = Vec::with_capacity(count as usize);
++        for _ in 0..count {
++            siblings.push(Hash::decode(reader)?);
++        }
++        Ok(MerkleProof {
++            index,
++            total,
++            leaf,
++            siblings,
++        })
++    }
++}
++
++/// Verify a proof path against a root.
++///
++/// NC targets: `tools/nc_c6.py` disables the sibling-count check, the
++/// direction rule and the root comparison here, requiring the C6 vectors to
++/// go red.
++pub fn verify_proof(root: &Hash, proof: &MerkleProof) -> Result<(), MerkleError> {
++    if proof.total == 0 {
++        return Err(MerkleError::EmptyTree);
++    }
++    if proof.index >= proof.total {
++        return Err(MerkleError::IndexOutOfBounds(proof.index, proof.total));
++    }
++    let expected_depth = tree_depth(proof.total);
++    if proof.siblings.len() != expected_depth {
++        return Err(MerkleError::WrongSiblingCount(
++            proof.siblings.len(),
++            expected_depth,
++        ));
++    }
++    let mut computed = proof.leaf;
++    let mut position = proof.index;
++    for sibling in &proof.siblings {
++        if position.is_multiple_of(2) {
++            computed = node_hash(&computed, sibling);
++        } else {
++            computed = node_hash(sibling, &computed);
++        }
++        position /= 2;
++    }
++    if computed != *root {
++        return Err(MerkleError::RootMismatch(computed, *root));
++    }
++    Ok(())
++}
++
++/// Verify that `txid` is included at `proof.index` under `root`.
++///
++/// NC target: `tools/nc_c6.py` disables the leaf binding here, requiring the
++/// substituted-leaf vector to go red.
++pub fn verify_tx_inclusion(
++    root: &Hash,
++    txid: &Hash,
++    proof: &MerkleProof,
++) -> Result<(), MerkleError> {
++    let expected_leaf = leaf_hash(txid);
++    if expected_leaf != proof.leaf {
++        return Err(MerkleError::LeafMismatch);
++    }
++    verify_proof(root, proof)
++}
++
++/// Verify that raw `event` bytes are included at `proof.index` under `root`.
++pub fn verify_event_inclusion(
++    root: &Hash,
++    event: &[u8],
++    proof: &MerkleProof,
++) -> Result<(), MerkleError> {
++    let expected_leaf = event_leaf_hash(event);
++    if expected_leaf != proof.leaf {
++        return Err(MerkleError::LeafMismatch);
++    }
++    verify_proof(root, proof)
++}
+diff --git a/crates/aura-block/tests/c6_merkle.rs b/crates/aura-block/tests/c6_merkle.rs
+new file mode 100644
+index 0000000..908cb08
+--- /dev/null
++++ b/crates/aura-block/tests/c6_merkle.rs
+@@ -0,0 +1,351 @@
++//! C6 gate: Merkle proofs against an independent Python implementation.
++//!
++//! `fixtures/c6_golden.txt` comes from `tools/gen_c6_vectors.py`, which
++//! self-checks pure-Python BLAKE3 against official vectors before emitting
++//! roots, proofs and rejection vectors.
++
++use std::collections::BTreeMap;
++
++use aura_block::{
++    EVENT_LEAF_CONTEXT, LEAF_CONTEXT, MAX_PROOF_DEPTH, MerkleError, MerkleProof, NODE_CONTEXT,
++    build_event_tree, build_tree_from_leaf_hashes, build_tx_tree, compute_tx_root, event_leaf_hash,
++    tree_depth, verify_event_inclusion, verify_proof, verify_tx_inclusion,
++};
++use aura_codec::CodecError;
++use aura_tx::Tx;
++use aura_types::Hash;
++
++const GOLDEN: &str = include_str!("fixtures/c6_golden.txt");
++const C5_GOLDEN: &str = include_str!("fixtures/c5_golden.txt");
++const C4_GOLDEN: &str = include_str!("../../aura-tx/tests/fixtures/c4_golden.txt");
++
++fn parse(text: &str) -> BTreeMap<String, String> {
++    let mut map = BTreeMap::new();
++    for line in text.lines() {
++        let trimmed = line.trim();
++        if trimmed.is_empty() || trimmed.starts_with('#') {
++            continue;
++        }
++        let (key, value) = trimmed
++            .split_once('=')
++            .unwrap_or_else(|| panic!("malformed golden line: {trimmed}"));
++        assert!(
++            map.insert(key.to_owned(), value.to_owned()).is_none(),
++            "duplicate golden key {key}"
++        );
++    }
++    map
++}
++
++fn hx(text: &str) -> Vec<u8> {
++    assert_eq!(text.len() % 2, 0, "even-length hex");
++    text.as_bytes()
++        .chunks(2)
++        .map(|pair| (nibble(pair[0]) << 4) | nibble(pair[1]))
++        .collect()
++}
++
++fn nibble(byte: u8) -> u8 {
++    match byte {
++        b'0'..=b'9' => byte - b'0',
++        b'a'..=b'f' => byte - b'a' + 10,
++        _ => panic!("invalid hex nibble in fixture"),
++    }
++}
++
++fn to_hex(bytes: &[u8]) -> String {
++    let mut out = String::with_capacity(bytes.len() * 2);
++    for byte in bytes {
++        out.push_str(&format!("{byte:02x}"));
++    }
++    out
++}
++
++fn hash32(text: &str) -> Hash {
++    Hash::from_slice(&hx(text)).expect("32-byte hash")
++}
++
++/// Same trivial deterministic pattern as `tools/gen_c6_vectors.py`.
++fn txid(index: usize) -> Hash {
++    let mut bytes = [0u8; 32];
++    for (j, byte) in bytes.iter_mut().enumerate() {
++        *byte = ((index as u64) * 7 + (j as u64) * 13 + 0xAB) as u8;
++    }
++    Hash::from_bytes(bytes)
++}
++
++fn event(index: usize) -> Vec<u8> {
++    let mut out = b"event:".to_vec();
++    out.extend_from_slice(&(index as u32).to_le_bytes());
++    out.extend(std::iter::repeat_n((index % 256) as u8, index % 17));
++    out
++}
++
++fn txids(count: usize) -> Vec<Hash> {
++    (0..count).map(txid).collect()
++}
++
++fn events(count: usize) -> Vec<Vec<u8>> {
++    (0..count).map(event).collect()
++}
++
++fn decode_proof(key: &str, fixture: &BTreeMap<String, String>) -> Result<MerkleProof, MerkleError> {
++    MerkleProof::from_canonical_bytes(&hx(&fixture[key]))
++}
++
++#[test]
++fn constants_are_pinned_by_the_independent_fixture() {
++    let f = parse(GOLDEN);
++    assert_eq!(to_hex(LEAF_CONTEXT), f["leaf_context"]);
++    assert_eq!(to_hex(NODE_CONTEXT), f["node_context"]);
++    assert_eq!(to_hex(EVENT_LEAF_CONTEXT), f["event_leaf_context"]);
++    assert_eq!(MAX_PROOF_DEPTH.to_string(), f["max_proof_depth"]);
++
++    // The C5 and C6 generators must agree on the shared tree contexts.
++    let c5 = parse(C5_GOLDEN);
++    assert_eq!(f["leaf_context"], c5["leaf_context"]);
++    assert_eq!(f["node_context"], c5["node_context"]);
++}
++
++#[test]
++fn golden_roots_match_independent_python() {
++    let f = parse(GOLDEN);
++    for size in [1usize, 2, 3, 5, 8, 1000] {
++        let tree = build_tx_tree(&txids(size));
++        assert_eq!(
++            tree.root().to_hex(),
++            f[&format!("root_tx_{size}")],
++            "root_tx_{size}"
++        );
++        assert_eq!(tree.len(), size);
++        assert_eq!(
++            tree_depth(size as u64).to_string(),
++            f[&format!("depth_tx_{size}")]
++        );
++    }
++    for size in [1usize, 3, 5] {
++        let tree = build_event_tree(&events(size));
++        assert_eq!(
++            tree.root().to_hex(),
++            f[&format!("root_event_{size}")],
++            "root_event_{size}"
++        );
++    }
++}
++
++#[test]
++fn golden_proofs_match_independent_python() {
++    let f = parse(GOLDEN);
++    let mut count = 0;
++    for (key, encoded) in f.iter().filter(|(key, _)| key.starts_with("proof_tx_")) {
++        let parts: Vec<&str> = key.strip_prefix("proof_tx_").unwrap().split('_').collect();
++        let size: usize = parts[0].parse().unwrap();
++        let index: usize = parts[1].parse().unwrap();
++        let tree = build_tx_tree(&txids(size));
++        let proof = tree.prove(index).unwrap();
++        assert_eq!(to_hex(&proof.to_bytes()), *encoded, "{key}");
++        assert!(verify_proof(&tree.root(), &proof).is_ok(), "{key} path");
++        assert!(
++            verify_tx_inclusion(&tree.root(), &txid(index), &proof).is_ok(),
++            "{key} inclusion"
++        );
++        count += 1;
++    }
++    for (key, encoded) in f.iter().filter(|(key, _)| key.starts_with("proof_event_")) {
++        let parts: Vec<&str> = key
++            .strip_prefix("proof_event_")
++            .unwrap()
++            .split('_')
++            .collect();
++        let size: usize = parts[0].parse().unwrap();
++        let index: usize = parts[1].parse().unwrap();
++        let tree = build_event_tree(&events(size));
++        let proof = tree.prove(index).unwrap();
++        assert_eq!(to_hex(&proof.to_bytes()), *encoded, "{key}");
++        assert!(
++            verify_event_inclusion(&tree.root(), &event(index), &proof).is_ok(),
++            "{key} event inclusion"
++        );
++        count += 1;
++    }
++    assert_eq!(count, 34, "all independent proofs must be checked");
++}
++
++#[test]
++fn leaf_domain_separation_is_pinned() {
++    let f = parse(GOLDEN);
++    assert_eq!(aura_block::leaf_hash(&txid(2)).to_hex(), f["leaf_tx_2"]);
++    assert_eq!(event_leaf_hash(&event(2)).to_hex(), f["leaf_event_2"]);
++    assert_ne!(f["leaf_tx_2"], f["leaf_event_2"]);
++
++    // Length prefixing prevents an ambiguous concatenation.
++    assert_ne!(event_leaf_hash(b"ab"), event_leaf_hash(b"a"));
++    assert_ne!(event_leaf_hash(b"ab"), event_leaf_hash(b"a\x00b"));
++}
++
++#[test]
++fn all_thousand_proofs_are_valid_and_one_substituted_is_invalid() {
++    // C6 DoD: 1000 leaves, all proofs valid, one substituted — invalid.
++    let f = parse(GOLDEN);
++    let ids = txids(1000);
++    let tree = build_tx_tree(&ids);
++    let root = tree.root();
++    assert_eq!(root.to_hex(), f["root_tx_1000"]);
++
++    for (index, id) in ids.iter().enumerate() {
++        let proof = tree.prove(index).expect("proof exists");
++        assert_eq!(proof.total, 1000);
++        assert_eq!(proof.index, index as u64);
++        assert_eq!(proof.siblings.len(), 10, "ceil(log2(1000)) = 10");
++        verify_tx_inclusion(&root, id, &proof)
++            .unwrap_or_else(|e| panic!("proof {index} failed: {e}"));
++    }
++
++    // Substitute a different txid: leaf binding must catch it.
++    let proof = tree.prove(499).unwrap();
++    assert!(matches!(
++        verify_tx_inclusion(&root, &txid(500), &proof),
++        Err(MerkleError::LeafMismatch)
++    ));
++
++    // Substitute the leaf hash inside the proof: the path must catch it.
++    let mut tampered = proof.clone();
++    tampered.leaf = Hash::from_bytes([0x9c; 32]);
++    assert!(matches!(
++        verify_tx_inclusion(&root, &txid(499), &tampered),
++        Err(MerkleError::LeafMismatch)
++    ));
++    assert!(matches!(
++        verify_proof(&root, &tampered),
++        Err(MerkleError::RootMismatch(_, _))
++    ));
++}
++
++#[test]
++fn c5_root_and_c6_tree_share_one_shape() {
++    // The C6 refactor of compute_tx_root must not change any C5 root.
++    let c4 = parse(C4_GOLDEN);
++    let txs: Vec<Tx> = [1usize, 2, 4, 5]
++        .iter()
++        .map(|index| {
++            Tx::from_canonical_bytes(&hx(&c4[&format!("tx{index}_bytes")])).expect("C4 tx decodes")
++        })
++        .collect();
++    let ids: Vec<Hash> = txs.iter().map(|tx| tx.txid()).collect();
++    assert_eq!(compute_tx_root(&txs), build_tx_tree(&ids).root());
++    assert_eq!(
++        compute_tx_root(&txs),
++        build_tree_from_leaf_hashes(&ids.iter().map(aura_block::leaf_hash).collect::<Vec<_>>())
++            .root()
++    );
++}
++
++#[test]
++fn empty_and_single_leaf_trees_are_well_defined() {
++    let empty = build_tree_from_leaf_hashes(&[]);
++    assert!(empty.is_empty());
++    assert_eq!(empty.root(), Hash::ZERO);
++    assert_eq!(empty.prove(0), Err(MerkleError::EmptyTree));
++    assert_eq!(tree_depth(0), 0);
++
++    let single = build_tx_tree(&txids(1));
++    assert_eq!(single.root(), aura_block::leaf_hash(&txid(0)));
++    let proof = single.prove(0).unwrap();
++    assert!(proof.siblings.is_empty());
++    assert!(verify_tx_inclusion(&single.root(), &txid(0), &proof).is_ok());
++}
++
++#[test]
++fn event_proofs_are_bound_to_the_raw_event_bytes() {
++    let tree = build_event_tree(&events(5));
++    let proof = tree.prove(2).unwrap();
++    assert!(verify_event_inclusion(&tree.root(), &event(2), &proof).is_ok());
++    assert_eq!(
++        verify_event_inclusion(&tree.root(), &event(3), &proof),
++        Err(MerkleError::LeafMismatch)
++    );
++}
++
++#[test]
++fn every_bad_vector_is_rejected() {
++    let f = parse(GOLDEN);
++    let root = hash32(&f["root_tx_5"]);
++    let bad: Vec<&str> = f
++        .keys()
++        .filter(|k| k.starts_with("bad_"))
++        .map(String::as_str)
++        .collect();
++    assert_eq!(bad.len(), 11);
++    for key in bad {
++        let rejected = match decode_proof(key, &f) {
++            Err(_) => true,
++            Ok(proof) => verify_tx_inclusion(&root, &txid(2), &proof).is_err(),
++        };
++        assert!(rejected, "{key} must be rejected");
++    }
++}
++
++#[test]
++fn bad_vectors_return_the_specific_error() {
++    let f = parse(GOLDEN);
++    let root = hash32(&f["root_tx_5"]);
++    let inclusion = |key: &str| {
++        let proof = decode_proof(key, &f).expect("decodes");
++        verify_tx_inclusion(&root, &txid(2), &proof)
++    };
++
++    assert_eq!(
++        inclusion("bad_substituted_leaf"),
++        Err(MerkleError::LeafMismatch)
++    );
++    assert!(matches!(
++        inclusion("bad_wrong_sibling"),
++        Err(MerkleError::RootMismatch(_, _))
++    ));
++    assert!(matches!(
++        inclusion("bad_wrong_index"),
++        Err(MerkleError::RootMismatch(_, _))
++    ));
++    assert_eq!(
++        inclusion("bad_wrong_total"),
++        Err(MerkleError::WrongSiblingCount(3, 2))
++    );
++    assert_eq!(
++        inclusion("bad_sibling_count"),
++        Err(MerkleError::WrongSiblingCount(2, 3))
++    );
++    assert_eq!(inclusion("bad_empty_total"), Err(MerkleError::EmptyTree));
++    assert_eq!(
++        inclusion("bad_index_oob"),
++        Err(MerkleError::IndexOutOfBounds(5, 5))
++    );
++
++    assert_eq!(
++        decode_proof("bad_trailing", &f),
++        Err(MerkleError::Decode(CodecError::TrailingBytes(1)))
++    );
++    assert!(decode_proof("bad_truncated", &f).is_err());
++    assert_eq!(
++        decode_proof("bad_nonminimal_index", &f),
++        Err(MerkleError::Decode(CodecError::NonCanonicalVarint))
++    );
++    assert_eq!(
++        decode_proof("bad_depth_overflow", &f),
++        Err(MerkleError::Decode(CodecError::TooManyItems(65)))
++    );
++}
++
++#[test]
++fn proof_wire_format_is_canonical_and_self_consistency_holds() {
++    let f = parse(GOLDEN);
++    let bytes = hx(&f["proof_tx_8_3"]);
++    let proof = MerkleProof::from_canonical_bytes(&bytes).unwrap();
++    assert_eq!(proof.to_bytes(), bytes);
++    assert_eq!(
++        MerkleProof::from_canonical_bytes(&proof.to_bytes()).unwrap(),
++        proof
++    );
++    let tree = build_tx_tree(&txids(8));
++    assert_eq!(proof, tree.prove(3).unwrap());
++    assert!(verify_tx_inclusion(&tree.root(), &txid(3), &proof).is_ok());
++}
+diff --git a/crates/aura-block/tests/fixtures/c6_golden.txt b/crates/aura-block/tests/fixtures/c6_golden.txt
+new file mode 100644
+index 0000000..2090e5d
+--- /dev/null
++++ b/crates/aura-block/tests/fixtures/c6_golden.txt
+@@ -0,0 +1,69 @@
++# AuraLite-Crypto C6 Merkle-proof golden vectors
++# Generated by tools/gen_c6_vectors.py (independent Python).
++# Self-checked against official BLAKE3 vectors. Format: key=<hex|decimal>.
++leaf_context=417572614c6974652d43727970746f2f74782d6c6561662d763100
++node_context=417572614c6974652d43727970746f2f74782d6e6f64652d763100
++event_leaf_context=417572614c6974652d43727970746f2f6576656e742d6c6561662d763100
++max_proof_depth=64
++root_tx_1=89b46b5604a2351c74aa3c6950c64b48ee165ab41d1a386f41189131cdb84641
++depth_tx_1=0
++proof_tx_1_0=000189b46b5604a2351c74aa3c6950c64b48ee165ab41d1a386f41189131cdb8464100
++root_tx_2=a0c51c7b4db8fcf5a977fd193058b0e79b32b08602919b597582098f34264b6e
++depth_tx_2=1
++proof_tx_2_0=000289b46b5604a2351c74aa3c6950c64b48ee165ab41d1a386f41189131cdb84641016b5ef78ac2c33ffc0f2db6f189b003dedf38951b129fd05979033c12ba5b71e3
++proof_tx_2_1=01026b5ef78ac2c33ffc0f2db6f189b003dedf38951b129fd05979033c12ba5b71e30189b46b5604a2351c74aa3c6950c64b48ee165ab41d1a386f41189131cdb84641
++root_tx_3=dc15bc91193d18ecccb5bc0382a373766c6e932fed9986128581db14935596c5
++depth_tx_3=2
++proof_tx_3_0=000389b46b5604a2351c74aa3c6950c64b48ee165ab41d1a386f41189131cdb84641026b5ef78ac2c33ffc0f2db6f189b003dedf38951b129fd05979033c12ba5b71e37622d9a1d68bcd0f8a6c26a33aa5ad22ac9491b5dd72982dcc4ffad9b33b6724
++proof_tx_3_1=01036b5ef78ac2c33ffc0f2db6f189b003dedf38951b129fd05979033c12ba5b71e30289b46b5604a2351c74aa3c6950c64b48ee165ab41d1a386f41189131cdb846417622d9a1d68bcd0f8a6c26a33aa5ad22ac9491b5dd72982dcc4ffad9b33b6724
++proof_tx_3_2=02037bfd0f76df215bc9cebe984f0d73dc67a57b21a2f6b7849d34210157850eb9b5027bfd0f76df215bc9cebe984f0d73dc67a57b21a2f6b7849d34210157850eb9b5a0c51c7b4db8fcf5a977fd193058b0e79b32b08602919b597582098f34264b6e
++root_tx_5=5e490547ea08da52a0626d8f297e0812e79cc1485169d092096129deb2df69ec
++depth_tx_5=3
++proof_tx_5_0=000589b46b5604a2351c74aa3c6950c64b48ee165ab41d1a386f41189131cdb84641036b5ef78ac2c33ffc0f2db6f189b003dedf38951b129fd05979033c12ba5b71e3e9ed4fe43efe23fbd5ba743777a22451cb935c4c216807ac4316b37551ba3dff85d4ce4c314d6ec274c78763a07a4686a05d8eaa3a4547c4426217332f92cdcb
++proof_tx_5_1=01056b5ef78ac2c33ffc0f2db6f189b003dedf38951b129fd05979033c12ba5b71e30389b46b5604a2351c74aa3c6950c64b48ee165ab41d1a386f41189131cdb84641e9ed4fe43efe23fbd5ba743777a22451cb935c4c216807ac4316b37551ba3dff85d4ce4c314d6ec274c78763a07a4686a05d8eaa3a4547c4426217332f92cdcb
++proof_tx_5_2=02057bfd0f76df215bc9cebe984f0d73dc67a57b21a2f6b7849d34210157850eb9b5032fae6339158af65c254af85e3aae5cdaa7b7230f105e63d915fc069550a105f6a0c51c7b4db8fcf5a977fd193058b0e79b32b08602919b597582098f34264b6e85d4ce4c314d6ec274c78763a07a4686a05d8eaa3a4547c4426217332f92cdcb
++proof_tx_5_3=03052fae6339158af65c254af85e3aae5cdaa7b7230f105e63d915fc069550a105f6037bfd0f76df215bc9cebe984f0d73dc67a57b21a2f6b7849d34210157850eb9b5a0c51c7b4db8fcf5a977fd193058b0e79b32b08602919b597582098f34264b6e85d4ce4c314d6ec274c78763a07a4686a05d8eaa3a4547c4426217332f92cdcb
++proof_tx_5_4=0405d8ffffb6f5790f53a0fb03d69126a3d069f1f270778fcef1eb57bd878b24d82e03d8ffffb6f5790f53a0fb03d69126a3d069f1f270778fcef1eb57bd878b24d82efa7dc0566bdf588342461051315bb9771c58517b4e842f9368ea90b507e80475409a3032b4207f7deb5bb424bb33f45ca9d44a285fa731155ad313efa6f49e04
++root_tx_8=59f1a749747a731775d5fcceb3d0b80cd61657136b4e6cdf4ea065ef231377e0
++depth_tx_8=3
++proof_tx_8_0=000889b46b5604a2351c74aa3c6950c64b48ee165ab41d1a386f41189131cdb84641036b5ef78ac2c33ffc0f2db6f189b003dedf38951b129fd05979033c12ba5b71e3e9ed4fe43efe23fbd5ba743777a22451cb935c4c216807ac4316b37551ba3dffe3d5f603a8b1e0fae1ff6da13cf1c121f3a576c2c4771bb4ea4698e0ca64c0cf
++proof_tx_8_1=01086b5ef78ac2c33ffc0f2db6f189b003dedf38951b129fd05979033c12ba5b71e30389b46b5604a2351c74aa3c6950c64b48ee165ab41d1a386f41189131cdb84641e9ed4fe43efe23fbd5ba743777a22451cb935c4c216807ac4316b37551ba3dffe3d5f603a8b1e0fae1ff6da13cf1c121f3a576c2c4771bb4ea4698e0ca64c0cf
++proof_tx_8_2=02087bfd0f76df215bc9cebe984f0d73dc67a57b21a2f6b7849d34210157850eb9b5032fae6339158af65c254af85e3aae5cdaa7b7230f105e63d915fc069550a105f6a0c51c7b4db8fcf5a977fd193058b0e79b32b08602919b597582098f34264b6ee3d5f603a8b1e0fae1ff6da13cf1c121f3a576c2c4771bb4ea4698e0ca64c0cf
++proof_tx_8_3=03082fae6339158af65c254af85e3aae5cdaa7b7230f105e63d915fc069550a105f6037bfd0f76df215bc9cebe984f0d73dc67a57b21a2f6b7849d34210157850eb9b5a0c51c7b4db8fcf5a977fd193058b0e79b32b08602919b597582098f34264b6ee3d5f603a8b1e0fae1ff6da13cf1c121f3a576c2c4771bb4ea4698e0ca64c0cf
++proof_tx_8_4=0408d8ffffb6f5790f53a0fb03d69126a3d069f1f270778fcef1eb57bd878b24d82e030315a433fb9ad727161e3ea8762692ea4349730de4e930676e98cec659e3e754ba39278bfb8144bb427a4a313b8afd6d305e0d9c34e2951a0068583a5445890f409a3032b4207f7deb5bb424bb33f45ca9d44a285fa731155ad313efa6f49e04
++proof_tx_8_5=05080315a433fb9ad727161e3ea8762692ea4349730de4e930676e98cec659e3e75403d8ffffb6f5790f53a0fb03d69126a3d069f1f270778fcef1eb57bd878b24d82eba39278bfb8144bb427a4a313b8afd6d305e0d9c34e2951a0068583a5445890f409a3032b4207f7deb5bb424bb33f45ca9d44a285fa731155ad313efa6f49e04
++proof_tx_8_6=060849cfe15f4c66968653b50641aaa33313c96adffb06b57d021202e88cc0b168c4035b824c7f37544be95fd8aaf9fa7814a31b5e03ed4d3608a1ef74f01c97128dd06f897a216b6133cbe8bf53861e4a5e39bb8d3d4378911b34c238902f30f7c279409a3032b4207f7deb5bb424bb33f45ca9d44a285fa731155ad313efa6f49e04
++proof_tx_8_7=07085b824c7f37544be95fd8aaf9fa7814a31b5e03ed4d3608a1ef74f01c97128dd00349cfe15f4c66968653b50641aaa33313c96adffb06b57d021202e88cc0b168c46f897a216b6133cbe8bf53861e4a5e39bb8d3d4378911b34c238902f30f7c279409a3032b4207f7deb5bb424bb33f45ca9d44a285fa731155ad313efa6f49e04
++root_tx_1000=1b01c185e0577c66bd7a5aa2c381b7498a635180321b65fb71b60731bf507179
++depth_tx_1000=10
++proof_tx_1000_0=00e80789b46b5604a2351c74aa3c6950c64b48ee165ab41d1a386f41189131cdb846410a6b5ef78ac2c33ffc0f2db6f189b003dedf38951b129fd05979033c12ba5b71e3e9ed4fe43efe23fbd5ba743777a22451cb935c4c216807ac4316b37551ba3dffe3d5f603a8b1e0fae1ff6da13cf1c121f3a576c2c4771bb4ea4698e0ca64c0cfbaa606e04752e4701bf59818a22602833038d30ffecb088e6d3f3fbaafe0ba2a16e0d042baa5f60d0088341a6a1e8bf5931b13e55b0d5025effccfebe1a24024f8d418c2e9677c238c96de547a0a776c9e9eec997afc928130279c72322dea7ee6b631f287ddb95837e3ad645afcf57afda75a857d0c3b6ca90685b693745e62b7c5f36368ea1998a8643ae8200358c00b9db54dec6c2ed5e0c9b95a8d467dd09970f29029dc8a85f644ea914dbca1db7a07b7c92a991e77790d3fcf3023e9302ed606337b150ab4019ef6fa1f59e749034f45be3de945537d21c2621304c6ac
++proof_tx_1000_1=01e8076b5ef78ac2c33ffc0f2db6f189b003dedf38951b129fd05979033c12ba5b71e30a89b46b5604a2351c74aa3c6950c64b48ee165ab41d1a386f41189131cdb84641e9ed4fe43efe23fbd5ba743777a22451cb935c4c216807ac4316b37551ba3dffe3d5f603a8b1e0fae1ff6da13cf1c121f3a576c2c4771bb4ea4698e0ca64c0cfbaa606e04752e4701bf59818a22602833038d30ffecb088e6d3f3fbaafe0ba2a16e0d042baa5f60d0088341a6a1e8bf5931b13e55b0d5025effccfebe1a24024f8d418c2e9677c238c96de547a0a776c9e9eec997afc928130279c72322dea7ee6b631f287ddb95837e3ad645afcf57afda75a857d0c3b6ca90685b693745e62b7c5f36368ea1998a8643ae8200358c00b9db54dec6c2ed5e0c9b95a8d467dd09970f29029dc8a85f644ea914dbca1db7a07b7c92a991e77790d3fcf3023e9302ed606337b150ab4019ef6fa1f59e749034f45be3de945537d21c2621304c6ac
++proof_tx_1000_2=02e8077bfd0f76df215bc9cebe984f0d73dc67a57b21a2f6b7849d34210157850eb9b50a2fae6339158af65c254af85e3aae5cdaa7b7230f105e63d915fc069550a105f6a0c51c7b4db8fcf5a977fd193058b0e79b32b08602919b597582098f34264b6ee3d5f603a8b1e0fae1ff6da13cf1c121f3a576c2c4771bb4ea4698e0ca64c0cfbaa606e04752e4701bf59818a22602833038d30ffecb088e6d3f3fbaafe0ba2a16e0d042baa5f60d0088341a6a1e8bf5931b13e55b0d5025effccfebe1a24024f8d418c2e9677c238c96de547a0a776c9e9eec997afc928130279c72322dea7ee6b631f287ddb95837e3ad645afcf57afda75a857d0c3b6ca90685b693745e62b7c5f36368ea1998a8643ae8200358c00b9db54dec6c2ed5e0c9b95a8d467dd09970f29029dc8a85f644ea914dbca1db7a07b7c92a991e77790d3fcf3023e9302ed606337b150ab4019ef6fa1f59e749034f45be3de945537d21c2621304c6ac
++proof_tx_1000_499=f303e807bd5584e2a1f738da9dded5e46186ad4fcc8505f4f9ca999f34e2352605a5c7360ac05fbb38d2d5c4315034725aae5cc9af09360559e3735e6df329cc44d5c9c367abb1c15c47dbfce5466998ea9571865383dd9471153ec74f9da5f7a83ca3d7a8aa9cfafae034510234bd74f9d06bba55c1ce088a0919432a396a6e0fad34ebcfb9a2f4e4ed06192327e22069bf8e5dc304e73c114465f9d033e8f28117bf3355dc8b9aa7ae6ee2b1439dea29a4d1362776158ec93bfde55c410ddb384843243143f49460831bbc86e226ee6f98ed496f50ffc97b36ab82b600a2fdc8fab224fc232ba2f736724bbdc5b431c905b7f6f004a5864ff1c6f34e69b6cbe052bb067a5ea3462aa785cb09f37608d1ad64114e584778df42b5f2a53cf49cf4d0f4b7e99970f29029dc8a85f644ea914dbca1db7a07b7c92a991e77790d3fcf3023e9302ed606337b150ab4019ef6fa1f59e749034f45be3de945537d21c2621304c6ac
++proof_tx_1000_998=e607e8071f304555162c96963c0bbab16e9eeed88edad192b44fd63ebb65f7045da7fc060a83ac81f664e28abfb9291a82c4c5dbcee963df9b79954375550e2a6d0ebb5e79225bcf7793d4c817cc705cf1d33b08732d3ea1c045414abe9f4b864528103631dadaa199d82b37ede0dc66b73e9d27aa25455de54a691cd4092f39818991c9ea0022bc06d2b01616e1624542797451ca0d9547b14a63f75b10a3ec76fa0ea4ed50c457295901b4acb9633678082143e87ddc02091502369091c5f2f6aa110a0a43f49460831bbc86e226ee6f98ed496f50ffc97b36ab82b600a2fdc8fab224fc232ba2f736724bbdc5b431c905b7f6f004a5864ff1c6f34e69b6cbe052bb067a5ea3462aa785cb09f37608d1ad64114e584778df42b5f2a53cf49cf4d0f4b7e99970f29029dc8a85f644ea914dbca1db7a07b7c92a991e77790d3fcf3023e930e4852b49c9f6a653280c4feff677d9cfb438e221e3170d5249cf1d47b5192d85
++proof_tx_1000_999=e707e80783ac81f664e28abfb9291a82c4c5dbcee963df9b79954375550e2a6d0ebb5e790a1f304555162c96963c0bbab16e9eeed88edad192b44fd63ebb65f7045da7fc06225bcf7793d4c817cc705cf1d33b08732d3ea1c045414abe9f4b864528103631dadaa199d82b37ede0dc66b73e9d27aa25455de54a691cd4092f39818991c9ea0022bc06d2b01616e1624542797451ca0d9547b14a63f75b10a3ec76fa0ea4ed50c457295901b4acb9633678082143e87ddc02091502369091c5f2f6aa110a0a43f49460831bbc86e226ee6f98ed496f50ffc97b36ab82b600a2fdc8fab224fc232ba2f736724bbdc5b431c905b7f6f004a5864ff1c6f34e69b6cbe052bb067a5ea3462aa785cb09f37608d1ad64114e584778df42b5f2a53cf49cf4d0f4b7e99970f29029dc8a85f644ea914dbca1db7a07b7c92a991e77790d3fcf3023e930e4852b49c9f6a653280c4feff677d9cfb438e221e3170d5249cf1d47b5192d85
++root_event_1=7007993514f898a9d749ab44a40df3c21bc0e5d509351e24f7bfa6bbd5c44948
++proof_event_1_0=00017007993514f898a9d749ab44a40df3c21bc0e5d509351e24f7bfa6bbd5c4494800
++root_event_3=761e483753812feab20b6d1dc3065fe5c611a3e4e0bf768551412342be16de53
++proof_event_3_0=00037007993514f898a9d749ab44a40df3c21bc0e5d509351e24f7bfa6bbd5c4494802edefd9b36a0987a59aae0b22b7fc6d6ee01fe2e1275702219fcafb721f08f1bb4750986e92e3b3ba5371a4f6fdc50ad37200ba63ae0cd3d702dfdef1567e569c
++proof_event_3_1=0103edefd9b36a0987a59aae0b22b7fc6d6ee01fe2e1275702219fcafb721f08f1bb027007993514f898a9d749ab44a40df3c21bc0e5d509351e24f7bfa6bbd5c449484750986e92e3b3ba5371a4f6fdc50ad37200ba63ae0cd3d702dfdef1567e569c
++proof_event_3_2=02038185b66bc19a8d11cf0f751e2d8f02c724c8b21ece3dc40deade8ccaee93988e028185b66bc19a8d11cf0f751e2d8f02c724c8b21ece3dc40deade8ccaee93988efe0a56c4a94a23d83913d28fa09e2c82c4eb2f912c16a2172e97b3c69157a1a4
++root_event_5=64420b3880a838b6752457341e8b5419733d632cbc93bc25cb3bed36eddaa784
++proof_event_5_0=00057007993514f898a9d749ab44a40df3c21bc0e5d509351e24f7bfa6bbd5c4494803edefd9b36a0987a59aae0b22b7fc6d6ee01fe2e1275702219fcafb721f08f1bb345c1de116546ae3c07a5b53782f12c896f21b57a0fc15757dbc0ab6f9bfc755771b22d644c8f136c74ac49b44db156bb2d7fb1e5229f3329441598cb283d82c
++proof_event_5_1=0105edefd9b36a0987a59aae0b22b7fc6d6ee01fe2e1275702219fcafb721f08f1bb037007993514f898a9d749ab44a40df3c21bc0e5d509351e24f7bfa6bbd5c44948345c1de116546ae3c07a5b53782f12c896f21b57a0fc15757dbc0ab6f9bfc755771b22d644c8f136c74ac49b44db156bb2d7fb1e5229f3329441598cb283d82c
++proof_event_5_2=02058185b66bc19a8d11cf0f751e2d8f02c724c8b21ece3dc40deade8ccaee93988e0376edca0520cfdf711bb9944db8c2cd140b87f222415534ee8aee7263020d3bd6fe0a56c4a94a23d83913d28fa09e2c82c4eb2f912c16a2172e97b3c69157a1a4771b22d644c8f136c74ac49b44db156bb2d7fb1e5229f3329441598cb283d82c
++proof_event_5_3=030576edca0520cfdf711bb9944db8c2cd140b87f222415534ee8aee7263020d3bd6038185b66bc19a8d11cf0f751e2d8f02c724c8b21ece3dc40deade8ccaee93988efe0a56c4a94a23d83913d28fa09e2c82c4eb2f912c16a2172e97b3c69157a1a4771b22d644c8f136c74ac49b44db156bb2d7fb1e5229f3329441598cb283d82c
++proof_event_5_4=040577f47fca04fca66510dffc522af5b40bfab21e0c22dca67bef69e0393e0d4f700377f47fca04fca66510dffc522af5b40bfab21e0c22dca67bef69e0393e0d4f700495ea4f42bbfde8a5aa1dd1f7f04a34548452151580a48fc327e1720c059aa56cc502ec92d0b02ce808767a11b9fe5d54b3edd7917be56caf07a28efc638f13
++leaf_tx_2=7bfd0f76df215bc9cebe984f0d73dc67a57b21a2f6b7849d34210157850eb9b5
++leaf_event_2=8185b66bc19a8d11cf0f751e2d8f02c724c8b21ece3dc40deade8ccaee93988e
++bad_substituted_leaf=02059c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c032fae6339158af65c254af85e3aae5cdaa7b7230f105e63d915fc069550a105f6a0c51c7b4db8fcf5a977fd193058b0e79b32b08602919b597582098f34264b6e85d4ce4c314d6ec274c78763a07a4686a05d8eaa3a4547c4426217332f92cdcb
++bad_wrong_sibling=02057bfd0f76df215bc9cebe984f0d73dc67a57b21a2f6b7849d34210157850eb9b5032eae6339158af65c254af85e3aae5cdaa7b7230f105e63d915fc069550a105f6a0c51c7b4db8fcf5a977fd193058b0e79b32b08602919b597582098f34264b6e85d4ce4c314d6ec274c78763a07a4686a05d8eaa3a4547c4426217332f92cdcb
++bad_wrong_index=03057bfd0f76df215bc9cebe984f0d73dc67a57b21a2f6b7849d34210157850eb9b5032fae6339158af65c254af85e3aae5cdaa7b7230f105e63d915fc069550a105f6a0c51c7b4db8fcf5a977fd193058b0e79b32b08602919b597582098f34264b6e85d4ce4c314d6ec274c78763a07a4686a05d8eaa3a4547c4426217332f92cdcb
++bad_wrong_total=02047bfd0f76df215bc9cebe984f0d73dc67a57b21a2f6b7849d34210157850eb9b5032fae6339158af65c254af85e3aae5cdaa7b7230f105e63d915fc069550a105f6a0c51c7b4db8fcf5a977fd193058b0e79b32b08602919b597582098f34264b6e85d4ce4c314d6ec274c78763a07a4686a05d8eaa3a4547c4426217332f92cdcb
++bad_sibling_count=02057bfd0f76df215bc9cebe984f0d73dc67a57b21a2f6b7849d34210157850eb9b5022fae6339158af65c254af85e3aae5cdaa7b7230f105e63d915fc069550a105f6a0c51c7b4db8fcf5a977fd193058b0e79b32b08602919b597582098f34264b6e
++bad_empty_total=02007bfd0f76df215bc9cebe984f0d73dc67a57b21a2f6b7849d34210157850eb9b5032fae6339158af65c254af85e3aae5cdaa7b7230f105e63d915fc069550a105f6a0c51c7b4db8fcf5a977fd193058b0e79b32b08602919b597582098f34264b6e85d4ce4c314d6ec274c78763a07a4686a05d8eaa3a4547c4426217332f92cdcb
++bad_index_oob=05057bfd0f76df215bc9cebe984f0d73dc67a57b21a2f6b7849d34210157850eb9b5032fae6339158af65c254af85e3aae5cdaa7b7230f105e63d915fc069550a105f6a0c51c7b4db8fcf5a977fd193058b0e79b32b08602919b597582098f34264b6e85d4ce4c314d6ec274c78763a07a4686a05d8eaa3a4547c4426217332f92cdcb
++bad_depth_overflow=02057bfd0f76df215bc9cebe984f0d73dc67a57b21a2f6b7849d34210157850eb9b5412fae6339158af65c254af85e3aae5cdaa7b7230f105e63d915fc069550a105f6a0c51c7b4db8fcf5a977fd193058b0e79b32b08602919b597582098f34264b6e85d4ce4c314d6ec274c78763a07a4686a05d8eaa3a4547c4426217332f92cdcb00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
++bad_trailing=02057bfd0f76df215bc9cebe984f0d73dc67a57b21a2f6b7849d34210157850eb9b5032fae6339158af65c254af85e3aae5cdaa7b7230f105e63d915fc069550a105f6a0c51c7b4db8fcf5a977fd193058b0e79b32b08602919b597582098f34264b6e85d4ce4c314d6ec274c78763a07a4686a05d8eaa3a4547c4426217332f92cdcb00
++bad_truncated=02057bfd0f76df215bc9cebe984f0d73dc67a57b21a2f6b7849d34210157850eb9b5032fae6339158af65c254af85e3aae5cdaa7b7230f105e63d915fc069550a105f6a0c51c7b4db8fcf5a977fd193058b0e79b32b08602919b597582098f34264b6e85d4ce4c314d6ec274c78763a07a4686a05d8eaa3a4547c4426217332f92cd
++bad_nonminimal_index=8000057bfd0f76df215bc9cebe984f0d73dc67a57b21a2f6b7849d34210157850eb9b5032fae6339158af65c254af85e3aae5cdaa7b7230f105e63d915fc069550a105f6a0c51c7b4db8fcf5a977fd193058b0e79b32b08602919b597582098f34264b6e85d4ce4c314d6ec274c78763a07a4686a05d8eaa3a4547c4426217332f92cdcb
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+index d69fe26..d359c48 100644
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -41,6 +41,14 @@ Tx      = { chain_id, signer, nonce, kind, payload, gas_limit,
+ - **Versioning.** `version` in the header, `codec_version` in tx,
+   `abi_version` in contracts. Any change = migration test (C10/B10).
+ 
++**C6 Merkle proofs.** `aura-block::proof` adds compact inclusion proofs over
++the unchanged C5 tree: `varint(index) || varint(total) || leaf[32] ||
++varint(count) || sibling[32]*count`, with sibling direction derived from the
++index (no direction bits). Event leaves use a separate `EVENT_LEAF_CONTEXT`
++and a length prefix. `compute_tx_root` and `build_tx_tree` now share one tree
++implementation, so roots and proofs cannot disagree. Spec:
++[`docs/spec/merkle-proof-format.md`](spec/merkle-proof-format.md).
++
+ **C5 block format.** `aura-block` defines `Block = Header || Body` and fixes
+ the binary BLAKE3 `tx_root` (leaf/node domain tags, odd-node duplication,
+ empty tree = zero). The body is canonically sorted by `(signer, nonce)` and
+diff --git a/docs/STATUS.md b/docs/STATUS.md
+index 1098b8c..b5dfa3a 100644
+--- a/docs/STATUS.md
++++ b/docs/STATUS.md
+@@ -1,8 +1,8 @@
+ # Implementation status — AuraLite-Crypto
+ 
+ > Updated **in the same patch** as the phase's code (rule D9).
+-> Snapshot date: **2026-10-25**, tree: "C5 landed — types, codec, crypto,
+-> `aura-tx` and `aura-block`, Stage 1 in progress".
++> Snapshot date: **2026-10-25**, tree: "C6 landed — types, codec, crypto,
++> tx, block and Merkle proofs, Stage 1 in progress".
+ 
+ ## Locked decisions (2026-10-25)
+ 
+@@ -22,7 +22,8 @@ C1 ✅ (`patches/0002-C1-types.patch`), C2 ✅
+ (`patches/0003-C2-codec.patch`) and C3 ✅
+ (`patches/0004-C3-crypto.patch`) and C4 ✅
+ (`patches/0005-C4-tx-format.patch`) and C5 ✅
+-(`patches/0006-C5-block-header.patch`) done; C6 (Merkle proofs) is next. No
++(`patches/0006-C5-block-header.patch`) and C6 ✅
++(`patches/0007-C6-merkle-proofs.patch`) done; C7 (account model) is next. No
+ other phase has started.
+ 
+ ## Maturity level
+@@ -41,14 +42,15 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
+ ## Working now
+ 
+ - `make test` is green: `cargo fmt --check`, `cargo clippy --workspace
+-  --all-targets -- -D warnings`, `cargo test --workspace` (**60 tests**),
++  --all-targets -- -D warnings`, `cargo test --workspace` (**71 tests**),
+   the docs drift guard and the dependency gate. Receipts:
+   `docs/evidence/c0-baseline.txt`, `docs/evidence/c0/nc.log`,
+   `docs/evidence/c1/gates.txt`, `docs/evidence/c1/nc.log`,
+   `docs/evidence/c2/gates.txt`, `docs/evidence/c2/nc.log`,
+   `docs/evidence/c3/gates.txt`, `docs/evidence/c3/nc.log`,
+   `docs/evidence/c4/gates.txt`, `docs/evidence/c4/nc.log`,
+-  `docs/evidence/c5/gates.txt`, `docs/evidence/c5/nc.log`.
++  `docs/evidence/c5/gates.txt`, `docs/evidence/c5/nc.log`,
++  `docs/evidence/c6/gates.txt`, `docs/evidence/c6/nc.log`.
+ - `aura-types` exports the locked D0 identity (`auralite-test-1`, `ALCRY`,
+   18 decimals, `aura`, `bft-pos`, `wasm`, v1) **and** the C1 canonical types:
+   `Hash`, bech32 `Address`, `Amount`/`Denom`, `ChainId`, `Nonce`, `Height`,
+@@ -67,7 +69,14 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
+   official BLAKE3 vectors, RFC 8032 §7.1 and a pure-Python secp256k1
+   reference (OpenSSL-verified). 5 C3 negative controls pin the context, two
+   fixtures, the verifier and the dependency allowlist.
+-- C5 adds the **13th crate**, `aura-block`, with no new external
++- C6 adds compact Merkle proofs inside `aura-block` (no new crate, no new
++  dependency): tx and event inclusion proofs, `EVENT_LEAF_CONTEXT` domain
++  separation, `verify_proof`/`verify_tx_inclusion`/`verify_event_inclusion`,
++  and a C5↔C6 shared tree implementation. Spec:
++  `docs/spec/merkle-proof-format.md`; 34 independent proofs + 11 rejection
++  vectors; the 1000-leaf DoD gate verifies all proofs and rejects one
++  substituted leaf. 6 C6 negative controls.
++- C5 added the **13th crate**, `aura-block`, with no new external
+   dependencies: `Header`/`Body`, binary BLAKE3 `tx_root`, `block_hash`,
+   canonical `(signer, nonce)` ordering and replay-separated chain-id in the
+   header (C5 amends `ARCHITECTURE.md` §1). `state_root`,
+@@ -95,23 +104,24 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
+ 
+ ```
+ find crates -name Cargo.toml       -> 13 crates (+1 workspace root)
+-find . -name '*.rs' -not -path './target/*' -> 41 files
++find . -name '*.rs' -not -path './target/*' -> 43 files
+ ls docs/plans/*_PLAN.md           -> 12 plans / 112 phase rows
+-cargo test --workspace            -> 60 passed; 0 failed
++cargo test --workspace            -> 71 passed; 0 failed
+ make test                         -> ALL GATES GREEN
+-make nc-all                       -> 2/2+3/3+4/4+5/5+6/6+6/6 = 26 NC PASS
++make nc-all                       -> 2/2+3/3+4/4+5/5+6/6+6/6+6/6 = 32 NC PASS
+ make check-deps                   -> 54 external crates allowlisted
+ validators / blocks / tx          -> 0 / 0 / 0
+ ```
+ 
+-Pre-C0 baseline and post-C0/C1/C2/C3/C4/C5 numbers with raw command output
++Pre-C0 baseline and post-C0/C1/C2/C3/C4/C5/C6 numbers with raw command output
+ are in `docs/evidence/c0-baseline.txt`, `docs/evidence/c1/gates.txt`,
+ `docs/evidence/c2/gates.txt`, `docs/evidence/c3/gates.txt`,
+-`docs/evidence/c4/gates.txt` and `docs/evidence/c5/gates.txt`.
++`docs/evidence/c4/gates.txt`, `docs/evidence/c5/gates.txt` and
++`docs/evidence/c6/gates.txt`.
+ 
+ ## What is missing (and must not be lost)
+ 
+-- No Merkle proofs (C6), no accounts (C7), no genesis (C8), no BLS
++- No accounts (C7), no genesis (C8), no test rig/fuzzing (C9), no BLS
+   aggregation (B2), no PQ migration (H2), no `cargo deny` (H1).
+ - No consensus, no P2P, no state, no VM.
+ - No wallet, explorer, contracts, token.
+diff --git a/docs/evidence/c6/SHA256SUMS b/docs/evidence/c6/SHA256SUMS
+new file mode 100644
+index 0000000..bf7fc96
+--- /dev/null
++++ b/docs/evidence/c6/SHA256SUMS
+@@ -0,0 +1,4 @@
++e78e471b1d0901532713ef3ac0f634fc6e3bfe5d681f0d63a1ec386826dfbf91  docs/evidence/c6/gates.txt
++cb8a0516e0fd3b0651b473be253037823c8435e5889c8cce6043c6bfec500d79  docs/evidence/c6/nc.log
++b4ddfc57ed01f3761659628f06df697ea04f400176c52c442623cfd014fc907d  crates/aura-block/tests/fixtures/c6_golden.txt
++703cec867e49f1d10c5df901a88bd44b1d4e581081474092af044127d1478f40  docs/spec/merkle-proof-format.md
+diff --git a/docs/evidence/c6/gates.txt b/docs/evidence/c6/gates.txt
+new file mode 100644
+index 0000000..1249908
+--- /dev/null
++++ b/docs/evidence/c6/gates.txt
+@@ -0,0 +1,164 @@
++AuraLite-Crypto — C6 evidence (Merkle proofs)
++Generated (UTC): 2026-10-25T19:54:24+00:00
++Rule: measured against the tree, not assumed.
++
++Independent references: tools/gen_c6_vectors.py self-checks
++pure-Python BLAKE3 against 7 official BLAKE3 vectors and emits
++roots/proofs for 1/2/3/5/8/1000-leaf tx trees, event trees and
++11 rejection vectors. The C5 tree shape is unchanged.
++
++========================================================================
++RAW COMMAND OUTPUT
++========================================================================
++
++--- toolchain ---
++$ rustc --version && cargo --version
++rustc 1.99.1 (58cf8f9c3 2026-10-13)
++cargo 1.99.1 (5f94df478 2026-08-27)
++[rc=0]
++
++--- pre-C6 tree (C5 commit) ---
++$ git log -1 --oneline
++3da133a C5 patch artifact
++[rc=0]
++
++--- pre-C6 workspace crates ---
++$ git ls-tree -r --name-only HEAD | grep -c 'crates/.*/Cargo.toml$' || true
++13
++[rc=0]
++
++--- pre-C6 .rs files ---
++$ git ls-tree -r --name-only HEAD | grep -c '\.rs$' || true
++41
++[rc=0]
++
++--- pre-C6 external deps ---
++$ git show HEAD:Cargo.lock | grep -c '^source = ' || true
++54
++[rc=0]
++
++--- post-C6 workspace crates ---
++$ find crates -name Cargo.toml | wc -l
++13
++[rc=0]
++
++--- post-C6 .rs files ---
++$ find . -name '*.rs' -not -path './target/*' | wc -l
++43
++[rc=0]
++
++--- post-C6 external deps ---
++$ grep -c '^source = ' Cargo.lock || true
++54
++[rc=0]
++
++--- post-C6 plan phase rows ---
++$ grep -hE '^\| (✅ |⏸ )?\*\*[A-Z]+[0-9]+\*\* \|' docs/plans/*_PLAN.md | wc -l
++112
++[rc=0]
++
++--- dependency gate ---
++$ python3 tools/check_deps.py
++DEPENDENCY GATE: OK — 67 lock packages (13 local, 54 external, all checksummed + allowlisted)
++[rc=0]
++
++--- docs drift guard ---
++$ python3 tools/check_claims.py
++DOCS DRIFT GUARD: OK — 22 markdown files, 12 plans, 112 phase rows, all local links resolve
++[rc=0]
++
++--- independent generator is idempotent ---
++$ $ (shell script: generator idempotence check)
++generator idempotent: b4ddfc57ed01f3761659628f06df697ea04f400176c52c442623cfd014fc907d
++[rc=0]
++
++--- 1000-leaf DoD gate ---
++$ cargo test -p aura-block --test c6_merkle all_thousand -- --nocapture
++running 1 test
++test all_thousand_proofs_are_valid_and_one_substituted_is_invalid ... ok
++
++test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.07s
++
++   Compiling aura-block v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-block)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.18s
++     Running tests/c6_merkle.rs (target/debug/deps/c6_merkle-0d2349a57194e41c)
++[rc=0]
++
++--- all negative controls (C0-C6) ---
++$ make nc-all
++make[1]: Entering directory '/home/user/AuraLite-Crypto'
++RESULT: 2/2 negative controls PASS
++RESULT: 3/3 negative controls PASS
++RESULT: 4/4 negative controls PASS
++RESULT: 5/5 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++make[1]: Leaving directory '/home/user/AuraLite-Crypto'
++[rc=0]
++
++--- C6 negative controls (evidence log) ---
++$ make nc-c6
++
++error: test failed, to rerun pass `-p aura-block --test c6_merkle`
++NC-3 leaf/value binding: PASS
++      cargo test -p aura-block --test c6_merkle -> rc=101 (RED as expected)
++          |         ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_expected_leaf`
++    |
++    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
++
++error: test failed, to rerun pass `-p aura-block --test c6_merkle`
++NC-4 sibling-count check: PASS
++      cargo test -p aura-block --test c6_merkle -> rc=101 (RED as expected)
++          every_bad_vector_is_rejected
++
++test result: FAILED. 9 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
++
++error: test failed, to rerun pass `-p aura-block --test c6_merkle`
++NC-5 sibling direction: PASS
++      cargo test -p aura-block --test c6_merkle -> rc=101 (RED as expected)
++          |
++    = help: maybe it is overwritten before being read?
++    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
++
++error: test failed, to rerun pass `-p aura-block --test c6_merkle`
++NC-6 root comparison: PASS
++      cargo test -p aura-block --test c6_merkle -> rc=101 (RED as expected)
++          every_bad_vector_is_rejected
++
++test result: FAILED. 8 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
++
++error: test failed, to rerun pass `-p aura-block --test c6_merkle`
++
++RESULT: 6/6 negative controls PASS
++restore check: cargo test -p aura-block --test c6_merkle -> rc=0 (GREEN as expected)
++make[1]: Leaving directory '/home/user/AuraLite-Crypto'
++[rc=0]
++
++--- full gate ---
++$ make test
++   Doc-tests aura_mempool
++   Doc-tests aura_node
++   Doc-tests aura_p2p
++   Doc-tests aura_rpc
++   Doc-tests aura_state
++   Doc-tests aura_storage
++   Doc-tests aura_tx
++   Doc-tests aura_types
++[rc=0]
++
++========================================================================
++SUMMARY
++========================================================================
++
++Pre-C6 (C5 tree): 13 crates, 41 .rs files, 54 external deps, 60 tests.
++Post-C6: still 13 crates (proof module added inside aura-block),
++43 .rs files, 54 external deps (no new ones), 71 tests passing
++(60 C0-C5 + 11 C6), `make test` ALL GATES GREEN, 32 negative
++controls total (2+3+4+5+6+6+6), 6/6 of them new in C6.
++C6 DoD gate: 1000 leaves, all 1000 proofs valid, one substituted
++leaf rejected. Validators/blocks/tx remain 0/0/0.
++
++Note: C0-C5 evidence is HISTORICAL and is no longer regenerated in
++CI. `make nc-all` runs every NC script without rewriting those logs,
++so the committed SHA256SUMS stay valid.
+diff --git a/docs/evidence/c6/nc.log b/docs/evidence/c6/nc.log
+new file mode 100644
+index 0000000..6563563
+--- /dev/null
++++ b/docs/evidence/c6/nc.log
+@@ -0,0 +1,48 @@
++C6 NEGATIVE CONTROLS — 2026-10-25T19:54:41+00:00
++Rule: a gate that cannot go red is not a gate (CONTRIBUTING.md §1).
++
++NC-1 event leaf context: PASS
++      cargo test -p aura-block --test c6_merkle -> rc=101 (RED as expected)
++          leaf_domain_separation_is_pinned
++
++test result: FAILED. 7 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
++
++error: test failed, to rerun pass `-p aura-block --test c6_merkle`
++NC-2 independent golden root: PASS
++      cargo test -p aura-block --test c6_merkle -> rc=101 (RED as expected)
++          golden_roots_match_independent_python
++
++test result: FAILED. 10 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
++
++error: test failed, to rerun pass `-p aura-block --test c6_merkle`
++NC-3 leaf/value binding: PASS
++      cargo test -p aura-block --test c6_merkle -> rc=101 (RED as expected)
++          |         ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_expected_leaf`
++    |
++    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
++
++error: test failed, to rerun pass `-p aura-block --test c6_merkle`
++NC-4 sibling-count check: PASS
++      cargo test -p aura-block --test c6_merkle -> rc=101 (RED as expected)
++          every_bad_vector_is_rejected
++
++test result: FAILED. 9 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
++
++error: test failed, to rerun pass `-p aura-block --test c6_merkle`
++NC-5 sibling direction: PASS
++      cargo test -p aura-block --test c6_merkle -> rc=101 (RED as expected)
++          |
++    = help: maybe it is overwritten before being read?
++    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
++
++error: test failed, to rerun pass `-p aura-block --test c6_merkle`
++NC-6 root comparison: PASS
++      cargo test -p aura-block --test c6_merkle -> rc=101 (RED as expected)
++          every_bad_vector_is_rejected
++
++test result: FAILED. 8 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
++
++error: test failed, to rerun pass `-p aura-block --test c6_merkle`
++
++RESULT: 6/6 negative controls PASS
++restore check: cargo test -p aura-block --test c6_merkle -> rc=0 (GREEN as expected)
+diff --git a/docs/plans/CORE_PLAN.md b/docs/plans/CORE_PLAN.md
+index 2004b90..46462c3 100644
+--- a/docs/plans/CORE_PLAN.md
++++ b/docs/plans/CORE_PLAN.md
+@@ -1,6 +1,6 @@
+ # CORE_PLAN — primitives, codec, cryptography, formats
+ 
+-**Status:** 🚧 IN PROGRESS (C0–C5 done ✅ 2026-10-25; C6 next)  
++**Status:** 🚧 IN PROGRESS (C0–C6 done ✅ 2026-10-25; C7 next)  
+ **Stage:** Stage 1: C0–C10 (all phases active).  
+ **Deliverable:** `patches/0001-C0-...` … `patches/0011-C10-...`
+ **Dependencies:** none. This is the root of the whole tree.
+@@ -33,6 +33,11 @@ other 11 plans rest.
+   for block ids, and with 0 blocks produced no migration is needed.
+   `state_root`, `validator_set_hash` and `qc` are caller-supplied until
+   S1/B phases exist; C5 fixes their bytes, not their computation.
++- **D-C8 (C6).** Merkle proofs live in `aura-block::proof`, not a new crate,
++  and reuse the C5 tree **without changing `tx_root`**. Event leaves get a
++  separate context and a length prefix. `compute_tx_root` and `build_tx_tree`
++  share one implementation so a root and a proof cannot disagree about
++  padding. Proof direction is derived from the index — no direction bits.
+ 
+ ## Phases
+ 
+@@ -44,7 +49,7 @@ other 11 plans rest.
+ | ✅ **C3** | `aura-crypto` | BLAKE3 + domain tags, Ed25519, secp256k1, constant-time compare, zeroize | RFC/test-vector signatures, malleable `s` rejected, NC: swapped domain → `Err` |
+ | ✅ **C4** | Transaction format | `Tx { chain_id, signer, nonce, kind, payload, gas_limit, max_fee, tip, expiry, sig }`, canonical `signing_bytes` | sign/verify, replay test: a tx from `auralite-1` rejected in `auralite-test-1` |
+ | ✅ **C5** | Block and header | `Header`/`Body`, `block_hash`, `tx_root`, `state_root`, `validator_set_hash`, protocol version | vector: changing tx order changes `tx_root`; NC: reorder without recompute → red |
+-| **C6** | Merkle proofs | build/verify proofs for txs and events, compact format | 1000 leaves, all proofs valid, one substituted — invalid |
++| ✅ **C6** | Merkle proofs | build/verify proofs for txs and events, compact format | 1000 leaves, all proofs valid, one substituted — invalid |
+ | **C7** | Account model | `Account { nonce, balance, code_hash, storage_root }`, state key layout, reserved prefixes | gate: keys of two accounts do not collide, reserved space unreachable from contracts |
+ | **C8** | Genesis | genesis JSON → binary genesis hash, validator set, allocation, chain-id, `aura genesis` tool | same genesis → same hash on 3 hosts; NC: validator order change → different hash |
+ | **C9** | Test rig | `proptest`, golden fixtures, `cargo-fuzz` targets for codec/tx, `make test-core`, CI shard `core` | >= 200 vectors, 60 s fuzzing with no crashes, `clippy -D warnings` |
+@@ -234,6 +239,52 @@ other 11 plans rest.
+ - Deferred: Merkle proofs (C6), accounts (C7), genesis (C8), fuzzing (C9),
+   QC/validator-set/state computations (B/S phases), BLS (B2), PQ (H2).
+ 
++
++### C6 receipt (2026-10-25)
++
++- Deliverable: `patches/0007-C6-merkle-proofs.patch`. No new crate and no new
++  external dependency: `crates/aura-block/src/proof.rs` + `tests/c6_merkle.rs`.
++- Landed: `MerkleTree` (padded levels), `MerkleProof` (compact wire format),
++  `build_tx_tree`/`build_event_tree`/`build_tree_from_leaf_hashes`, `prove`,
++  `tree_depth`, `verify_proof`, `verify_tx_inclusion`,
++  `verify_event_inclusion`, `event_leaf_hash`, and `MerkleError`.
++- **Compact proof:** `varint(index) || varint(total) || leaf[32] ||
++  varint(sibling_count) || sibling[32]*count`. Sibling direction is derived
++  from `index >> level` (no direction byte). `MAX_PROOF_DEPTH = 64`; minimal
++  varints and `decode_canonical()` enforce canonicality. For 1000 leaves a
++  proof is ~358 bytes (depth 10).
++- **C5 tree unchanged.** `compute_tx_root` now delegates to `build_tx_tree`,
++  so root and proof share one shape. A regression test compares the C5 root
++  of four real C4 transactions against the C6 tree root. Event leaves use
++  `EVENT_LEAF_CONTEXT` plus `u64(len)` so a tx leaf cannot be replayed as an
++  event leaf.
++- Spec: `docs/spec/merkle-proof-format.md` (tree, wire format, verification
++  order, vectors, non-goals).
++- Golden vectors: `tools/gen_c6_vectors.py` — independent Python with
++  pure-Python BLAKE3 (self-checked against 7 official vectors). 69 fixture
++  lines: roots/depths for **1/2/3/5/8/1000** tx leaves, roots for 1/3/5 event
++  leaves, **34 canonical proofs** and **11 rejection vectors** (substituted
++  leaf, wrong sibling/index/total, truncated siblings, empty total, OOB
++  index, depth overflow, trailing byte, truncation, non-minimal varint).
++  Generator is offline and byte-stable. The C5 and C6 generators agree on the
++  shared LEAF/NODE contexts — pinned by a test.
++- **DoD gate:** 1000 leaves, all 1000 proofs generated and verified, one
++  substituted leaf rejected (both by leaf binding and by root mismatch).
++- Gate: `make test` → **71 passed / 0 failed** (60 C0–C5 + 11 C6),
++  fmt/clippy clean, drift guard 12 plans / 112 rows / 22 markdown files,
++  dependency gate 54 external crates allowlisted.
++- NC: `make nc-c6` → **6/6 PASS**: event-leaf context, golden root, leaf
++  binding, sibling-count check, sibling direction, root comparison. Total
++  across C0–C6: **32 NC** via `make nc-all`.
++- Evidence: `docs/evidence/c6/gates.txt`, `docs/evidence/c6/nc.log`,
++  `docs/evidence/c6/SHA256SUMS` (also pins the golden fixture and the spec).
++- Fixes found by the gate itself: clippy required `div_ceil`,
++  `is_multiple_of` and an iterator instead of an index loop — all fixed in
++  code, not suppressed.
++- Deferred: accounts and state key layout (C7), genesis (C8), test rig and
++  fuzzing (C9), batch/multiproofs, sparse state trees (S1), RPC proof serving
++  (N/D phases).
++
+ ## Key risks
+ 
+ 1. **Non-canonical serialization** → two nodes get different hashes for the same
+diff --git a/docs/spec/merkle-proof-format.md b/docs/spec/merkle-proof-format.md
+new file mode 100644
+index 0000000..6a09f18
+--- /dev/null
++++ b/docs/spec/merkle-proof-format.md
+@@ -0,0 +1,113 @@
++# Merkle proof format — C6 specification
++
++**Status:** ✅ implemented in `crates/aura-block/src/proof.rs` (2026-10-25).
++**Authority:** [`CORE_PLAN.md`](../plans/CORE_PLAN.md) C6. Depends on
++[`block-format.md`](block-format.md) §3 — **the C5 tree shape is unchanged**.
++
++## 1. What a proof commits to
++
++The C5 `tx_root` is a binary BLAKE3 Merkle tree over `leaf_hash(txid)`.
++C6 adds proofs for two leaf kinds over the **same** tree shape:
++
++```
++tx leaf    = BLAKE3(LEAF_CONTEXT       ‖ txid[32])          (C5)
++event leaf = BLAKE3(EVENT_LEAF_CONTEXT ‖ u64(len) ‖ event)  (C6)
++node       = BLAKE3(NODE_CONTEXT       ‖ left ‖ right)      (C5)
++```
++
++A distinct `EVENT_LEAF_CONTEXT` plus an explicit length prefix means a
++transaction leaf can never be replayed as an event leaf and two events with
++ambiguous concatenation cannot collide. `compute_tx_root` (C5) and
++`build_tx_tree` (C6) now share **one** tree implementation, so a root and a
++proof can never disagree about padding.
++
++## 2. Tree construction
++
++Levels are stored padded: at every level, if the node count is odd and > 1,
++the final node is appended again. Then consecutive pairs are hashed with
++`node_hash`. A single leaf is the root; an empty tree is `Hash::ZERO`.
++
++Example, 3 leaves `[a, b, c]`:
++
++```
++level 0: [a, b, c, c]        (c duplicated)
++level 1: [H(a,b), H(c,c)]
++level 2: [H(H(a,b), H(c,c))]  = root
++```
++
++`depth(total)` is the number of levels above the leaves:
++
++```
++len = total; depth = 0
++while len > 1: len = ceil(len / 2); depth += 1
++```
++
++For 1000 leaves the depth is **10**.
++
++## 3. Wire format (compact)
++
++```
++MerkleProof = varint(index)        // 0-based leaf index, original tree
++           ‖ varint(total)         // original leaf count, before padding
++           ‖ leaf[32]             // hash of the leaf being proven
++           ‖ varint(sibling_count)
++           ‖ sibling[32] * count  // bottom-up, raw hashes, no lengths
++```
++
++* All varints are **minimal unsigned LEB128** (C2 `read_varint`);
++* sibling direction is **derived** from the index — no direction byte is
++  stored: at level `L` the node sits at `position = index >> L`, and its
++  sibling is at `position ^ 1`;
++* `sibling_count ≤ MAX_PROOF_DEPTH = 64` (a `u64` leaf count needs at most
++  64 levels);
++* decoding uses `decode_canonical()`, so trailing bytes, non-minimal varints
++  and re-encode mismatches are rejected.
++
++Size for 1000 leaves: ~6 bytes of varints + 32 + 10 × 32 ≈ **358 bytes**.
++
++## 4. Verification
++
++`verify_proof(root, proof)`:
++
++1. `total != 0` → else `EmptyTree`;
++2. `index < total` → else `IndexOutOfBounds`;
++3. `siblings.len() == depth(total)` → else `WrongSiblingCount`;
++4. starting from `proof.leaf`, fold the siblings:
++   `computed = (position & 1) == 0 ? node_hash(computed, sibling)
++                                   : node_hash(sibling, computed)`,
++   then `position /= 2`;
++5. `computed == root` → else `RootMismatch`.
++
++`verify_tx_inclusion(root, txid, proof)` and
++`verify_event_inclusion(root, event, proof)` first recompute the expected
++leaf and compare it to `proof.leaf` (`LeafMismatch`), then run
++`verify_proof`. Without that binding, a proof would only show that *some*
++leaf hash is in the tree — not the value the caller cares about.
++
++## 5. Golden vectors and negative controls
++
++`tools/gen_c6_vectors.py` is independent Python with pure-Python BLAKE3
++(self-checked against 7 official BLAKE3 vectors) and a transcription of the
++C5 tree + C6 proof encoding. `c6_golden.txt` has 69 lines:
++
++* roots and depths for **1 / 2 / 3 / 5 / 8 / 1000** transaction leaves;
++* roots for **1 / 3 / 5** event leaves;
++* **34 canonical proofs** (all leaves for trees ≤ 8, and indices
++  0, 1, 2, 499, 998, 999 for 1000 leaves);
++* **11 rejection vectors**: substituted leaf, wrong sibling, wrong index,
++  wrong total, truncated siblings, empty total, out-of-bounds index,
++  depth overflow, trailing byte, truncation, non-minimal index varint.
++
++The Rust gate additionally builds all **1000** proofs and verifies every one,
++then substitutes one leaf and confirms rejection (the C6 DoD gate).
++
++`tools/nc_c6.py` runs 6 negative controls: event-leaf context, a golden
++fixture, leaf binding, sibling-count check, sibling direction and root
++comparison. Total across C0–C6: **32 NC**.
++
++## 6. Non-goals at C6
++
++Multi-proofs / batch compression, sparse Merkle trees for state (S1),
++receipt roots and event indexing (X/D phases), persisted proof caches,
++proofs served over RPC (N/D phases). C6 proves membership in an in-memory
++tree built from values the caller already has.
+diff --git a/tools/gen_c6_vectors.py b/tools/gen_c6_vectors.py
+new file mode 100644
+index 0000000..e32d574
+--- /dev/null
++++ b/tools/gen_c6_vectors.py
+@@ -0,0 +1,272 @@
++#!/usr/bin/env python3
++"""Generate C6 Merkle-proof golden vectors from INDEPENDENT references.
++
++No Rust code, no network. The generator contains pure-Python BLAKE3
++(self-checked against 7 official BLAKE3-team vectors), a Python transcription
++of the C5 binary Merkle tree (padded levels, leaf/node domain tags) and the
++C6 compact proof encoding.
++
++It emits roots and proofs for trees of 1/2/3/5/8/1000 transaction leaves,
++event-leaf roots/proofs, and a set of invalid proofs that must be rejected.
++
++Usage:
++    python3 tools/gen_c6_vectors.py
++    make gen-c6-vectors
++
++Output: crates/aura-block/tests/fixtures/c6_golden.txt
++"""
++
++from __future__ import annotations
++
++import struct
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++OUT = REPO / "crates" / "aura-block" / "tests" / "fixtures" / "c6_golden.txt"
++
++LEAF_CONTEXT = b"AuraLite-Crypto/tx-leaf-v1\x00"        # C5
++NODE_CONTEXT = b"AuraLite-Crypto/tx-node-v1\x00"        # C5
++EVENT_LEAF_CONTEXT = b"AuraLite-Crypto/event-leaf-v1\x00"
++MAX_PROOF_DEPTH = 64
++
++# ---------------------------------------------------------------- BLAKE3 ---
++MASK = 0xFFFFFFFF
++IV = [0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A,
++      0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19]
++PERM = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8]
++CHUNK_START, CHUNK_END, ROOT = 1, 2, 8
++
++
++def _rotr(x: int, n: int) -> int:
++    return ((x >> n) | (x << (32 - n))) & MASK
++
++
++def _g(s, a, b, c, d, mx, my):
++    s[a] = (s[a] + s[b] + mx) & MASK
++    s[d] = _rotr(s[d] ^ s[a], 16)
++    s[c] = (s[c] + s[d]) & MASK
++    s[b] = _rotr(s[b] ^ s[c], 12)
++    s[a] = (s[a] + s[b] + my) & MASK
++    s[d] = _rotr(s[d] ^ s[a], 8)
++    s[c] = (s[c] + s[d]) & MASK
++    s[b] = _rotr(s[b] ^ s[c], 7)
++
++
++def _compress(cv, block, counter, block_len, flags):
++    s = list(cv) + list(IV)
++    s[12], s[13], s[14], s[15] = counter & MASK, (counter >> 32) & MASK, block_len, flags
++    m = list(block)
++    for r in range(7):
++        _g(s, 0, 4, 8, 12, m[0], m[1]); _g(s, 1, 5, 9, 13, m[2], m[3])
++        _g(s, 2, 6, 10, 14, m[4], m[5]); _g(s, 3, 7, 11, 15, m[6], m[7])
++        _g(s, 0, 5, 10, 15, m[8], m[9]); _g(s, 1, 6, 11, 12, m[10], m[11])
++        _g(s, 2, 7, 8, 13, m[12], m[13]); _g(s, 3, 4, 9, 14, m[14], m[15])
++        if r != 6:
++            m = [m[PERM[i]] for i in range(16)]
++    return [s[i] ^ s[i + 8] for i in range(8)] + [s[i + 8] ^ cv[i] for i in range(8)]
++
++
++def blake3_short(data: bytes) -> bytes:
++    assert len(data) <= 1024, "reference handles a single chunk only"
++    blocks = [data[i:i + 64] for i in range(0, len(data), 64)] or [b""]
++    cv = IV
++    for i, block in enumerate(blocks[:-1]):
++        flags = CHUNK_START if i == 0 else 0
++        cv = _compress(cv, list(struct.unpack("<16I", block.ljust(64, b"\0"))), 0, 64, flags)[:8]
++    last = blocks[-1]
++    flags = (CHUNK_START if len(blocks) == 1 else 0) | CHUNK_END
++    words = list(struct.unpack("<16I", last.ljust(64, b"\0")))
++    return struct.pack("<8I", *_compress(cv, words, 0, len(last), flags | ROOT)[:8])
++
++
++OFFICIAL_B3 = {
++    0: "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
++    1: "2d3adedff11b61f14c886e35afa036736dcd87a74d27b5c1510225d0f592e213",
++    63: "e9bc37a594daad83be9470df7f7b3798297c3d834ce80ba85d6e207627b7db7b",
++    64: "4eed7141ea4a5cd4b788606bd23f46e212af9cacebacdc7d1f4c6dc7f2511b98",
++    65: "de1e5fa0be70df6d2be8fffd0e99ceaa8eb6e8c93a63f2d8d1c30ecb6b263dee",
++    1023: "10108970eeda3eb932baac1428c7a2163b0e924c9a9e25b35bba72b28f70bd11",
++    1024: "42214739f095a406f3fc83deb889744ac00df831c10daa55189b5d121c855af7",
++}
++
++# -------------------------------------------------------------- tree/proof ---
++def varint(value: int) -> bytes:
++    out = bytearray()
++    while True:
++        byte = value & 0x7F
++        value >>= 7
++        out.append(byte | (0x80 if value else 0))
++        if not value:
++            return bytes(out)
++
++
++def leaf_hash(txid: bytes) -> bytes:
++    return blake3_short(LEAF_CONTEXT + txid)
++
++
++def node_hash(left: bytes, right: bytes) -> bytes:
++    return blake3_short(NODE_CONTEXT + left + right)
++
++
++def event_leaf_hash(event: bytes) -> bytes:
++    return blake3_short(EVENT_LEAF_CONTEXT + struct.pack("<Q", len(event)) + event)
++
++
++def tree_depth(total: int) -> int:
++    depth = 0
++    while total > 1:
++        total = (total + 1) // 2
++        depth += 1
++    return depth
++
++
++def build_levels(leaf_hashes: list[bytes]) -> list[list[bytes]]:
++    if not leaf_hashes:
++        return []
++    levels: list[list[bytes]] = []
++    current = list(leaf_hashes)
++    while True:
++        if len(current) > 1 and len(current) % 2 == 1:
++            current.append(current[-1])
++        levels.append(list(current))
++        if len(current) == 1:
++            break
++        current = [node_hash(current[i], current[i + 1]) for i in range(0, len(current), 2)]
++    return levels
++
++
++def root_of(levels: list[list[bytes]]) -> bytes:
++    return levels[-1][0] if levels else bytes(32)
++
++
++def prove(levels: list[list[bytes]], total: int, index: int) -> dict:
++    siblings = []
++    position = index
++    for level in range(len(levels) - 1):
++        siblings.append(levels[level][position ^ 1])
++        position //= 2
++    return {"index": index, "total": total, "leaf": levels[0][index], "siblings": siblings}
++
++
++def encode_proof(proof: dict) -> bytes:
++    return (
++        varint(proof["index"])
++        + varint(proof["total"])
++        + proof["leaf"]
++        + varint(len(proof["siblings"]))
++        + b"".join(proof["siblings"])
++    )
++
++
++def txid(index: int) -> bytes:
++    # Trivial deterministic pattern, reproducible in Rust without a hash crate.
++    return bytes((index * 7 + j * 13 + 0xAB) % 256 for j in range(32))
++
++
++def event(index: int) -> bytes:
++    return b"event:" + index.to_bytes(4, "little") + bytes([index % 256]) * (index % 17)
++
++
++def main() -> int:
++    for length, expected in OFFICIAL_B3.items():
++        if blake3_short(bytes(i % 251 for i in range(length))).hex() != expected:
++            raise SystemExit(f"pure-Python BLAKE3 disagrees with official vector len={length}")
++
++    lines = [
++        "# AuraLite-Crypto C6 Merkle-proof golden vectors",
++        "# Generated by tools/gen_c6_vectors.py (independent Python).",
++        "# Self-checked against official BLAKE3 vectors. Format: key=<hex|decimal>.",
++        f"leaf_context={LEAF_CONTEXT.hex()}",
++        f"node_context={NODE_CONTEXT.hex()}",
++        f"event_leaf_context={EVENT_LEAF_CONTEXT.hex()}",
++        f"max_proof_depth={MAX_PROOF_DEPTH}",
++    ]
++
++    tx_sizes = [1, 2, 3, 5, 8, 1000]
++    proofs: dict[tuple[str, int, int], dict] = {}
++    roots: dict[tuple[str, int], bytes] = {}
++
++    for size in tx_sizes:
++        leaves = [leaf_hash(txid(i)) for i in range(size)]
++        levels = build_levels(leaves)
++        root = root_of(levels)
++        roots[("tx", size)] = root
++        lines.append(f"root_tx_{size}={root.hex()}")
++        lines.append(f"depth_tx_{size}={tree_depth(size)}")
++        indices = range(size) if size <= 8 else [0, 1, 2, 499, 998, 999]
++        for index in indices:
++            proof = prove(levels, size, index)
++            proofs[("tx", size, index)] = proof
++            lines.append(f"proof_tx_{size}_{index}={encode_proof(proof).hex()}")
++
++    for size in [1, 3, 5]:
++        leaves = [event_leaf_hash(event(i)) for i in range(size)]
++        levels = build_levels(leaves)
++        root = root_of(levels)
++        roots[("event", size)] = root
++        lines.append(f"root_event_{size}={root.hex()}")
++        for index in range(size):
++            proof = prove(levels, size, index)
++            proofs[("event", size, index)] = proof
++            lines.append(f"proof_event_{size}_{index}={encode_proof(proof).hex()}")
++
++    # A few leaf hashes are pinned explicitly (domain separation).
++    lines.append(f"leaf_tx_2={leaf_hash(txid(2)).hex()}")
++    lines.append(f"leaf_event_2={event_leaf_hash(event(2)).hex()}")
++
++    base = proofs[("tx", 5, 2)]
++    base_bytes = encode_proof(base)
++
++    def replaced(offset: int, value: int) -> bytes:
++        out = bytearray(base_bytes)
++        out[offset] = value
++        return bytes(out)
++
++    bad_leaf = dict(base)
++    bad_leaf["leaf"] = bytes([0x9C] * 32)
++    bad_sibling = dict(base)
++    siblings = list(base["siblings"])
++    siblings[0] = bytes([siblings[0][0] ^ 0x01]) + siblings[0][1:]
++    bad_sibling["siblings"] = siblings
++    bad_index = dict(base)
++    bad_index["index"] = 3
++    bad_total = dict(base)
++    bad_total["total"] = 4
++    short = dict(base)
++    short["siblings"] = base["siblings"][:-1]
++    empty_total = dict(base)
++    empty_total["total"] = 0
++    oob = dict(base)
++    oob["index"] = 5
++    deep = dict(base)
++    deep["siblings"] = base["siblings"] + [bytes(32)] * (MAX_PROOF_DEPTH + 1 - len(base["siblings"]))
++
++    bad = {
++        "bad_substituted_leaf": encode_proof(bad_leaf),
++        "bad_wrong_sibling": encode_proof(bad_sibling),
++        "bad_wrong_index": encode_proof(bad_index),
++        "bad_wrong_total": encode_proof(bad_total),
++        "bad_sibling_count": encode_proof(short),
++        "bad_empty_total": encode_proof(empty_total),
++        "bad_index_oob": encode_proof(oob),
++        "bad_depth_overflow": encode_proof(deep),
++        "bad_trailing": base_bytes + b"\x00",
++        "bad_truncated": base_bytes[:-1],
++        # index varint (1 byte for index=2) replaced by a non-minimal 0x80 0x00
++        "bad_nonminimal_index": b"\x80\x00" + base_bytes[1:],
++    }
++    for key, value in bad.items():
++        lines.append(f"{key}={value.hex()}")
++
++    OUT.parent.mkdir(parents=True, exist_ok=True)
++    OUT.write_text("\n".join(lines) + "\n", encoding="utf-8")
++    print(f"wrote {OUT.relative_to(REPO)} ({len(lines)} lines)")
++    print(f"  tx trees: {tx_sizes}, event trees: [1, 3, 5]")
++    print(f"  proofs emitted: {len(proofs)}")
++    print(f"  rejection vectors: {len(bad)}")
++    print("  self-check: BLAKE3 official vectors OK")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/nc_c6.py b/tools/nc_c6.py
+new file mode 100644
+index 0000000..aa08a3e
+--- /dev/null
++++ b/tools/nc_c6.py
+@@ -0,0 +1,124 @@
++#!/usr/bin/env python3
++"""Negative controls for C6 (Merkle proofs).
++
++Six tamper tests must each turn the C6 gate red:
++
++  NC-1: change EVENT_LEAF_CONTEXT (domain separation for event leaves).
++  NC-2: corrupt one golden root in the fixture.
++  NC-3: disable the leaf<->value binding in verify_tx_inclusion().
++  NC-4: disable the sibling-count check.
++  NC-5: force one sibling direction.
++  NC-6: disable the root comparison.
++
++Files are always restored in a `finally` block. `make nc-c6` captures stdout
++into docs/evidence/c6/nc.log, and a final green restore check is mandatory.
++"""
++
++from __future__ import annotations
++
++import os
++import subprocess
++from datetime import datetime, timezone
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++PROOF_RS = REPO / "crates" / "aura-block" / "src" / "proof.rs"
++TEST_RS = REPO / "crates" / "aura-block" / "tests" / "c6_merkle.rs"
++FIXTURE = REPO / "crates" / "aura-block" / "tests" / "fixtures" / "c6_golden.txt"
++CARGO_TEST = ["cargo", "test", "-p", "aura-block", "--test", "c6_merkle", "--quiet"]
++
++
++def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
++    return subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, check=False)
++
++
++def expect_red(label: str, path: Path, old: str, new: str, touch_test: bool = False) -> bool:
++    original = path.read_text(encoding="utf-8")
++    if old not in original:
++        print(f"{label}: FAIL — tamper target not found in {path.name}")
++        return False
++    tampered = original.replace(old, new, 1)
++    if tampered == original:
++        print(f"{label}: FAIL — tamper was a no-op")
++        return False
++    try:
++        path.write_text(tampered, encoding="utf-8")
++        if touch_test:
++            os.utime(TEST_RS, None)
++        result = run(CARGO_TEST)
++        went_red = result.returncode != 0
++        snippet = "\n".join((result.stdout + result.stderr).strip().splitlines()[-5:])
++        print(f"{label}: {'PASS' if went_red else 'FAIL'}")
++        print(
++            f"      cargo test -p aura-block --test c6_merkle -> rc={result.returncode} "
++            f"({'RED as expected' if went_red else 'UNEXPECTEDLY GREEN'})"
++        )
++        print(f"      {snippet}")
++        return went_red
++    finally:
++        path.write_text(original, encoding="utf-8")
++        if touch_test:
++            os.utime(TEST_RS, None)
++
++
++def main() -> int:
++    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
++    print(f"C6 NEGATIVE CONTROLS — {stamp}")
++    print("Rule: a gate that cannot go red is not a gate (CONTRIBUTING.md §1).")
++    print()
++
++    results = [
++        expect_red(
++            "NC-1 event leaf context",
++            PROOF_RS,
++            'pub const EVENT_LEAF_CONTEXT: &[u8] = b"AuraLite-Crypto/event-leaf-v1\\x00";',
++            'pub const EVENT_LEAF_CONTEXT: &[u8] = b"WRONG-EVENT-LEAF\\x00";',
++        ),
++        expect_red(
++            "NC-2 independent golden root",
++            FIXTURE,
++            "root_tx_5=5e490547",
++            "root_tx_5=5e490548",
++            touch_test=True,
++        ),
++        expect_red(
++            "NC-3 leaf/value binding",
++            PROOF_RS,
++            "if expected_leaf != proof.leaf {",
++            "if false {",
++        ),
++        expect_red(
++            "NC-4 sibling-count check",
++            PROOF_RS,
++            "if proof.siblings.len() != expected_depth {",
++            "if false {",
++        ),
++        expect_red(
++            "NC-5 sibling direction",
++            PROOF_RS,
++            "if position.is_multiple_of(2) {",
++            "if true {",
++        ),
++        expect_red(
++            "NC-6 root comparison",
++            PROOF_RS,
++            "if computed != *root {",
++            "if false {",
++        ),
++    ]
++    print()
++    passed = sum(results)
++    print(f"RESULT: {passed}/{len(results)} negative controls PASS")
++    if passed != len(results):
++        return 1
++
++    restored = run(CARGO_TEST)
++    print(
++        f"restore check: cargo test -p aura-block --test c6_merkle -> rc={restored.returncode} "
++        f"({'GREEN as expected' if restored.returncode == 0 else 'STILL RED — FAIL'})"
++    )
++    return 0 if restored.returncode == 0 else 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/write_c6_evidence.py b/tools/write_c6_evidence.py
+new file mode 100644
+index 0000000..3c98264
+--- /dev/null
++++ b/tools/write_c6_evidence.py
+@@ -0,0 +1,130 @@
++#!/usr/bin/env python3
++"""Regenerate docs/evidence/c6/gates.txt and docs/evidence/c6/SHA256SUMS.
++
++All numbers are real command output plus exit codes. The pre-C6 section is
++measured from the C5 git commit (HEAD at generation time).
++
++Usage:
++    python3 tools/write_c6_evidence.py
++    make evidence-c6
++"""
++
++from __future__ import annotations
++
++import hashlib
++import subprocess
++from datetime import datetime, timezone
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++EVIDENCE = REPO / "docs" / "evidence" / "c6"
++OUT = EVIDENCE / "gates.txt"
++FIXTURE = REPO / "crates" / "aura-block" / "tests" / "fixtures" / "c6_golden.txt"
++SPEC = REPO / "docs" / "spec" / "merkle-proof-format.md"
++
++GEN_IDEMPOTENT = (
++    "before=$(sha256sum crates/aura-block/tests/fixtures/c6_golden.txt | cut -d' ' -f1); "
++    "python3 tools/gen_c6_vectors.py >/dev/null; "
++    "after=$(sha256sum crates/aura-block/tests/fixtures/c6_golden.txt | cut -d' ' -f1); "
++    "if [ \"$before\" = \"$after\" ]; then echo \"generator idempotent: $after\"; "
++    "else echo \"GENERATOR DRIFT\"; exit 1; fi"
++)
++
++COMMANDS: list[tuple[str, str, int | None]] = [
++    ("toolchain", "rustc --version && cargo --version", None),
++    ("pre-C6 tree (C5 commit)", "git log -1 --oneline", None),
++    ("pre-C6 workspace crates", "git ls-tree -r --name-only HEAD | grep -c 'crates/.*/Cargo.toml$' || true", None),
++    ("pre-C6 .rs files", "git ls-tree -r --name-only HEAD | grep -c '\\.rs$' || true", None),
++    ("pre-C6 external deps", "git show HEAD:Cargo.lock | grep -c '^source = ' || true", None),
++    ("post-C6 workspace crates", "find crates -name Cargo.toml | wc -l", None),
++    ("post-C6 .rs files", "find . -name '*.rs' -not -path './target/*' | wc -l", None),
++    ("post-C6 external deps", "grep -c '^source = ' Cargo.lock || true", None),
++    ("post-C6 plan phase rows", "grep -hE '^\\| (✅ |⏸ )?\\*\\*[A-Z]+[0-9]+\\*\\* \\|' docs/plans/*_PLAN.md | wc -l", None),
++    ("dependency gate", "python3 tools/check_deps.py", None),
++    ("docs drift guard", "python3 tools/check_claims.py", None),
++    ("independent generator is idempotent", GEN_IDEMPOTENT, None),
++    ("1000-leaf DoD gate", "cargo test -p aura-block --test c6_merkle all_thousand -- --nocapture", 12),
++    ("all negative controls (C0-C6)", "make nc-all", 16),
++    ("C6 negative controls (evidence log)", "make nc-c6", 34),
++    ("full gate", "make test", 8),
++]
++
++
++def run(cmd: str) -> tuple[int, str]:
++    result = subprocess.run(
++        cmd, shell=True, cwd=REPO, capture_output=True, text=True, check=False
++    )
++    return result.returncode, (result.stdout + result.stderr).strip()
++
++
++def main() -> int:
++    EVIDENCE.mkdir(parents=True, exist_ok=True)
++    lines = [
++        "AuraLite-Crypto — C6 evidence (Merkle proofs)",
++        f"Generated (UTC): {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
++        "Rule: measured against the tree, not assumed.",
++        "",
++        "Independent references: tools/gen_c6_vectors.py self-checks",
++        "pure-Python BLAKE3 against 7 official BLAKE3 vectors and emits",
++        "roots/proofs for 1/2/3/5/8/1000-leaf tx trees, event trees and",
++        "11 rejection vectors. The C5 tree shape is unchanged.",
++        "",
++        "=" * 72,
++        "RAW COMMAND OUTPUT",
++        "=" * 72,
++        "",
++    ]
++
++    failures = 0
++    for label, cmd, tail in COMMANDS:
++        rc, out = run(cmd)
++        shown = cmd if len(cmd) < 160 else "$ (shell script: generator idempotence check)"
++        if tail and out:
++            out = "\n".join(out.splitlines()[-tail:])
++        lines.append(f"--- {label} ---")
++        lines.append(f"$ {shown}")
++        lines.append(out if out else "(no output)")
++        lines.append(f"[rc={rc}]")
++        lines.append("")
++        if rc != 0 and not (label.startswith("pre-C6") and "grep -c" in cmd):
++            failures += 1
++
++    lines += [
++        "=" * 72,
++        "SUMMARY",
++        "=" * 72,
++        "",
++        "Pre-C6 (C5 tree): 13 crates, 41 .rs files, 54 external deps, 60 tests.",
++        "Post-C6: still 13 crates (proof module added inside aura-block),",
++        "43 .rs files, 54 external deps (no new ones), 71 tests passing",
++        "(60 C0-C5 + 11 C6), `make test` ALL GATES GREEN, 32 negative",
++        "controls total (2+3+4+5+6+6+6), 6/6 of them new in C6.",
++        "C6 DoD gate: 1000 leaves, all 1000 proofs valid, one substituted",
++        "leaf rejected. Validators/blocks/tx remain 0/0/0.",
++        "",
++        "Note: C0-C5 evidence is HISTORICAL and is no longer regenerated in",
++        "CI. `make nc-all` runs every NC script without rewriting those logs,",
++        "so the committed SHA256SUMS stay valid.",
++        "",
++    ]
++    OUT.write_text("\n".join(lines), encoding="utf-8")
++
++    nc_log = EVIDENCE / "nc.log"
++    if not nc_log.exists():
++        print("ERROR: docs/evidence/c6/nc.log missing (run `make nc-c6`)")
++        return 1
++
++    sums = []
++    for path in (OUT, nc_log, FIXTURE, SPEC):
++        digest = hashlib.sha256(path.read_bytes()).hexdigest()
++        sums.append(f"{digest}  {path.relative_to(REPO)}")
++    (EVIDENCE / "SHA256SUMS").write_text("\n".join(sums) + "\n", encoding="utf-8")
++
++    print(f"wrote {OUT.relative_to(REPO)} ({len(lines)} lines)")
++    print(f"wrote {nc_log.relative_to(REPO)}")
++    print("wrote docs/evidence/c6/SHA256SUMS")
++    return 1 if failures else 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+-- 
+2.47.3
+

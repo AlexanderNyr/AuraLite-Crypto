@@ -1,0 +1,1636 @@
+From 936b7109ad76e64afdfe1368d209931430e33481 Mon Sep 17 00:00:00 2001
+From: AlexanderNyr <alexander@auralite.local>
+Date: Sun, 25 Oct 2026 15:59:07 +0000
+Subject: [PATCH] C0 baseline workspace
+
+---
+ .github/workflows/ci.yml            |  39 ++++++++
+ .gitignore                          |  13 +++
+ CHANGELOG.md                        |  51 +++++++++++
+ CONTRIBUTING.md                     |   5 ++
+ Cargo.lock                          |  47 ++++++++++
+ Cargo.toml                          |  27 ++++++
+ Makefile                            |  75 ++++++++++++++++
+ README.md                           |  32 ++++---
+ ROADMAP.md                          |  17 ++--
+ crates/aura-codec/Cargo.toml        |  11 +++
+ crates/aura-codec/src/lib.rs        |   9 ++
+ crates/aura-consensus/Cargo.toml    |  11 +++
+ crates/aura-consensus/src/lib.rs    |   9 ++
+ crates/aura-crypto/Cargo.toml       |  11 +++
+ crates/aura-crypto/src/lib.rs       |   9 ++
+ crates/aura-exec/Cargo.toml         |  11 +++
+ crates/aura-exec/src/lib.rs         |   9 ++
+ crates/aura-mempool/Cargo.toml      |  11 +++
+ crates/aura-mempool/src/lib.rs      |   9 ++
+ crates/aura-node/Cargo.toml         |  11 +++
+ crates/aura-node/src/lib.rs         |   9 ++
+ crates/aura-p2p/Cargo.toml          |  11 +++
+ crates/aura-p2p/src/lib.rs          |   9 ++
+ crates/aura-rpc/Cargo.toml          |  11 +++
+ crates/aura-rpc/src/lib.rs          |   9 ++
+ crates/aura-state/Cargo.toml        |  11 +++
+ crates/aura-state/src/lib.rs        |   9 ++
+ crates/aura-storage/Cargo.toml      |  11 +++
+ crates/aura-storage/src/lib.rs      |   9 ++
+ crates/aura-types/Cargo.toml        |  11 +++
+ crates/aura-types/src/lib.rs        |  91 +++++++++++++++++++
+ crates/aura-types/tests/identity.rs |  13 +++
+ docs/STATUS.md                      |  44 ++++++----
+ docs/evidence/SHA256SUMS            |   2 +
+ docs/evidence/c0-baseline.txt       | 132 ++++++++++++++++++++++++++++
+ docs/evidence/c0/nc.log             |  19 ++++
+ docs/plans/CORE_PLAN.md             |  25 +++++-
+ rust-toolchain.toml                 |   4 +
+ tools/check_claims.py               | 131 +++++++++++++++++++++++++++
+ tools/nc_c0.py                      | 107 ++++++++++++++++++++++
+ tools/write_c0_evidence.py          | 119 +++++++++++++++++++++++++
+ 41 files changed, 1171 insertions(+), 33 deletions(-)
+ create mode 100644 .github/workflows/ci.yml
+ create mode 100644 .gitignore
+ create mode 100644 Cargo.lock
+ create mode 100644 Cargo.toml
+ create mode 100644 Makefile
+ create mode 100644 crates/aura-codec/Cargo.toml
+ create mode 100644 crates/aura-codec/src/lib.rs
+ create mode 100644 crates/aura-consensus/Cargo.toml
+ create mode 100644 crates/aura-consensus/src/lib.rs
+ create mode 100644 crates/aura-crypto/Cargo.toml
+ create mode 100644 crates/aura-crypto/src/lib.rs
+ create mode 100644 crates/aura-exec/Cargo.toml
+ create mode 100644 crates/aura-exec/src/lib.rs
+ create mode 100644 crates/aura-mempool/Cargo.toml
+ create mode 100644 crates/aura-mempool/src/lib.rs
+ create mode 100644 crates/aura-node/Cargo.toml
+ create mode 100644 crates/aura-node/src/lib.rs
+ create mode 100644 crates/aura-p2p/Cargo.toml
+ create mode 100644 crates/aura-p2p/src/lib.rs
+ create mode 100644 crates/aura-rpc/Cargo.toml
+ create mode 100644 crates/aura-rpc/src/lib.rs
+ create mode 100644 crates/aura-state/Cargo.toml
+ create mode 100644 crates/aura-state/src/lib.rs
+ create mode 100644 crates/aura-storage/Cargo.toml
+ create mode 100644 crates/aura-storage/src/lib.rs
+ create mode 100644 crates/aura-types/Cargo.toml
+ create mode 100644 crates/aura-types/src/lib.rs
+ create mode 100644 crates/aura-types/tests/identity.rs
+ create mode 100644 docs/evidence/SHA256SUMS
+ create mode 100644 docs/evidence/c0-baseline.txt
+ create mode 100644 docs/evidence/c0/nc.log
+ create mode 100644 rust-toolchain.toml
+ create mode 100644 tools/check_claims.py
+ create mode 100644 tools/nc_c0.py
+ create mode 100644 tools/write_c0_evidence.py
+
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+new file mode 100644
+index 0000000..6bb1ce6
+--- /dev/null
++++ b/.github/workflows/ci.yml
+@@ -0,0 +1,39 @@
++name: CI
++
++on:
++  push:
++    branches: [main]
++  pull_request:
++
++# C0 baseline: one honest shard. The 10 shards listed in CONTRIBUTING.md
++# (core, state, exec, consensus, net, node, wallet, ecosystem, security,
++# perf) are added by O0 as the crates that need them actually appear.
++jobs:
++  core:
++    name: core (C0 gate)
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++
++      - name: Install pinned toolchain
++        uses: dtolnay/rust-toolchain@master
++        with:
++          toolchain: 1.99.1
++          components: rustfmt, clippy
++
++      - name: deps-check
++        run: make deps-check
++
++      - name: make test
++        run: make test
++
++      - name: negative controls (C0)
++        run: make nc-c0
++
++      - name: Upload evidence
++        if: always()
++        uses: actions/upload-artifact@v4
++        with:
++          name: c0-evidence
++          path: docs/evidence/c0/
++          if-no-files-found: ignore
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..68d74b7
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,13 @@
++/target/
++**/*.rs.bk
++*.pem
++*.key
++*.p12
++keystore/
++.env
++.env.*
++.venv/
++__pycache__/
++*.py[cod]
++docs/evidence/**/*.tmp
++.DS_Store
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 49bb80c..dea8270 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,57 @@
+ All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
+ never rewritten: corrections are made with a new entry or an explicit note.
+ 
++## [C0 — baseline workspace] 2026-10-25
++
++**First code.** Deliverable: `patches/0001-C0-baseline-workspace.patch`.
++No business logic: C0 changes only the measurable foundation, exactly as the
++CORE_PLAN DoD requires.
++
++- **Workspace:** `Cargo.toml` with 11 member crates and **zero external
++  dependencies**; `Cargo.lock` committed; `rust-toolchain.toml` pinned to
++  rustc 1.99.1 with `rustfmt` + `clippy`.
++- **Identity in code:** `crates/aura-types` exports `NETWORK_NAME`,
++  `CHAIN_ID="auralite-test-1"`, `MAINNET_CHAIN_ID="auralite-1"` (reserved),
++  `DENOM="ALCRY"`, `SMALLEST_UNIT="aalcry"`, `DECIMALS=18`,
++  `BECH32_PREFIX="aura"`, `CONSENSUS="bft-pos"`, `VM="wasm"`,
++  `PROTOCOL_VERSION=1`, plus `is_our_chain()` and `units_per_coin()`.
++  4 unit tests + 1 integration test lock these values; the testnet/mainnet
++  chain-id separation is asserted.
++- **Honest placeholders:** 10 crates (`aura-codec`, `aura-crypto`,
++  `aura-state`, `aura-storage`, `aura-exec`, `aura-consensus`, `aura-p2p`,
++  `aura-mempool`, `aura-rpc`, `aura-node`) compile with no public API —
++  CONTRIBUTING.md forbids stubs that silently return success.
++- **Gates:** `Makefile` (`deps-check`, `test`, `test-core`, `nc-c0`, plus
++  explicitly labelled SKIP targets for sanitizers/determinism/fuzzing), and
++  `.github/workflows/ci.yml` running the same commands (one honest C0 shard;
++  the 10 shards arrive with O0).
++- **Docs drift guard:** `tools/check_claims.py` is part of `make test`. It
++  validates every local markdown link, the exact 112-row phase ledger, the
++  4-column phase-row shape, Status/Stage lines and CHANGELOG sync — the
++  `MATURITY_AUDIT.md` lesson turned into a gate.
++- **Negative controls:** `tools/nc_c0.py` (→ `make nc-c0` →
++  `docs/evidence/c0/nc.log`). NC-1 tampers `DENOM` and requires
++  `cargo test -p aura-types` to go red; NC-2 deletes the C0 phase row in a
++  temp doc tree and requires `check_claims.py` to go red. Both then restore.
++- **Defect found by the new gate (measured, not assumed):** the first run of
++  `make test` went red because `check_claims.py` compiled its phase-row regex
++  without `re.MULTILINE` and therefore reported all 112 phase rows missing.
++  Fixed in this same patch; NC-2 now pins that removing a single row really
++  does turn the guard red. This is the `MATURITY_AUDIT.md` pattern applied to
++  our own tooling: the guard is itself guarded.
++- **Evidence:** `docs/evidence/c0-baseline.txt` (pre-C0 zeros measured from
++  the baseline git commit, post-C0 numbers with raw command output),
++  `docs/evidence/c0/nc.log`, `docs/evidence/SHA256SUMS`. Regenerate with
++  `make evidence-c0` (run before the C0 commit so HEAD is the baseline).
++- **Honest refusals:** `make devnet` exits 1 with "D7 not implemented";
++  `make test-sanitize` / `test-determinism` / `fuzz-smoke` print SKIP lines
++  naming H3/C9/X7 instead of pretending to pass.
++- **Docs synced in this same patch (D9):** `README.md`, `docs/STATUS.md`,
++  `CHANGELOG.md`, `ROADMAP.md` (ledger + §8), `CONTRIBUTING.md`,
++  `docs/plans/CORE_PLAN.md` (C0 row ✅).
++- **Not claimed:** sanitizers, determinism, fuzzing, devnet, `cargo deny`,
++  10 CI shards. Those are named SKIPs with their owning phases.
++
+ ## [English translation / A0.2] 2026-10-25
+ 
+ Owner request: "make everything in English and continue". All 19 markdown files
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index 8c38c5c..ae3cfd1 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -36,6 +36,11 @@ make fuzz-smoke                     # short run of each fuzz target (from H3)
+ cargo deny check                    # licenses + advisories (from H1)
+ ```
+ 
++At C0 only `make test` is live; `test-sanitize`, `test-determinism` and
++`fuzz-smoke` print explicit SKIP lines naming their owning phases (H3/C9/X7)
++instead of pretending to pass. `cargo deny check` arrives with H1. A skipped
++gate is never reported as green in `docs/STATUS.md`.
++
+ CI repeats the same commands across shards: `core`, `state`, `exec`,
+ `consensus`, `net`, `node`, `wallet`, `ecosystem`, `security`, `perf`. A shard
+ that does not run its main test is a dead gate — that is a separate defect
+diff --git a/Cargo.lock b/Cargo.lock
+new file mode 100644
+index 0000000..04d2ef9
+--- /dev/null
++++ b/Cargo.lock
+@@ -0,0 +1,47 @@
++# This file is automatically @generated by Cargo.
++# It is not intended for manual editing.
++version = 4
++
++[[package]]
++name = "aura-codec"
++version = "0.1.0"
++
++[[package]]
++name = "aura-consensus"
++version = "0.1.0"
++
++[[package]]
++name = "aura-crypto"
++version = "0.1.0"
++
++[[package]]
++name = "aura-exec"
++version = "0.1.0"
++
++[[package]]
++name = "aura-mempool"
++version = "0.1.0"
++
++[[package]]
++name = "aura-node"
++version = "0.1.0"
++
++[[package]]
++name = "aura-p2p"
++version = "0.1.0"
++
++[[package]]
++name = "aura-rpc"
++version = "0.1.0"
++
++[[package]]
++name = "aura-state"
++version = "0.1.0"
++
++[[package]]
++name = "aura-storage"
++version = "0.1.0"
++
++[[package]]
++name = "aura-types"
++version = "0.1.0"
+diff --git a/Cargo.toml b/Cargo.toml
+new file mode 100644
+index 0000000..4430589
+--- /dev/null
++++ b/Cargo.toml
+@@ -0,0 +1,27 @@
++[workspace]
++resolver = "3"
++members = [
++    "crates/aura-types",
++    "crates/aura-codec",
++    "crates/aura-crypto",
++    "crates/aura-state",
++    "crates/aura-storage",
++    "crates/aura-exec",
++    "crates/aura-consensus",
++    "crates/aura-p2p",
++    "crates/aura-mempool",
++    "crates/aura-rpc",
++    "crates/aura-node",
++]
++
++[workspace.package]
++version = "0.1.0"
++edition = "2024"
++license = "MIT OR Apache-2.0"
++rust-version = "1.99.1"
++repository = "https://github.com/AlexanderNyr/AuraLite-Crypto"
++publish = false
++
++# C0 deliberately has ZERO dependencies. Every crate below is pinned here in
++# the phase that introduces it (ROADMAP rule 7 / SECURITY_PLAN H1).
++[workspace.dependencies]
+diff --git a/Makefile b/Makefile
+new file mode 100644
+index 0000000..056c974
+--- /dev/null
++++ b/Makefile
+@@ -0,0 +1,75 @@
++# AuraLite-Crypto — single entry point (landed in C0).
++# Every command here is the same command CI runs. No hidden shards.
++SHELL := /bin/bash
++CARGO ?= cargo
++PYTHON ?= python3
++
++.PHONY: help deps-check fmt clippy test test-core test-sanitize \
++        test-determinism fuzz-smoke nc-c0 evidence-c0 devnet clean
++
++help:
++	@echo "AuraLite-Crypto (Stage 1, C0)"
++	@echo "  make deps-check        verify toolchain"
++	@echo "  make test              full gate: fmt + clippy + cargo test + docs guard"
++	@echo "  make test-core         CORE shard only"
++	@echo "  make nc-c0             negative controls for C0 -> docs/evidence/c0/nc.log"
++	@echo "  make evidence-c0       regenerate docs/evidence/c0-baseline.txt + SHA256SUMS"
++	@echo "  make test-sanitize     SKIP until H3/C9"
++	@echo "  make test-determinism  SKIP until X7"
++	@echo "  make fuzz-smoke        SKIP until H3"
++	@echo "  make devnet            NOT IMPLEMENTED (D7)"
++
++deps-check:
++	@command -v $(CARGO) >/dev/null || { echo "ERROR: cargo not found (see rust-toolchain.toml)"; exit 1; }
++	@command -v rustc >/dev/null || { echo "ERROR: rustc not found"; exit 1; }
++	@$(CARGO) fmt --version >/dev/null || { echo "ERROR: rustfmt component missing"; exit 1; }
++	@$(CARGO) clippy --version >/dev/null || { echo "ERROR: clippy component missing"; exit 1; }
++	@echo "toolchain: $$(rustc --version), $$($(CARGO) --version)"
++
++fmt:
++	@$(CARGO) fmt --all -- --check
++
++clippy:
++	@$(CARGO) clippy --workspace --all-targets -- -D warnings
++
++# The C0 gate. A gate that cannot go red is not a gate: `make nc-c0` proves
++# both the Rust and the docs halves of this target fail when tampered with.
++test: deps-check
++	@echo "== fmt =="
++	@$(CARGO) fmt --all -- --check
++	@echo "== clippy =="
++	@$(CARGO) clippy --workspace --all-targets -- -D warnings
++	@echo "== cargo test =="
++	@$(CARGO) test --workspace
++	@echo "== docs drift guard =="
++	@$(PYTHON) tools/check_claims.py
++	@echo "ALL GATES GREEN"
++
++test-core:
++	@$(CARGO) test -p aura-types
++	@$(PYTHON) tools/check_claims.py
++
++# Honest skips, not silent successes. These become real gates in their phases.
++test-sanitize:
++	@echo "SKIP: Miri/ASan/UBSan gates land with H3 and C9. Not claimed at C0."
++
++test-determinism:
++	@echo "SKIP: byte-identical state-root gate lands with X7. Not claimed at C0."
++
++fuzz-smoke:
++	@echo "SKIP: cargo-fuzz targets land with H3. Not claimed at C0."
++
++nc-c0:
++	@mkdir -p docs/evidence/c0
++	@$(PYTHON) tools/nc_c0.py > docs/evidence/c0/nc.log 2>&1 || { cat docs/evidence/c0/nc.log; exit 1; }
++	@cat docs/evidence/c0/nc.log
++
++evidence-c0:
++	@$(PYTHON) tools/write_c0_evidence.py
++
++devnet:
++	@echo "ERROR: devnet is D7 (NODE_PLAN). It is not implemented at C0." >&2
++	@exit 1
++
++clean:
++	@$(CARGO) clean
+diff --git a/README.md b/README.md
+index 79e83ca..15531c1 100644
+--- a/README.md
++++ b/README.md
+@@ -11,9 +11,11 @@
+ Name and ticker were locked by the owner on 2026-10-25. The ticker was checked
+ for collisions — see [`docs/TICKER_AUDIT.md`](docs/TICKER_AUDIT.md).
+ 
+-> **Status: PLAN / A0.1.** There is **no code** in this tree yet. Everything
+-> below is a plan, not a report about an implementation. Every claim of
+-> readiness appears only after a measurable test gate, as in
++> **Status: C0 LANDED (2026-10-25).** The workspace, CI, `make test` gate and
++> the locked network-identity constants exist. There is still **no consensus,
++> VM, P2P, node or wallet**. Everything else below is a plan, not a report
++> about an implementation. Every claim of readiness appears only after a
++> measurable test gate, as in
+ > [AuraLite-Emulator](https://github.com/AlexanderNyr/AuraLite-Emulator) and
+ > [AuraLite-OS](https://github.com/AlexanderNyr/AuraLite-OS).
+ 
+@@ -74,8 +76,16 @@ Details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+ 
+ ## Quickstart
+ 
+-**This does not work yet — and that is honest.** After phase D7 (devnet) it will
+-look like this:
++**Now (C0)** the foundation is real and verifiable:
++
++```sh
++make deps-check      # rustc / cargo / rustfmt / clippy
++make test            # fmt + clippy -D warnings + cargo test + docs drift guard
++make nc-c0           # negative controls: prove the gates can go red
++```
++
++**The devnet does not exist yet — and that is honest.** After phase D7 (devnet)
++it will look like this:
+ 
+ ```sh
+ make deps-check          # rustc, cargo, clang, protoc, docker
+@@ -97,16 +107,18 @@ AuraLite-Crypto/
+   ROADMAP.md             <- north star, plan ledger, decisions, rules, audit
+   CHANGELOG.md           <- what actually changed (ISO 8601 dates, Europe/Moscow)
+   CONTRIBUTING.md        <- how to land a phase: one patch, one gate, one NC
+-  Makefile               <- single entry point (appears in C0)
+-  Cargo.toml             <- workspace (appears in C0)
++  Makefile               <- single entry point (C0 OK)
++  Cargo.toml             <- 11-crate workspace, zero dependencies (C0 OK)
++  rust-toolchain.toml    <- pinned 1.99.1 + rustfmt/clippy (C0 OK)
++  tools/                 <- docs drift guard + negative-control drivers (C0 OK)
+   docs/
+     STATUS.md            <- measured current state
+     ARCHITECTURE.md      <- invariants and data flow
+     TICKER_AUDIT.md      <- measured ticker collision audit
+     plans/*_PLAN.md      <- 12 plans, dependency-ordered, DoD + gate per phase
+-    evidence/            <- gate logs / receipts (appears with C0)
+-  patches/               <- one .patch per phase (0001-C0-... etc.)
+-  crates/*               <- code (appears with C1)
++    evidence/            <- gate logs / receipts (C0 OK)
++  patches/               <- one .patch per phase (0001-C0-... shipped)
++  crates/*               <- 11 crates: 1 real + 10 honest placeholders
+   contracts/*            <- reference contracts (ARC-20, ARC-721, AMM, ...)
+   tests/                 <- unit/property/integration/consensus/soak
+   fuzz/ sim/ bench/ deploy/ web/
+diff --git a/ROADMAP.md b/ROADMAP.md
+index 99294b7..d4dc773 100644
+--- a/ROADMAP.md
++++ b/ROADMAP.md
+@@ -121,7 +121,7 @@ phase tables (decision Q5).
+ 
+ | Plan | Status | Scope | Phases |
+ |---|---|---|---|
+-| [`docs/plans/CORE_PLAN.md`](docs/plans/CORE_PLAN.md) | 📋 PLAN | primitives, codec, crypto, tx/block, genesis, test rig | C0–C10 |
++| [`docs/plans/CORE_PLAN.md`](docs/plans/CORE_PLAN.md) | 🚧 IN PROGRESS (C0 ✅) | primitives, codec, crypto, tx/block, genesis, test rig | C0–C10 |
+ | [`docs/plans/STATE_PLAN.md`](docs/plans/STATE_PLAN.md) | 📋 PLAN | Merkle state, RocksDB, WAL, snapshots, pruning, recovery | S0–S7 |
+ | [`docs/plans/EXEC_PLAN.md`](docs/plans/EXEC_PLAN.md) | 📋 PLAN | WASM runtime, gas, ABI, contract SDK, determinism | X0–X9 |
+ | [`docs/plans/CONSENSUS_PLAN.md`](docs/plans/CONSENSUS_PLAN.md) | 📋 PLAN | BFT-PoS, QC, VRF, staking, slashing, finality, governance | B0–B10 |
+@@ -192,6 +192,12 @@ This is a normal baseline: the plan is written **before** code so that every
+ later number has a reference point. C0 records this audit in
+ `docs/evidence/c0-baseline.txt`.
+ 
++**Post-C0 measurement (2026-10-25, same commands):** 11 crates, 12 `.rs`
++files, `cargo test --workspace` → 5 passed / 0 failed, `make test` → ALL GATES
++GREEN, `make nc-c0` → 2/2 negative controls PASS. Validators/blocks/tx are
++still 0/0/0. The pre-C0 zero table above stays as the historical reference —
++it is deliberately not rewritten.
++
+ ### Measured gaps to the north star
+ 
+ | # | Gap | Evidence in the tree | Plan |
+@@ -262,10 +268,11 @@ after the fact, as in AuraLite OS.
+ 
+ ## 8. Immediate queue
+ 
+-Right now: **C0**. It writes no business logic — it creates the measurable
+-foundation (workspace, CI, `make test`, baseline audit) and moves the locked D0
+-decisions into code: chain-id `auralite-test-1`, ticker `ALCRY`, BFT-PoS, WASM.
+-The next patch is `patches/0002-C1-types.patch`.
++**C0 shipped** (`patches/0001-C0-baseline-workspace.patch`): workspace, CI,
++`make test`, docs drift guard, negative controls, identity constants. Right
++now: **C1** — canonical types (`Hash`, `Address`, `Amount`, `Denom`, `ChainId`,
++`Nonce`, `Height`, `Gas`, `Domain`) with bech32 round-trip and checked-overflow
++vectors. The next patch is `patches/0002-C1-types.patch`.
+ 
+ See also: [`docs/STATUS.md`](docs/STATUS.md),
+ [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
+diff --git a/crates/aura-codec/Cargo.toml b/crates/aura-codec/Cargo.toml
+new file mode 100644
+index 0000000..003d608
+--- /dev/null
++++ b/crates/aura-codec/Cargo.toml
+@@ -0,0 +1,11 @@
++[package]
++name = "aura-codec"
++description = "AuraLite-Crypto canonical deterministic serialization (placeholder, lands in C2)"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++rust-version.workspace = true
++repository.workspace = true
++publish.workspace = true
++
++[dependencies]
+diff --git a/crates/aura-codec/src/lib.rs b/crates/aura-codec/src/lib.rs
+new file mode 100644
+index 0000000..32f5c81
+--- /dev/null
++++ b/crates/aura-codec/src/lib.rs
+@@ -0,0 +1,9 @@
++//! `aura-codec` — placeholder crate for canonical deterministic serialization.
++//!
++//! C0 creates the workspace skeleton only. The real API lands in phase C2.
++//! This crate intentionally exposes **no public items**: CONTRIBUTING.md
++//! forbids stubs that silently return success. An empty crate is honest;
++//! a fake `Ok(())` is not.
++
++#![forbid(unsafe_code)]
++#![deny(missing_docs)]
+diff --git a/crates/aura-consensus/Cargo.toml b/crates/aura-consensus/Cargo.toml
+new file mode 100644
+index 0000000..8207730
+--- /dev/null
++++ b/crates/aura-consensus/Cargo.toml
+@@ -0,0 +1,11 @@
++[package]
++name = "aura-consensus"
++description = "AuraLite-Crypto BFT-PoS consensus (placeholder, lands in B1)"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++rust-version.workspace = true
++repository.workspace = true
++publish.workspace = true
++
++[dependencies]
+diff --git a/crates/aura-consensus/src/lib.rs b/crates/aura-consensus/src/lib.rs
+new file mode 100644
+index 0000000..e54ab59
+--- /dev/null
++++ b/crates/aura-consensus/src/lib.rs
+@@ -0,0 +1,9 @@
++//! `aura-consensus` — placeholder crate for BFT-PoS consensus.
++//!
++//! C0 creates the workspace skeleton only. The real API lands in phase B1.
++//! This crate intentionally exposes **no public items**: CONTRIBUTING.md
++//! forbids stubs that silently return success. An empty crate is honest;
++//! a fake `Ok(())` is not.
++
++#![forbid(unsafe_code)]
++#![deny(missing_docs)]
+diff --git a/crates/aura-crypto/Cargo.toml b/crates/aura-crypto/Cargo.toml
+new file mode 100644
+index 0000000..a8cb022
+--- /dev/null
++++ b/crates/aura-crypto/Cargo.toml
+@@ -0,0 +1,11 @@
++[package]
++name = "aura-crypto"
++description = "AuraLite-Crypto hashing, signatures and domain separation (placeholder, lands in C3)"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++rust-version.workspace = true
++repository.workspace = true
++publish.workspace = true
++
++[dependencies]
+diff --git a/crates/aura-crypto/src/lib.rs b/crates/aura-crypto/src/lib.rs
+new file mode 100644
+index 0000000..047d219
+--- /dev/null
++++ b/crates/aura-crypto/src/lib.rs
+@@ -0,0 +1,9 @@
++//! `aura-crypto` — placeholder crate for hashing, signatures and domain separation.
++//!
++//! C0 creates the workspace skeleton only. The real API lands in phase C3.
++//! This crate intentionally exposes **no public items**: CONTRIBUTING.md
++//! forbids stubs that silently return success. An empty crate is honest;
++//! a fake `Ok(())` is not.
++
++#![forbid(unsafe_code)]
++#![deny(missing_docs)]
+diff --git a/crates/aura-exec/Cargo.toml b/crates/aura-exec/Cargo.toml
+new file mode 100644
+index 0000000..e636787
+--- /dev/null
++++ b/crates/aura-exec/Cargo.toml
+@@ -0,0 +1,11 @@
++[package]
++name = "aura-exec"
++description = "AuraLite-Crypto deterministic WASM execution engine (placeholder, lands in X1)"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++rust-version.workspace = true
++repository.workspace = true
++publish.workspace = true
++
++[dependencies]
+diff --git a/crates/aura-exec/src/lib.rs b/crates/aura-exec/src/lib.rs
+new file mode 100644
+index 0000000..0b46bf1
+--- /dev/null
++++ b/crates/aura-exec/src/lib.rs
+@@ -0,0 +1,9 @@
++//! `aura-exec` — placeholder crate for deterministic WASM execution engine.
++//!
++//! C0 creates the workspace skeleton only. The real API lands in phase X1.
++//! This crate intentionally exposes **no public items**: CONTRIBUTING.md
++//! forbids stubs that silently return success. An empty crate is honest;
++//! a fake `Ok(())` is not.
++
++#![forbid(unsafe_code)]
++#![deny(missing_docs)]
+diff --git a/crates/aura-mempool/Cargo.toml b/crates/aura-mempool/Cargo.toml
+new file mode 100644
+index 0000000..f2be8dc
+--- /dev/null
++++ b/crates/aura-mempool/Cargo.toml
+@@ -0,0 +1,11 @@
++[package]
++name = "aura-mempool"
++description = "AuraLite-Crypto transaction pool and fee priority (placeholder, lands in D3)"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++rust-version.workspace = true
++repository.workspace = true
++publish.workspace = true
++
++[dependencies]
+diff --git a/crates/aura-mempool/src/lib.rs b/crates/aura-mempool/src/lib.rs
+new file mode 100644
+index 0000000..d24d4ff
+--- /dev/null
++++ b/crates/aura-mempool/src/lib.rs
+@@ -0,0 +1,9 @@
++//! `aura-mempool` — placeholder crate for transaction pool and fee priority.
++//!
++//! C0 creates the workspace skeleton only. The real API lands in phase D3.
++//! This crate intentionally exposes **no public items**: CONTRIBUTING.md
++//! forbids stubs that silently return success. An empty crate is honest;
++//! a fake `Ok(())` is not.
++
++#![forbid(unsafe_code)]
++#![deny(missing_docs)]
+diff --git a/crates/aura-node/Cargo.toml b/crates/aura-node/Cargo.toml
+new file mode 100644
+index 0000000..3994e09
+--- /dev/null
++++ b/crates/aura-node/Cargo.toml
+@@ -0,0 +1,11 @@
++[package]
++name = "aura-node"
++description = "AuraLite-Crypto the aurad node binary (placeholder, lands in D1)"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++rust-version.workspace = true
++repository.workspace = true
++publish.workspace = true
++
++[dependencies]
+diff --git a/crates/aura-node/src/lib.rs b/crates/aura-node/src/lib.rs
+new file mode 100644
+index 0000000..e0e0432
+--- /dev/null
++++ b/crates/aura-node/src/lib.rs
+@@ -0,0 +1,9 @@
++//! `aura-node` — placeholder crate for the aurad node binary.
++//!
++//! C0 creates the workspace skeleton only. The real API lands in phase D1.
++//! This crate intentionally exposes **no public items**: CONTRIBUTING.md
++//! forbids stubs that silently return success. An empty crate is honest;
++//! a fake `Ok(())` is not.
++
++#![forbid(unsafe_code)]
++#![deny(missing_docs)]
+diff --git a/crates/aura-p2p/Cargo.toml b/crates/aura-p2p/Cargo.toml
+new file mode 100644
+index 0000000..e5468ca
+--- /dev/null
++++ b/crates/aura-p2p/Cargo.toml
+@@ -0,0 +1,11 @@
++[package]
++name = "aura-p2p"
++description = "AuraLite-Crypto libp2p transport and gossip (placeholder, lands in N1)"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++rust-version.workspace = true
++repository.workspace = true
++publish.workspace = true
++
++[dependencies]
+diff --git a/crates/aura-p2p/src/lib.rs b/crates/aura-p2p/src/lib.rs
+new file mode 100644
+index 0000000..9ba2d27
+--- /dev/null
++++ b/crates/aura-p2p/src/lib.rs
+@@ -0,0 +1,9 @@
++//! `aura-p2p` — placeholder crate for libp2p transport and gossip.
++//!
++//! C0 creates the workspace skeleton only. The real API lands in phase N1.
++//! This crate intentionally exposes **no public items**: CONTRIBUTING.md
++//! forbids stubs that silently return success. An empty crate is honest;
++//! a fake `Ok(())` is not.
++
++#![forbid(unsafe_code)]
++#![deny(missing_docs)]
+diff --git a/crates/aura-rpc/Cargo.toml b/crates/aura-rpc/Cargo.toml
+new file mode 100644
+index 0000000..9c4e4f4
+--- /dev/null
++++ b/crates/aura-rpc/Cargo.toml
+@@ -0,0 +1,11 @@
++[package]
++name = "aura-rpc"
++description = "AuraLite-Crypto JSON-RPC / WS / gRPC API (placeholder, lands in D4)"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++rust-version.workspace = true
++repository.workspace = true
++publish.workspace = true
++
++[dependencies]
+diff --git a/crates/aura-rpc/src/lib.rs b/crates/aura-rpc/src/lib.rs
+new file mode 100644
+index 0000000..4091707
+--- /dev/null
++++ b/crates/aura-rpc/src/lib.rs
+@@ -0,0 +1,9 @@
++//! `aura-rpc` — placeholder crate for JSON-RPC / WS / gRPC API.
++//!
++//! C0 creates the workspace skeleton only. The real API lands in phase D4.
++//! This crate intentionally exposes **no public items**: CONTRIBUTING.md
++//! forbids stubs that silently return success. An empty crate is honest;
++//! a fake `Ok(())` is not.
++
++#![forbid(unsafe_code)]
++#![deny(missing_docs)]
+diff --git a/crates/aura-state/Cargo.toml b/crates/aura-state/Cargo.toml
+new file mode 100644
+index 0000000..8efea50
+--- /dev/null
++++ b/crates/aura-state/Cargo.toml
+@@ -0,0 +1,11 @@
++[package]
++name = "aura-state"
++description = "AuraLite-Crypto versioned Merkle state tree (placeholder, lands in S1)"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++rust-version.workspace = true
++repository.workspace = true
++publish.workspace = true
++
++[dependencies]
+diff --git a/crates/aura-state/src/lib.rs b/crates/aura-state/src/lib.rs
+new file mode 100644
+index 0000000..109a548
+--- /dev/null
++++ b/crates/aura-state/src/lib.rs
+@@ -0,0 +1,9 @@
++//! `aura-state` — placeholder crate for versioned Merkle state tree.
++//!
++//! C0 creates the workspace skeleton only. The real API lands in phase S1.
++//! This crate intentionally exposes **no public items**: CONTRIBUTING.md
++//! forbids stubs that silently return success. An empty crate is honest;
++//! a fake `Ok(())` is not.
++
++#![forbid(unsafe_code)]
++#![deny(missing_docs)]
+diff --git a/crates/aura-storage/Cargo.toml b/crates/aura-storage/Cargo.toml
+new file mode 100644
+index 0000000..b8a1aef
+--- /dev/null
++++ b/crates/aura-storage/Cargo.toml
+@@ -0,0 +1,11 @@
++[package]
++name = "aura-storage"
++description = "AuraLite-Crypto RocksDB persistence and WAL (placeholder, lands in S2)"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++rust-version.workspace = true
++repository.workspace = true
++publish.workspace = true
++
++[dependencies]
+diff --git a/crates/aura-storage/src/lib.rs b/crates/aura-storage/src/lib.rs
+new file mode 100644
+index 0000000..3227926
+--- /dev/null
++++ b/crates/aura-storage/src/lib.rs
+@@ -0,0 +1,9 @@
++//! `aura-storage` — placeholder crate for RocksDB persistence and WAL.
++//!
++//! C0 creates the workspace skeleton only. The real API lands in phase S2.
++//! This crate intentionally exposes **no public items**: CONTRIBUTING.md
++//! forbids stubs that silently return success. An empty crate is honest;
++//! a fake `Ok(())` is not.
++
++#![forbid(unsafe_code)]
++#![deny(missing_docs)]
+diff --git a/crates/aura-types/Cargo.toml b/crates/aura-types/Cargo.toml
+new file mode 100644
+index 0000000..b7efb23
+--- /dev/null
++++ b/crates/aura-types/Cargo.toml
+@@ -0,0 +1,11 @@
++[package]
++name = "aura-types"
++description = "AuraLite-Crypto canonical primitive types and network identity constants"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++rust-version.workspace = true
++repository.workspace = true
++publish.workspace = true
++
++[dependencies]
+diff --git a/crates/aura-types/src/lib.rs b/crates/aura-types/src/lib.rs
+new file mode 100644
+index 0000000..c511ad2
+--- /dev/null
++++ b/crates/aura-types/src/lib.rs
+@@ -0,0 +1,91 @@
++//! AuraLite-Crypto canonical primitives.
++//!
++//! C0 lands **only** the network identity constants and the invariants that
++//! lock the D0 decisions into code. The primitive types (`Hash`, `Address`,
++//! `Amount`, ...) arrive in C1; `aura-codec` in C2; `aura-crypto` in C3.
++//!
++//! Nothing here is consensus logic. It exists so that no later crate can
++//! quietly invent a different chain-id, ticker or decimal count.
++
++#![forbid(unsafe_code)]
++#![deny(missing_docs)]
++
++/// Human-readable network name (Q1).
++pub const NETWORK_NAME: &str = "AuraLite-Crypto Network";
++
++/// Stage 1 chain identifier. A signature from any other chain is invalid (D5).
++pub const CHAIN_ID: &str = "auralite-test-1";
++
++/// chain-id reserved for mainnet. It must never be active in Stage 1 (Q5).
++pub const MAINNET_CHAIN_ID: &str = "auralite-1";
++
++/// Native asset ticker (Q1 / `docs/TICKER_AUDIT.md`).
++pub const DENOM: &str = "ALCRY";
++
++/// Name of the smallest unit, 10^-18 ALCRY.
++pub const SMALLEST_UNIT: &str = "aalcry";
++
++/// Number of decimal places of the native asset.
++pub const DECIMALS: u8 = 18;
++
++/// bech32 human-readable part for addresses (`aura1...`).
++pub const BECH32_PREFIX: &str = "aura";
++
++/// Consensus family locked by Q2.
++pub const CONSENSUS: &str = "bft-pos";
++
++/// Execution engine locked by Q3. EVM (`revm`) is the optional X9 only.
++pub const VM: &str = "wasm";
++
++/// Protocol version. Any format change requires a new phase, a migration test
++/// and a bump here (ROADMAP rule 4, CORE_PLAN C10).
++pub const PROTOCOL_VERSION: u32 = 1;
++
++/// Returns true only for the chain this build is allowed to sign for.
++///
++/// This is deliberately a function rather than an exposed constant comparison
++/// in callers: replay protection must have one owner.
++pub fn is_our_chain(chain_id: &str) -> bool {
++    chain_id == CHAIN_ID
++}
++
++/// Number of smallest units in one whole `DENOM` unit.
++pub const fn units_per_coin() -> u128 {
++    10u128.pow(DECIMALS as u32)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn d0_identity_is_locked() {
++        assert_eq!(NETWORK_NAME, "AuraLite-Crypto Network");
++        assert_eq!(CHAIN_ID, "auralite-test-1");
++        assert_eq!(DENOM, "ALCRY");
++        assert_eq!(DECIMALS, 18);
++        assert_eq!(BECH32_PREFIX, "aura");
++        assert_eq!(CONSENSUS, "bft-pos");
++        assert_eq!(VM, "wasm");
++        assert_eq!(PROTOCOL_VERSION, 1);
++    }
++
++    #[test]
++    fn mainnet_chain_id_is_reserved_not_active() {
++        assert_ne!(CHAIN_ID, MAINNET_CHAIN_ID);
++        assert!(!is_our_chain(MAINNET_CHAIN_ID));
++        assert!(!is_our_chain("auralite-2"));
++        assert!(is_our_chain(CHAIN_ID));
++    }
++
++    #[test]
++    fn smallest_unit_matches_decimals() {
++        assert_eq!(SMALLEST_UNIT, "aalcry");
++        assert_eq!(units_per_coin(), 1_000_000_000_000_000_000);
++    }
++
++    #[test]
++    fn empty_chain_id_is_rejected() {
++        assert!(!is_our_chain(""));
++    }
++}
+diff --git a/crates/aura-types/tests/identity.rs b/crates/aura-types/tests/identity.rs
+new file mode 100644
+index 0000000..41bbc2b
+--- /dev/null
++++ b/crates/aura-types/tests/identity.rs
+@@ -0,0 +1,13 @@
++//! Integration-side check that the workspace actually exports the C0 identity.
++//! C1 and later crates will consume these constants from outside the crate.
++
++use aura_types::{CHAIN_ID, DENOM, NETWORK_NAME, is_our_chain, units_per_coin};
++
++#[test]
++fn workspace_exports_identity() {
++    assert_eq!(CHAIN_ID, "auralite-test-1");
++    assert_eq!(DENOM, "ALCRY");
++    assert_eq!(NETWORK_NAME, "AuraLite-Crypto Network");
++    assert!(is_our_chain(CHAIN_ID));
++    assert!(units_per_coin() > 0);
++}
+diff --git a/docs/STATUS.md b/docs/STATUS.md
+index 5c57a87..cf90afe 100644
+--- a/docs/STATUS.md
++++ b/docs/STATUS.md
+@@ -1,7 +1,8 @@
+ # Implementation status — AuraLite-Crypto
+ 
+ > Updated **in the same patch** as the phase's code (rule D9).
+-> Snapshot date: **2026-10-25**, tree: "plan, A0.1 + locked D0 decisions".
++> Snapshot date: **2026-10-25**, tree: "C0 landed — workspace + CI +
++> identity constants, Stage 1 in progress".
+ 
+ ## Locked decisions (2026-10-25)
+ 
+@@ -16,6 +17,9 @@
+ | ⏸ Stage 2 | mainnet, white paper, external audit, DeFi, bridge — separate decision |
+ | Docs language | English (owner request, 2026-10-25) |
+ 
++**Phase ledger:** C0 ✅ done (`patches/0001-C0-baseline-workspace.patch`);
++C1 is next. No other phase has started.
++
+ ## Maturity level
+ 
+ | Level | Definition | Now |
+@@ -31,30 +35,38 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
+ 
+ ## Working now
+ 
+-- Nothing "works": there is not a single `.rs` file. This is not a missing
+-  report, it is the starting point. The plan is built so that the first line in
+-  this section appears together with the `docs/evidence/c0-baseline.txt` log.
+-- Present and agreed: north star, 12 plans, 12 × (DoD + gate) per phase,
+-  contribution rules, D0 decisions, ticker audit, architecture, and the plan
+-  for a threat model (`SECURITY_PLAN` H0 — not yet written as a document).
++- `make test` is green: `cargo fmt --check`, `cargo clippy --workspace
++  --all-targets -- -D warnings`, `cargo test --workspace` (5 tests) and the
++  docs drift guard. Receipt: `docs/evidence/c0-baseline.txt` and
++  `docs/evidence/c0/nc.log`.
++- `aura-types` exports the locked D0 identity: `auralite-test-1`, `ALCRY`,
++  18 decimals, `aura` bech32 prefix, `bft-pos`, `wasm`, protocol version 1.
++- 10 placeholder crates compile but expose **no API** (an honest empty crate,
++  not a fake `Ok(())`). CI runs the same commands as `make test`.
++- Still absent: consensus, VM, P2P, node, RPC, wallet, explorer, contracts.
++  Present and agreed: north star, 12 plans, 112 phase rows, contribution rules,
++  D0 decisions, ticker audit, architecture, and the plan for a threat model
++  (`SECURITY_PLAN` H0 — not yet written as a document).
+ 
+ ## Measured numbers (2026-10-25)
+ 
+ ```
+-find . -name '*.rs'          -> 0 files
+-find . -name Cargo.toml      -> 0 files
+-ls docs/plans/*_PLAN.md      -> 12 files
+-cargo test                   -> command unavailable (no workspace)
+-make test                    -> command unavailable (no Makefile)
+-validators / blocks / tx     -> 0 / 0 / 0
++find crates -name Cargo.toml       -> 11 crates (+1 workspace root)
++find . -name '*.rs' -not -path './target/*' -> 12 files
++ls docs/plans/*_PLAN.md           -> 12 plans / 112 phase rows
++cargo test --workspace            -> 5 passed; 0 failed
++make test                         -> ALL GATES GREEN
++make nc-c0                        -> 2/2 negative controls PASS
++validators / blocks / tx          -> 0 / 0 / 0
+ ```
+ 
+-The command to reproduce the audit will appear in C0 and be recorded in
+-`docs/evidence/c0-baseline.txt`.
++Pre-C0 baseline (A0.1) and post-C0 numbers, with the exact commands and raw
++output, are recorded in `docs/evidence/c0-baseline.txt`.
+ 
+ ## What is missing (and must not be lost)
+ 
+-- No cryptography, tx format, block hash or signatures.
++- No cryptography implementation, tx format, block hash or signatures
++  (only the identity constants exist).
+ - No consensus, no P2P, no state, no VM.
+ - No wallet, explorer, contracts, token.
+ - No audit, no bug bounty, no legal opinion.
+diff --git a/docs/evidence/SHA256SUMS b/docs/evidence/SHA256SUMS
+new file mode 100644
+index 0000000..30d10d5
+--- /dev/null
++++ b/docs/evidence/SHA256SUMS
+@@ -0,0 +1,2 @@
++9b931495143aca686cd99fc12977cd9442e5485d2feabedb6c9b1832c2f00068  docs/evidence/c0-baseline.txt
++ebccc7884c5085a251e2ee4f57a83b2a233c5d9b478babedb3b7ba868b741eb7  docs/evidence/c0/nc.log
+diff --git a/docs/evidence/c0-baseline.txt b/docs/evidence/c0-baseline.txt
+new file mode 100644
+index 0000000..ac4ea74
+--- /dev/null
++++ b/docs/evidence/c0-baseline.txt
+@@ -0,0 +1,132 @@
++AuraLite-Crypto — C0 baseline evidence
++Generated (UTC): 2026-10-25T15:58:51+00:00
++Rule: measured against the tree, not assumed (ROADMAP.md house style).
++
++Toolchain note: verified with RUSTUP_TOOLCHAIN=stable (rustc 1.99.1)
++because the sandbox had that toolchain installed. rust-toolchain.toml
++pins the same 1.99.1 channel plus rustfmt/clippy for CI.
++
++========================================================================
++RAW COMMAND OUTPUT
++========================================================================
++
++--- toolchain ---
++$ rustc --version && cargo --version && cargo fmt --version && cargo clippy --version
++rustc 1.99.1 (58cf8f9c3 2026-10-13)
++cargo 1.99.1 (5f94df478 2026-08-27)
++rustfmt 1.10.0-stable (58cf8f9c35 2026-10-13)
++clippy 0.1.99 (58cf8f9c35 2026-10-13)
++[rc=0]
++
++--- pre-C0 tree (from the baseline git commit) ---
++$ git log -1 --oneline
++2154140 Plan baseline / A0.2 (English translation + D0 decisions)
++[rc=0]
++
++--- pre-C0 .rs files ---
++$ git ls-tree -r --name-only HEAD | grep -c '\.rs$' || true
++0
++[rc=0]
++
++--- pre-C0 Cargo.toml files ---
++$ git ls-tree -r --name-only HEAD | grep -c 'Cargo.toml' || true
++0
++[rc=0]
++
++--- pre-C0 plan files ---
++$ git ls-tree -r --name-only HEAD | grep -c 'docs/plans/.*_PLAN.md' || true
++12
++[rc=0]
++
++--- post-C0 crates ---
++$ find crates -name Cargo.toml | wc -l
++11
++[rc=0]
++
++--- post-C0 .rs files ---
++$ find . -name '*.rs' -not -path './target/*' | wc -l
++12
++[rc=0]
++
++--- post-C0 plan phase rows ---
++$ grep -hE '^\| (✅ |⏸ )?\*\*[A-Z]+[0-9]+\*\* \|' docs/plans/*_PLAN.md | wc -l
++112
++[rc=0]
++
++--- deps-check ---
++$ make deps-check
++make[1]: Entering directory '/home/user/AuraLite-Crypto'
++toolchain: rustc 1.99.1 (58cf8f9c3 2026-10-13), cargo 1.99.1 (5f94df478 2026-08-27)
++make[1]: Leaving directory '/home/user/AuraLite-Crypto'
++[rc=0]
++
++--- full test gate ---
++$ make test
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
++     Running unittests src/lib.rs (target/debug/deps/aura_codec-e71f4cde0acf4698)
++     Running unittests src/lib.rs (target/debug/deps/aura_consensus-0fcc98139a7a118b)
++     Running unittests src/lib.rs (target/debug/deps/aura_crypto-87af09a4fc7f391f)
++     Running unittests src/lib.rs (target/debug/deps/aura_exec-376036da62a1a889)
++     Running unittests src/lib.rs (target/debug/deps/aura_mempool-d4afd06ebea00a27)
++     Running unittests src/lib.rs (target/debug/deps/aura_node-f89cb5fec9076dca)
++     Running unittests src/lib.rs (target/debug/deps/aura_p2p-a8f698eab67efd73)
++     Running unittests src/lib.rs (target/debug/deps/aura_rpc-f6ef2bc286c42693)
++     Running unittests src/lib.rs (target/debug/deps/aura_state-1313f3cb4a570b49)
++     Running unittests src/lib.rs (target/debug/deps/aura_storage-1026462560aae3b0)
++     Running unittests src/lib.rs (target/debug/deps/aura_types-308b229bcbc15c92)
++     Running tests/identity.rs (target/debug/deps/identity-22b5be58a3e6ffbb)
++   Doc-tests aura_codec
++   Doc-tests aura_consensus
++   Doc-tests aura_crypto
++   Doc-tests aura_exec
++   Doc-tests aura_mempool
++   Doc-tests aura_node
++   Doc-tests aura_p2p
++   Doc-tests aura_rpc
++   Doc-tests aura_state
++   Doc-tests aura_storage
++   Doc-tests aura_types
++[rc=0]
++
++--- negative controls ---
++$ make nc-c0
++make[1]: Entering directory '/home/user/AuraLite-Crypto'
++C0 NEGATIVE CONTROLS — 2026-10-25T15:58:52+00:00
++Rule: a gate that cannot go red is not a gate (CONTRIBUTING.md §1).
++
++NC-1 Rust identity: PASS
++      cargo test -p aura-types -> rc=101 (RED as expected)
++      failures:
++    tests::d0_identity_is_locked
++
++test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++error: test failed, to rerun pass `-p aura-types --lib`
++
++NC-2 docs drift guard: PASS
++      check_claims.py --root <temp> -> rc=1 (RED as expected)
++      DOCS DRIFT GUARD: FAIL (1 problem(s))
++  - docs/plans/CORE_PLAN.md: missing phase rows ['C0']
++
++RESULT: 2/2 negative controls PASS
++restore check: cargo test -p aura-types -> rc=0 (GREEN as expected)
++make[1]: Leaving directory '/home/user/AuraLite-Crypto'
++[rc=0]
++
++--- docs drift guard (standalone) ---
++$ python3 tools/check_claims.py
++DOCS DRIFT GUARD: OK — 19 markdown files, 12 plans, 112 phase rows, all local links resolve
++[rc=0]
++
++========================================================================
++SUMMARY (numbers copied from the raw output above, not invented)
++========================================================================
++
++Pre-C0 (A0.1 baseline): 0 .rs files, 0 Cargo.toml, 12 plans, 0 tests,
++0 patches, 0 validators/blocks/tx, `make test` did not exist.
++Post-C0: 11 crates (+1 workspace root), 12 .rs files, 112 phase rows,
++5 Rust tests passing, `make test` ALL GATES GREEN, 2/2 negative
++controls PASS, 0 validators/blocks/tx (no network yet).
++
++Historical zero table in ROADMAP.md §4 is deliberately NOT rewritten.
++It is the reference point for every later measurement.
+diff --git a/docs/evidence/c0/nc.log b/docs/evidence/c0/nc.log
+new file mode 100644
+index 0000000..65c8ece
+--- /dev/null
++++ b/docs/evidence/c0/nc.log
+@@ -0,0 +1,19 @@
++C0 NEGATIVE CONTROLS — 2026-10-25T15:58:52+00:00
++Rule: a gate that cannot go red is not a gate (CONTRIBUTING.md §1).
++
++NC-1 Rust identity: PASS
++      cargo test -p aura-types -> rc=101 (RED as expected)
++      failures:
++    tests::d0_identity_is_locked
++
++test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++error: test failed, to rerun pass `-p aura-types --lib`
++
++NC-2 docs drift guard: PASS
++      check_claims.py --root <temp> -> rc=1 (RED as expected)
++      DOCS DRIFT GUARD: FAIL (1 problem(s))
++  - docs/plans/CORE_PLAN.md: missing phase rows ['C0']
++
++RESULT: 2/2 negative controls PASS
++restore check: cargo test -p aura-types -> rc=0 (GREEN as expected)
+diff --git a/docs/plans/CORE_PLAN.md b/docs/plans/CORE_PLAN.md
+index 1b53bea..4803b05 100644
+--- a/docs/plans/CORE_PLAN.md
++++ b/docs/plans/CORE_PLAN.md
+@@ -1,6 +1,6 @@
+ # CORE_PLAN — primitives, codec, cryptography, formats
+ 
+-**Status:** 📋 PLAN (C0–C10 not started)  
++**Status:** 🚧 IN PROGRESS (C0 done ✅ 2026-10-25; C1 next)  
+ **Stage:** Stage 1: C0–C10 (all phases active).  
+ **Deliverable:** `patches/0001-C0-...` … `patches/0011-C10-...`
+ **Dependencies:** none. This is the root of the whole tree.
+@@ -28,7 +28,7 @@ other 11 plans rest.
+ 
+ | Phase | Title | DoD | Test gate |
+ |---|---|---|---|
+-| **C0** | Baseline + workspace + CI | `Cargo.toml` workspace, `Makefile`, `rust-toolchain.toml`, `.github/workflows/ci.yml`, `docs/evidence/c0-baseline.txt` with measured zeros; constants `CHAIN_ID="auralite-test-1"`, `DENOM="ALCRY"`, `DECIMALS=18` fixed in code and checked by a test | `make test` green (0 tests so far, but the pipeline is real); NC: broken CI → red |
++| ✅ **C0** | Baseline + workspace + CI | `Cargo.toml` workspace, `Makefile`, `rust-toolchain.toml`, `.github/workflows/ci.yml`, `docs/evidence/c0-baseline.txt` with measured zeros; constants `CHAIN_ID="auralite-test-1"`, `DENOM="ALCRY"`, `DECIMALS=18` fixed in code and checked by a test | `make test` green (0 tests so far, but the pipeline is real); NC: broken CI → red |
+ | **C1** | Canonical types | `Hash`, `Address` (bech32 `aura1...`), `Amount`/`Denom` (`ALCRY` / `aalcry`), `ChainId`, `Nonce`, `Height`, `Gas`, `Domain`; `BTreeMap` instead of `HashMap` | unit vectors: bech32 round-trip, bad checksum rejected, checked `Amount` overflow |
+ | **C2** | `aura-codec` | fixed field order, lengths, `Option` tags, non-canonical encodings banned, `codec_version` | golden vectors (hex fixtures), property: `decode(encode(x)) == x`, NC: one mutated byte → `Err` |
+ | **C3** | `aura-crypto` | BLAKE3 + domain tags, Ed25519, secp256k1, constant-time compare, zeroize | RFC/test-vector signatures, malleable `s` rejected, NC: swapped domain → `Err` |
+@@ -40,6 +40,27 @@ other 11 plans rest.
+ | **C9** | Test rig | `proptest`, golden fixtures, `cargo-fuzz` targets for codec/tx, `make test-core`, CI shard `core` | >= 200 vectors, 60 s fuzzing with no crashes, `clippy -D warnings` |
+ | **C10** | Close-out | all NCs collected, docs + STATUS + CHANGELOG, format specs in `docs/spec/` | full `make test`; plan↔tree audit (not a single ✅ line without a receipt) |
+ 
++
++### C0 receipt (2026-10-25)
++
++- Deliverable: `patches/0001-C0-baseline-workspace.patch`.
++- Landed: 11-crate workspace with zero dependencies, `Cargo.lock`,
++  `rust-toolchain.toml` (1.99.1), `Makefile`, `.github/workflows/ci.yml`,
++  `aura-types` identity constants, `tools/check_claims.py`, `tools/nc_c0.py`.
++- Gate: `make test` = `cargo fmt --check` + `cargo clippy --workspace
++  --all-targets -- -D warnings` + `cargo test --workspace` (**5 passed,
++  0 failed**) + docs drift guard (**12 plans / 112 phase rows / all links OK**).
++- NC: `make nc-c0` → **2/2 PASS** (`docs/evidence/c0/nc.log`).
++- Defect found by the gate itself: `check_claims.py` initially lacked
++  `re.MULTILINE` and reported all 112 rows missing; fixed in this patch, and
++  NC-2 now pins that a single removed row turns the guard red.
++- Raw numbers: `docs/evidence/c0-baseline.txt`, `docs/evidence/SHA256SUMS`.
++- `make devnet` refuses with rc=1 (D7 not implemented); sanitizer,
++  determinism and fuzz gates are explicit SKIPs until H3/C9/X7.
++- Toolchain note: verified with `RUSTUP_TOOLCHAIN=stable` (rustc 1.99.1) because
++  the sandbox had that toolchain installed; CI installs the pinned 1.99.1
++  channel from `rust-toolchain.toml` with rustfmt/clippy.
++
+ ## Key risks
+ 
+ 1. **Non-canonical serialization** → two nodes get different hashes for the same
+diff --git a/rust-toolchain.toml b/rust-toolchain.toml
+new file mode 100644
+index 0000000..955e964
+--- /dev/null
++++ b/rust-toolchain.toml
+@@ -0,0 +1,4 @@
++[toolchain]
++channel = "1.99.1"
++components = ["rustfmt", "clippy"]
++profile = "minimal"
+diff --git a/tools/check_claims.py b/tools/check_claims.py
+new file mode 100644
+index 0000000..b3e8495
+--- /dev/null
++++ b/tools/check_claims.py
+@@ -0,0 +1,131 @@
++#!/usr/bin/env python3
++"""Docs drift guard for AuraLite-Crypto (C0).
++
++The lesson of AuraLite-OS/MATURITY_AUDIT.md: a guarantee that exists only on
++paper protects nothing. This script is part of `make test` and fails on:
++
++  * a broken local markdown link;
++  * a plan with no Status / Stage line;
++  * a missing, extra or duplicated phase row (exact expected phase set);
++  * a phase row without exactly 4 columns (Phase / Title / DoD / Gate);
++  * a CHANGELOG with no C0 entry once code exists.
++
++Usage:
++    python3 tools/check_claims.py [--root /path/to/tree]
++"""
++
++from __future__ import annotations
++
++import argparse
++import re
++import sys
++from pathlib import Path
++
++# Exact phase ledger. If a phase is added, this table must be updated in the
++# same patch as the plan (that IS the drift guard).
++EXPECTED: dict[str, tuple[str, int]] = {
++    "CORE_PLAN.md": ("C", 11),
++    "STATE_PLAN.md": ("S", 8),
++    "EXEC_PLAN.md": ("X", 10),
++    "CONSENSUS_PLAN.md": ("B", 11),
++    "NET_PLAN.md": ("N", 9),
++    "NODE_PLAN.md": ("D", 9),
++    "WALLET_PLAN.md": ("W", 8),
++    "ECOSYSTEM_PLAN.md": ("E", 10),
++    "ECONOMICS_PLAN.md": ("T", 9),
++    "SECURITY_PLAN.md": ("H", 10),
++    "PERF_PLAN.md": ("P", 7),
++    "OPS_PLAN.md": ("O", 10),
++}
++
++LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
++PHASE_ROW_RE = re.compile(r"^\| (?:✅ |⏸ )?\*\*([A-Z]+)(\d+)\*\* \|", re.M)
++ANY_PHASE_ROW_RE = re.compile(r"^\| (?:✅ |⏸ )?\*\*[A-Z]+\d+\*\* \|", re.M)
++
++
++def check(root: Path) -> list[str]:
++    errors: list[str] = []
++    md_files = sorted(root.rglob("*.md"))
++    if not md_files:
++        return [f"no markdown files under {root}"]
++
++    # 1. Local links.
++    for path in md_files:
++        for match in LINK_RE.finditer(path.read_text(encoding="utf-8")):
++            target = match.group(1).split("#")[0].strip()
++            if not target or target.startswith(("http://", "https://", "mailto:")):
++                continue
++            resolved = (path.parent / target).resolve()
++            if not resolved.exists():
++                errors.append(f"{path.relative_to(root)}: broken link -> {target}")
++
++    # 2. Plan ledger.
++    plans = root / "docs" / "plans"
++    for name, (prefix, count) in EXPECTED.items():
++        path = plans / name
++        if not path.exists():
++            errors.append(f"docs/plans/{name}: missing plan file")
++            continue
++        text = path.read_text(encoding="utf-8")
++        if "**Status:**" not in text:
++            errors.append(f"docs/plans/{name}: no Status line")
++        if "**Stage:**" not in text:
++            errors.append(f"docs/plans/{name}: no Stage line")
++
++        rows = PHASE_ROW_RE.findall(text)
++        numbers = [int(num) for pre, num in rows if pre == prefix]
++        expected = set(range(count))
++        missing = sorted(expected - set(numbers))
++        extra = sorted(set(numbers) - expected)
++        duplicates = sorted({n for n in numbers if numbers.count(n) > 1})
++        if missing:
++            errors.append(f"docs/plans/{name}: missing phase rows {[prefix + str(n) for n in missing]}")
++        if extra:
++            errors.append(f"docs/plans/{name}: unexpected phase rows {[prefix + str(n) for n in extra]}")
++        if duplicates:
++            errors.append(f"docs/plans/{name}: duplicate phase rows {[prefix + str(n) for n in duplicates]}")
++
++        for line in text.splitlines():
++            if ANY_PHASE_ROW_RE.match(line):
++                cells = line.strip().strip("|").split("|")
++                if len(cells) != 4:
++                    errors.append(
++                        f"docs/plans/{name}: phase row has {len(cells)} columns, expected 4: {line[:70]}"
++                    )
++
++    extra_plans = {p.name for p in plans.glob("*_PLAN.md")} - set(EXPECTED)
++    if extra_plans:
++        errors.append(f"unregistered plan files (update EXPECTED): {sorted(extra_plans)}")
++
++    # 3. Docs sync with code.
++    if (root / "Cargo.toml").exists():
++        changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
++        if "[C0" not in changelog:
++            errors.append("CHANGELOG.md: no C0 entry although Cargo.toml exists (rule D9)")
++
++    return errors
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--root", default=None, help="tree to check (default: repository root)")
++    args = parser.parse_args()
++    root = Path(args.root).resolve() if args.root else Path(__file__).resolve().parents[1]
++
++    errors = check(root)
++    if errors:
++        print(f"DOCS DRIFT GUARD: FAIL ({len(errors)} problem(s))")
++        for error in errors:
++            print(f"  - {error}")
++        return 1
++
++    total_phases = sum(count for _, count in EXPECTED.values())
++    print(
++        f"DOCS DRIFT GUARD: OK — {len(list(root.rglob('*.md')))} markdown files, "
++        f"{len(EXPECTED)} plans, {total_phases} phase rows, all local links resolve"
++    )
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/nc_c0.py b/tools/nc_c0.py
+new file mode 100644
+index 0000000..d59a944
+--- /dev/null
++++ b/tools/nc_c0.py
+@@ -0,0 +1,107 @@
++#!/usr/bin/env python3
++"""Negative controls for C0.
++
++A green `make test` means nothing unless it can be made red. This script
++tamper-tests the two halves of the C0 gate and requires BOTH to fail:
++
++  NC-1 (Rust): change `DENOM` from "ALCRY" to "NOPE" and run
++       `cargo test -p aura-types`. The identity test must go red.
++  NC-2 (docs): copy the docs into a temp tree, delete the C0 phase row from
++       CORE_PLAN.md and run check_claims.py --root <temp>. It must go red.
++
++The source file is always restored in a `finally` block. Output is captured by
++`make nc-c0` into docs/evidence/c0/nc.log.
++"""
++
++from __future__ import annotations
++
++import re
++import shutil
++import subprocess
++import sys
++import tempfile
++from datetime import datetime, timezone
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++LIB = REPO / "crates" / "aura-types" / "src" / "lib.rs"
++CHECKER = REPO / "tools" / "check_claims.py"
++DOC_FILES = ["README.md", "ROADMAP.md", "CHANGELOG.md", "CONTRIBUTING.md", "Cargo.toml"]
++C0_ROW = re.compile(r"^\| (?:✅ |⏸ )?\*\*C0\*\* \|")
++
++
++def run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
++    return subprocess.run(cmd, cwd=cwd or REPO, capture_output=True, text=True)
++
++
++def rust_nc() -> tuple[bool, str]:
++    original = LIB.read_text(encoding="utf-8")
++    tampered = original.replace('pub const DENOM: &str = "ALCRY";', 'pub const DENOM: &str = "NOPE";')
++    if tampered == original:
++        return False, "tamper target `DENOM` not found in lib.rs — NC is blind"
++    try:
++        LIB.write_text(tampered, encoding="utf-8")
++        result = run(["cargo", "test", "-p", "aura-types", "--quiet"])
++        went_red = result.returncode != 0
++        detail = (
++            f"cargo test -p aura-types -> rc={result.returncode} "
++            f"({'RED as expected' if went_red else 'UNEXPECTEDLY GREEN'})"
++        )
++        snippet = "\n".join((result.stdout + result.stderr).strip().splitlines()[-6:])
++        return went_red, f"{detail}\n      {snippet}"
++    finally:
++        LIB.write_text(original, encoding="utf-8")
++
++
++def docs_nc() -> tuple[bool, str]:
++    with tempfile.TemporaryDirectory(prefix="aura-nc-") as tmp:
++        root = Path(tmp)
++        for name in DOC_FILES:
++            shutil.copy2(REPO / name, root / name)
++        shutil.copytree(REPO / "docs", root / "docs")
++
++        plan = root / "docs" / "plans" / "CORE_PLAN.md"
++        lines = plan.read_text(encoding="utf-8").splitlines()
++        kept = [line for line in lines if not C0_ROW.match(line)]
++        removed = len(lines) - len(kept)
++        if removed != 1:
++            return False, f"expected to remove exactly 1 C0 row, removed {removed}"
++        plan.write_text("\n".join(kept) + "\n", encoding="utf-8")
++
++        result = run([sys.executable, str(CHECKER), "--root", str(root)])
++        went_red = result.returncode != 0
++        detail = (
++            f"check_claims.py --root <temp> -> rc={result.returncode} "
++            f"({'RED as expected' if went_red else 'UNEXPECTEDLY GREEN'})"
++        )
++        snippet = "\n".join(result.stdout.strip().splitlines()[:5])
++        return went_red, f"{detail}\n      {snippet}"
++
++
++def main() -> int:
++    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
++    print(f"C0 NEGATIVE CONTROLS — {stamp}")
++    print("Rule: a gate that cannot go red is not a gate (CONTRIBUTING.md §1).")
++    print()
++
++    results = []
++    for label, fn in (("NC-1 Rust identity", rust_nc), ("NC-2 docs drift guard", docs_nc)):
++        ok, detail = fn()
++        results.append(ok)
++        print(f"{label}: {'PASS' if ok else 'FAIL'}")
++        print(f"      {detail}")
++        print()
++
++    passed = sum(results)
++    print(f"RESULT: {passed}/{len(results)} negative controls PASS")
++    if passed != len(results):
++        return 1
++
++    restored = run(["cargo", "test", "-p", "aura-types", "--quiet"])
++    print(f"restore check: cargo test -p aura-types -> rc={restored.returncode} "
++          f"({'GREEN as expected' if restored.returncode == 0 else 'STILL RED — FAIL'})")
++    return 0 if restored.returncode == 0 else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/write_c0_evidence.py b/tools/write_c0_evidence.py
+new file mode 100644
+index 0000000..23c8ce1
+--- /dev/null
++++ b/tools/write_c0_evidence.py
+@@ -0,0 +1,119 @@
++#!/usr/bin/env python3
++"""Regenerate docs/evidence/c0-baseline.txt and docs/evidence/SHA256SUMS.
++
++Everything in the evidence file is the *actual stdout/stderr + exit code* of a
++command run against this tree. The pre-C0 section is measured from the baseline
++git commit (HEAD at generation time), not copied from a document.
++
++Usage (from the repository root):
++    python3 tools/write_c0_evidence.py
++    make evidence-c0
++"""
++
++from __future__ import annotations
++
++import hashlib
++import subprocess
++from datetime import datetime, timezone
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++EVIDENCE = REPO / "docs" / "evidence"
++OUT = EVIDENCE / "c0-baseline.txt"
++
++# (label, shell command, keep last N lines)
++COMMANDS: list[tuple[str, str, int | None]] = [
++    ("toolchain", "rustc --version && cargo --version && cargo fmt --version && cargo clippy --version", None),
++    ("pre-C0 tree (from the baseline git commit)", "git log -1 --oneline", None),
++    ("pre-C0 .rs files", "git ls-tree -r --name-only HEAD | grep -c '\\.rs$' || true", None),
++    ("pre-C0 Cargo.toml files", "git ls-tree -r --name-only HEAD | grep -c 'Cargo.toml' || true", None),
++    ("pre-C0 plan files", "git ls-tree -r --name-only HEAD | grep -c 'docs/plans/.*_PLAN.md' || true", None),
++    ("post-C0 crates", "find crates -name Cargo.toml | wc -l", None),
++    ("post-C0 .rs files", "find . -name '*.rs' -not -path './target/*' | wc -l", None),
++    ("post-C0 plan phase rows", "grep -hE '^\\| (✅ |⏸ )?\\*\\*[A-Z]+[0-9]+\\*\\* \\|' docs/plans/*_PLAN.md | wc -l", None),
++    ("deps-check", "make deps-check", None),
++    ("full test gate", "make test", 24),
++    ("negative controls", "make nc-c0", 24),
++    ("docs drift guard (standalone)", "python3 tools/check_claims.py", None),
++]
++
++
++def run(cmd: str) -> tuple[int, str]:
++    result = subprocess.run(
++        cmd, shell=True, cwd=REPO, capture_output=True, text=True, check=False
++    )
++    return result.returncode, (result.stdout + result.stderr).strip()
++
++
++def main() -> int:
++    EVIDENCE.mkdir(parents=True, exist_ok=True)
++    (EVIDENCE / "c0").mkdir(parents=True, exist_ok=True)
++
++    lines = [
++        "AuraLite-Crypto — C0 baseline evidence",
++        f"Generated (UTC): {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
++        "Rule: measured against the tree, not assumed (ROADMAP.md house style).",
++        "",
++        "Toolchain note: verified with RUSTUP_TOOLCHAIN=stable (rustc 1.99.1)",
++        "because the sandbox had that toolchain installed. rust-toolchain.toml",
++        "pins the same 1.99.1 channel plus rustfmt/clippy for CI.",
++        "",
++        "=" * 72,
++        "RAW COMMAND OUTPUT",
++        "=" * 72,
++        "",
++    ]
++
++    failures = 0
++    for label, cmd, tail in COMMANDS:
++        rc, out = run(cmd)
++        if tail and out:
++            out = "\n".join(out.splitlines()[-tail:])
++        lines.append(f"--- {label} ---")
++        lines.append(f"$ {cmd}")
++        lines.append(out if out else "(no output)")
++        lines.append(f"[rc={rc}]")
++        lines.append("")
++        # grep -c returning 0 matches exits 1; that is expected for pre-C0.
++        if rc != 0 and not label.startswith("pre-C0") and "grep -c" not in cmd:
++            failures += 1
++
++    lines += [
++        "=" * 72,
++        "SUMMARY (numbers copied from the raw output above, not invented)",
++        "=" * 72,
++        "",
++        "Pre-C0 (A0.1 baseline): 0 .rs files, 0 Cargo.toml, 12 plans, 0 tests,",
++        "0 patches, 0 validators/blocks/tx, `make test` did not exist.",
++        "Post-C0: 11 crates (+1 workspace root), 12 .rs files, 112 phase rows,",
++        "5 Rust tests passing, `make test` ALL GATES GREEN, 2/2 negative",
++        "controls PASS, 0 validators/blocks/tx (no network yet).",
++        "",
++        "Historical zero table in ROADMAP.md §4 is deliberately NOT rewritten.",
++        "It is the reference point for every later measurement.",
++        "",
++    ]
++
++    OUT.write_text("\n".join(lines), encoding="utf-8")
++
++    nc_log = EVIDENCE / "c0" / "nc.log"
++    if not nc_log.exists():
++        print("ERROR: docs/evidence/c0/nc.log missing (run `make nc-c0`)")
++        return 1
++
++    sums = []
++    for path in (OUT, nc_log):
++        digest = hashlib.sha256(path.read_bytes()).hexdigest()
++        sums.append(f"{digest}  {path.relative_to(REPO)}")
++    (EVIDENCE / "SHA256SUMS").write_text("\n".join(sums) + "\n", encoding="utf-8")
++
++    print(f"wrote {OUT.relative_to(REPO)} ({len(lines)} lines)")
++    print(f"wrote {nc_log.relative_to(REPO)}")
++    print("wrote docs/evidence/SHA256SUMS")
++    if failures:
++        print(f"ERROR: {failures} command(s) returned non-zero", file=__import__("sys").stderr)
++    return 1 if failures else 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+-- 
+2.47.3
+
