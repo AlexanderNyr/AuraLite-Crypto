@@ -15,7 +15,15 @@ PYTHON ?= python3
         gen-c7-vectors nc-c7 evidence-c7 \
         record-c8-deps record-c9-deps record-deps gen-c8-vectors nc-c8 evidence-c8 \
         gen-c9-vectors nc-c9 evidence-c9 vector-inventory \
-        audit-closeout nc-c10 evidence-c10 devnet clean
+        audit-closeout nc-c10 evidence-c10 \
+        gen-s0-vectors nc-s0 evidence-s0 \
+        gen-s1-vectors nc-s1 evidence-s1 \
+        record-s2-deps gen-s2-vectors nc-s2 evidence-s2 test-s2-native \
+        gen-s3-vectors nc-s3 evidence-s3 \
+        record-s4-deps gen-s4-vectors nc-s4 evidence-s4 \
+        record-s5-deps gen-s5-vectors nc-s5 evidence-s5 \
+        record-s6-deps gen-s6-vectors nc-s6 evidence-s6 \
+        record-s7-deps gen-s7-vectors nc-s7 evidence-s7 devnet clean
 
 help:
 	@echo "AuraLite-Crypto (Stage 1, C0)"
@@ -57,6 +65,36 @@ help:
 	@echo "  make audit-closeout    plan<->tree audit (no ✅ without a receipt)"
 	@echo "  make nc-c10            C10 negative controls -> docs/evidence/c10/nc.log"
 	@echo "  make evidence-c10      regenerate close-out receipts + NC inventory"
+	@echo "  make gen-s0-vectors    regenerate independent state-baseline vectors"
+	@echo "  make nc-s0             S0 negative controls -> docs/evidence/s0/nc.log"
+	@echo "  make evidence-s0       regenerate S0 report + receipts"
+	@echo "  make gen-s1-vectors    regenerate independent Merkle-tree vectors"
+	@echo "  make nc-s1             S1 negative controls -> docs/evidence/s1/nc.log"
+	@echo "  make evidence-s1       regenerate S1 report + receipts"
+	@echo "  make record-s2-deps    re-record S2 dependency delta"
+	@echo "  make gen-s2-vectors    regenerate independent WAL/RocksDB vectors"
+	@echo "  make nc-s2             S2 negative controls -> docs/evidence/s2/nc.log"
+	@echo "  make evidence-s2       regenerate S2 report + receipts"
+	@echo "  make test-s2-native    optional real-RocksDB backend tests (needs librocksdb)"
+	@echo "  make gen-s3-vectors    regenerate independent overlay/diff vectors"
+	@echo "  make nc-s3             S3 negative controls -> docs/evidence/s3/nc.log"
+	@echo "  make evidence-s3       regenerate S3 report + receipts"
+	@echo "  make record-s4-deps    re-record S4 dependency decision"
+	@echo "  make gen-s4-vectors    regenerate independent snapshot vectors"
+	@echo "  make nc-s4             S4 negative controls -> docs/evidence/s4/nc.log"
+	@echo "  make evidence-s4       regenerate S4 report + receipts"
+	@echo "  make record-s5-deps    re-record S5 dependency decision"
+	@echo "  make gen-s5-vectors    regenerate independent state-sync vectors"
+	@echo "  make nc-s5             S5 negative controls -> docs/evidence/s5/nc.log"
+	@echo "  make evidence-s5       regenerate S5 report + receipts"
+	@echo "  make record-s6-deps    re-record S6 dependency decision"
+	@echo "  make gen-s6-vectors    regenerate independent retention vectors"
+	@echo "  make nc-s6             S6 negative controls -> docs/evidence/s6/nc.log"
+	@echo "  make evidence-s6       regenerate S6 report + receipts"
+	@echo "  make record-s7-deps    re-record S7 dependency decision"
+	@echo "  make gen-s7-vectors    regenerate independent backup/restore vectors"
+	@echo "  make nc-s7             S7 negative controls -> docs/evidence/s7/nc.log"
+	@echo "  make evidence-s7       regenerate S7 report + receipts"
 	@echo "  make record-c9-deps    re-record the C9 dependency addendum"
 	@echo "  make gen-c9-vectors    regenerate 512 independent test-rig vectors"
 	@echo "  make nc-c9             C9 negative controls -> docs/evidence/c9/nc.log"
@@ -105,7 +143,7 @@ test: deps-check
 test-core:
 	@$(PYTHON) tools/count_vectors.py
 	@$(PYTHON) tools/check_rig.py
-	@$(CARGO) test -p aura-types -p aura-codec -p aura-crypto -p aura-tx -p aura-block -p aura-state -p aura-genesis -p aura-testkit
+	@$(CARGO) test -p aura-types -p aura-codec -p aura-crypto -p aura-tx -p aura-block -p aura-state -p aura-storage -p aura-genesis -p aura-testkit
 	@$(CARGO) run --quiet -p aura-testkit --bin aura-fuzz -- --seconds 0 --min-iterations 5000 --target all
 	@$(PYTHON) tools/check_claims.py
 	@$(PYTHON) tools/check_deps.py
@@ -174,10 +212,10 @@ evidence-c3:
 # Runs every NC script WITHOUT rewriting the historical C0-C3 evidence logs,
 # so their committed SHA256SUMS stay valid. CI uses this instead of nc-cX.
 nc-all:
-	@for phase in 0 1 2 3 4 5 6 7 8 9 10; do \
-	    $(PYTHON) tools/nc_c$$phase.py > /tmp/aura-nc-c$$phase.log 2>&1 || \
-	      { echo "C$$phase NEGATIVE CONTROLS FAILED"; tail -30 /tmp/aura-nc-c$$phase.log; exit 1; }; \
-	    grep '^RESULT:' /tmp/aura-nc-c$$phase.log; \
+	@for phase in c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 s0 s1 s2 s3 s4 s5 s6 s7; do \
+	    $(PYTHON) tools/nc_$$phase.py > /tmp/aura-nc-$$phase.log 2>&1 || \
+	      { echo "$$phase NEGATIVE CONTROLS FAILED"; tail -30 /tmp/aura-nc-$$phase.log; exit 1; }; \
+	    grep '^RESULT:' /tmp/aura-nc-$$phase.log; \
 	done
 
 gen-c4-vectors:
@@ -268,6 +306,113 @@ nc-c10:
 
 evidence-c10:
 	@$(PYTHON) tools/write_c10_evidence.py
+
+gen-s0-vectors:
+	@$(PYTHON) tools/gen_s0_vectors.py
+
+nc-s0:
+	@mkdir -p docs/evidence/s0
+	@$(PYTHON) tools/nc_s0.py > docs/evidence/s0/nc.log 2>&1 || { cat docs/evidence/s0/nc.log; exit 1; }
+	@cat docs/evidence/s0/nc.log
+
+evidence-s0:
+	@$(PYTHON) tools/write_s0_evidence.py
+
+gen-s1-vectors:
+	@$(PYTHON) tools/gen_s1_vectors.py
+
+nc-s1:
+	@mkdir -p docs/evidence/s1
+	@$(PYTHON) tools/nc_s1.py > docs/evidence/s1/nc.log 2>&1 || { cat docs/evidence/s1/nc.log; exit 1; }
+	@cat docs/evidence/s1/nc.log
+
+evidence-s1:
+	@$(PYTHON) tools/write_s1_evidence.py
+
+record-s2-deps:
+	@$(PYTHON) tools/record_s2_deps.py
+
+gen-s2-vectors:
+	@$(PYTHON) tools/gen_s2_vectors.py
+
+nc-s2:
+	@mkdir -p docs/evidence/s2
+	@$(PYTHON) tools/nc_s2.py > docs/evidence/s2/nc.log 2>&1 || { cat docs/evidence/s2/nc.log; exit 1; }
+	@cat docs/evidence/s2/nc.log
+
+evidence-s2: record-s2-deps
+	@$(PYTHON) tools/write_s2_evidence.py
+
+test-s2-native:
+	@eval "$$(sh tools/s2_native_env.sh)" && $(CARGO) test -p aura-storage --test s2_storage --features rocksdb
+	@eval "$$(sh tools/s2_native_env.sh)" && $(CARGO) clippy -p aura-storage --all-targets --features rocksdb -- -D warnings
+
+gen-s3-vectors:
+	@$(PYTHON) tools/gen_s3_vectors.py
+
+nc-s3:
+	@mkdir -p docs/evidence/s3
+	@$(PYTHON) tools/nc_s3.py > docs/evidence/s3/nc.log 2>&1 || { cat docs/evidence/s3/nc.log; exit 1; }
+	@cat docs/evidence/s3/nc.log
+
+evidence-s3:
+	@$(PYTHON) tools/write_s3_evidence.py
+
+record-s4-deps:
+	@$(PYTHON) tools/record_s4_deps.py
+
+gen-s4-vectors:
+	@$(PYTHON) tools/gen_s4_vectors.py
+
+nc-s4:
+	@mkdir -p docs/evidence/s4
+	@$(PYTHON) tools/nc_s4.py > docs/evidence/s4/nc.log 2>&1 || { cat docs/evidence/s4/nc.log; exit 1; }
+	@cat docs/evidence/s4/nc.log
+
+evidence-s4: record-s4-deps
+	@$(PYTHON) tools/write_s4_evidence.py
+
+record-s5-deps:
+	@$(PYTHON) tools/record_s5_deps.py
+
+gen-s5-vectors:
+	@$(PYTHON) tools/gen_s5_vectors.py
+
+nc-s5:
+	@mkdir -p docs/evidence/s5
+	@$(PYTHON) tools/nc_s5.py > docs/evidence/s5/nc.log 2>&1 || { cat docs/evidence/s5/nc.log; exit 1; }
+	@cat docs/evidence/s5/nc.log
+
+evidence-s5: record-s5-deps
+	@$(PYTHON) tools/write_s5_evidence.py
+
+record-s6-deps:
+	@$(PYTHON) tools/record_s6_deps.py
+
+gen-s6-vectors:
+	@$(PYTHON) tools/gen_s6_vectors.py
+
+nc-s6:
+	@mkdir -p docs/evidence/s6
+	@$(PYTHON) tools/nc_s6.py > docs/evidence/s6/nc.log 2>&1 || { cat docs/evidence/s6/nc.log; exit 1; }
+	@cat docs/evidence/s6/nc.log
+
+evidence-s6: record-s6-deps
+	@$(PYTHON) tools/write_s6_evidence.py
+
+record-s7-deps:
+	@$(PYTHON) tools/record_s7_deps.py
+
+gen-s7-vectors:
+	@$(PYTHON) tools/gen_s7_vectors.py
+
+nc-s7:
+	@mkdir -p docs/evidence/s7
+	@$(PYTHON) tools/nc_s7.py > docs/evidence/s7/nc.log 2>&1 || { cat docs/evidence/s7/nc.log; exit 1; }
+	@cat docs/evidence/s7/nc.log
+
+evidence-s7: record-s7-deps
+	@$(PYTHON) tools/write_s7_evidence.py
 
 devnet:
 	@echo "ERROR: devnet is D7 (NODE_PLAN). It is not implemented at C0." >&2

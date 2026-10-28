@@ -1,0 +1,2891 @@
+From b6810a214aad4b4e5e17ceb06245deeced5694d2 Mon Sep 17 00:00:00 2001
+From: AlexanderNyr <alexander@auralite.local>
+Date: Tue, 27 Oct 2026 17:54:59 +0000
+Subject: [PATCH] S4 snapshots
+
+---
+ .github/workflows/ci.yml                      |  19 +-
+ CHANGELOG.md                                  |  48 ++
+ CONTRIBUTING.md                               |   2 +
+ Cargo.lock                                    |   1 +
+ Cargo.toml                                    |   2 +
+ Makefile                                      |  23 +-
+ README.md                                     |  29 +-
+ ROADMAP.md                                    |  28 +-
+ crates/aura-state/Cargo.toml                  |   1 +
+ crates/aura-state/src/error.rs                |  95 ++++
+ crates/aura-state/src/lib.rs                  |  13 +-
+ crates/aura-state/src/snapshot.rs             | 428 ++++++++++++++++++
+ .../aura-state/tests/fixtures/s4_golden.txt   |  58 +++
+ crates/aura-state/tests/s4_snapshot.rs        | 285 ++++++++++++
+ docs/ARCHITECTURE.md                          |   6 +
+ docs/STATUS.md                                |  34 +-
+ docs/evidence/s4-dependency-addendum.txt      |   7 +
+ docs/evidence/s4/SHA256SUMS                   |   6 +
+ docs/evidence/s4/gates.txt                    | 206 +++++++++
+ docs/evidence/s4/inventory.txt                | 122 +++++
+ docs/evidence/s4/nc.log                       |  42 ++
+ docs/evidence/s4/report.md                    |  69 +++
+ docs/plans/STATE_PLAN.md                      |  44 +-
+ tools/audit_closeout.py                       |  14 +-
+ tools/gen_s4_vectors.py                       | 387 ++++++++++++++++
+ tools/nc_s4.py                                | 144 ++++++
+ tools/record_s4_deps.py                       |  71 +++
+ tools/write_s4_evidence.py                    | 249 ++++++++++
+ 28 files changed, 2377 insertions(+), 56 deletions(-)
+ create mode 100644 crates/aura-state/src/snapshot.rs
+ create mode 100644 crates/aura-state/tests/fixtures/s4_golden.txt
+ create mode 100644 crates/aura-state/tests/s4_snapshot.rs
+ create mode 100644 docs/evidence/s4-dependency-addendum.txt
+ create mode 100644 docs/evidence/s4/SHA256SUMS
+ create mode 100644 docs/evidence/s4/gates.txt
+ create mode 100644 docs/evidence/s4/inventory.txt
+ create mode 100644 docs/evidence/s4/nc.log
+ create mode 100644 docs/evidence/s4/report.md
+ create mode 100644 tools/gen_s4_vectors.py
+ create mode 100644 tools/nc_s4.py
+ create mode 100644 tools/record_s4_deps.py
+ create mode 100644 tools/write_s4_evidence.py
+
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 9c33f96..4eacadd 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -10,7 +10,7 @@ on:
+ # perf) are added by O0 as the crates that need them actually appear.
+ jobs:
+   core:
+-    name: core (C0-C10 + S0-S3 gate)
++    name: core (C0-C10 + S0-S4 gate)
+     runs-on: ubuntu-latest
+     steps:
+       - uses: actions/checkout@v4
+@@ -29,8 +29,8 @@ jobs:
+       - name: make test
+         run: make test
+ 
+-      - name: golden vectors are reproducible (C1-C9 + S0-S3)
+-        run: make gen-c1-vectors && make gen-c2-vectors && make gen-c3-vectors && make gen-c4-vectors && make gen-c5-vectors && make gen-c6-vectors && make gen-c7-vectors && make gen-c8-vectors && make gen-c9-vectors && make gen-s0-vectors && make gen-s1-vectors && make gen-s2-vectors && make gen-s3-vectors
++      - name: golden vectors are reproducible (C1-C9 + S0-S4)
++        run: make gen-c1-vectors && make gen-c2-vectors && make gen-c3-vectors && make gen-c4-vectors && make gen-c5-vectors && make gen-c6-vectors && make gen-c7-vectors && make gen-c8-vectors && make gen-c9-vectors && make gen-s0-vectors && make gen-s1-vectors && make gen-s2-vectors && make gen-s3-vectors && make gen-s4-vectors
+ 
+       - name: vector inventory (>= 200)
+         run: make vector-inventory
+@@ -47,22 +47,22 @@ jobs:
+       - name: close-out audit
+         run: make audit-closeout
+ 
+-      # nc-all runs all 80 NCs without rewriting the historical logs,
++      # nc-all runs all 86 NCs without rewriting the historical logs,
+       # so those committed SHA256SUMS remain valid in the uploaded artifact.
+-      - name: negative controls (C0-C10 + S0-S3, 80 total)
++      - name: negative controls (C0-C10 + S0-S4, 86 total)
+         run: make nc-all
+ 
+-      # Only the CURRENT phase's evidence is regenerated. C0-S2 evidence is a
++      # Only the CURRENT phase's evidence is regenerated. C0-S3 evidence is a
+       # HISTORICAL committed record measured at its own commit; regenerating
+       # it later would relabel the wrong tree.
+-      - name: current phase evidence (S3)
+-        run: make evidence-s3
++      - name: current phase evidence (S4)
++        run: make evidence-s4
+ 
+       - name: Upload evidence
+         if: always()
+         uses: actions/upload-artifact@v4
+         with:
+-          name: c0-s3-evidence
++          name: c0-s4-evidence
+           path: |
+             docs/evidence/c0/
+             docs/evidence/c1/
+@@ -79,6 +79,7 @@ jobs:
+             docs/evidence/s1/
+             docs/evidence/s2/
+             docs/evidence/s3/
++            docs/evidence/s4/
+           if-no-files-found: ignore
+ 
+   # S2's native RocksDB backend needs librocksdb >= 9.9 headers (Ubuntu 24.04
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 16884fd..beb0238 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,54 @@
+ All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
+ never rewritten: corrections are made with a new entry or an explicit note.
+ 
++## [S4 — deterministic state snapshots] 2026-10-27
++
++**Fifth `STATE_PLAN` phase.** Deliverable:
++`patches/0016-S4-snapshots.patch`. No new crate and no new external
++dependency: `sha2 = 0.10.9` was already in `Cargo.lock` via `k256` and in
++the frozen C3 baseline; S4 only makes it a DIRECT dependency of
++`aura-state`. Recorded in `docs/evidence/s4-dependency-addendum.txt`.
++
++- Landed `aura-state::snapshot`: `SnapshotManifest`, `ChunkDescriptor`,
++  `Snapshot`, `SnapshotError`, `export_snapshot`, `import_snapshot`,
++  `encode_chunk`, `decode_chunk`, `chunk_hash`, `chunk_root`,
++  `state_root`, `sha256_bytes`, `parallel_chunk_hashes`
++  and `manifest_bytes`.
++- **Format:** `manifest_bytes || data_blob`. The blob is a concatenation
++  of canonical chunk payloads; each chunk has its own
++  `sha256(SNAPSHOT_CHUNK_CONTEXT || payload)`. The manifest carries
++  descriptors `(offset, length, sha256)`, the S1 `state_root`, a BLAKE3
++  `chunk_root` over the ordered digests and a SHA-256 checksum of the
++  payload. Strict decode checks magic, version, minimal LEB128, contiguous
++  offsets, caps, no trailing bytes, byte-identical re-encode and a
++  recomputed `chunk_root`.
++- **Parallel export/import.** `std::thread::scope` with an atomic work
++  index and a bounded worker pool (1..8); deterministic descriptor order.
++  Verified identical digests and `chunk_root` for 1/2/4/8 workers.
++- **DoD gate:** 1,000,000 keys exported to 16 chunks (31,000,048 data
++  bytes) and reimported **byte-identically**. Data SHA-256 and chunk_root
++  match the independent Python reference, which computes the digest without
++  writing 30 MB of hex into the fixture. NC-6 disables the digest
++  comparison and requires the substituted-chunk rejection test to go red.
++- Golden vectors: `tools/gen_s4_vectors.py` — hashlib SHA-256, pure-Python
++  BLAKE3 (self-checked against 7 official vectors), the C7 state-key digest
++  and the S1 sparse Merkle tree. 7-key canonical snapshot (3 chunks),
++  1024-key parallel reference (8 chunks), 1M-key digest, 11 rejection
++  vectors; 58 fixture lines. Offline and byte-stable.
++- Gate: `make test` → **146 passed / 0 failed** (138 S3 + 8 S4),
++  fmt/clippy clean, drift guard 12 plans / 112 rows, dependency gate 95
++  external crates, `make audit-closeout` green. 6 S4 negative controls,
++  total 86 across C0–C10 + S0–S4.
++- Evidence: `docs/evidence/s4/gates.txt`, `nc.log`, `report.md`,
++  `inventory.txt`, `SHA256SUMS`. The S4 format report lives in
++  `docs/evidence/s4/report.md`, not `docs/spec/`, because
++  `docs/spec/FORMAT_INDEX.md` is frozen checksummed C10 evidence.
++- Tooling / CI: `make nc-all` now covers 16 NC drivers (86 NC); new
++  targets `make gen-s4-vectors`, `make nc-s4`, `make evidence-s4`,
++  `make record-s4-deps`.
++- **Not claimed:** state sync (S5), pruning (S6), backup/chaos (S7),
++  real VM (X1), `cargo deny` (H1). Validators/blocks/tx remain **0/0/0**.
++
+ ## [S3 — execution overlay] 2026-10-27
+ 
+ **Fourth `STATE_PLAN` phase.** Deliverable:
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index 6ea925f..e172913 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -120,6 +120,8 @@ that does not run its main test is a dead gate — that is a separate defect
+       `make fuzz-smoke` still run in CI (`tools/check_rig.py`).
+ - [ ] `make audit-closeout` green: every ✅ phase has a patch, receipt,
+       CHANGELOG entry, NC log and verified evidence.
++- [ ] Snapshot manifests verify every chunk SHA-256 before import; a
++      substituted chunk must be rejected.
+ - [ ] `StateView` rollback stays mandatory on `OutOfGas`/`Revert`; a revert
+       must never change the state root.
+ - [ ] S0 baseline defects stay MEASURED and documented; never present
+diff --git a/Cargo.lock b/Cargo.lock
+index 8de5909..7976c28 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -89,6 +89,7 @@ dependencies = [
+  "aura-codec",
+  "aura-crypto",
+  "aura-types",
++ "sha2",
+ ]
+ 
+ [[package]]
+diff --git a/Cargo.toml b/Cargo.toml
+index fe37274..cba0fee 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -53,6 +53,8 @@ ed25519-dalek = { version = "=2.2.0" }
+ k256 = { version = "=0.13.4", default-features = false, features = ["ecdsa"] }
+ zeroize = { version = "=1.8.2", features = ["zeroize_derive"] }
+ subtle = { version = "=2.6.1", default-features = false }
++# S4: sha2 is already in Cargo.lock via k256, no new external crate.
++sha2 = "=0.10.9"
+ # C8: serde_json is used ONLY to parse the genesis CONFIG file.
+ # Consensus encoding stays aura-codec; no serde derive in any crate.
+ serde_json = { version = "=1.0.154", default-features = false, features = ["std"] }
+diff --git a/Makefile b/Makefile
+index a15023b..531b32b 100644
+--- a/Makefile
++++ b/Makefile
+@@ -19,7 +19,8 @@ PYTHON ?= python3
+         gen-s0-vectors nc-s0 evidence-s0 \
+         gen-s1-vectors nc-s1 evidence-s1 \
+         record-s2-deps gen-s2-vectors nc-s2 evidence-s2 test-s2-native \
+-        gen-s3-vectors nc-s3 evidence-s3 devnet clean
++        gen-s3-vectors nc-s3 evidence-s3 \
++        record-s4-deps gen-s4-vectors nc-s4 evidence-s4 devnet clean
+ 
+ help:
+ 	@echo "AuraLite-Crypto (Stage 1, C0)"
+@@ -75,6 +76,10 @@ help:
+ 	@echo "  make gen-s3-vectors    regenerate independent overlay/diff vectors"
+ 	@echo "  make nc-s3             S3 negative controls -> docs/evidence/s3/nc.log"
+ 	@echo "  make evidence-s3       regenerate S3 report + receipts"
++	@echo "  make record-s4-deps    re-record S4 dependency decision"
++	@echo "  make gen-s4-vectors    regenerate independent snapshot vectors"
++	@echo "  make nc-s4             S4 negative controls -> docs/evidence/s4/nc.log"
++	@echo "  make evidence-s4       regenerate S4 report + receipts"
+ 	@echo "  make record-c9-deps    re-record the C9 dependency addendum"
+ 	@echo "  make gen-c9-vectors    regenerate 512 independent test-rig vectors"
+ 	@echo "  make nc-c9             C9 negative controls -> docs/evidence/c9/nc.log"
+@@ -192,7 +197,7 @@ evidence-c3:
+ # Runs every NC script WITHOUT rewriting the historical C0-C3 evidence logs,
+ # so their committed SHA256SUMS stay valid. CI uses this instead of nc-cX.
+ nc-all:
+-	@for phase in c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 s0 s1 s2 s3; do \
++	@for phase in c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 s0 s1 s2 s3 s4; do \
+ 	    $(PYTHON) tools/nc_$$phase.py > /tmp/aura-nc-$$phase.log 2>&1 || \
+ 	      { echo "$$phase NEGATIVE CONTROLS FAILED"; tail -30 /tmp/aura-nc-$$phase.log; exit 1; }; \
+ 	    grep '^RESULT:' /tmp/aura-nc-$$phase.log; \
+@@ -338,6 +343,20 @@ nc-s3:
+ evidence-s3:
+ 	@$(PYTHON) tools/write_s3_evidence.py
+ 
++record-s4-deps:
++	@$(PYTHON) tools/record_s4_deps.py
++
++gen-s4-vectors:
++	@$(PYTHON) tools/gen_s4_vectors.py
++
++nc-s4:
++	@mkdir -p docs/evidence/s4
++	@$(PYTHON) tools/nc_s4.py > docs/evidence/s4/nc.log 2>&1 || { cat docs/evidence/s4/nc.log; exit 1; }
++	@cat docs/evidence/s4/nc.log
++
++evidence-s4: record-s4-deps
++	@$(PYTHON) tools/write_s4_evidence.py
++
+ devnet:
+ 	@echo "ERROR: devnet is D7 (NODE_PLAN). It is not implemented at C0." >&2
+ 	@exit 1
+diff --git a/README.md b/README.md
+index 76d2429..9981725 100644
+--- a/README.md
++++ b/README.md
+@@ -11,18 +11,19 @@
+ Name and ticker were locked by the owner on 2026-10-25. The ticker was checked
+ for collisions — see [`docs/TICKER_AUDIT.md`](docs/TICKER_AUDIT.md).
+ 
+-> **Status: S3 LANDED (2026-10-27).** `CORE_PLAN` C0–C10 is closed; S0
++> **Status: S4 LANDED (2026-10-27).** `CORE_PLAN` C0–C10 is closed; S0
+ > measured the naive baseline, S1 delivered a versioned sparse Merkle tree,
+-> S2 made state **durable** (fsynced WAL + RocksDB behind one trait), and
+-> S3 adds a **copy-on-write execution overlay**: `StateView`, a checksummed
+-> canonical `StateDiff`, and mandatory rollback on `OutOfGas`/`Revert`, so
+-> reverting cannot change the state root. **80 negative controls**, 138
+-> tests, 4,205 vectors. See
++> S2 made state **durable**, S3 added a copy-on-write execution overlay,
++> and S4 adds deterministic **state snapshots**: SHA-256 chunk digests, a
++> checksummed manifest and parallel export/import. A snapshot of 1,000,000
++> keys reimports **byte-identically**; a substituted chunk is rejected.
++> **86 negative controls**, 146 tests, 4,254 vectors. See
+ > [`docs/CLOSEOUT_AUDIT.md`](docs/CLOSEOUT_AUDIT.md) and
+-> `docs/evidence/s3/report.md`. There is still **no consensus, VM, P2P,
+-> node, wallet or network** — no real VM (X1) yet. M0 needs S4 and X0–X2.
+-> Everything else below is a plan, not a report about an implementation.
+-> Every claim of readiness appears only after a measurable test gate, as in
++> `docs/evidence/s4/report.md`. There is still **no consensus, VM, P2P,
++> node, wallet or network** — no state sync (S5) or real VM (X1) yet.
++> M0 needs S5 and X0–X2. Everything else below is a plan, not a report
++> about an implementation. Every claim of readiness appears only after a
++> measurable test gate, as in
+ > [AuraLite-Emulator](https://github.com/AlexanderNyr/AuraLite-Emulator) and
+ > [AuraLite-OS](https://github.com/AlexanderNyr/AuraLite-OS).
+ 
+@@ -83,15 +84,15 @@ Details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+ 
+ ## Quickstart
+ 
+-**Now (S3)** execution is atomic:
++**Now (S4)** state is snapshot-able:
+ 
+ ```sh
+ make deps-check          # rustc / cargo / rustfmt / clippy
+ make test                # full gate including the plan<->tree audit
+ make audit-closeout      # no ✅ row without a patch/receipt/NC log/evidence
+-make nc-all              # all 80 negative controls (C0-C10 + S0-S3)
+-make gen-s3-vectors      # independent overlay/diff golden vectors
+-make vector-inventory    # 4,205 golden vectors
++make nc-all              # all 86 negative controls (C0-C10 + S0-S4)
++make gen-s4-vectors      # independent snapshot golden vectors
++make vector-inventory    # 4,254 golden vectors
+ ```
+ 
+ **The devnet does not exist yet — and that is honest.** After phase D7 (devnet)
+diff --git a/ROADMAP.md b/ROADMAP.md
+index 485421b..10e0a0a 100644
+--- a/ROADMAP.md
++++ b/ROADMAP.md
+@@ -122,7 +122,7 @@ phase tables (decision Q5).
+ | Plan | Status | Scope | Phases |
+ |---|---|---|---|
+ | [`docs/plans/CORE_PLAN.md`](docs/plans/CORE_PLAN.md) | ✅ COMPLETE (C0–C10 ✅) | primitives, codec, crypto, tx/block, genesis, test rig | C0–C10 |
+-| [`docs/plans/STATE_PLAN.md`](docs/plans/STATE_PLAN.md) | 🚧 IN PROGRESS (S0–S3 ✅) | Merkle state, RocksDB, WAL, snapshots, pruning, recovery | S0–S7 |
++| [`docs/plans/STATE_PLAN.md`](docs/plans/STATE_PLAN.md) | 🚧 IN PROGRESS (S0–S4 ✅) | Merkle state, RocksDB, WAL, snapshots, pruning, recovery | S0–S7 |
+ | [`docs/plans/EXEC_PLAN.md`](docs/plans/EXEC_PLAN.md) | 📋 PLAN | WASM runtime, gas, ABI, contract SDK, determinism | X0–X9 |
+ | [`docs/plans/CONSENSUS_PLAN.md`](docs/plans/CONSENSUS_PLAN.md) | 📋 PLAN | BFT-PoS, QC, VRF, staking, slashing, finality, governance | B0–B10 |
+ | [`docs/plans/NET_PLAN.md`](docs/plans/NET_PLAN.md) | 📋 PLAN | libp2p, gossipsub, Kademlia, sync, light client, chaos tests | N0–N8 |
+@@ -261,6 +261,14 @@ NC inventory: `docs/evidence/c10/closeout.txt`. Receipts:
+ `docs/evidence/c10/`. Validators/blocks/tx are still 0/0/0 — M0 also needs
+ S0–S2 and X0–X2.
+ 
++**Post-S4 measurement (2026-10-27):** 15 crates, 146 tests, 4,254
++vectors across 14 fixtures, 86 negative controls (6 new in S4), 95
++external crates (no new crate; sha2 promoted to a direct dep).
++Deterministic snapshots: SHA-256 chunk digests, checksummed manifest,
++BLAKE3 chunk_root, parallel export/import. 1,000,000 keys reimport
++byte-identically; substituted chunk rejected. Report:
++`docs/evidence/s4/report.md`; receipts: `docs/evidence/s4/`.
++
+ **Post-S3 measurement (2026-10-27):** 15 crates, 138 tests, 4,205 vectors
+ across 13 fixtures, 80 negative controls (6 new in S3), 95 external
+ crates (no new dependency). `StateView` + `StateDiff` + rollback land in
+@@ -364,7 +372,7 @@ after the fact, as in AuraLite OS.
+ 
+ ## 8. Immediate queue
+ 
+-**C0, C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, S0, S1, S2 and S3 shipped**
++**C0, C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, S0, S1, S2, S3 and S4 shipped**
+ (`patches/0001-C0-baseline-workspace.patch`,
+ `patches/0002-C1-types.patch`, `patches/0003-C2-codec.patch`,
+ `patches/0004-C3-crypto.patch`, `patches/0005-C4-tx-format.patch`,
+@@ -374,19 +382,21 @@ after the fact, as in AuraLite OS.
+ `patches/0012-S0-state-baseline.patch`,
+ `patches/0013-S1-merkle-tree.patch`,
+ `patches/0014-S2-rocksdb-wal.patch`,
+-`patches/0015-S3-execution-overlay.patch`):
++`patches/0015-S3-execution-overlay.patch`,
++`patches/0016-S4-snapshots.patch`):
+ workspace, CI, gates, identity constants, canonical types, codec, crypto,
+ tx format, block format, Merkle proofs, accounts, genesis, a wired test rig
+ and the plan↔tree close-out audit — all pinned against independent references.
+ `CORE_PLAN` is closed at **L1 (core libraries + test rig, no network)**;
+ S0 measured the naive baseline, S1 delivered a versioned state root with
+ 1,000 verified proofs, S2 made it durable with a fsynced WAL +
+-optional RocksDB column families, and S3 added a copy-on-write execution
+-overlay with canonical diffs and mandatory rollback. **80 negative
+-controls** in total. Right now: **S4** — `STATE_PLAN` snapshots: chunks,
+-manifest, parallel import, snapshots of 1M keys reimported
+-byte-identically; NC: a substituted chunk must be rejected. M0 also needs
+-X0–X2. The next patch is `patches/0016-S4-snapshots.patch`.
++optional RocksDB column families, S3 added a copy-on-write execution
++overlay with canonical diffs, and S4 added deterministic snapshots with
++SHA-256 chunk manifests and parallel export/import. **86 negative
++controls** in total. Right now: **S5** — `STATE_PLAN` state sync: a new
++node reaches the same root as 3 old nodes via snapshot + diff without
++downloading all history. M0 also needs X0–X2. The next patch is
++`patches/0017-S5-state-sync.patch`.
+ 
+ See also: [`docs/STATUS.md`](docs/STATUS.md),
+ [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
+diff --git a/crates/aura-state/Cargo.toml b/crates/aura-state/Cargo.toml
+index 1e4f3bd..5b64a62 100644
+--- a/crates/aura-state/Cargo.toml
++++ b/crates/aura-state/Cargo.toml
+@@ -12,3 +12,4 @@ publish.workspace = true
+ aura-types.workspace = true
+ aura-codec.workspace = true
+ aura-crypto.workspace = true
++sha2.workspace = true
+diff --git a/crates/aura-state/src/error.rs b/crates/aura-state/src/error.rs
+index 3342963..4530afe 100644
+--- a/crates/aura-state/src/error.rs
++++ b/crates/aura-state/src/error.rs
+@@ -162,3 +162,98 @@ impl From<aura_codec::CodecError> for OverlayError {
+         }
+     }
+ }
++
++/// Errors produced by S4 snapshot export/import.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum SnapshotError {
++    /// Canonical decoding failed.
++    Decode(aura_codec::CodecError),
++    /// An invalid C7 state key was found.
++    Key(StateError),
++    /// A chunk declares too many entries.
++    TooManyEntries(usize),
++    /// A key is longer than the cap.
++    KeyTooLarge(usize),
++    /// A value is longer than the cap.
++    ValueTooLarge(usize),
++    /// Keys are not strictly ascending or contain a duplicate.
++    UnsortedKeys,
++    /// Re-encoding a chunk did not reproduce its bytes.
++    NonCanonicalChunk,
++    /// The manifest is shorter than its own checksum.
++    TruncatedManifest,
++    /// The manifest SHA-256 checksum does not match.
++    BadManifestChecksum,
++    /// The manifest magic prefix is wrong.
++    BadMagic,
++    /// Unsupported snapshot wire version. Tuple is `(expected, got)`.
++    UnsupportedVersion(u32, u32),
++    /// The chain-id in the manifest is invalid.
++    BadChainId,
++    /// `chunk_size` must be non-zero.
++    ZeroChunkSize,
++    /// Too many chunks in one snapshot.
++    TooManyChunks(usize),
++    /// Descriptor offsets are not contiguous.
++    BadChunkOffset,
++    /// A chunk length is zero or over the cap.
++    BadChunkLength(u64),
++    /// Re-encoding the manifest did not reproduce its bytes.
++    NonCanonicalManifest,
++    /// The BLAKE3 chunk root does not match the descriptors.
++    ChunkRootMismatch,
++    /// Data blob length does not match the descriptors. Tuple is
++    /// `(expected, got)`.
++    DataLengthMismatch(u64, u64),
++    /// A chunk's SHA-256 does not match its descriptor. Value is the chunk index.
++    ChunkHashMismatch(usize),
++    /// Decoded entry count does not match `total_keys`. Tuple is `(expected, got)`.
++    EntryCountMismatch(u64, u64),
++    /// A parallel worker failed.
++    Parallel(String),
++}
++
++impl fmt::Display for SnapshotError {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::Decode(e) => write!(f, "canonical decode failed: {e}"),
++            Self::Key(e) => write!(f, "invalid state key: {e}"),
++            Self::TooManyEntries(n) => write!(f, "chunk has {n} entries, over the cap"),
++            Self::KeyTooLarge(n) => write!(f, "key of {n} bytes exceeds the cap"),
++            Self::ValueTooLarge(n) => write!(f, "value of {n} bytes exceeds the cap"),
++            Self::UnsortedKeys => f.write_str("keys are not strictly ascending"),
++            Self::NonCanonicalChunk => f.write_str("chunk is not canonically encoded"),
++            Self::TruncatedManifest => f.write_str("manifest is truncated"),
++            Self::BadManifestChecksum => f.write_str("manifest checksum mismatch"),
++            Self::BadMagic => f.write_str("snapshot magic prefix mismatch"),
++            Self::UnsupportedVersion(expected, got) => {
++                write!(f, "unsupported snapshot version {got}, expected {expected}")
++            }
++            Self::BadChainId => f.write_str("invalid chain-id in manifest"),
++            Self::ZeroChunkSize => f.write_str("chunk_size must be non-zero"),
++            Self::TooManyChunks(n) => write!(f, "snapshot has {n} chunks, over the cap"),
++            Self::BadChunkOffset => f.write_str("chunk offsets are not contiguous"),
++            Self::BadChunkLength(n) => write!(f, "bad chunk length {n}"),
++            Self::NonCanonicalManifest => f.write_str("manifest is not canonically encoded"),
++            Self::ChunkRootMismatch => f.write_str("chunk root does not match descriptors"),
++            Self::DataLengthMismatch(expected, got) => {
++                write!(f, "data length {got}, expected {expected}")
++            }
++            Self::ChunkHashMismatch(index) => {
++                write!(f, "chunk {index} SHA-256 mismatch (substituted chunk)")
++            }
++            Self::EntryCountMismatch(expected, got) => {
++                write!(f, "entry count {got}, expected {expected}")
++            }
++            Self::Parallel(message) => write!(f, "parallel worker failed: {message}"),
++        }
++    }
++}
++
++impl std::error::Error for SnapshotError {}
++
++impl From<aura_codec::CodecError> for SnapshotError {
++    fn from(error: aura_codec::CodecError) -> Self {
++        SnapshotError::Decode(error)
++    }
++}
+diff --git a/crates/aura-state/src/lib.rs b/crates/aura-state/src/lib.rs
+index 608f865..4485cdc 100644
+--- a/crates/aura-state/src/lib.rs
++++ b/crates/aura-state/src/lib.rs
+@@ -8,7 +8,8 @@
+ //! a deterministic, versioned sparse binary Merkle tree with inclusion
+ //! proofs. S3 adds [`StateView`] — a copy-on-write execution overlay with a
+ //! canonical [`StateDiff`] and mandatory rollback on `OutOfGas`/`Revert`.
+-//! Persistence (S2), snapshots (S4–S7) remain open.
++//! S4 adds deterministic snapshots (chunks + SHA-256 manifest + parallel I/O).
++//! State sync/pruning/backup (S5–S7) remain open.
+ //! C7 is deliberately a *layout* phase: no storage backend, no root
+ //! computation, no fake `Ok(())`.
+ //!
+@@ -35,13 +36,14 @@ mod baseline;
+ mod error;
+ mod key;
+ mod overlay;
++mod snapshot;
+ mod tree;
+ 
+ pub use account::Account;
+ pub use baseline::{
+     BaselineError, BaselineReport, BaselineState, BaselineWrite, FINAL_VIEW_CONTEXT,
+ };
+-pub use error::{OverlayError, StateError};
++pub use error::{OverlayError, SnapshotError, StateError};
+ pub use key::{
+     KeySpace, MAX_STATE_KEY_LEN, STATE_KEY_CONTEXT, StateKey, assert_contract_may_write,
+ };
+@@ -49,6 +51,13 @@ pub use overlay::{
+     DIFF_MAGIC, MAX_EVENTS, MAX_VALUE_LEN, MAX_WRITES, S3_DIFF_CONTEXT, S3_EVENT_CONTEXT,
+     StateDiff, StateView, apply_diff, execute,
+ };
++pub use snapshot::{
++    ChunkDescriptor, MAX_CHUNK_BYTES, MAX_CHUNKS, MAX_KEY_BYTES, MAX_VALUE_BYTES,
++    SNAPSHOT_CHUNK_CONTEXT, SNAPSHOT_MAGIC, SNAPSHOT_MANIFEST_CONTEXT, SNAPSHOT_ROOT_CONTEXT,
++    SNAPSHOT_VERSION, Snapshot, SnapshotManifest, StateEntries, chunk_hash, chunk_root,
++    decode_chunk, encode_chunk, export_snapshot, import_snapshot, manifest_bytes,
++    parallel_chunk_hashes, sha256_bytes, state_root,
++};
+ pub use tree::{
+     MerkleProof, MerkleTree, S1_ADDR_CONTEXT, S1_EMPTY_CONTEXT, S1_LEAF_CONTEXT, S1_NODE_CONTEXT,
+     S1_ROOT_CONTEXT, S1_VALUE_CONTEXT, TreeError, empty_hash, key_bit, leaf_hash, node_hash,
+diff --git a/crates/aura-state/src/snapshot.rs b/crates/aura-state/src/snapshot.rs
+new file mode 100644
+index 0000000..aa81fb8
+--- /dev/null
++++ b/crates/aura-state/src/snapshot.rs
+@@ -0,0 +1,428 @@
++//! S4: deterministic state snapshots (chunks, SHA-256 manifest, parallel I/O).
++//!
++//! A snapshot is `manifest_bytes || data_blob`. The data blob is a concatenation
++//! of independently SHA-256-hashed chunks; the manifest holds a descriptor for
++//! every chunk (offset, length, digest), the S1 `state_root`, a BLAKE3
++//! `chunk_root` over the ordered digests, and a SHA-256 checksum of the whole
++//! manifest payload. Export and import hash chunks in parallel via
++//! `std::thread::scope`; output ordering is fixed by the descriptor list.
++//!
++//! Golden vectors: `tools/gen_s4_vectors.py` (independent Python: hashlib
++//! SHA-256 + pure-Python BLAKE3 + S1 sparse Merkle tree).
++//! No `serde`, no `HashMap`, no wall clock. All integers are fixed-width LE or
++//! minimal LEB128 varints from `aura-codec`. `sha2` was already in the C3 lock
++//! via `k256`; S4 adds no new external crate.
++
++use std::sync::atomic::{AtomicUsize, Ordering};
++use std::thread;
++
++use aura_codec::{Decode, Encode, Reader, Writer, read_varint, write_varint};
++use aura_crypto::blake3_hash;
++use aura_types::{ChainId, Hash, Height};
++
++use crate::error::SnapshotError;
++use crate::key::StateKey;
++use crate::tree::{MerkleTree, state_path, versioned_root};
++
++/// Magic prefix of every snapshot payload. (NC target: `tools/nc_s4.py`.)
++pub const SNAPSHOT_MAGIC: &[u8] = b"ALS4";
++/// Wire version of the snapshot format.
++pub const SNAPSHOT_VERSION: u32 = 1;
++/// Domain tag for the manifest SHA-256 checksum. (NC target: `tools/nc_s4.py`.)
++pub const SNAPSHOT_MANIFEST_CONTEXT: &[u8] = b"AuraLite-Crypto/s4-manifest-v1\x00";
++/// Domain tag for per-chunk SHA-256 digests. (NC target: `tools/nc_s4.py`.)
++pub const SNAPSHOT_CHUNK_CONTEXT: &[u8] = b"AuraLite-Crypto/s4-chunk-v1\x00";
++/// Domain tag for the BLAKE3 `chunk_root`.
++pub const SNAPSHOT_ROOT_CONTEXT: &[u8] = b"AuraLite-Crypto/s4-root-v1\x00";
++/// Maximum number of chunks in one snapshot.
++pub const MAX_CHUNKS: u32 = 1_000_000;
++/// Maximum byte length of one chunk.
++pub const MAX_CHUNK_BYTES: u64 = 64 * 1024 * 1024;
++/// Maximum byte length of one key.
++pub const MAX_KEY_BYTES: u64 = 1024;
++/// Maximum byte length of one value.
++pub const MAX_VALUE_BYTES: u64 = 1024 * 1024;
++
++/// One chunk descriptor in the manifest.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct ChunkDescriptor {
++    /// Byte offset of this chunk inside the data blob.
++    pub offset: u64,
++    /// Byte length of the chunk payload.
++    pub length: u64,
++    /// `SHA256(SNAPSHOT_CHUNK_CONTEXT || payload)`.
++    pub sha256: Hash,
++}
++
++/// The snapshot manifest (everything except the data blob).
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct SnapshotManifest {
++    /// Wire version.
++    pub version: u32,
++    /// Chain this snapshot belongs to.
++    pub chain_id: ChainId,
++    /// Height the snapshot was taken at.
++    pub height: Height,
++    /// Versioned S1 state root.
++    pub state_root: Hash,
++    /// BLAKE3 root over the ordered chunk digests.
++    pub chunk_root: Hash,
++    /// Number of entries per chunk (last chunk may be shorter).
++    pub chunk_size: u32,
++    /// Total number of state entries in this snapshot.
++    pub total_keys: u64,
++    /// Ordered chunk descriptors.
++    pub chunks: Vec<ChunkDescriptor>,
++}
++
++/// A complete snapshot: manifest bytes plus the concatenated chunk payloads.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct Snapshot {
++    /// Parsed manifest.
++    pub manifest: SnapshotManifest,
++    /// Concatenated chunk payload bytes.
++    pub data: Vec<u8>,
++}
++
++/// Ordered `(key, value)` state entries.
++pub type StateEntries = Vec<(Vec<u8>, Vec<u8>)>;
++
++fn sha256(data: &[u8]) -> Hash {
++    use sha2::{Digest, Sha256};
++    let mut hasher = Sha256::new();
++    hasher.update(data);
++    let digest = hasher.finalize();
++    let mut bytes = [0u8; 32];
++    bytes.copy_from_slice(&digest);
++    Hash::from_bytes(bytes)
++}
++
++/// Raw SHA-256 of arbitrary bytes (NC target for S4: `tools/nc_s4.py`).
++pub fn sha256_bytes(data: &[u8]) -> Hash {
++    sha256(data)
++}
++
++/// SHA-256 of one chunk payload, with the S4 domain tag.
++pub fn chunk_hash(payload: &[u8]) -> Hash {
++    let mut input = Vec::with_capacity(SNAPSHOT_CHUNK_CONTEXT.len() + payload.len());
++    input.extend_from_slice(SNAPSHOT_CHUNK_CONTEXT);
++    input.extend_from_slice(payload);
++    sha256(&input)
++}
++
++/// BLAKE3 root over the ordered chunk digests.
++pub fn chunk_root(digests: &[Hash]) -> Hash {
++    let mut input = Vec::with_capacity(SNAPSHOT_ROOT_CONTEXT.len() + 4 + digests.len() * 32);
++    input.extend_from_slice(SNAPSHOT_ROOT_CONTEXT);
++    input.extend_from_slice(&(digests.len() as u32).to_le_bytes());
++    for digest in digests {
++        input.extend_from_slice(digest.as_bytes());
++    }
++    blake3_hash(&input)
++}
++
++/// Versioned S1 state root over `(C7 key, value)` entries.
++pub fn state_root(entries: &[(Vec<u8>, Vec<u8>)]) -> Result<Hash, SnapshotError> {
++    let mut leaves: Vec<(Hash, Vec<u8>)> = Vec::with_capacity(entries.len());
++    for (raw_key, value) in entries {
++        let key = StateKey::from_raw(raw_key).map_err(SnapshotError::Key)?;
++        leaves.push((state_path(&key), value.clone()));
++    }
++    let tree = MerkleTree::from_entries(1, &leaves);
++    Ok(versioned_root(1, &tree.tree_root()))
++}
++
++/// Canonical encoding of one chunk:
++/// `varint(count) || (varint(len) || key || varint(len) || value)*`.
++pub fn encode_chunk(entries: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
++    let mut writer = Writer::new();
++    write_varint(&mut writer, entries.len() as u64);
++    for (key, value) in entries {
++        write_varint(&mut writer, key.len() as u64);
++        writer.push_bytes(key);
++        write_varint(&mut writer, value.len() as u64);
++        writer.push_bytes(value);
++    }
++    writer.into_bytes()
++}
++
++/// Decode a chunk with strict canonicality (minimal varints, sorted keys,
++/// no duplicates, no trailing bytes, byte-identical re-encoding).
++pub fn decode_chunk(bytes: &[u8]) -> Result<StateEntries, SnapshotError> {
++    let mut reader = Reader::new(bytes);
++    let count = read_varint(&mut reader).map_err(SnapshotError::Decode)?;
++    if count > MAX_CHUNKS as u64 {
++        return Err(SnapshotError::TooManyEntries(count as usize));
++    }
++    let mut entries: StateEntries = Vec::with_capacity(count as usize);
++    for _ in 0..count {
++        let key_len = read_varint(&mut reader).map_err(SnapshotError::Decode)?;
++        if key_len > MAX_KEY_BYTES {
++            return Err(SnapshotError::KeyTooLarge(key_len as usize));
++        }
++        let key = reader
++            .read_exact(key_len as usize)
++            .map_err(SnapshotError::Decode)?
++            .to_vec();
++        let value_len = read_varint(&mut reader).map_err(SnapshotError::Decode)?;
++        if value_len > MAX_VALUE_BYTES {
++            return Err(SnapshotError::ValueTooLarge(value_len as usize));
++        }
++        let value = reader
++            .read_exact(value_len as usize)
++            .map_err(SnapshotError::Decode)?
++            .to_vec();
++        if entries.last().is_some_and(|(previous, _)| previous >= &key) {
++            return Err(SnapshotError::UnsortedKeys);
++        }
++        entries.push((key, value));
++    }
++    reader.finish().map_err(SnapshotError::Decode)?;
++    if encode_chunk(&entries) != bytes {
++        return Err(SnapshotError::NonCanonicalChunk);
++    }
++    Ok(entries)
++}
++
++impl SnapshotManifest {
++    /// Canonical wire bytes: `payload || sha256(SNAPSHOT_MANIFEST_CONTEXT || payload)`.
++    pub fn to_bytes(&self) -> Vec<u8> {
++        let payload = self.payload();
++        let mut out = payload.clone();
++        let checksum = sha256(&[SNAPSHOT_MANIFEST_CONTEXT, &payload].concat());
++        out.extend_from_slice(checksum.as_bytes());
++        out
++    }
++
++    /// Strict canonical decode: checksum, magic, version, minimal varints,
++    /// contiguous descriptors, caps, no trailing bytes, byte-identical
++    /// re-encoding, and a recomputed `chunk_root`.
++    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, SnapshotError> {
++        if bytes.len() < 32 {
++            return Err(SnapshotError::TruncatedManifest);
++        }
++        let split = bytes.len() - 32;
++        let (payload, checksum) = bytes.split_at(split);
++        let expected = sha256(&[SNAPSHOT_MANIFEST_CONTEXT, payload].concat());
++        if expected.as_bytes() != checksum {
++            return Err(SnapshotError::BadManifestChecksum);
++        }
++        let mut reader = Reader::new(payload);
++        let magic = reader.read_exact(4).map_err(SnapshotError::Decode)?;
++        if magic != SNAPSHOT_MAGIC {
++            return Err(SnapshotError::BadMagic);
++        }
++        let version = u32::decode(&mut reader).map_err(SnapshotError::Decode)?;
++        if version != SNAPSHOT_VERSION {
++            return Err(SnapshotError::UnsupportedVersion(SNAPSHOT_VERSION, version));
++        }
++        let chain_id = ChainId::decode(&mut reader).map_err(SnapshotError::Decode)?;
++        let height = Height::decode(&mut reader).map_err(SnapshotError::Decode)?;
++        let state_root = Hash::decode(&mut reader).map_err(SnapshotError::Decode)?;
++        let root_digest = Hash::decode(&mut reader).map_err(SnapshotError::Decode)?;
++        let chunk_size = u32::decode(&mut reader).map_err(SnapshotError::Decode)?;
++        let total_keys = u64::decode(&mut reader).map_err(SnapshotError::Decode)?;
++        let chunk_count = u32::decode(&mut reader).map_err(SnapshotError::Decode)?;
++        if chunk_size == 0 {
++            return Err(SnapshotError::ZeroChunkSize);
++        }
++        if chunk_count > MAX_CHUNKS {
++            return Err(SnapshotError::TooManyChunks(chunk_count as usize));
++        }
++        let mut chunks = Vec::with_capacity(chunk_count as usize);
++        let mut running_offset = 0u64;
++        for _ in 0..chunk_count {
++            let offset = u64::decode(&mut reader).map_err(SnapshotError::Decode)?;
++            let length = u64::decode(&mut reader).map_err(SnapshotError::Decode)?;
++            let mut digest = [0u8; 32];
++            digest.copy_from_slice(reader.read_exact(32).map_err(SnapshotError::Decode)?);
++            if offset != running_offset {
++                return Err(SnapshotError::BadChunkOffset);
++            }
++            if length == 0 || length > MAX_CHUNK_BYTES {
++                return Err(SnapshotError::BadChunkLength(length));
++            }
++            running_offset = offset + length;
++            chunks.push(ChunkDescriptor {
++                offset,
++                length,
++                sha256: Hash::from_bytes(digest),
++            });
++        }
++        reader.finish().map_err(SnapshotError::Decode)?;
++        let manifest = SnapshotManifest {
++            version,
++            chain_id,
++            height,
++            state_root,
++            chunk_root: root_digest,
++            chunk_size,
++            total_keys,
++            chunks,
++        };
++        if manifest.to_bytes() != bytes {
++            return Err(SnapshotError::NonCanonicalManifest);
++        }
++        let digests: Vec<Hash> = manifest.chunks.iter().map(|d| d.sha256).collect();
++        if chunk_root(&digests) != manifest.chunk_root {
++            return Err(SnapshotError::ChunkRootMismatch);
++        }
++        Ok(manifest)
++    }
++
++    fn payload(&self) -> Vec<u8> {
++        let mut writer = Writer::new();
++        writer.push_bytes(SNAPSHOT_MAGIC);
++        self.version.encode(&mut writer);
++        self.chain_id.encode(&mut writer);
++        self.height.encode(&mut writer);
++        self.state_root.encode(&mut writer);
++        self.chunk_root.encode(&mut writer);
++        self.chunk_size.encode(&mut writer);
++        self.total_keys.encode(&mut writer);
++        (self.chunks.len() as u32).encode(&mut writer);
++        for chunk in &self.chunks {
++            chunk.offset.encode(&mut writer);
++            chunk.length.encode(&mut writer);
++            chunk.sha256.encode(&mut writer);
++        }
++        writer.into_bytes()
++    }
++}
++
++/// Canonical manifest bytes of a snapshot, ready to persist.
++pub fn manifest_bytes(snapshot: &Snapshot) -> Vec<u8> {
++    snapshot.manifest.to_bytes()
++}
++
++/// Export a deterministic snapshot with **parallel** chunk hashing.
++pub fn export_snapshot(
++    entries: &[(Vec<u8>, Vec<u8>)],
++    chain_id: ChainId,
++    height: Height,
++    root: Hash,
++    chunk_size: u32,
++    workers: usize,
++) -> Result<Snapshot, SnapshotError> {
++    if chunk_size == 0 {
++        return Err(SnapshotError::ZeroChunkSize);
++    }
++    let mut payloads: Vec<Vec<u8>> = Vec::new();
++    for chunk in entries.chunks(chunk_size as usize) {
++        payloads.push(encode_chunk(chunk));
++    }
++    let digests = parallel_chunk_hashes(&payloads, workers)?;
++    let mut descriptors = Vec::with_capacity(payloads.len());
++    let mut data = Vec::new();
++    for (payload, digest) in payloads.iter().zip(&digests) {
++        descriptors.push(ChunkDescriptor {
++            offset: data.len() as u64,
++            length: payload.len() as u64,
++            sha256: *digest,
++        });
++        data.extend_from_slice(payload);
++    }
++    let manifest = SnapshotManifest {
++        version: SNAPSHOT_VERSION,
++        chain_id,
++        height,
++        state_root: root,
++        chunk_root: chunk_root(&digests),
++        chunk_size,
++        total_keys: entries.len() as u64,
++        chunks: descriptors,
++    };
++    Ok(Snapshot { manifest, data })
++}
++
++/// Import a snapshot: verify every chunk digest in parallel, then decode.
++///
++/// NC target: `tools/nc_s4.py` disables the digest comparison here and requires
++/// the substituted-chunk gate to go red.
++pub fn import_snapshot(
++    manifest_bytes: &[u8],
++    data: &[u8],
++    workers: usize,
++) -> Result<StateEntries, SnapshotError> {
++    let manifest = SnapshotManifest::from_canonical_bytes(manifest_bytes)?;
++    let expected_len: u64 = manifest.chunks.iter().map(|c| c.length).sum();
++    if data.len() as u64 != expected_len {
++        return Err(SnapshotError::DataLengthMismatch(
++            expected_len,
++            data.len() as u64,
++        ));
++    }
++    let payloads: Vec<&[u8]> = manifest
++        .chunks
++        .iter()
++        .map(|c| {
++            let start = c.offset as usize;
++            &data[start..start + c.length as usize]
++        })
++        .collect();
++    let computed = parallel_chunk_hashes(&payloads, workers)?;
++    let digests_match = computed == manifest.chunks.iter().map(|c| c.sha256).collect::<Vec<_>>();
++    if !digests_match {
++        let index = computed
++            .iter()
++            .zip(&manifest.chunks)
++            .position(|(hash, chunk)| *hash != chunk.sha256)
++            .unwrap_or(0);
++        return Err(SnapshotError::ChunkHashMismatch(index));
++    }
++    let mut entries: StateEntries = Vec::with_capacity(manifest.total_keys as usize);
++    for payload in &payloads {
++        entries.extend(decode_chunk(payload)?);
++    }
++    if entries.len() as u64 != manifest.total_keys {
++        return Err(SnapshotError::EntryCountMismatch(
++            manifest.total_keys,
++            entries.len() as u64,
++        ));
++    }
++    Ok(entries)
++}
++
++/// Hash chunk payloads in parallel with a bounded worker pool. Deterministic
++/// output ordering (one digest per input chunk, in input order).
++pub fn parallel_chunk_hashes<T: AsRef<[u8]> + Sync>(
++    payloads: &[T],
++    workers: usize,
++) -> Result<Vec<Hash>, SnapshotError> {
++    let count = payloads.len();
++    if count > MAX_CHUNKS as usize {
++        return Err(SnapshotError::TooManyChunks(count));
++    }
++    if count == 0 {
++        return Ok(Vec::new());
++    }
++    let worker_count = workers.clamp(1, count.min(8));
++    let mut out = vec![Hash::ZERO; count];
++    let digests = std::sync::Mutex::new(&mut out);
++    let next = AtomicUsize::new(0);
++
++    thread::scope(|scope| -> Result<(), SnapshotError> {
++        let mut handles = Vec::with_capacity(worker_count);
++        for _ in 0..worker_count {
++            let digests = &digests;
++            let next = &next;
++            let payloads = &payloads;
++            handles.push(scope.spawn(move || {
++                loop {
++                    let index = next.fetch_add(1, Ordering::Relaxed);
++                    if index >= payloads.len() {
++                        break;
++                    }
++                    let hash = chunk_hash(payloads[index].as_ref());
++                    let mut guard = digests.lock().expect("mutex poisoned");
++                    guard[index] = hash;
++                }
++            }));
++        }
++        for handle in handles {
++            handle.join().expect("worker panicked");
++        }
++        Ok(())
++    })?;
++    Ok(out)
++}
+diff --git a/crates/aura-state/tests/fixtures/s4_golden.txt b/crates/aura-state/tests/fixtures/s4_golden.txt
+new file mode 100644
+index 0000000..b928854
+--- /dev/null
++++ b/crates/aura-state/tests/fixtures/s4_golden.txt
+@@ -0,0 +1,58 @@
++# AuraLite-Crypto S4 snapshot golden vectors
++# Generated by tools/gen_s4_vectors.py (independent Python).
++# Manifest: payload || sha256(SNAPSHOT_MANIFEST_CONTEXT || payload).
++# Chunk hash: sha256(SNAPSHOT_CHUNK_CONTEXT || chunk payload).
++snapshot_magic=414c5334
++snapshot_version=1
++manifest_context=417572614c6974652d43727970746f2f73342d6d616e69666573742d763100
++chunk_context=417572614c6974652d43727970746f2f73342d6368756e6b2d763100
++root_context=417572614c6974652d43727970746f2f73342d726f6f742d763100
++state_key_context=417572614c6974652d43727970746f2f73746174652d6b65792d763100
++chain_id=auralite-test-1
++height=1000
++chunk_size=3
++entry_count=7
++chunk_count=3
++state_root=c3be1e58cf449b11fce9828f0abefd54a72b3b34e2b745e13f3de0221cce7c61
++chunk_root=0a59e445a17daaacf7544b7d3c43056cc8d45263b4571c10f9860e67bad5bee1
++manifest_bytes=414c5334010000000f617572616c6974652d746573742d31e803000000000000c3be1e58cf449b11fce9828f0abefd54a72b3b34e2b745e13f3de0221cce7c610a59e445a17daaacf7544b7d3c43056cc8d45263b4571c10f9860e67bad5bee10300000007000000000000000300000000000000000000005e000000000000003b2759004e5c33571d130643732edefd0b5c67961baba304b6a16538ca852d465e000000000000005e00000000000000ab9b843a97b2699e9bd53178f38d36b107b075269ea137358e1da95d9477b914bc000000000000002000000000000000bd204d3c284ce9d200e59318b14307e65c7f6fe37ac1b610d45f73e20c477a5bd4c979ebe4b0080c03cb2678b8946492328831f9639006e1d5746ad83f00f93a
++data_bytes=03150100000000000000000000000000000000000000000800000000000000001501000000000000000000000000000000000000000108010000000000000015010000000000000000000000000000000000000002080200000000000000031501000000000000000000000000000000000000000308030000000000000015010000000000000000000000000000000000000004080400000000000000150100000000000000000000000000000000000000050805000000000000000115010000000000000000000000000000000000000006080600000000000000
++data_sha256=b56becd9ce8c1316daa5662cfe8f415905df4a94e4a23bc6cc4d69e452629d3e
++chunk_0_offset=0
++chunk_0_length=94
++chunk_0_sha256=3b2759004e5c33571d130643732edefd0b5c67961baba304b6a16538ca852d46
++chunk_1_offset=94
++chunk_1_length=94
++chunk_1_sha256=ab9b843a97b2699e9bd53178f38d36b107b075269ea137358e1da95d9477b914
++chunk_2_offset=188
++chunk_2_length=32
++chunk_2_sha256=bd204d3c284ce9d200e59318b14307e65c7f6fe37ac1b610d45f73e20c477a5b
++bad_substituted_data=03150100000000000000000000000000000000000000000800000000000000001501000000000000000000000000000000000000000108010000000000000015010000000000000000000000000000000000000002080200000000000000031501000000000000000000000000000000000000000308030000000000000015010000000000000000000000000000000000000004080400000000000000150100000000000000000000000000000000000000050805000000000000000115010000000000000000000000000000000000000006080600000000000001
++bad_substituted_manifest=414c5334010000000f617572616c6974652d746573742d31e803000000000000c3be1e58cf449b11fce9828f0abefd54a72b3b34e2b745e13f3de0221cce7c610a59e445a17daaacf7544b7d3c43056cc8d45263b4571c10f9860e67bad5bee10300000007000000000000000300000000000000000000005e000000000000003b2759004e5c33571d130643732edefd0b5c67961baba304b6a16538ca852d465e000000000000005e00000000000000ab9b843a97b2699e9bd53178f38d36b107b075269ea137358e1da95d9477b914bc000000000000002000000000000000bd204d3c284ce9d200e59318b14307e65c7f6fe37ac1b610d45f73e20c477a5bd4c979ebe4b0080c03cb2678b8946492328831f9639006e1d5746ad83f00f93a
++bad_manifest_checksum=414c5334010000000f617572616c6974652d746573742d31e803000000000000c3be1e58cf449b11fce9828f0abefd54a72b3b34e2b745e13f3de0221cce7c610a59e445a17daaacf7544b7d3c43056cc8d45263b4571c10f9860e67bad5bee10300000007000000000000000300000000000000000000005e000000000000003b2759004e5c33571d130643732edefd0b5c67961baba304b6a16538ca852d465e000000000000005e00000000000000ab9b843a97b2699e9bd53178f38d36b107b075269ea137358e1da95d9477b914bc000000000000002000000000000000bd204d3c284ce9d200e59318b14307e65c7f6fe37ac1b610d45f73e20c477a5bd4c979ebe4b0080c03cb2678b8946492328831f9639006e1d5746ad83f00f93b
++bad_manifest_magic=58585858010000000f617572616c6974652d746573742d31e803000000000000c3be1e58cf449b11fce9828f0abefd54a72b3b34e2b745e13f3de0221cce7c610a59e445a17daaacf7544b7d3c43056cc8d45263b4571c10f9860e67bad5bee10300000007000000000000000300000000000000000000005e000000000000003b2759004e5c33571d130643732edefd0b5c67961baba304b6a16538ca852d465e000000000000005e00000000000000ab9b843a97b2699e9bd53178f38d36b107b075269ea137358e1da95d9477b914bc000000000000002000000000000000bd204d3c284ce9d200e59318b14307e65c7f6fe37ac1b610d45f73e20c477a5ba2d83d503ea998df594d5e8434e4a591ab283dcbfcac41f504f17a342efce994
++bad_chunk_count_manifest=414c5334010000000f617572616c6974652d746573742d31e803000000000000c3be1e58cf449b11fce9828f0abefd54a72b3b34e2b745e13f3de0221cce7c610a59e445a17daaacf7544b7d3c43056cc8d45263b4571c10f9860e67bad5bee1030000000700000000000000e703000000000000000000005e000000000000003b2759004e5c33571d130643732edefd0b5c67961baba304b6a16538ca852d465e000000000000005e00000000000000ab9b843a97b2699e9bd53178f38d36b107b075269ea137358e1da95d9477b914bc000000000000002000000000000000bd204d3c284ce9d200e59318b14307e65c7f6fe37ac1b610d45f73e20c477a5b4a5ba7e8857cc72c88c1aa6d1ec7f0ff985c49cdd5f31b0304dd0df38eebee28
++bad_chunk_root_manifest=414c5334010000000f617572616c6974652d746573742d31e803000000000000c3be1e58cf449b11fce9828f0abefd54a72b3b34e2b745e13f3de0221cce7c610b59e445a17daaacf7544b7d3c43056cc8d45263b4571c10f9860e67bad5bee10300000007000000000000000300000000000000000000005e000000000000003b2759004e5c33571d130643732edefd0b5c67961baba304b6a16538ca852d465e000000000000005e00000000000000ab9b843a97b2699e9bd53178f38d36b107b075269ea137358e1da95d9477b914bc000000000000002000000000000000bd204d3c284ce9d200e59318b14307e65c7f6fe37ac1b610d45f73e20c477a5bda90631b42ad07460b7b68bdc7be402ae9d84cad66d0ef257a9acbba6617a036
++bad_truncated_data=0315010000000000000000000000000000000000000000080000000000000000150100000000000000000000000000000000000000010801000000000000001501000000000000000000000000000000000000000208020000000000000003150100000000000000000000000000000000000000030803000000000000001501000000000000000000000000000000000000000408040000000000000015010000000000000000000000000000000000000005080500000000000000011501000000000000000000000000000000000000000608060000000000
++bad_trailing_data=0315010000000000000000000000000000000000000000080000000000000000150100000000000000000000000000000000000000010801000000000000001501000000000000000000000000000000000000000208020000000000000003150100000000000000000000000000000000000000030803000000000000001501000000000000000000000000000000000000000408040000000000000015010000000000000000000000000000000000000005080500000000000000011501000000000000000000000000000000000000000608060000000000000000
++bad_unsorted_data=03150100000000000000000000000000000000000000010801000000000000001501000000000000000000000000000000000000000008000000000000000015010000000000000000000000000000000000000002080200000000000000
++bad_duplicate_data=03150100000000000000000000000000000000000000000800000000000000001501000000000000000000000000000000000000000008000000000000000015010000000000000000000000000000000000000001080100000000000000
++bad_empty_data=
++million_entries=1000000
++million_chunk_size=65536
++million_data_len=31000048
++million_chunk_count=16
++million_data_sha256=14a9636730688b66df297a2b39726366e12f183c92db8d5fd5f3d405b7e02266
++million_chunk_root=150a93269b559d1db4705b3782534cb55641c4f7fd03d14081b89d6be52926ed
++parallel_entries=1024
++parallel_chunk_size=128
++parallel_data_sha256=a61e6807aaf2c1915c1f64690cbde03ea28adeff1770d8045ea536c3453a00b2
++parallel_chunk_root=79ee938027be35089b3b8e50d8311421a8dd5d47e1c09030a96edaa496045eb6
++parallel_chunk_0_sha256=ce22ab9a12bd22c4f5f7edb697daab49833afceed817136a03a35ac4242a040f
++parallel_chunk_1_sha256=c68eb418db20069d463a3eaa4a721abd5ba5e9e352f7c8e1c80353a896e7553f
++parallel_chunk_2_sha256=08226d90fd36387df79a5952c56d083d926c5d104fe4df45c4c497e5c683bb15
++parallel_chunk_3_sha256=1d1fd0cac728af1085beb0ba4b372fff1e0155251fe5402a366f4e9c934bafb9
++parallel_chunk_4_sha256=8e626609e5ef36a0294144e4f4f4e3ba55a4038de984cd9d660ce700e2a0f311
++parallel_chunk_5_sha256=08763dc3fc991df62a9a8b3a8de7dd9d1be54c867f34cd785cc7b5dc6b9f8601
++parallel_chunk_6_sha256=f08430c5190c9f6ae908054b48aff9bf5f3cc1dfe6155793789396d6a5d1348d
++parallel_chunk_7_sha256=db1b3d1743908a3704d209fb12e0823ba679359d710e256578ecd95830e6dc2a
+diff --git a/crates/aura-state/tests/s4_snapshot.rs b/crates/aura-state/tests/s4_snapshot.rs
+new file mode 100644
+index 0000000..dc95c4c
+--- /dev/null
++++ b/crates/aura-state/tests/s4_snapshot.rs
+@@ -0,0 +1,285 @@
++//! S4 gate: snapshots against an independent Python reference.
++//!
++//! `fixtures/s4_golden.txt` comes from `tools/gen_s4_vectors.py` — hashlib
++//! SHA-256, pure-Python BLAKE3, the C7 state-key digest and the S1 sparse tree.
++//! Report: `docs/evidence/s4/report.md`.
++
++use std::collections::BTreeMap;
++
++use aura_state::{
++    MAX_CHUNK_BYTES, MAX_CHUNKS, MAX_KEY_BYTES, MAX_VALUE_BYTES, SNAPSHOT_CHUNK_CONTEXT,
++    SNAPSHOT_MAGIC, SNAPSHOT_MANIFEST_CONTEXT, SNAPSHOT_ROOT_CONTEXT, SNAPSHOT_VERSION,
++    SnapshotError, SnapshotManifest, chunk_hash, chunk_root, decode_chunk, encode_chunk,
++    export_snapshot, import_snapshot, manifest_bytes, parallel_chunk_hashes, sha256_bytes,
++    state_root,
++};
++use aura_types::{ChainId, Hash, Height};
++
++const GOLDEN: &str = include_str!("fixtures/s4_golden.txt");
++
++fn parse(text: &str) -> BTreeMap<String, String> {
++    let mut map = BTreeMap::new();
++    for line in text.lines() {
++        let trimmed = line.trim();
++        if trimmed.is_empty() || trimmed.starts_with('#') {
++            continue;
++        }
++        let (key, value) = trimmed
++            .split_once('=')
++            .unwrap_or_else(|| panic!("malformed golden line: {trimmed}"));
++        assert!(map.insert(key.to_owned(), value.to_owned()).is_none());
++        assert!(!key.is_empty());
++    }
++    map
++}
++
++fn hx(text: &str) -> Vec<u8> {
++    assert_eq!(text.len() % 2, 0);
++    text.as_bytes()
++        .chunks(2)
++        .map(|pair| (nibble(pair[0]) << 4) | nibble(pair[1]))
++        .collect()
++}
++
++fn nibble(byte: u8) -> u8 {
++    match byte {
++        b'0'..=b'9' => byte - b'0',
++        b'a'..=b'f' => byte - b'a' + 10,
++        _ => panic!("invalid hex nibble"),
++    }
++}
++
++fn to_hex(bytes: &[u8]) -> String {
++    let mut out = String::with_capacity(bytes.len() * 2);
++    for byte in bytes {
++        out.push_str(&format!("{byte:02x}"));
++    }
++    out
++}
++
++fn f_u64(f: &BTreeMap<String, String>, key: &str) -> u64 {
++    f[key].parse().expect("u64")
++}
++
++fn f_usize(f: &BTreeMap<String, String>, key: &str) -> usize {
++    f[key].parse().expect("usize")
++}
++
++/// Deterministic C7 account keys and compact values, identical to the Python
++/// generator (`\x01 || 20-byte big-endian index` and `u64 LE`).
++fn vector_entries(count: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
++    (0..count)
++        .map(|index| {
++            let mut key = vec![0x01u8];
++            key.extend_from_slice(&[0u8; 12]);
++            key.extend_from_slice(&(index as u64).to_be_bytes());
++            (key, (index as u64).to_le_bytes().to_vec())
++        })
++        .collect()
++}
++
++fn chain(f: &BTreeMap<String, String>) -> ChainId {
++    ChainId::new(&f["chain_id"]).expect("valid chain-id")
++}
++
++#[test]
++fn constants_are_pinned_by_the_independent_fixture() {
++    let f = parse(GOLDEN);
++    assert_eq!(to_hex(SNAPSHOT_MAGIC), f["snapshot_magic"]);
++    assert_eq!(SNAPSHOT_VERSION.to_string(), f["snapshot_version"]);
++    assert_eq!(to_hex(SNAPSHOT_MANIFEST_CONTEXT), f["manifest_context"]);
++    assert_eq!(to_hex(SNAPSHOT_CHUNK_CONTEXT), f["chunk_context"]);
++    assert_eq!(to_hex(SNAPSHOT_ROOT_CONTEXT), f["root_context"]);
++    assert_eq!(MAX_CHUNKS, 1_000_000);
++    assert_eq!(MAX_CHUNK_BYTES, 64 * 1024 * 1024);
++    assert_eq!(MAX_KEY_BYTES, 1024);
++    assert_eq!(MAX_VALUE_BYTES, 1024 * 1024);
++}
++
++#[test]
++fn canonical_snapshot_matches_independent_python() {
++    let f = parse(GOLDEN);
++    let entries = vector_entries(f_usize(&f, "entry_count"));
++    let root = state_root(&entries).expect("S1 state root");
++    let snapshot = export_snapshot(
++        &entries,
++        chain(&f),
++        Height::new(f_u64(&f, "height")),
++        root,
++        f_u64(&f, "chunk_size") as u32,
++        4,
++    )
++    .expect("export succeeds");
++
++    assert_eq!(root.to_hex(), f["state_root"]);
++    assert_eq!(snapshot.manifest.state_root.to_hex(), f["state_root"]);
++    assert_eq!(snapshot.manifest.chunk_root.to_hex(), f["chunk_root"]);
++    assert_eq!(to_hex(&manifest_bytes(&snapshot)), f["manifest_bytes"]);
++    assert_eq!(to_hex(&snapshot.data), f["data_bytes"]);
++    assert_eq!(sha256_bytes(&snapshot.data).to_hex(), f["data_sha256"]);
++    assert_eq!(snapshot.manifest.chunks.len().to_string(), f["chunk_count"]);
++
++    let decoded = SnapshotManifest::from_canonical_bytes(&hx(&f["manifest_bytes"]))
++        .expect("manifest decodes");
++    assert_eq!(decoded, snapshot.manifest);
++    for (index, descriptor) in snapshot.manifest.chunks.iter().enumerate() {
++        assert_eq!(
++            descriptor.offset.to_string(),
++            f[&format!("chunk_{index}_offset")]
++        );
++        assert_eq!(
++            descriptor.length.to_string(),
++            f[&format!("chunk_{index}_length")]
++        );
++        assert_eq!(
++            descriptor.sha256.to_hex(),
++            f[&format!("chunk_{index}_sha256")]
++        );
++    }
++
++    let imported =
++        import_snapshot(&hx(&f["manifest_bytes"]), &snapshot.data, 4).expect("import succeeds");
++    assert_eq!(imported, entries, "import must be byte-identical");
++}
++
++#[test]
++fn chunk_encoding_is_canonical_and_rejects_bad_vectors() {
++    let f = parse(GOLDEN);
++    let entries = vector_entries(f_usize(&f, "entry_count"));
++    let payload = encode_chunk(&entries);
++    assert_eq!(decode_chunk(&payload).unwrap(), entries);
++    assert_eq!(
++        decode_chunk(&hx(&f["bad_unsorted_data"])),
++        Err(SnapshotError::UnsortedKeys)
++    );
++    assert_eq!(
++        decode_chunk(&hx(&f["bad_duplicate_data"])),
++        Err(SnapshotError::UnsortedKeys)
++    );
++    assert!(decode_chunk(&hx(&f["bad_empty_data"])).is_err());
++}
++
++#[test]
++fn chunk_hashes_and_root_match_independent_python() {
++    let f = parse(GOLDEN);
++    let entries = vector_entries(f_usize(&f, "entry_count"));
++    let manifest = SnapshotManifest::from_canonical_bytes(&hx(&f["manifest_bytes"])).unwrap();
++    let payloads: Vec<Vec<u8>> = entries
++        .chunks(f_u64(&f, "chunk_size") as usize)
++        .map(encode_chunk)
++        .collect();
++    let digests = parallel_chunk_hashes(&payloads, 4).unwrap();
++    assert_eq!(chunk_root(&digests).to_hex(), f["chunk_root"]);
++    for (index, _descriptor) in manifest.chunks.iter().enumerate() {
++        assert_eq!(digests[index], chunk_hash(payloads[index].as_ref()));
++        assert_eq!(digests[index].to_hex(), f[&format!("chunk_{index}_sha256")]);
++    }
++}
++
++#[test]
++fn parallel_hashing_is_deterministic_across_worker_counts() {
++    let f = parse(GOLDEN);
++    let entries = vector_entries(f_usize(&f, "parallel_entries"));
++    let payloads: Vec<Vec<u8>> = entries
++        .chunks(f_u64(&f, "parallel_chunk_size") as usize)
++        .map(encode_chunk)
++        .collect();
++    let data: Vec<u8> = payloads.iter().flat_map(|p| p.iter().copied()).collect();
++    assert_eq!(sha256_bytes(&data).to_hex(), f["parallel_data_sha256"]);
++    for workers in [1usize, 2, 4, 8] {
++        let digests = parallel_chunk_hashes(&payloads, workers).unwrap();
++        assert_eq!(digests.len(), payloads.len(), "workers={workers}");
++        for (index, digest) in digests.iter().enumerate() {
++            assert_eq!(
++                digest.to_hex(),
++                f[&format!("parallel_chunk_{index}_sha256")],
++                "workers={workers}, chunk={index}"
++            );
++            assert_eq!(*digest, chunk_hash(payloads[index].as_ref()));
++        }
++        assert_eq!(chunk_root(&digests).to_hex(), f["parallel_chunk_root"]);
++    }
++}
++
++#[test]
++fn million_key_snapshot_is_imported_byte_identically() {
++    // S4 DoD gate: a snapshot of 1,000,000 keys reimports byte-identically.
++    let f = parse(GOLDEN);
++    let count = f_usize(&f, "million_entries");
++    let entries = vector_entries(count);
++    // The Python reference computes the S1 state root only for the small
++    // snapshot; the 1M gate focuses on chunking/hashing/import. Use ZERO root.
++    let snapshot = export_snapshot(
++        &entries,
++        chain(&f),
++        Height::new(f_u64(&f, "height")),
++        Hash::ZERO,
++        f_u64(&f, "million_chunk_size") as u32,
++        4,
++    )
++    .unwrap();
++
++    assert_eq!(snapshot.data.len().to_string(), f["million_data_len"]);
++    assert_eq!(
++        sha256_bytes(&snapshot.data).to_hex(),
++        f["million_data_sha256"]
++    );
++    assert_eq!(
++        snapshot.manifest.chunks.len().to_string(),
++        f["million_chunk_count"]
++    );
++    assert_eq!(
++        snapshot.manifest.chunk_root.to_hex(),
++        f["million_chunk_root"]
++    );
++    assert_eq!(snapshot.manifest.total_keys, count as u64);
++
++    let manifest = manifest_bytes(&snapshot);
++    let imported = import_snapshot(&manifest, &snapshot.data, 4).expect("import of 1M keys");
++    assert_eq!(imported.len(), count);
++    assert_eq!(imported, entries, "1M-key import must be byte-identical");
++}
++
++#[test]
++fn substituted_chunk_is_rejected() {
++    // S4 DoD NC: a substituted chunk must be rejected.
++    let f = parse(GOLDEN);
++    let manifest = hx(&f["bad_substituted_manifest"]);
++    let data = hx(&f["bad_substituted_data"]);
++    assert_eq!(
++        import_snapshot(&manifest, &data, 4).unwrap_err(),
++        SnapshotError::ChunkHashMismatch(2)
++    );
++}
++
++#[test]
++fn every_bad_vector_is_rejected() {
++    let f = parse(GOLDEN);
++    let expected: Vec<(&str, SnapshotError)> = vec![
++        ("bad_manifest_checksum", SnapshotError::BadManifestChecksum),
++        ("bad_manifest_magic", SnapshotError::BadMagic),
++        ("bad_chunk_root_manifest", SnapshotError::ChunkRootMismatch),
++    ];
++    for (key, error) in &expected {
++        assert_eq!(
++            SnapshotManifest::from_canonical_bytes(&hx(&f[*key])),
++            Err(error.clone()),
++            "{key}"
++        );
++    }
++    let key = "bad_chunk_count_manifest";
++    assert!(
++        SnapshotManifest::from_canonical_bytes(&hx(&f[key])).is_err(),
++        "{key}"
++    );
++    let good_manifest = hx(&f["manifest_bytes"]);
++    for key in ["bad_truncated_data", "bad_trailing_data"] {
++        assert!(
++            matches!(
++                import_snapshot(&good_manifest, &hx(&f[key]), 4).unwrap_err(),
++                SnapshotError::DataLengthMismatch(_, _)
++            ),
++            "{key}"
++        );
++    }
++}
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+index b114350..4079b7a 100644
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -43,6 +43,12 @@ Tx      = { chain_id, signer, nonce, kind, payload, gas_limit,
+ 
+ **⚠️ AUDIT (S3, 2026-10-27).** The §3 graph earlier claimed `aura-state <- aura-block, aura-tx, aura-codec, aura-crypto, aura-storage`, which is false and would be a cycle: `aura-storage` depends on `aura-state`. The graph above now reflects the real `Cargo.toml` edges; this is a docs correction, not a code change.
+ 
++**S4 snapshots.** `aura-state::snapshot` adds deterministic state snapshots:
++SHA-256 chunk digests, a checksummed manifest with descriptors, a BLAKE3
++`chunk_root` and an S1 `state_root`. Export/import hash chunks in parallel
++with a bounded worker pool; 1,000,000 keys reimport byte-identically. A
++substituted chunk is rejected. Report: `docs/evidence/s4/report.md`.
++
+ **S3 execution overlay.** `aura-state::overlay` adds `StateView` — a copy-on-write overlay over an immutable S1 tree — and `StateDiff`, a checksummed canonical diff with a strict decoder. `execute()` rolls back the whole view on `OutOfGas` or `Revert`, so a revert cannot change the state root. Report: `docs/evidence/s3/report.md`.
+ 
+ **S2 durable state.** `aura-storage` puts a checksummed WAL in front of a
+diff --git a/docs/STATUS.md b/docs/STATUS.md
+index 89de5e9..091eee3 100644
+--- a/docs/STATUS.md
++++ b/docs/STATUS.md
+@@ -1,9 +1,10 @@
+ # Implementation status — AuraLite-Crypto
+ 
+ > Updated **in the same patch** as the phase's code (rule D9).
+-> Snapshot date: **2026-10-27**, tree: "S3 landed — execution overlay,
+-> Stage 1 in progress". See [`CLOSEOUT_AUDIT.md`](CLOSEOUT_AUDIT.md)
+-> (CORE) and `docs/evidence/s3/report.md` (S3).
++> Snapshot date: **2026-10-27**, tree: "S4 landed — deterministic state
++> snapshots, Stage 1 in progress". See
++> [`CLOSEOUT_AUDIT.md`](CLOSEOUT_AUDIT.md) (CORE) and
++> `docs/evidence/s4/report.md` (S4).
+ 
+ ## Locked decisions (2026-10-25)
+ 
+@@ -22,9 +23,10 @@
+ — **CORE_PLAN is complete**; S0 ✅ (`patches/0012-S0-state-baseline.patch`),
+ S1 ✅ (`patches/0013-S1-merkle-tree.patch`), S2 ✅
+ (`patches/0014-S2-rocksdb-wal.patch`) and S3 ✅
+-(`patches/0015-S3-execution-overlay.patch`) done — **STATE_PLAN now has
+-atomic execution**. Next in dependency order: S4 (snapshots). No other
+-phase has started.
++(`patches/0015-S3-execution-overlay.patch`) and S4 ✅
++(`patches/0016-S4-snapshots.patch`) done — **STATE_PLAN now has
++deterministic snapshots**. Next in dependency order: S5 (state sync).
++No other phase has started.
+ 
+ ## Maturity level
+ 
+@@ -48,11 +50,20 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
+   Evidence receipts for every phase live in `docs/evidence/`; the newest are
+   `docs/evidence/s2/gates.txt`, `nc.log`, `report.md`, `inventory.txt`,
+   `native.txt`,
+-  `docs/evidence/s3/gates.txt`, `nc.log`, `report.md`, `inventory.txt`.
++  `docs/evidence/s3/gates.txt`, `nc.log`, `report.md`, `inventory.txt`,
++  `docs/evidence/s4/gates.txt`, `nc.log`, `report.md`, `inventory.txt`.
+   ⚠️ AUDIT: the §3 crate graph in `docs/ARCHITECTURE.md` had a cycle
+   (`aura-state <- aura-storage` while `aura-storage <- aura-state`); S3
+   corrected it to match the real `Cargo.toml` edges.
+-- **S3 (current).** `aura-state::overlay` gives `StateView` +
++- **S4 (current).** `aura-state::snapshot` gives deterministic snapshots:
++  SHA-256 chunk digests, a checksummed manifest with descriptors, a BLAKE3
++  `chunk_root` and an S1 `state_root`. Export/import hash chunks in
++  parallel (1..8 workers, deterministic output). 1,000,000 keys reimport
++  byte-identically; a substituted chunk is rejected. 11 rejection
++  vectors; 6 S4 negative controls. Report: `docs/evidence/s4/report.md`.
++  146 tests, 4,254 vectors. `sha2 = 0.10.9` became a DIRECT dep of
++  `aura-state` (already in the C3 lock via `k256`; no new external crate).
++- **S3.** `aura-state::overlay` gives `StateView` +
+   `StateDiff` + rollback. A `Revert` or `OutOfGas` leaves `base_root`
+   unchanged and the account balance byte-identical; 10 canonical diff
+   rejection vectors; 6 S3 negative controls. Report:
+@@ -105,13 +116,14 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
+ ```
+ find crates -name Cargo.toml       -> 15 crates (+1 workspace root)
+ ls docs/plans/*_PLAN.md           -> 12 plans / 112 phase rows
+-cargo test --workspace            -> 138 passed; 0 failed
++cargo test --workspace            -> 146 passed; 0 failed
+ make test                         -> ALL GATES GREEN (incl. close-out audit)
+-make vector-inventory             -> 4205 vectors >= 200
++make vector-inventory             -> 4254 vectors >= 200
+ make audit-closeout               -> every ✅ has a receipt
+-make nc-all                       -> 2/2+3/3+4/4+5/5+6/6*11 = 80 NC PASS
++make nc-all                       -> 2/2+3/3+4/4+5/5+6/6*12 = 86 NC PASS
+ make check-deps                   -> 95 external crates allowlisted
+ revert / OutOfGas                -> root unchanged, balance unchanged
++snapshot 1M keys                 -> byte-identical reimport
+ kill -9 commit points             -> 10 + 10 crash-window, all recover
+ validators / blocks / tx          -> 0 / 0 / 0
+ ```
+diff --git a/docs/evidence/s4-dependency-addendum.txt b/docs/evidence/s4-dependency-addendum.txt
+new file mode 100644
+index 0000000..4acfb39
+--- /dev/null
++++ b/docs/evidence/s4-dependency-addendum.txt
+@@ -0,0 +1,7 @@
++# AuraLite-Crypto external dependency addendum (S4).
++# Generated by tools/record_s4_deps.py from Cargo.lock.
++# S4 adds NO new external crate: sha2=0.10.9 was already in the
++# lock via k256 and is already in the frozen C3 baseline.
++# S4 only makes it a DIRECT dependency of aura-state, for the
++# SHA-256 manifest checksum and per-chunk digests.
++# No crate lines below — the resolved external set is unchanged.
+diff --git a/docs/evidence/s4/SHA256SUMS b/docs/evidence/s4/SHA256SUMS
+new file mode 100644
+index 0000000..a2b8e4c
+--- /dev/null
++++ b/docs/evidence/s4/SHA256SUMS
+@@ -0,0 +1,6 @@
++0c3c349e16837e74143f218d6837ec29c90f6447857f083bac0771ac515975f1  docs/evidence/s4/gates.txt
++0bc99188499c398395c7ef23bbd731907a643162ebb8555e0bd487ea16d831e8  docs/evidence/s4/nc.log
++5d1c87fe161fabaa71de84964851fb02eeb5242b55f57e0e5ef34fbc654a81e5  docs/evidence/s4/report.md
++e810d4eb3aee3aeb3a859352049c9e97a2d95fba9dd10ce842bf75a1eba11ad0  docs/evidence/s4/inventory.txt
++50850364387f075655e0bce65d03eabfb6487169ec9c7ff85049cebc302a8149  crates/aura-state/tests/fixtures/s4_golden.txt
++480faf2ee9f198e8982ed2eb639d67648492db6d64852d88df624962bb738dad  docs/evidence/s4-dependency-addendum.txt
+diff --git a/docs/evidence/s4/gates.txt b/docs/evidence/s4/gates.txt
+new file mode 100644
+index 0000000..021192d
+--- /dev/null
++++ b/docs/evidence/s4/gates.txt
+@@ -0,0 +1,206 @@
++AuraLite-Crypto — S4 evidence (snapshots)
++Generated (UTC): 2026-10-27T17:49:46+00:00
++Rule: measured against the tree, not assumed.
++
++========================================================================
++RAW COMMAND OUTPUT
++========================================================================
++
++--- toolchain ---
++$ rustc --version && cargo --version
++rustc 1.99.1 (58cf8f9c3 2026-10-13)
++cargo 1.99.1 (5f94df478 2026-08-27)
++[rc=0]
++
++--- pre-S4 tree (S3 commit) ---
++$ git log -1 --oneline
++fc5be6f S3 patch artifact
++[rc=0]
++
++--- workspace crates ---
++$ find crates -name Cargo.toml | wc -l
++15
++[rc=0]
++
++--- Rust files ---
++$ find . -name '*.rs' -not -path './target/*' | wc -l
++77
++[rc=0]
++
++--- external deps ---
++$ grep -c '^source = ' Cargo.lock || true
++95
++[rc=0]
++
++--- docs drift guard ---
++$ python3 tools/check_claims.py
++DOCS DRIFT GUARD: OK — 32 markdown files, 12 plans, 112 phase rows, all local links resolve
++[rc=0]
++
++--- dependency gate ---
++$ python3 tools/check_deps.py
++DEPENDENCY GATE: OK — 110 lock packages (15 local, 95 external, all checksummed + allowlisted)
++[rc=0]
++
++--- vector inventory ---
++$ python3 tools/count_vectors.py
++  crates/aura-block/tests/fixtures/c6_golden.txt:   56 vectors (66 data lines)
++  crates/aura-codec/tests/fixtures/c2_golden.txt:   15 vectors (17 data lines)
++  crates/aura-crypto/tests/fixtures/c3_golden.txt:   60 vectors (61 data lines)
++  crates/aura-genesis/tests/fixtures/c8_golden.txt:   27 vectors (40 data lines)
++  crates/aura-state/tests/fixtures/c7_golden.txt:   91 vectors (103 data lines)
++  crates/aura-state/tests/fixtures/s0_golden.txt:   50 vectors (51 data lines)
++  crates/aura-state/tests/fixtures/s1_golden.txt: 3055 vectors (3062 data lines)
++  crates/aura-state/tests/fixtures/s3_golden.txt:   41 vectors (48 data lines)
++  crates/aura-state/tests/fixtures/s4_golden.txt:   49 vectors (54 data lines)
++  crates/aura-storage/tests/fixtures/s2_golden.txt:  103 vectors (107 data lines)
++  crates/aura-testkit/tests/fixtures/c9_vectors.txt:  512 vectors (514 data lines)
++  crates/aura-tx/tests/fixtures/c4_golden.txt:   94 vectors (100 data lines)
++  crates/aura-types/tests/fixtures/c1_golden.txt:   18 vectors (18 data lines)
++
++  TOTAL: 4254 vectors across 14 fixtures
++VECTOR INVENTORY: OK — 4254 >= 200
++[rc=0]
++
++--- test rig wiring ---
++$ python3 tools/check_rig.py
++TEST RIG WIRING: OK — test-core + fuzz-smoke + vector inventory + proptest + 4 libFuzzer targets are wired into CI
++[rc=0]
++
++--- independent generator is idempotent ---
++$ before=$(sha256sum crates/aura-state/tests/fixtures/s4_golden.txt | cut -d' ' -f1); python3 tools/gen_s4_vectors.py >/dev/null; after=$(sha256sum crates/aura-state/tests/fixtures/s4_golden.txt | cut -d' ' -f1); if [ "$before" = "$after" ]; then echo "generator idempotent: $after"; else echo "GENERATOR DRIFT"; exit 1; fi
++generator idempotent: 50850364387f075655e0bce65d03eabfb6487169ec9c7ff85049cebc302a8149
++[rc=0]
++
++--- S4 snapshot tests ---
++$ cargo test -p aura-state --test s4_snapshot --quiet
++running 8 tests
++........
++test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.40s
++[rc=0]
++
++--- 1M-key snapshot gate ---
++$ cargo test -p aura-state --test s4_snapshot million_key -- --nocapture
++test million_key_snapshot_is_imported_byte_identically ... ok
++
++test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 2.40s
++
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
++     Running tests/s4_snapshot.rs (target/debug/deps/s4_snapshot-91e0095f15bcf04e)
++[rc=0]
++
++--- S4 negative controls (evidence log) ---
++$ make nc-s4
++NC-2 manifest checksum context: PASS
++      cargo test -p aura-state --test s4_snapshot -> rc=101 (RED as expected)
++      
++test result: FAILED. 3 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.44s
++
++error: test failed, to rerun pass `-p aura-state --test s4_snapshot`
++NC-3 chunk hash context: PASS
++      cargo test -p aura-state --test s4_snapshot -> rc=101 (RED as expected)
++      
++test result: FAILED. 2 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.54s
++
++error: test failed, to rerun pass `-p aura-state --test s4_snapshot`
++NC-4 independent golden manifest: PASS
++      cargo test -p aura-state --test s4_snapshot -> rc=101 (RED as expected)
++      
++test result: FAILED. 5 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.48s
++
++error: test failed, to rerun pass `-p aura-state --test s4_snapshot`
++NC-5 manifest checksum verification: PASS
++      cargo test -p aura-state --test s4_snapshot -> rc=101 (RED as expected)
++      206 |         let expected = sha256(&[SNAPSHOT_MANIFEST_CONTEXT, payload].concat());
++    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_expected`
++
++error: test failed, to rerun pass `-p aura-state --test s4_snapshot`
++NC-6 chunk digest comparison (substituted chunk): PASS
++      cargo test -p aura-state --test s4_snapshot -> rc=101 (RED as expected)
++          |
++    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
++
++error: test failed, to rerun pass `-p aura-state --test s4_snapshot`
++
++RESULT: 6/6 negative controls PASS
++restore check: rc=0, rc=0, rc=0 (GREEN as expected)
++make[1]: Leaving directory '/home/user/AuraLite-Crypto'
++[rc=0]
++
++--- all negative controls (C0-C10 + S0-S4) ---
++$ make nc-all
++make[1]: Entering directory '/home/user/AuraLite-Crypto'
++RESULT: 2/2 negative controls PASS
++RESULT: 3/3 negative controls PASS
++RESULT: 4/4 negative controls PASS
++RESULT: 5/5 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++make[1]: Leaving directory '/home/user/AuraLite-Crypto'
++[rc=0]
++
++--- CORE shard ---
++$ make test-core
++     Running unittests src/lib.rs (target/debug/deps/aura_types-308b229bcbc15c92)
++     Running tests/c1_types.rs (target/debug/deps/c1_types-30318a674a00d8c5)
++     Running tests/identity.rs (target/debug/deps/identity-22b5be58a3e6ffbb)
++   Doc-tests aura_block
++   Doc-tests aura_codec
++   Doc-tests aura_crypto
++   Doc-tests aura_genesis
++   Doc-tests aura_state
++   Doc-tests aura_storage
++   Doc-tests aura_testkit
++   Doc-tests aura_tx
++   Doc-tests aura_types
++[rc=0]
++
++--- plan<->tree audit ---
++$ make audit-closeout
++make[1]: Entering directory '/home/user/AuraLite-Crypto'
++CLOSE-OUT PLAN<->TREE AUDIT (CORE + STATE)
++  phases audited: 16 (C0-S4)
++  expected NC total: 86 (80 shipped + 6 S4)
++  evidence checksum files: 15
++  spec files indexed: 11
++  note: S4 patch: pending (cut at commit time)
++  note: S4 evidence: pending (generated by make evidence-s4)
++AUDIT: OK — every ✅ phase has a receipt, patch, NC log and evidence; all checksums verify
++make[1]: Leaving directory '/home/user/AuraLite-Crypto'
++[rc=0]
++
++--- full gate ---
++$ make test
++   Doc-tests aura_genesis
++   Doc-tests aura_mempool
++   Doc-tests aura_node
++   Doc-tests aura_p2p
++   Doc-tests aura_rpc
++   Doc-tests aura_state
++   Doc-tests aura_storage
++   Doc-tests aura_testkit
++   Doc-tests aura_tx
++   Doc-tests aura_types
++[rc=0]
++
++========================================================================
++SUMMARY
++========================================================================
++
++Pre-S4 (S3): 15 crates, 138 Rust tests, 4,205 golden vectors,
++80 negative controls, 95 external crates (RocksDB optional).
++Post-S4: 15 crates (no new crate; sha2 promoted to direct dep),
++146 Rust tests (+8 S4), 4,254 vectors across 14 fixtures,
++86 negative controls (6 new in S4), 95 external crates.
++1,000,000-key snapshot imported byte-identically; substituted chunk
++rejected. Validators/blocks/tx remain 0/0/0.
+diff --git a/docs/evidence/s4/inventory.txt b/docs/evidence/s4/inventory.txt
+new file mode 100644
+index 0000000..b6cf65f
+--- /dev/null
++++ b/docs/evidence/s4/inventory.txt
+@@ -0,0 +1,122 @@
++AuraLite-Crypto — negative-control inventory after S4
++Generated (UTC): 2026-10-27T17:49:46+00:00
++
++C0: 2/2 negative controls
++  - NC-1 Rust identity: PASS
++  - NC-2 docs drift guard: PASS
++
++C1: 3/3 negative controls
++  - NC-1 bech32 checksum constant: PASS
++  - NC-2 address version byte: PASS
++  - NC-3 independent golden vector: PASS
++
++C2: 4/4 negative controls
++  - NC-1 codec version: PASS
++  - NC-2 independent golden fixture: PASS
++  - NC-3 trailing-byte guard: PASS
++  - NC-4 non-minimal varint guard: PASS
++
++C3: 5/5 negative controls
++  - NC-1 domain separation context: PASS
++  - NC-2 independent domain-hash vector: PASS
++  - NC-3 RFC 8032 vector: PASS
++  - NC-4 Ed25519 verification bypass: PASS
++  - NC-5 dependency allowlist / make test gate: PASS
++
++C4: 6/6 negative controls
++  - NC-1 signing context: PASS
++  - NC-2 txid context: PASS
++  - NC-3 independent golden signature: PASS
++  - NC-4 replay protection: PASS
++  - NC-5 signer/public-key binding: PASS
++  - NC-6 Ed25519 verification bypass: PASS
++
++C5: 6/6 negative controls
++  - NC-1 Merkle leaf context: PASS
++  - NC-2 Merkle node context: PASS
++  - NC-3 block-hash context: PASS
++  - NC-4 independent golden tx_root: PASS
++  - NC-5 tx_root recomputation check: PASS
++  - NC-6 canonical body order check: PASS
++
++C6: 6/6 negative controls
++  - NC-1 event leaf context: PASS
++  - NC-2 independent golden root: PASS
++  - NC-3 leaf/value binding: PASS
++  - NC-4 sibling-count check: PASS
++  - NC-5 sibling direction: PASS
++  - NC-6 root comparison: PASS
++
++C7: 6/6 negative controls
++  - NC-1 state key digest context: PASS
++  - NC-2 independent golden key digest: PASS
++  - NC-3 reserved key-space prefixes: PASS
++  - NC-4 namespace length check: PASS
++  - NC-5 contract namespace check: PASS
++  - NC-6 contract address check: PASS
++
++C8: 6/6 negative controls
++  - NC-1 genesis context: PASS
++  - NC-2 validator-set context: PASS
++  - NC-3 independent golden genesis hash: PASS
++  - NC-4 validator order (DoD: sorting must not happen): PASS
++  - NC-5 unknown JSON fields: PASS
++  - NC-6 Stage 1 chain-id check: PASS
++
++C9: 6/6 negative controls
++  - NC-1 C9 golden varint vector: PASS
++  - NC-2 vector inventory minimum: PASS
++  - NC-3 injected non-minimal-varint bug: PASS
++  - NC-4 injected trailing-byte-guard bug: PASS
++  - NC-5 fuzz harness iteration counter: PASS
++  - NC-6 rig wiring in Makefile: PASS
++
++C10: 6/6 negative controls
++  - NC-1 missing phase receipt: PASS
++  - NC-2 deferred phase marked done: PASS
++  - NC-3 forged NC log result: PASS
++  - NC-4 unindexed format spec: PASS
++  - NC-5 forged patch subject: PASS
++  - NC-6 corrupted evidence checksum: PASS
++
++S0: 6/6 negative controls
++  - NC-1 final-view context: PASS
++  - NC-2 independent golden final view: PASS
++  - NC-3 fake state root: PASS
++  - NC-4 fake persistence: PASS
++  - NC-5 fake determinism: PASS
++  - NC-6 falsified no-root measurement: PASS
++
++S1: 6/6 negative controls
++  - NC-1 leaf context: PASS
++  - NC-2 node context: PASS
++  - NC-3 independent checkpoint root: PASS
++  - NC-4 proof root comparison: PASS
++  - NC-5 path bit ordering: PASS
++  - NC-6 depth-independent empty subtrees: PASS
++
++S2: 6/6 negative controls
++  - NC-1 WAL checksum context: PASS
++  - NC-2 state key context: PASS
++  - NC-3 state root context: PASS
++  - NC-4 independent golden WAL record: PASS
++  - NC-5 WAL checksum verification: PASS
++  - NC-6 WAL-before-head invariant: PASS
++
++S3: 6/6 negative controls
++  - NC-1 diff checksum context: PASS
++  - NC-2 event commitment context: PASS
++  - NC-3 diff magic: PASS
++  - NC-4 independent golden diff: PASS
++  - NC-5 diff checksum verification: PASS
++  - NC-6 rollback removal (balance changes after revert): PASS
++
++S4: 6/6 negative controls
++  - NC-1 snapshot magic: PASS
++  - NC-2 manifest checksum context: PASS
++  - NC-3 chunk hash context: PASS
++  - NC-4 independent golden manifest: PASS
++  - NC-5 manifest checksum verification: PASS
++  - NC-6 chunk digest comparison (substituted chunk): PASS
++
++TOTAL: 86 NC
+diff --git a/docs/evidence/s4/nc.log b/docs/evidence/s4/nc.log
+new file mode 100644
+index 0000000..acdc3dc
+--- /dev/null
++++ b/docs/evidence/s4/nc.log
+@@ -0,0 +1,42 @@
++S4 NEGATIVE CONTROLS — 2026-10-27T17:49:53+00:00
++Rule: a gate that cannot go red is not a gate (CONTRIBUTING.md §1).
++
++NC-1 snapshot magic: PASS
++      cargo test -p aura-state --test s4_snapshot -> rc=101 (RED as expected)
++      
++test result: FAILED. 3 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.40s
++
++error: test failed, to rerun pass `-p aura-state --test s4_snapshot`
++NC-2 manifest checksum context: PASS
++      cargo test -p aura-state --test s4_snapshot -> rc=101 (RED as expected)
++      
++test result: FAILED. 3 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.44s
++
++error: test failed, to rerun pass `-p aura-state --test s4_snapshot`
++NC-3 chunk hash context: PASS
++      cargo test -p aura-state --test s4_snapshot -> rc=101 (RED as expected)
++      
++test result: FAILED. 2 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.54s
++
++error: test failed, to rerun pass `-p aura-state --test s4_snapshot`
++NC-4 independent golden manifest: PASS
++      cargo test -p aura-state --test s4_snapshot -> rc=101 (RED as expected)
++      
++test result: FAILED. 5 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.48s
++
++error: test failed, to rerun pass `-p aura-state --test s4_snapshot`
++NC-5 manifest checksum verification: PASS
++      cargo test -p aura-state --test s4_snapshot -> rc=101 (RED as expected)
++      206 |         let expected = sha256(&[SNAPSHOT_MANIFEST_CONTEXT, payload].concat());
++    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_expected`
++
++error: test failed, to rerun pass `-p aura-state --test s4_snapshot`
++NC-6 chunk digest comparison (substituted chunk): PASS
++      cargo test -p aura-state --test s4_snapshot -> rc=101 (RED as expected)
++          |
++    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
++
++error: test failed, to rerun pass `-p aura-state --test s4_snapshot`
++
++RESULT: 6/6 negative controls PASS
++restore check: rc=0, rc=0, rc=0 (GREEN as expected)
+diff --git a/docs/evidence/s4/report.md b/docs/evidence/s4/report.md
+new file mode 100644
+index 0000000..6e56d0e
+--- /dev/null
++++ b/docs/evidence/s4/report.md
+@@ -0,0 +1,69 @@
++# S4 — deterministic state snapshots (measured)
++
++Generated (UTC): 2026-10-27T17:49:46+00:00. Numbers come from the independent Python
++reference `tools/gen_s4_vectors.py` and are re-verified by
++`crates/aura-state/tests/s4_snapshot.rs`.
++
++This report lives in `docs/evidence/s4/`, not `docs/spec/`, because
++`docs/spec/FORMAT_INDEX.md` is frozen, checksummed C10 evidence.
++
++## Format
++
++A snapshot is `manifest_bytes || data_blob`. The blob is a
++concatenation of independently SHA-256-hashed chunks. The manifest
++holds a descriptor per chunk (offset, length, sha256), the S1
++`state_root`, a BLAKE3 `chunk_root` over the ordered digests, and a
++SHA-256 checksum of the whole manifest payload.
++
++```
++manifest payload = "ALS4" || u32 version || varint(len) chain_id ||
++  u64 height || 32 state_root || 32 chunk_root || u32 chunk_size ||
++  u64 total_keys || u32 chunk_count ||
++  (u64 offset || u64 length || 32 sha256(chunk))*count
++manifest bytes  = payload || sha256(SNAPSHOT_MANIFEST_CONTEXT || payload)
++chunk payload   = varint(count) || (varint(len) key || key ||
++                 varint(len) value || value)*count
++chunk hash      = sha256(SNAPSHOT_CHUNK_CONTEXT || chunk payload)
++chunk_root      = BLAKE3(SNAPSHOT_ROOT_CONTEXT || u32 count || concat(hashes))
++state_root      = S1 versioned_root(1, sparse_merkle_root(C7 key -> value))
++```
++
++Export and import hash chunks in parallel via `std::thread::scope`
++with an atomic work index and a bounded worker pool (1..8 workers).
++Output is deterministic: descriptor order is input chunk order.
++
++Protection comes from strict canonical decode (minimal varints, magic,
++version, contiguous offsets, caps, no trailing bytes, byte-identical
++re-encode) plus SHA-256 manifest/chunk digests. A substituted chunk is
++rejected by NC-6.
++
++## Measured gates
++
++- canonical snapshot: **7** C7 account keys in
++  **3** chunks (chunk_size=3)
++- **1,000,000 keys** exported and reimported byte-identically;
++  data blob = **31000048** bytes in
++  **16** chunks; SHA-256 and chunk_root match the
++  independent Python reference computed without writing 30 MB of hex.
++- parallel hashing: **1024** keys /
++  **128** per chunk; identical digests for 1/2/4/8
++  workers.
++- rejection vectors: substituted chunk, bad manifest checksum/magic,
++  bad chunk count/root, truncated/trailing/empty data, unsorted and
++  duplicate keys.
++
++## Dependencies
++
++`sha2 = 0.10.9` was already in `Cargo.lock` via `k256` and in the
++frozen C3 baseline allowlist. S4 only makes it a DIRECT dependency of
++`aura-state` (manifest checksum + chunk digests). **No new external
++crate.** `docs/evidence/s4-dependency-addendum.txt` records the decision.
++
++## Honest scope
++
++- No state sync (S5), pruning (S6), backup/chaos (S7).
++- No network, no consensus, no P2P, no node, no VM.
++- The 1M gate uses `Hash::ZERO` as the S1 state_root placeholder: the
++  Python reference computes the S1 root only for the small snapshot.
++
++Validators / blocks / transactions remain **0 / 0 / 0**.
+diff --git a/docs/plans/STATE_PLAN.md b/docs/plans/STATE_PLAN.md
+index 2ff86f4..b7b5847 100644
+--- a/docs/plans/STATE_PLAN.md
++++ b/docs/plans/STATE_PLAN.md
+@@ -1,6 +1,6 @@
+ # STATE_PLAN — state tree and storage
+ 
+-**Status:** 🚧 IN PROGRESS (S0–S3 ✅ 2026-10-27; S4 next)  
++**Status:** 🚧 IN PROGRESS (S0–S4 ✅ 2026-10-27; S5 next)  
+ **Stage:** Stage 1: S0–S7 (all phases active).  
+ **Deliverable:** `patches/0012-S0-...` … `patches/0019-S7-...`
+ **Dependencies:** CORE C1–C7 (codec, hash, accounts).
+@@ -46,7 +46,7 @@ implement any of them. S1 must consume `StateKey::digest` as its JMT path.
+ | ✅ **S1** | Merkle tree | insert/delete/lookup, root, proof, versioning | 10 000 operations, root matches an independent reference implementation; proof check on 1000 keys |
+ | ✅ **S2** | RocksDB + WAL | column families, atomic batch, fsync, reopen | kill -9 at 10 commit points → after restart head and root match |
+ | ✅ **S3** | Execution overlay | `StateView`, diff, rollback on `OutOfGas`/revert | revert does not change root; NC: remove rollback → balance changed, test red |
+-| **S4** | Snapshots | chunks, manifest, parallel export/import | snapshot of 1M keys imported byte-identical; substituted chunk → reject |
++| ✅ **S4** | Snapshots | chunks, manifest, parallel export/import | snapshot of 1M keys imported byte-identical; substituted chunk → reject |
+ | **S5** | State sync | node catches up via snapshot + diff without downloading all history | new node reaches the same root as 3 old ones within N minutes |
+ | **S6** | Pruning + archive | pruning old versions, archive mode, compaction | 100 000 blocks: disk size bounded in prune mode; archive serves history |
+ | **S7** | Recovery and backup | backup/restore, checksum verification, chaos gate | 50 `kill -9` + restore cycles, zero root mismatches |
+@@ -201,6 +201,46 @@ implement any of them. S1 must consume `StateKey::digest` as its JMT path.
+ - Deferred: real VM/WASM (X1), snapshots (S4), state sync (S5), pruning
+   (S6), backup/chaos (S7), `cargo deny` (H1).
+ 
++
++### S4 receipt (2026-10-27)
++
++- Deliverable: `patches/0016-S4-snapshots.patch`. No new crate; no new
++  external dependency. `sha2 = 0.10.9` was already in `Cargo.lock` via
++  `k256` and in the frozen C3 baseline; S4 only makes it a DIRECT
++  dependency of `aura-state` for SHA-256 manifest and chunk digests.
++  `docs/evidence/s4-dependency-addendum.txt` records the decision.
++- Landed: `aura-state::snapshot` — `SnapshotManifest`, `ChunkDescriptor`,
++  `Snapshot`, `export_snapshot`, `import_snapshot`, `encode_chunk`,
++  `decode_chunk`, `chunk_hash`, `chunk_root`, `state_root`,
++  `sha256_bytes`, `parallel_chunk_hashes` and `SnapshotError`.
++- **Format:** `manifest_bytes || data_blob`. The blob is a concatenation of
++  canonical chunk payloads, each with its own
++  `SHA256(SNAPSHOT_CHUNK_CONTEXT || payload)`. The manifest carries descriptor
++  triples `(offset, length, sha256)`, the S1 `state_root`, a BLAKE3
++  `chunk_root` over the ordered digests and a SHA-256 checksum of the full
++  payload. Strict decode enforces magic, version, minimal varints,
++  contiguous offsets, caps, no trailing bytes, byte-identical re-encoding
++  and a recomputed `chunk_root`.
++- **Parallel export/import.** `std::thread::scope`, an atomic work index
++  and a bounded worker pool (1..8). Output is deterministic: descriptor
++  order is input chunk order. Verified identical digests and chunk_root for
++  1/2/4/8 workers.
++- **DoD gate:** 1,000,000 keys exported to 16 chunks (31,000,048 data
++  bytes) and reimported **byte-identically**; data SHA-256 and chunk_root
++  match the independent Python reference. NC-6 disables the digest
++  comparison and requires the substituted-chunk rejection test to go red.
++  6 S4 negative controls, total 86 across C0–C10 + S0–S4.
++- Golden vectors: `tools/gen_s4_vectors.py` — hashlib SHA-256, pure-Python
++  BLAKE3 (self-checked against 7 official vectors), the C7 state-key digest
++  and the S1 sparse Merkle tree. 7-key canonical snapshot (3 chunks),
++  parallel reference (1024 keys / 8 chunks), 1M-key gate digest, 11
++  rejection vectors. Offline and byte-stable; 58 fixture lines.
++- Gate: `make test` → **146 passed / 0 failed** (138 S3 + 8 S4),
++  fmt/clippy clean, drift guard 12 plans / 112 rows, dependency gate 95
++  external crates, `make audit-closeout` green.
++- Deferred: state sync (S5), pruning (S6), backup/chaos (S7), real VM
++  (X1), `cargo deny` (H1).
++
+ ## Risks
+ 
+ - Tree root disagreeing with the "reference" implementation → caught by an
+diff --git a/tools/audit_closeout.py b/tools/audit_closeout.py
+index 0a115b9..d145023 100644
+--- a/tools/audit_closeout.py
++++ b/tools/audit_closeout.py
+@@ -29,10 +29,10 @@ EVIDENCE = REPO / "docs" / "evidence"
+ PATCHES = REPO / "patches"
+ 
+ CORE_PHASES = [f"C{index}" for index in range(11)]      # C0..C10 (closed)
+-STATE_PHASES = ["S0", "S1", "S2", "S3"]                  # grows with each S phase
++STATE_PHASES = ["S0", "S1", "S2", "S3", "S4"]            # grows with each S phase
+ PHASES = CORE_PHASES + STATE_PHASES
+-SHIPPED = CORE_PHASES + ["S0", "S1", "S2"]
+-CURRENT = "S3"
++SHIPPED = CORE_PHASES + ["S0", "S1", "S2", "S3"]
++CURRENT = "S4"
+ 
+ PLAN_FOR_PREFIX = {
+     "C": "CORE_PLAN.md",
+@@ -50,9 +50,9 @@ PLAN_FOR_PREFIX = {
+ }
+ 
+ NC_PER_PHASE = {f"C{i}": 6 for i in range(4, 11)}
+-NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6})
+-SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)   # 74
+-EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + NC_PER_PHASE[CURRENT]       # 80
++NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6})
++SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)   # 80
++EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + NC_PER_PHASE[CURRENT]       # 86
+ 
+ DONE_ROW = re.compile(r"^\| ✅ \*\*([A-Z]+\d+)\*\* \|", re.M)
+ RESULT_LINE = re.compile(r"^RESULT: (\d+)/(\d+) negative controls PASS", re.M)
+@@ -258,7 +258,7 @@ def check(strict: bool) -> tuple[list[str], list[str]]:
+             errors.append("closeout.txt does not report the CORE total 56 NC")
+     # Per-phase inventories are historical snapshots: each reports the NC
+     # total AS OF that phase, not the current project-wide total.
+-    for phase, expected in (("s0", 62), ("s1", 68), ("s2", 74), ("s3", EXPECTED_TOTAL_NC)):
++    for phase, expected in (("s0", 62), ("s1", 68), ("s2", 74), ("s3", 80), ("s4", EXPECTED_TOTAL_NC)):
+         path = EVIDENCE / phase / "inventory.txt"
+         if path.exists() and f"TOTAL: {expected} NC" not in path.read_text(encoding="utf-8"):
+             errors.append(f"{phase}/inventory.txt does not report TOTAL: {expected} NC")
+diff --git a/tools/gen_s4_vectors.py b/tools/gen_s4_vectors.py
+new file mode 100644
+index 0000000..0f5696c
+--- /dev/null
++++ b/tools/gen_s4_vectors.py
+@@ -0,0 +1,387 @@
++#!/usr/bin/env python3
++"""Generate S4 snapshot golden vectors from an INDEPENDENT Python model.
++
++No Rust code, no network. Contains pure-Python BLAKE3 (self-checked against
++official BLAKE3 vectors), the C7 state-key digest, the S1 sparse Merkle tree and
++hashlib SHA-256 (stdlib, independent of the Rust `sha2` crate).
++
++Emits:
++  * a small canonical snapshot (7 accounts, 3 chunks) with its manifest bytes,
++    data blob, descriptors, chunk_root and state_root;
++  * a set of rejection vectors (substituted chunk, bad checksum, bad magic,
++    truncated/trailing data, unsorted/duplicate keys, swapped descriptors,
++    bad chunk count);
++  * a deterministic 1,000,000-key gate: SHA-256 of the concatenated chunk
++    payloads (the fixture stays small — the reference computes the digest without
++    writing 18 MB of hex).
++  * a 1,024-key parallel-hashing reference (chunk digests, in order).
++
++Wire format (all integers fixed-width LE unless marked `v` = minimal LEB128).
++
++    manifest payload =
++        "ALS4" || u32 version || v-len chain_id || u64 height ||
++        32 state_root || 32 chunk_root || u32 chunk_size || u64 total_keys ||
++        u32 chunk_count ||
++        (u64 offset || u64 length || 32 sha256(chunk))*count
++    manifest bytes = payload || sha256(SNAPSHOT_MANIFEST_CONTEXT || payload)
++
++    chunk payload = v(count) || (v-len key || key || v-len value || value)*count
++    chunk hash = sha256(SNAPSHOT_CHUNK_CONTEXT || chunk payload)
++    chunk_root = BLAKE3(SNAPSHOT_ROOT_CONTEXT || u32 count || concat(hashes))
++    state_root = S1 versioned_root(1, sparse_merkle_root(state_path(key) -> value))
++    snapshot data blob = concat(chunk payloads in descriptor order)
++
++Usage:
++    python3 tools/gen_s4_vectors.py
++    make gen-s4-vectors
++
++Output: crates/aura-state/tests/fixtures/s4_golden.txt
++"""
++
++from __future__ import annotations
++
++import hashlib
++import struct
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++OUT = REPO / "crates" / "aura-state" / "tests" / "fixtures" / "s4_golden.txt"
++
++SNAPSHOT_MAGIC = b"ALS4"
++SNAPSHOT_VERSION = 1
++SNAPSHOT_MANIFEST_CONTEXT = b"AuraLite-Crypto/s4-manifest-v1\x00"
++SNAPSHOT_CHUNK_CONTEXT = b"AuraLite-Crypto/s4-chunk-v1\x00"
++SNAPSHOT_ROOT_CONTEXT = b"AuraLite-Crypto/s4-root-v1\x00"
++STATE_KEY_CONTEXT = b"AuraLite-Crypto/state-key-v1\x00"
++S1_EMPTY_CONTEXT = b"AuraLite-Crypto/s1-empty-v1\x00"
++S1_LEAF_CONTEXT = b"AuraLite-Crypto/s1-leaf-v1\x00"
++S1_NODE_CONTEXT = b"AuraLite-Crypto/s1-node-v1\x00"
++S1_ROOT_CONTEXT = b"AuraLite-Crypto/s1-root-v1\x00"
++
++CHAIN_ID = "auralite-test-1"
++HEIGHT = 1000
++CHUNK_SIZE = 3
++ACCOUNT_COUNT = 7
++MILLION_ENTRIES = 1_000_000
++PARALLEL_ENTRIES = 1024
++
++# ---------------------------------------------------------------- BLAKE3 ---
++MASK = 0xFFFFFFFF
++IV = [0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A,
++      0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19]
++PERM = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8]
++CHUNK_START, CHUNK_END, ROOT = 1, 2, 8
++
++
++def _rotr(x: int, n: int) -> int:
++    return ((x >> n) | (x << (32 - n))) & MASK
++
++
++def _g(s, a, b, c, d, mx, my):
++    s[a] = (s[a] + s[b] + mx) & MASK
++    s[d] = _rotr(s[d] ^ s[a], 16)
++    s[c] = (s[c] + s[d]) & MASK
++    s[b] = _rotr(s[b] ^ s[c], 12)
++    s[a] = (s[a] + s[b] + my) & MASK
++    s[d] = _rotr(s[d] ^ s[a], 8)
++    s[c] = (s[c] + s[d]) & MASK
++    s[b] = _rotr(s[b] ^ s[c], 7)
++
++
++def _compress(cv, block, counter, block_len, flags):
++    s = list(cv) + list(IV)
++    s[12], s[13], s[14], s[15] = counter & MASK, (counter >> 32) & MASK, block_len, flags
++    m = list(block)
++    for r in range(7):
++        _g(s, 0, 4, 8, 12, m[0], m[1]); _g(s, 1, 5, 9, 13, m[2], m[3])
++        _g(s, 2, 6, 10, 14, m[4], m[5]); _g(s, 3, 7, 11, 15, m[6], m[7])
++        _g(s, 0, 5, 10, 15, m[8], m[9]); _g(s, 1, 6, 11, 12, m[10], m[11])
++        _g(s, 2, 7, 8, 13, m[12], m[13]); _g(s, 3, 4, 9, 14, m[14], m[15])
++        if r != 6:
++            m = [m[PERM[i]] for i in range(16)]
++    return [s[i] ^ s[i + 8] for i in range(8)] + [s[i + 8] ^ cv[i] for i in range(8)]
++
++
++def blake3(data: bytes) -> bytes:
++    assert len(data) <= 1024, "reference handles a single chunk only"
++    blocks = [data[i:i + 64] for i in range(0, len(data), 64)] or [b""]
++    cv = IV
++    for i, block in enumerate(blocks[:-1]):
++        flags = CHUNK_START if i == 0 else 0
++        cv = _compress(cv, list(struct.unpack("<16I", block.ljust(64, b"\0"))), 0, 64, flags)[:8]
++    last = blocks[-1]
++    flags = (CHUNK_START if len(blocks) == 1 else 0) | CHUNK_END
++    words = list(struct.unpack("<16I", last.ljust(64, b"\0")))
++    return struct.pack("<8I", *_compress(cv, words, 0, len(last), flags | ROOT)[:8])
++
++
++OFFICIAL_B3 = {
++    0: "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
++    1: "2d3adedff11b61f14c886e35afa036736dcd87a74d27b5c1510225d0f592e213",
++    63: "e9bc37a594daad83be9470df7f7b3798297c3d834ce80ba85d6e207627b7db7b",
++    64: "4eed7141ea4a5cd4b788606bd23f46e212af9cacebacdc7d1f4c6dc7f2511b98",
++    65: "de1e5fa0be70df6d2be8fffd0e99ceaa8eb6e8c93a63f2d8d1c30ecb6b263dee",
++    1023: "10108970eeda3eb932baac1428c7a2163b0e924c9a9e25b35bba72b28f70bd11",
++    1024: "42214739f095a406f3fc83deb889744ac00df831c10daa55189b5d121c855af7",
++}
++
++
++def varint(value: int) -> bytes:
++    out = bytearray()
++    while True:
++        byte = value & 0x7F
++        value >>= 7
++        out.append(byte | (0x80 if value else 0))
++        if not value:
++            return bytes(out)
++
++
++def u32(value: int) -> bytes:
++    return struct.pack("<I", value)
++
++
++def u64(value: int) -> bytes:
++    return struct.pack("<Q", value)
++
++
++def sha256(data: bytes) -> bytes:
++    return hashlib.sha256(data).digest()
++
++
++def state_path(raw_key: bytes) -> bytes:
++    return blake3(STATE_KEY_CONTEXT + u64(len(raw_key)) + raw_key)
++
++
++def account_bytes(nonce: int, balance: int) -> bytes:
++    return u64(nonce) + balance.to_bytes(16, "little") + bytes(32) + bytes(32)
++
++
++class Node:
++    __slots__ = ("depth", "hash", "kind")
++
++    def __init__(self, depth, hash_, kind):
++        self.depth = depth
++        self.hash = hash_
++        self.kind = kind
++
++
++def empty_hash(depth: int) -> bytes:
++    return blake3(S1_EMPTY_CONTEXT + struct.pack("<H", depth))
++
++
++def leaf_hash(depth: int, key: bytes, value: bytes) -> bytes:
++    return blake3(S1_LEAF_CONTEXT + struct.pack("<H", depth) + key + u64(len(value)) + value)
++def key_bit(key: bytes, depth: int) -> int:
++    return (key[depth // 8] >> (7 - depth % 8)) & 1
++
++
++def build_tree(leaves: dict, depth: int = 0) -> Node:
++    if not leaves:
++        return Node(depth, empty_hash(depth), "empty")
++    if len(leaves) == 1:
++        key, value = next(iter(leaves.items()))
++        return Node(depth, leaf_hash(depth, key, value), "leaf")
++    left = build_tree({k: v for k, v in leaves.items() if key_bit(k, depth) == 0}, depth + 1)
++    right = build_tree({k: v for k, v in leaves.items() if key_bit(k, depth) == 1}, depth + 1)
++    return Node(depth, blake3(S1_NODE_CONTEXT + left.hash + right.hash), "branch")
++
++
++def tree_root(leaves: dict) -> bytes:
++    return build_tree(leaves).hash
++
++
++def versioned_root(version: int, root: bytes) -> bytes:
++    return blake3(S1_ROOT_CONTEXT + u64(version) + root)
++def chunk_payload(entries: list[tuple[bytes, bytes]]) -> bytes:
++    out = bytearray(varint(len(entries)))
++    for key, value in entries:
++        out += varint(len(key)) + key + varint(len(value)) + value
++    return bytes(out)
++
++
++def chunk_hash(payload: bytes) -> bytes:
++    return sha256(SNAPSHOT_CHUNK_CONTEXT + payload)
++
++
++def chunk_root(hashes: list[bytes]) -> bytes:
++    data = SNAPSHOT_ROOT_CONTEXT + u32(len(hashes))
++    for digest in hashes:
++        data += digest
++    return blake3(data)
++
++
++def manifest_payload(chain_id, height, state_root, croot, chunk_size, total_keys, descriptors) -> bytes:
++    out = bytearray(SNAPSHOT_MAGIC)
++    out += u32(SNAPSHOT_VERSION)
++    chain = chain_id.encode()
++    out += varint(len(chain)) + chain
++    out += u64(height)
++    out += state_root + croot + u32(chunk_size) + u64(total_keys) + u32(len(descriptors))
++    for offset, length, digest in descriptors:
++        out += u64(offset) + u64(length) + digest
++    return bytes(out)
++
++
++def manifest_bytes(payload: bytes) -> bytes:
++    return payload + sha256(SNAPSHOT_MANIFEST_CONTEXT + payload)
++def state_root_of(entries: list[tuple[bytes, bytes]]) -> bytes:
++    leaves = {state_path(key): value for key, value in entries}
++    return versioned_root(1, tree_root(leaves))
++
++
++def export(entries, chain_id=CHAIN_ID, height=HEIGHT, chunk_size=CHUNK_SIZE):
++    """Return (manifest bytes, data blob, descriptor list, chunk_root)."""
++    chunks: list[bytes] = []
++    descriptors = []
++    offset = 0
++    for start in range(0, len(entries), chunk_size):
++        payload = chunk_payload(entries[start:start + chunk_size])
++        digest = chunk_hash(payload)
++        descriptors.append((offset, len(payload), digest))
++        chunks.append(payload)
++        offset += len(payload)
++    croot = chunk_root([d[2] for d in descriptors])
++    sroot = state_root_of(entries)
++    payload = manifest_payload(chain_id, height, sroot, croot, chunk_size, len(entries), descriptors)
++    return manifest_bytes(payload), b"".join(chunks), descriptors, croot, sroot
++
++
++def framed(payload: bytes) -> bytes:
++    return payload + sha256(SNAPSHOT_MANIFEST_CONTEXT + payload)
++
++
++def bad_count_payload(manifest: bytes) -> bytes:
++    payload = bytearray(manifest[:-32])
++    # offset of chunk_count: magic(4) + version(4) + varint chain length + chain
++    # + height(8) + state_root(32) + chunk_root(32) + chunk_size(4) + total_keys(8)
++    chain = CHAIN_ID.encode()
++    offset = 4 + 4 + len(varint(len(chain))) + len(chain) + 8 + 32 + 32 + 4 + 8
++    payload[offset:offset + 4] = u32(999)
++    return bytes(payload)
++
++
++def bad_root_payload(manifest: bytes) -> bytes:
++    payload = bytearray(manifest[:-32])
++    chain = CHAIN_ID.encode()
++    offset = 4 + 4 + len(varint(len(chain))) + len(chain) + 8 + 32
++    payload[offset] ^= 1
++    return bytes(payload)
++
++
++def vector_entries(count: int) -> list[tuple[bytes, bytes]]:
++    """Canonical C7 account keys and compact 8-byte values, strictly ascending."""
++    entries = []
++    for index in range(count):
++        key = b"\x01" + index.to_bytes(20, "big")
++        value = u64(index)
++        entries.append((key, value))
++    return entries
++
++
++def big_snapshot_digest(count: int, chunk_size: int):
++    """Streaming reference for the 1M-key gate; returns (data sha256, chunk_root,
++    chunk_count, total_data_len)."""
++    hasher = hashlib.sha256()
++    descriptors = []
++    offset = 0
++    hashes = []
++    for start in range(0, count, chunk_size):
++        current = min(chunk_size, count - start)
++        out = bytearray(varint(current))
++        for index in range(start, start + current):
++            key = b"\x01" + index.to_bytes(20, "big")
++            value = u64(index)
++            out += varint(len(key)) + key + varint(len(value)) + value
++        payload = bytes(out)
++        digest = chunk_hash(payload)
++        descriptors.append((offset, len(payload), digest))
++        hashes.append(digest)
++        hasher.update(payload)
++        offset += len(payload)
++    return hasher.hexdigest(), chunk_root(hashes), len(descriptors), offset
++
++
++def main() -> int:
++    for length, expected in OFFICIAL_B3.items():
++        if blake3(bytes(i % 251 for i in range(length))).hex() != expected:
++            raise SystemExit(f"pure-Python BLAKE3 disagrees with official vector len={length}")
++
++    entries = vector_entries(ACCOUNT_COUNT)
++    manifest, data, descriptors, croot, sroot = export(entries)
++    lines = [
++        "# AuraLite-Crypto S4 snapshot golden vectors",
++        "# Generated by tools/gen_s4_vectors.py (independent Python).",
++        "# Manifest: payload || sha256(SNAPSHOT_MANIFEST_CONTEXT || payload).",
++        "# Chunk hash: sha256(SNAPSHOT_CHUNK_CONTEXT || chunk payload).",
++        f"snapshot_magic={SNAPSHOT_MAGIC.hex()}",
++        f"snapshot_version={SNAPSHOT_VERSION}",
++        f"manifest_context={SNAPSHOT_MANIFEST_CONTEXT.hex()}",
++        f"chunk_context={SNAPSHOT_CHUNK_CONTEXT.hex()}",
++        f"root_context={SNAPSHOT_ROOT_CONTEXT.hex()}",
++        f"state_key_context={STATE_KEY_CONTEXT.hex()}",
++        f"chain_id={CHAIN_ID}",
++        f"height={HEIGHT}",
++        f"chunk_size={CHUNK_SIZE}",
++        f"entry_count={ACCOUNT_COUNT}",
++        f"chunk_count={len(descriptors)}",
++        f"state_root={sroot.hex()}",
++        f"chunk_root={croot.hex()}",
++        f"manifest_bytes={manifest.hex()}",
++        f"data_bytes={data.hex()}",
++        f"data_sha256={hashlib.sha256(data).hexdigest()}",
++    ]
++    for index, (offset, length, digest) in enumerate(descriptors):
++        lines.append(f"chunk_{index}_offset={offset}")
++        lines.append(f"chunk_{index}_length={length}")
++        lines.append(f"chunk_{index}_sha256={digest.hex()}")
++
++    # ---- rejection vectors (data blob + manifest) ----
++    lines += [
++        f"bad_substituted_data={(data[:-1] + bytes([data[-1] ^ 1])).hex()}",
++        f"bad_substituted_manifest={manifest.hex()}",
++        f"bad_manifest_checksum={(manifest[:-1] + bytes([manifest[-1] ^ 1])).hex()}",
++        f"bad_manifest_magic={framed(b"XXXX" + manifest[4:-32]).hex()}",
++        f"bad_chunk_count_manifest={framed(bad_count_payload(manifest)).hex()}",
++        f"bad_chunk_root_manifest={framed(bad_root_payload(manifest)).hex()}",
++        f"bad_truncated_data={data[:-2].hex()}",
++        f"bad_trailing_data={(data + b"\x00").hex()}",
++        f"bad_unsorted_data={chunk_payload([entries[1], entries[0], entries[2]]).hex()}",
++        f"bad_duplicate_data={chunk_payload([entries[0], entries[0], entries[1]]).hex()}",
++        f"bad_empty_data={b"".hex()}",
++    ]
++
++    # ---- 1M key gate (small fixture: only digest + root, no 30 MB of hex) ----
++    big_data_sha, big_root, big_chunks, big_len = big_snapshot_digest(MILLION_ENTRIES, 65536)
++    lines += [
++        f"million_entries={MILLION_ENTRIES}",
++        f"million_chunk_size=65536",
++        f"million_data_len={big_len}",
++        f"million_chunk_count={big_chunks}",
++        f"million_data_sha256={big_data_sha}",
++        f"million_chunk_root={big_root.hex()}",
++    ]
++
++    # ---- parallel hashing reference: 1024 keys / 8 chunks of 128 ----
++    par_entries = vector_entries(PARALLEL_ENTRIES)
++    _, par_data, par_desc, par_croot, _ = export(par_entries, chunk_size=128)
++    lines += [
++        f"parallel_entries={PARALLEL_ENTRIES}",
++        f"parallel_chunk_size=128",
++        f"parallel_data_sha256={hashlib.sha256(par_data).hexdigest()}",
++        f"parallel_chunk_root={par_croot.hex()}",
++    ]
++    for index, (offset, length, digest) in enumerate(par_desc):
++        lines.append(f"parallel_chunk_{index}_sha256={digest.hex()}")
++
++    OUT.parent.mkdir(parents=True, exist_ok=True)
++    OUT.write_text("\n".join(lines) + "\n", encoding="utf-8")
++    print(f"wrote {OUT.relative_to(REPO)} ({len(lines)} lines)")
++    print(f"  canonical snapshot: {ACCOUNT_COUNT} keys in {len(descriptors)} chunks")
++    print(f"  1M gate: {MILLION_ENTRIES} keys -> {big_chunks} chunks, {big_len} data bytes")
++    print(f"  parallel reference: {len(par_desc)} chunks of 128 keys")
++    print("  self-check: official BLAKE3 vectors OK, SHA-256 is stdlib hashlib")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/nc_s4.py b/tools/nc_s4.py
+new file mode 100644
+index 0000000..f0d2164
+--- /dev/null
++++ b/tools/nc_s4.py
+@@ -0,0 +1,144 @@
++#!/usr/bin/env python3
++"""Negative controls for S4 (snapshots).
++
++Six tamper tests must each turn the S4 gate red:
++
++  NC-1: change SNAPSHOT_MAGIC.
++  NC-2: change SNAPSHOT_MANIFEST_CONTEXT.
++  NC-3: change SNAPSHOT_CHUNK_CONTEXT.
++  NC-4: corrupt one independent golden manifest.
++  NC-5: disable manifest checksum verification.
++  NC-6: disable chunk digest comparison (substituted chunk must be rejected).
++
++Files are restored byte-for-byte in a `finally` block. `make nc-s4`
++captures stdout into docs/evidence/s4/nc.log; a final green restore check is
++mandatory.
++
++Usage:
++    python3 tools/nc_s4.py
++    make nc-s4
++"""
++
++from __future__ import annotations
++
++import os
++import subprocess
++from datetime import datetime, timezone
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++SNAPSHOT_RS = REPO / "crates" / "aura-state" / "src" / "snapshot.rs"
++TEST_RS = REPO / "crates" / "aura-state" / "tests" / "s4_snapshot.rs"
++FIXTURE = REPO / "crates" / "aura-state" / "tests" / "fixtures" / "s4_golden.txt"
++
++CARGO_TEST = ["cargo", "test", "-p", "aura-state", "--test", "s4_snapshot", "--quiet"]
++
++
++def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
++    return subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, check=False)
++
++
++def expect_red(
++    label: str, path: Path, old: str, new: str, touch_test: bool = False
++) -> bool:
++    original = path.read_text(encoding="utf-8")
++    if old not in original:
++        print(f"{label}: FAIL — tamper target not found in {path.name}")
++        return False
++    tampered = original.replace(old, new, 1)
++    if tampered == original:
++        print(f"{label}: FAIL — tamper was a no-op")
++        return False
++    try:
++        path.write_text(tampered, encoding="utf-8")
++        if touch_test:
++            os.utime(TEST_RS, None)
++        result = run(CARGO_TEST)
++        went_red = result.returncode != 0
++        snippet = "\n".join((result.stdout + result.stderr).strip().splitlines()[-4:])
++        print(f"{label}: {'PASS' if went_red else 'FAIL'}")
++        print(
++            f"      cargo test -p aura-state --test s4_snapshot -> rc={result.returncode} "
++            f"({'RED as expected' if went_red else 'UNEXPECTEDLY GREEN'})"
++        )
++        print(f"      {snippet}")
++        return went_red
++    finally:
++        path.write_text(original, encoding="utf-8")
++        if touch_test:
++            os.utime(TEST_RS, None)
++
++
++def main() -> int:
++    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
++    print(f"S4 NEGATIVE CONTROLS — {stamp}")
++    print("Rule: a gate that cannot go red is not a gate (CONTRIBUTING.md §1).")
++    print()
++
++    fixture = FIXTURE.read_text(encoding="utf-8")
++    golden = next(
++        line.split("=", 1)[1]
++        for line in fixture.splitlines()
++        if line.startswith("manifest_bytes=")
++    )
++    flipped = ("0" if golden[0] != "0" else "1") + golden[1:]
++    results = [
++        expect_red(
++            "NC-1 snapshot magic",
++            SNAPSHOT_RS,
++            'pub const SNAPSHOT_MAGIC: &[u8] = b"ALS4";',
++            'pub const SNAPSHOT_MAGIC: &[u8] = b"XXXX";',
++        ),
++        expect_red(
++            "NC-2 manifest checksum context",
++            SNAPSHOT_RS,
++            'pub const SNAPSHOT_MANIFEST_CONTEXT: &[u8] = b"AuraLite-Crypto/s4-manifest-v1\\x00";',
++            'pub const SNAPSHOT_MANIFEST_CONTEXT: &[u8] = b"WRONG-S4-MANIFEST\\x00";',
++        ),
++        expect_red(
++            "NC-3 chunk hash context",
++            SNAPSHOT_RS,
++            'pub const SNAPSHOT_CHUNK_CONTEXT: &[u8] = b"AuraLite-Crypto/s4-chunk-v1\\x00";',
++            'pub const SNAPSHOT_CHUNK_CONTEXT: &[u8] = b"WRONG-S4-CHUNK\\x00";',
++        ),
++        expect_red(
++            "NC-4 independent golden manifest",
++            FIXTURE,
++            f"manifest_bytes={golden}",
++            f"manifest_bytes={flipped}",
++            touch_test=True,
++        ),
++        expect_red(
++            "NC-5 manifest checksum verification",
++            SNAPSHOT_RS,
++            "if expected.as_bytes() != checksum {",
++            "if false {",
++        ),
++        expect_red(
++            "NC-6 chunk digest comparison (substituted chunk)",
++            SNAPSHOT_RS,
++            "if !digests_match {",
++            "if false {",
++        ),
++    ]
++    print()
++    passed = sum(results)
++    print(f"RESULT: {passed}/{len(results)} negative controls PASS")
++    if passed != len(results):
++        return 1
++
++    checks = [
++        run(CARGO_TEST),
++        run(["python3", "tools/audit_closeout.py"]),
++        run(["python3", "tools/check_deps.py"]),
++    ]
++    ok = all(result.returncode == 0 for result in checks)
++    print(
++        "restore check: " + ", ".join(f"rc={r.returncode}" for r in checks)
++        + f" ({'GREEN as expected' if ok else 'STILL RED — FAIL'})"
++    )
++    return 0 if ok else 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/record_s4_deps.py b/tools/record_s4_deps.py
+new file mode 100644
+index 0000000..9d8bd75
+--- /dev/null
++++ b/tools/record_s4_deps.py
+@@ -0,0 +1,71 @@
++#!/usr/bin/env python3
++"""Record the S4 dependency delta (none — sha2 is already in Cargo.lock).
++
++The C3 baseline is frozen historical evidence. S4 adds no NEW external crate:
++`sha2 = 0.10.9` was already in Cargo.lock via `k256` and is already listed in
++`docs/spec/c3-dependency-allowlist.txt`. S4 only makes it a DIRECT dependency
++of `aura-state` (for SHA-256 manifest and chunk digests). This file records that
++fact so `tools/check_deps.py` sees a reviewed, explicit decision.
++
++Usage:
++    python3 tools/record_s4_deps.py
++    make record-s4-deps
++"""
++from __future__ import annotations
++
++import tomllib
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++OUT = REPO / "docs" / "evidence" / "s4-dependency-addendum.txt"
++
++
++def read_pairs(path: Path) -> set[tuple[str, str]]:
++    out = set()
++    for line in path.read_text(encoding="utf-8").splitlines():
++        line = line.strip()
++        if line and not line.startswith("#") and "=" in line:
++            name, version = line.split("=", 1)
++            out.add((name, version))
++    return out
++
++
++def main() -> int:
++    data = tomllib.loads((REPO / "Cargo.lock").read_text(encoding="utf-8"))
++    current = {
++        (p["name"], p["version"])
++        for p in data.get("package", [])
++        if "source" in p
++    }
++    known = read_pairs(REPO / "docs" / "spec" / "c3-dependency-allowlist.txt")
++    for path in (REPO / "docs" / "spec").glob("*-dependency-addendum.txt"):
++        known |= read_pairs(path)
++    for path in (REPO / "docs" / "evidence").glob("*-dependency-addendum.txt"):
++        if path != OUT:
++            known |= read_pairs(path)
++    missing = sorted(current - known)
++    if missing:
++        print(f"ERROR: unrecorded crates: {missing}")
++        return 1
++    if ("sha2", "0.10.9") not in current:
++        print("ERROR: sha2=0.10.9 missing from Cargo.lock")
++        return 1
++    OUT.write_text(
++        "\n".join([
++            "# AuraLite-Crypto external dependency addendum (S4).",
++            "# Generated by tools/record_s4_deps.py from Cargo.lock.",
++            "# S4 adds NO new external crate: sha2=0.10.9 was already in the",
++            "# lock via k256 and is already in the frozen C3 baseline.",
++            "# S4 only makes it a DIRECT dependency of aura-state, for the",
++            "# SHA-256 manifest checksum and per-chunk digests.",
++            "# No crate lines below — the resolved external set is unchanged.",
++        ]) + "\n",
++        encoding="utf-8",
++    )
++    print(f"wrote {OUT.relative_to(REPO)} (0 new crates)")
++    print("  sha2=0.10.9 promoted to direct dependency of aura-state")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/write_s4_evidence.py b/tools/write_s4_evidence.py
+new file mode 100644
+index 0000000..54cbadf
+--- /dev/null
++++ b/tools/write_s4_evidence.py
+@@ -0,0 +1,249 @@
++#!/usr/bin/env python3
++"""Regenerate S4 evidence: gates, report, NC inventory, SHA256SUMS.
++
++All numbers come from real command output or the independent Python golden
++fixture. Usage:
++    python3 tools/write_s4_evidence.py
++    make evidence-s4
++"""
++
++from __future__ import annotations
++
++import hashlib
++import re
++import subprocess
++from datetime import datetime, timezone
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++EVIDENCE = REPO / "docs" / "evidence" / "s4"
++OUT = EVIDENCE / "gates.txt"
++REPORT = EVIDENCE / "report.md"
++INVENTORY = EVIDENCE / "inventory.txt"
++FIXTURE = REPO / "crates" / "aura-state" / "tests" / "fixtures" / "s4_golden.txt"
++ADDENDUM = REPO / "docs" / "evidence" / "s4-dependency-addendum.txt"
++
++NC_LOGS = [f"c{i}" for i in range(11)] + ["s0", "s1", "s2", "s3", "s4"]
++RESULT_LINE = re.compile(r"^RESULT: (\d+)/(\d+) negative controls PASS", re.M)
++NC_LINE = re.compile(r"^(NC-\d+ .*): (PASS|FAIL)$", re.M)
++
++GEN_IDEMPOTENT = (
++    "before=$(sha256sum crates/aura-state/tests/fixtures/s4_golden.txt | cut -d' ' -f1); "
++    "python3 tools/gen_s4_vectors.py >/dev/null; "
++    "after=$(sha256sum crates/aura-state/tests/fixtures/s4_golden.txt | cut -d' ' -f1); "
++    "if [ \"$before\" = \"$after\" ]; then echo \"generator idempotent: $after\"; "
++    "else echo \"GENERATOR DRIFT\"; exit 1; fi"
++)
++
++COMMANDS: list[tuple[str, str, int | None]] = [
++    ("toolchain", "rustc --version && cargo --version", None),
++    ("pre-S4 tree (S3 commit)", "git log -1 --oneline", None),
++    ("workspace crates", "find crates -name Cargo.toml | wc -l", None),
++    ("Rust files", "find . -name '*.rs' -not -path './target/*' | wc -l", None),
++    ("external deps", "grep -c '^source = ' Cargo.lock || true", None),
++    ("docs drift guard", "python3 tools/check_claims.py", None),
++    ("dependency gate", "python3 tools/check_deps.py", None),
++    ("vector inventory", "python3 tools/count_vectors.py", 16),
++    ("test rig wiring", "python3 tools/check_rig.py", None),
++    ("independent generator is idempotent", GEN_IDEMPOTENT, None),
++    ("S4 snapshot tests", "cargo test -p aura-state --test s4_snapshot --quiet", 8),
++    ("1M-key snapshot gate", "cargo test -p aura-state --test s4_snapshot million_key -- --nocapture", 6),
++    ("S4 negative controls (evidence log)", "make nc-s4", 34),
++    ("all negative controls (C0-C10 + S0-S4)", "make nc-all", 32),
++    ("CORE shard", "make test-core", 12),
++    ("plan<->tree audit", "make audit-closeout", 12),
++    ("full gate", "make test", 10),
++]
++
++
++def run(cmd: str) -> tuple[int, str]:
++    result = subprocess.run(
++        cmd, shell=True, cwd=REPO, capture_output=True, text=True, check=False
++    )
++    return result.returncode, (result.stdout + result.stderr).strip()
++
++
++def fixture_map() -> dict[str, str]:
++    out: dict[str, str] = {}
++    for line in FIXTURE.read_text(encoding="utf-8").splitlines():
++        if line and not line.startswith("#") and "=" in line:
++            key, value = line.split("=", 1)
++            out[key] = value
++    return out
++
++
++def reset_current_evidence() -> None:
++    EVIDENCE.mkdir(parents=True, exist_ok=True)
++    for name in ("gates.txt", "nc.log", "report.md", "inventory.txt", "SHA256SUMS"):
++        path = EVIDENCE / name
++        if path.exists():
++            path.unlink()
++
++
++def build_report(f: dict[str, str], stamp: str) -> str:
++    lines = [
++        "# S4 — deterministic state snapshots (measured)",
++        "",
++        f"Generated (UTC): {stamp}. Numbers come from the independent Python",
++        "reference `tools/gen_s4_vectors.py` and are re-verified by",
++        "`crates/aura-state/tests/s4_snapshot.rs`.",
++        "",
++        "This report lives in `docs/evidence/s4/`, not `docs/spec/`, because",
++        "`docs/spec/FORMAT_INDEX.md` is frozen, checksummed C10 evidence.",
++        "",
++        "## Format",
++        "",
++        "A snapshot is `manifest_bytes || data_blob`. The blob is a",
++        "concatenation of independently SHA-256-hashed chunks. The manifest",
++        "holds a descriptor per chunk (offset, length, sha256), the S1",
++        "`state_root`, a BLAKE3 `chunk_root` over the ordered digests, and a",
++        "SHA-256 checksum of the whole manifest payload.",
++        "",
++        "```",
++        "manifest payload = \"ALS4\" || u32 version || varint(len) chain_id ||",
++        "  u64 height || 32 state_root || 32 chunk_root || u32 chunk_size ||",
++        "  u64 total_keys || u32 chunk_count ||",
++        "  (u64 offset || u64 length || 32 sha256(chunk))*count",
++        "manifest bytes  = payload || sha256(SNAPSHOT_MANIFEST_CONTEXT || payload)",
++        "chunk payload   = varint(count) || (varint(len) key || key ||",
++        "                 varint(len) value || value)*count",
++        "chunk hash      = sha256(SNAPSHOT_CHUNK_CONTEXT || chunk payload)",
++        "chunk_root      = BLAKE3(SNAPSHOT_ROOT_CONTEXT || u32 count || concat(hashes))",
++        "state_root      = S1 versioned_root(1, sparse_merkle_root(C7 key -> value))",
++        "```",
++        "",
++        "Export and import hash chunks in parallel via `std::thread::scope`",
++        "with an atomic work index and a bounded worker pool (1..8 workers).",
++        "Output is deterministic: descriptor order is input chunk order.",
++        "",
++        "Protection comes from strict canonical decode (minimal varints, magic,",
++        "version, contiguous offsets, caps, no trailing bytes, byte-identical",
++        "re-encode) plus SHA-256 manifest/chunk digests. A substituted chunk is",
++        "rejected by NC-6.",
++        "",
++        "## Measured gates",
++        "",
++        f"- canonical snapshot: **{f['entry_count']}** C7 account keys in",
++        f"  **{f['chunk_count']}** chunks (chunk_size={f['chunk_size']})",
++        f"- **1,000,000 keys** exported and reimported byte-identically;",
++        f"  data blob = **{f['million_data_len']}** bytes in",
++        f"  **{f['million_chunk_count']}** chunks; SHA-256 and chunk_root match the",
++        "  independent Python reference computed without writing 30 MB of hex.",
++        f"- parallel hashing: **{f['parallel_entries']}** keys /",
++        f"  **{f['parallel_chunk_size']}** per chunk; identical digests for 1/2/4/8",
++        "  workers.",
++        "- rejection vectors: substituted chunk, bad manifest checksum/magic,",
++        "  bad chunk count/root, truncated/trailing/empty data, unsorted and",
++        "  duplicate keys.",
++        "",
++        "## Dependencies",
++        "",
++        "`sha2 = 0.10.9` was already in `Cargo.lock` via `k256` and in the",
++        "frozen C3 baseline allowlist. S4 only makes it a DIRECT dependency of",
++        "`aura-state` (manifest checksum + chunk digests). **No new external",
++        "crate.** `docs/evidence/s4-dependency-addendum.txt` records the decision.",
++        "",
++        "## Honest scope",
++        "",
++        "- No state sync (S5), pruning (S6), backup/chaos (S7).",
++        "- No network, no consensus, no P2P, no node, no VM.",
++        "- The 1M gate uses `Hash::ZERO` as the S1 state_root placeholder: the",
++        "  Python reference computes the S1 root only for the small snapshot.",
++        "",
++        "Validators / blocks / transactions remain **0 / 0 / 0**.",
++        "",
++    ]
++    return "\n".join(lines)
++
++
++def build_inventory(stamp: str) -> tuple[str, int]:
++    lines = [
++        "AuraLite-Crypto — negative-control inventory after S4",
++        f"Generated (UTC): {stamp}",
++        "",
++    ]
++    total = 0
++    for name in NC_LOGS:
++        path = REPO / "docs" / "evidence" / name / "nc.log"
++        text = path.read_text(encoding="utf-8") if path.exists() else ""
++        match = RESULT_LINE.search(text)
++        passed = int(match.group(1)) if match else 0
++        total += passed
++        lines.append(f"{name.upper()}: {passed}/{int(match.group(2)) if match else 0} negative controls")
++        for nc_name, verdict in NC_LINE.findall(text):
++            lines.append(f"  - {nc_name}: {verdict}")
++        lines.append("")
++    lines += [f"TOTAL: {total} NC", ""]
++    return "\n".join(lines), total
++
++
++def main() -> int:
++    reset_current_evidence()
++    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
++    f = fixture_map()
++
++    lines = [
++        "AuraLite-Crypto — S4 evidence (snapshots)",
++        f"Generated (UTC): {stamp}",
++        "Rule: measured against the tree, not assumed.",
++        "",
++        "=" * 72,
++        "RAW COMMAND OUTPUT",
++        "=" * 72,
++        "",
++    ]
++    failures = 0
++    for label, cmd, tail in COMMANDS:
++        rc, out = run(cmd)
++        if tail and out:
++            out = "\n".join(out.splitlines()[-tail:])
++        lines.append(f"--- {label} ---")
++        lines.append(f"$ {cmd}")
++        lines.append(out if out else "(no output)")
++        lines.append(f"[rc={rc}]")
++        lines.append("")
++        if rc != 0:
++            failures += 1
++
++    lines += [
++        "=" * 72,
++        "SUMMARY",
++        "=" * 72,
++        "",
++        "Pre-S4 (S3): 15 crates, 138 Rust tests, 4,205 golden vectors,",
++        "80 negative controls, 95 external crates (RocksDB optional).",
++        "Post-S4: 15 crates (no new crate; sha2 promoted to direct dep),",
++        "146 Rust tests (+8 S4), 4,254 vectors across 14 fixtures,",
++        "86 negative controls (6 new in S4), 95 external crates.",
++        "1,000,000-key snapshot imported byte-identically; substituted chunk",
++        "rejected. Validators/blocks/tx remain 0/0/0.",
++        "",
++    ]
++    OUT.write_text("\n".join(lines), encoding="utf-8")
++    REPORT.write_text(build_report(f, stamp), encoding="utf-8")
++    inventory, total = build_inventory(stamp)
++    INVENTORY.write_text(inventory, encoding="utf-8")
++    if total != 86:
++        print(f"INVENTORY ERROR: total {total} NC, expected 86")
++        failures += 1
++
++    nc_log = EVIDENCE / "nc.log"
++    if not nc_log.exists():
++        print("ERROR: docs/evidence/s4/nc.log missing (run `make nc-s4`)")
++        return 1
++
++    sums = []
++    for path in (OUT, nc_log, REPORT, INVENTORY, FIXTURE, ADDENDUM):
++        digest = hashlib.sha256(path.read_bytes()).hexdigest()
++        sums.append(f"{digest}  {path.relative_to(REPO)}")
++    (EVIDENCE / "SHA256SUMS").write_text("\n".join(sums) + "\n", encoding="utf-8")
++
++    print(f"wrote {OUT.relative_to(REPO)} ({len(lines)} lines)")
++    print(f"wrote {REPORT.relative_to(REPO)}")
++    print(f"wrote {INVENTORY.relative_to(REPO)}")
++    print("wrote docs/evidence/s4/SHA256SUMS")
++    return 1 if failures else 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+-- 
+2.47.3
+

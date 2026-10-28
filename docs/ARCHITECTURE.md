@@ -41,6 +41,66 @@ Tx      = { chain_id, signer, nonce, kind, payload, gas_limit,
 - **Versioning.** `version` in the header, `codec_version` in tx,
   `abi_version` in contracts. Any change = migration test (C10/B10).
 
+**⚠️ AUDIT (S3, 2026-10-27).** The §3 graph earlier claimed `aura-state <- aura-block, aura-tx, aura-codec, aura-crypto, aura-storage`, which is false and would be a cycle: `aura-storage` depends on `aura-state`. The graph above now reflects the real `Cargo.toml` edges; this is a docs correction, not a code change.
+
+**S7 recovery and backup.** `aura-storage::backup` builds a self-verifying
+bundle — `u32le(manifest_len) || manifest || WAL blob` — where the manifest
+carries a BLAKE3 checksum (domain `S7_MANIFEST_CONTEXT`), the chain-id, head
+version/root, record count, blob length and `SHA-256(blob)`, while the blob is
+the S2 framed, BLAKE3-checksummed WAL. `restore_backup` verifies all layers,
+refuses a non-empty target, and then **replays every record through the real
+commit path**, so a fully re-checksummed lie about a root is caught by
+recomputation (`RootMismatch`) rather than trusted. The `s7-chaos` binary is
+the `kill -9` harness used by the 50-cycle gate.
+
+**S6 pruning + archive.** `aura-state::history` adds `HistoryTree`, an
+incrementally maintained compressed sparse Merkle tree whose roots are
+bit-for-bit identical to S1 `MerkleTree` (S1 rebuilds the whole arena per
+commit: 16.4 ms at 1 024 leaves, measured; the incremental tree costs ~12
+hashes per write). `aura-storage::prune` adds `RetentionStore`:
+`RetentionPolicy::prune(keep_versions)` keeps a materialised base snapshot
+plus the last `keep_versions` version records, `RetentionPolicy::archive()`
+keeps all of them, `compact()` folds deltas into the base without moving the
+root, and a pruned version returns `PruneError::Pruned` instead of a wrong
+state. Version records and base snapshots are canonical, checksummed and
+domain separated (`S6_RECORD_CONTEXT`, `S6_BASE_CONTEXT`). Crate edges are
+unchanged: `aura-storage` already depends on `aura-state`.
+
+**S5 state sync.** `aura-state::sync` adds a catch-up protocol: a fresh
+node downloads one package (3-head quorum + S4 snapshot + compact delta)
+instead of the full event history; all blobs are SHA-256 checked and the
+recomputed S1 root must match the quorum. A substituted diff chunk is
+rejected. Report: `docs/evidence/s5/report.md`.
+
+**S4 snapshots.** `aura-state::snapshot` adds deterministic state snapshots:
+SHA-256 chunk digests, a checksummed manifest with descriptors, a BLAKE3
+`chunk_root` and an S1 `state_root`. Export/import hash chunks in parallel
+with a bounded worker pool; 1,000,000 keys reimport byte-identically. A
+substituted chunk is rejected. Report: `docs/evidence/s4/report.md`.
+
+**S3 execution overlay.** `aura-state::overlay` adds `StateView` — a copy-on-write overlay over an immutable S1 tree — and `StateDiff`, a checksummed canonical diff with a strict decoder. `execute()` rolls back the whole view on `OutOfGas` or `Revert`, so a revert cannot change the state root. Report: `docs/evidence/s3/report.md`.
+
+**S2 durable state.** `aura-storage` puts a checksummed WAL in front of a
+pluggable `StateBackend`: the default is pure Rust (reproducible in CI), and
+the optional `rocksdb` feature uses real RocksDB column families with one
+atomic, `sync = true` `WriteBatch`. The WAL record is fsynced BEFORE head
+publication, so `kill -9` between the two is recoverable by replay. Report:
+`docs/evidence/s2/report.md`.
+
+**S1 state tree.** `aura-state::tree` is a deterministic, versioned sparse
+binary Merkle tree over `StateKey::digest` paths, with single-leaf subtree
+compression, depth-dependent empty hashes and inclusion proofs bound to a
+block height. `state_root = BLAKE3(S1_ROOT_CONTEXT ‖ version ‖ tree_root)`.
+It is in memory only — S2 owes persistence. Report:
+`docs/evidence/s1/report.md`.
+
+**S0 state baseline.** `aura-state::baseline` is an intentionally naive
+in-memory state whose only job is to measure what S1 must fix: no
+`state_root`, no persistence, and write order changes balances. It is
+explicitly not for consensus code. Report:
+`docs/evidence/s0/baseline-report.md`. S1 replaces it with a deterministic
+versioned Merkle tree keyed by `StateKey::digest`.
+
 **C10 close-out.** `CORE_PLAN` C0–C10 is complete. Every shipped phase has a
 numbered patch, a receipt, an NC log and checksummed evidence;
 `tools/audit_closeout.py` runs inside `make test` and fails on any ✅ row
@@ -141,10 +201,11 @@ aura-codec  <- aura-types
 aura-crypto <- aura-types
 aura-tx     <- aura-types, aura-codec, aura-crypto   (C4, 12th crate)
 aura-block  <- aura-tx, aura-codec, aura-crypto, aura-types  (C5, 13th crate)
-aura-state  <- aura-block, aura-tx, aura-codec, aura-crypto, aura-storage
+aura-state  <- aura-types, aura-codec, aura-crypto  (C7 + S0/S1/S3/S5/S6)
+aura-storage <- aura-types, aura-codec, aura-crypto, aura-state  (S2 + S6 + S7, RocksDB optional)
 aura-genesis <- aura-state, aura-block, aura-crypto, aura-codec, aura-types  (C8, 14th crate)
+aura-exec   <- aura-state, aura-crypto, wasmtime  (X1, planned)
 aura-testkit <- all of the above (C9, 15th crate, dev/test only)
-aura-exec   <- aura-state, aura-crypto, wasmtime
 aura-consensus <- aura-state, aura-crypto, aura-p2p
 aura-node(aurad) <- all of the above + aura-rpc + aura-mempool
 aura-wallet / indexer / explorer / bridge <- aura-types + aura-rpc client

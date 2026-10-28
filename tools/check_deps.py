@@ -71,8 +71,13 @@ def check() -> list[str]:
     # The C3 baseline is frozen historical evidence (its checksum is pinned
     # by docs/evidence/c3/SHA256SUMS). Later phases record additive deltas.
     spec_dir = REPO / "docs" / "spec"
-    allowlist_paths = [spec_dir / "c3-dependency-allowlist.txt"] + sorted(
-        spec_dir.glob("*-dependency-addendum.txt")
+    evidence_dir = REPO / "docs" / "evidence"
+    # S2+ addenda live under docs/evidence/ because docs/spec/FORMAT_INDEX.md
+    # is frozen C10 evidence and must not gain new files.
+    allowlist_paths = (
+        [spec_dir / "c3-dependency-allowlist.txt"]
+        + sorted(spec_dir.glob("*-dependency-addendum.txt"))
+        + sorted(evidence_dir.glob("*-dependency-addendum.txt"))
     )
     allowed: list[tuple[str, str]] = []
     for allowlist_path in allowlist_paths:

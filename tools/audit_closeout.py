@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-"""Plan<->tree close-out audit (C10).
+"""Plan<->tree close-out audit (C10, extended for STATE_PLAN S0).
 
 Fails when any ✅ phase row lacks a receipt, patch, NC driver/log, evidence,
 CHANGELOG entry or spec — i.e. "not a single ✅ line without a receipt".
 Also verifies every evidence SHA256SUMS, the total NC count, the spec index
-and that no deferred (non-CORE) phase is marked ✅.
+and that no phase is marked done in the wrong plan.
 
 Usage:
     python3 tools/audit_closeout.py [--strict]
     make audit-closeout
 
-`--strict` additionally requires the C10 patch, NC log and evidence files.
-Default mode tolerates them as "pending" while the close-out phase itself is
-being produced (its patch is cut at commit time).
+`--strict` additionally requires the current phase's patch and evidence.
+Default mode tolerates them as "pending" while that phase is being produced.
 """
 
 from __future__ import annotations
@@ -29,24 +28,53 @@ SPEC = REPO / "docs" / "spec"
 EVIDENCE = REPO / "docs" / "evidence"
 PATCHES = REPO / "patches"
 
-PHASES = [f"C{index}" for index in range(11)]          # C0..C10
-SHIPPED = PHASES[:10]                                   # patches already cut
-CURRENT = "C10"
-EXPECTED_NC = dict(zip(PHASES, [2, 3, 4, 5, 6, 6, 6, 6, 6, 6, 6]))
-SHIPPED_NC_TOTAL = sum(EXPECTED_NC[phase] for phase in SHIPPED)   # 50
-EXPECTED_TOTAL_NC = 56
+CORE_PHASES = [f"C{index}" for index in range(11)]      # C0..C10 (closed)
+STATE_PHASES = ["S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7"]  # STATE_PLAN now complete
+PHASES = CORE_PHASES + STATE_PHASES
+SHIPPED = CORE_PHASES + ["S0", "S1", "S2", "S3", "S4", "S5", "S6"]
+CURRENT = "S7"
+
+PLAN_FOR_PREFIX = {
+    "C": "CORE_PLAN.md",
+    "S": "STATE_PLAN.md",
+    "X": "EXEC_PLAN.md",
+    "B": "CONSENSUS_PLAN.md",
+    "N": "NET_PLAN.md",
+    "D": "NODE_PLAN.md",
+    "W": "WALLET_PLAN.md",
+    "E": "ECOSYSTEM_PLAN.md",
+    "T": "ECONOMICS_PLAN.md",
+    "H": "SECURITY_PLAN.md",
+    "P": "PERF_PLAN.md",
+    "O": "OPS_PLAN.md",
+}
+
+NC_PER_PHASE = {f"C{i}": 6 for i in range(4, 11)}
+NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6})
+SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)   # 98
+EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + NC_PER_PHASE[CURRENT]       # 104
+
 DONE_ROW = re.compile(r"^\| ✅ \*\*([A-Z]+\d+)\*\* \|", re.M)
 RESULT_LINE = re.compile(r"^RESULT: (\d+)/(\d+) negative controls PASS", re.M)
 
 
+def patch_prefix(phase: str) -> str:
+    if phase.startswith("C"):
+        number = int(phase[1:]) + 1
+    elif phase.startswith("S"):
+        number = 12 + int(phase[1:])
+    else:
+        number = 20 + int(phase[1:])
+    return f"{number:04d}-{phase}-"
+
+
 def patch_path(phase: str) -> Path | None:
-    prefix = f"{int(phase[1:]) + 1:04d}-{phase}-"
-    matches = sorted(PATCHES.glob(f"{prefix}*.patch"))
+    matches = sorted(PATCHES.glob(f"{patch_prefix(phase)}*.patch"))
     return matches[0] if matches else None
 
 
 def nc_log(phase: str) -> Path:
-    return EVIDENCE / f"c{phase[1:]}" / "nc.log"
+    return EVIDENCE / phase.lower() / "nc.log"
 
 
 def sha_files() -> list[Path]:
@@ -69,60 +97,62 @@ def validate_patch(phase: str, path: Path, errors: list[str]) -> None:
 def check(strict: bool) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     notes: list[str] = []
-    core = (PLANS / "CORE_PLAN.md").read_text(encoding="utf-8")
     changelog = (REPO / "CHANGELOG.md").read_text(encoding="utf-8")
+    plan_texts = {p.name: p.read_text(encoding="utf-8") for p in PLANS.glob("*_PLAN.md")}
 
-    # 1. Which phases are marked done, and where?
+    # 1. Which phases are marked done, and in the right plan?
     done: list[tuple[str, str]] = []
-    for plan in sorted(PLANS.glob("*_PLAN.md")):
-        for phase in DONE_ROW.findall(plan.read_text(encoding="utf-8")):
-            done.append((plan.name, phase))
+    for plan_name, text in plan_texts.items():
+        for phase in DONE_ROW.findall(text):
+            done.append((plan_name, phase))
     found = [phase for _, phase in done]
     for plan_name, phase in done:
-        if plan_name != "CORE_PLAN.md":
+        expected_plan = PLAN_FOR_PREFIX.get(phase[0])
+        if plan_name != expected_plan:
             errors.append(
-                f"{plan_name}: phase {phase} is ✅ but only CORE_PLAN may ship phases"
+                f"{plan_name}: phase {phase} is ✅ but belongs in {expected_plan}"
             )
         if phase not in PHASES:
             errors.append(f"{plan_name}: unexpected ✅ phase {phase}")
     for phase in PHASES:
         if found.count(phase) != 1:
             errors.append(
-                f"CORE_PLAN.md: phase {phase} has {found.count(phase)} ✅ rows, expected 1"
+                f"phase {phase} has {found.count(phase)} ✅ rows, expected 1"
             )
 
     # 2. Receipts, CHANGELOG, NC drivers and NC logs.
+    all_plan_text = "\n".join(plan_texts.values())
     shipped_nc = 0
     current_nc: int | None = None
     for phase in PHASES:
-        index = int(phase[1:])
-        if f"### {phase} receipt" not in core:
-            errors.append(f"{phase}: missing '### {phase} receipt' in CORE_PLAN.md")
+        lower = phase.lower()
+        if f"### {phase} receipt" not in all_plan_text:
+            errors.append(f"{phase}: missing '### {phase} receipt' in a plan")
         if f"## [{phase}" not in changelog:
             errors.append(f"{phase}: missing CHANGELOG entry '## [{phase}'")
-        driver = REPO / "tools" / f"nc_c{index}.py"
+        driver = REPO / "tools" / f"nc_{lower}.py"
         if not driver.exists():
             errors.append(f"{phase}: missing {driver.relative_to(REPO)}")
 
         log = nc_log(phase)
         if not log.exists():
             if phase == CURRENT and not strict:
-                notes.append("C10 NC log: pending (created by make nc-c10)")
+                notes.append(f"{phase} NC log: pending (created by make nc-{lower})")
                 continue
             errors.append(f"{phase}: missing NC log {log.relative_to(REPO)}")
             continue
         match = RESULT_LINE.search(log.read_text(encoding="utf-8"))
         if not match:
             if phase == CURRENT and not strict:
-                notes.append("C10 NC log: pending (no RESULT line yet)")
+                notes.append(f"{phase} NC log: pending (no RESULT line yet)")
                 continue
             errors.append(f"{phase}: NC log has no 'RESULT: n/n negative controls PASS' line")
             continue
         passed, total = int(match.group(1)), int(match.group(2))
-        if passed != total or total != EXPECTED_NC[phase]:
+        if passed != total or total != NC_PER_PHASE[phase]:
             errors.append(
                 f"{phase}: NC log says {passed}/{total}, expected "
-                f"{EXPECTED_NC[phase]}/{EXPECTED_NC[phase]}"
+                f"{NC_PER_PHASE[phase]}/{NC_PER_PHASE[phase]}"
             )
         if phase == CURRENT:
             current_nc = passed
@@ -133,18 +163,18 @@ def check(strict: bool) -> tuple[list[str], list[str]]:
         errors.append(f"shipped NC total = {shipped_nc}, expected {SHIPPED_NC_TOTAL}")
     total_nc = shipped_nc + (current_nc or 0)
     if current_nc is None:
-        notes.append(f"NC total so far: {total_nc} of {EXPECTED_TOTAL_NC} (C10 pending)")
+        notes.append(f"NC total so far: {total_nc} of {EXPECTED_TOTAL_NC} ({CURRENT} pending)")
         if strict:
-            errors.append("C10 NC log has no valid RESULT line")
+            errors.append(f"{CURRENT} NC log has no valid RESULT line")
     elif total_nc != EXPECTED_TOTAL_NC:
         errors.append(f"total NCs = {total_nc}, expected {EXPECTED_TOTAL_NC}")
 
     # 3. Shipped phases need a valid patch and evidence receipts.
     for phase in SHIPPED:
-        index = int(phase[1:])
+        lower = phase.lower()
         path = patch_path(phase)
         if path is None:
-            errors.append(f"{phase}: missing patch patches/{index + 1:04d}-{phase}-*.patch")
+            errors.append(f"{phase}: missing patch patches/{patch_prefix(phase)}*.patch")
         else:
             validate_patch(phase, path, errors)
 
@@ -156,38 +186,39 @@ def check(strict: bool) -> tuple[list[str], list[str]]:
             ]
         else:
             required = [
-                EVIDENCE / f"c{index}" / "gates.txt",
-                EVIDENCE / f"c{index}" / "nc.log",
-                EVIDENCE / f"c{index}" / "SHA256SUMS",
+                EVIDENCE / lower / "gates.txt",
+                EVIDENCE / lower / "nc.log",
+                EVIDENCE / lower / "SHA256SUMS",
             ]
         for item in required:
             if not item.exists():
                 errors.append(f"{phase}: missing evidence {item.relative_to(REPO)}")
 
     # 4. The current phase's own patch/evidence (cut after this audit runs).
-    c10_patch = patch_path(CURRENT)
-    if c10_patch is None:
-        message = "C10 patch: pending (cut at commit time)"
+    current_patch = patch_path(CURRENT)
+    if current_patch is None:
+        message = f"{CURRENT} patch: pending (cut at commit time)"
         if strict:
             errors.append(message)
         else:
             notes.append(message)
     else:
-        validate_patch(CURRENT, c10_patch, errors)
-        notes.append(f"C10 patch: {c10_patch.name} OK")
+        validate_patch(CURRENT, current_patch, errors)
+        notes.append(f"{CURRENT} patch: {current_patch.name} OK")
 
-    c10_gates = EVIDENCE / "c10" / "gates.txt"
-    if not c10_gates.exists():
-        message = "C10 evidence: pending (generated by make evidence-c10)"
+    current_gates = EVIDENCE / CURRENT.lower() / "gates.txt"
+    if not current_gates.exists():
+        message = f"{CURRENT} evidence: pending (generated by make evidence-{CURRENT.lower()})"
         if strict:
             errors.append(message)
         else:
             notes.append(message)
     else:
-        notes.append("C10 evidence: gates.txt present")
-        for name in ("gates.txt", "nc.log", "closeout.txt", "SHA256SUMS"):
-            if not (EVIDENCE / "c10" / name).exists():
-                errors.append(f"C10: missing docs/evidence/c10/{name}")
+        notes.append(f"{CURRENT} evidence: gates.txt present")
+        current_report = "baseline-report.md" if CURRENT == "S0" else "report.md"
+        for name in ("gates.txt", "nc.log", "SHA256SUMS", current_report, "inventory.txt"):
+            if not (EVIDENCE / CURRENT.lower() / name).exists():
+                errors.append(f"{CURRENT}: missing docs/evidence/{CURRENT.lower()}/{name}")
 
     # 5. Every evidence checksum must verify (paths are repo-root relative).
     for sums in sha_files():
@@ -205,7 +236,8 @@ def check(strict: bool) -> tuple[list[str], list[str]]:
                 f"({'; '.join(bad[:3]) if bad else result.stderr.strip()})"
             )
 
-    # 6. Every spec file must be indexed.
+    # 6. Every spec file must be indexed (FORMAT_INDEX.md is the frozen CORE
+    # index; S0 stores its report in evidence, not in docs/spec/).
     index_path = SPEC / "FORMAT_INDEX.md"
     if not index_path.exists():
         errors.append("docs/spec/FORMAT_INDEX.md is missing")
@@ -215,15 +247,21 @@ def check(strict: bool) -> tuple[list[str], list[str]]:
             if item.is_file() and item.name not in index_text:
                 errors.append(f"FORMAT_INDEX.md does not list docs/spec/{item.name}")
 
-    # 7. Consolidated NC inventory, when present.
+    # 7. Consolidated NC inventories, when present.
     closeout = EVIDENCE / "c10" / "closeout.txt"
     if closeout.exists():
         text = closeout.read_text(encoding="utf-8")
-        for phase in PHASES:
+        for phase in CORE_PHASES:
             if f"{phase}:" not in text:
                 errors.append(f"closeout.txt has no {phase} inventory line")
-        if f"TOTAL: {EXPECTED_TOTAL_NC} NC" not in text:
-            errors.append(f"closeout.txt does not report TOTAL: {EXPECTED_TOTAL_NC} NC")
+        if "TOTAL: 56 NC" not in text:
+            errors.append("closeout.txt does not report the CORE total 56 NC")
+    # Per-phase inventories are historical snapshots: each reports the NC
+    # total AS OF that phase, not the current project-wide total.
+    for phase, expected in (("s0", 62), ("s1", 68), ("s2", 74), ("s3", 80), ("s4", 86), ("s5", 92), ("s6", 98), ("s7", EXPECTED_TOTAL_NC)):
+        path = EVIDENCE / phase / "inventory.txt"
+        if path.exists() and f"TOTAL: {expected} NC" not in path.read_text(encoding="utf-8"):
+            errors.append(f"{phase}/inventory.txt does not report TOTAL: {expected} NC")
 
     return errors, notes
 
@@ -231,14 +269,17 @@ def check(strict: bool) -> tuple[list[str], list[str]]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--strict", action="store_true", help="require the C10 patch, NC log and evidence too"
+        "--strict", action="store_true", help="require the current phase patch and evidence too"
     )
     args = parser.parse_args()
 
     errors, notes = check(args.strict)
-    print("CLOSE-OUT PLAN<->TREE AUDIT (C10)")
-    print(f"  phases audited: {len(PHASES)} (C0-C10)")
-    print(f"  expected NC total: {EXPECTED_TOTAL_NC} (50 shipped + 6 C10)")
+    print("CLOSE-OUT PLAN<->TREE AUDIT (CORE + STATE)")
+    print(f"  phases audited: {len(PHASES)} ({PHASES[0]}-{PHASES[-1]})")
+    print(
+        f"  expected NC total: {EXPECTED_TOTAL_NC} "
+        f"({SHIPPED_NC_TOTAL} shipped + {NC_PER_PHASE[CURRENT]} {CURRENT})"
+    )
     print(f"  evidence checksum files: {len(sha_files())}")
     print(f"  spec files indexed: {len([p for p in SPEC.iterdir() if p.is_file()])}")
     for note in notes:

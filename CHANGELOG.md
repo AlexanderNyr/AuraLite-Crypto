@@ -3,6 +3,448 @@
 All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
 never rewritten: corrections are made with a new entry or an explicit note.
 
+## [S7 — recovery and backup] 2026-10-28
+
+**Eighth and final `STATE_PLAN` phase — STATE_PLAN is now COMPLETE.**
+Deliverable: `patches/0019-S7-recovery-backup.patch`. No new crate, no new
+external dependency; one new binary target (`s7-chaos`).
+
+- Landed `aura-storage::backup`: `BackupManifest`, `BackupBundle`,
+  `create_backup`, `restore_backup`, `RestoreReport`, `BackupError`, and
+  `Storage::wal_records()`.
+- **Bundle:** `u32le(manifest_len) || manifest_bytes || blob`;
+  `manifest_bytes = payload || BLAKE3(S7_MANIFEST_CONTEXT || payload)` with
+  `payload = ALM7 || u32 version || chain_id || head_version || head_root ||
+  record_count || blob_len || blob_sha256`; `blob` = the S2 framed,
+  BLAKE3-checksummed WAL records 1..=head; `blob_sha256 = SHA-256(blob)`.
+- **Restore replays through the real commit path**, so declared roots are
+  recomputed rather than trusted: a perfectly checksummed manifest that lies
+  about a root fails with `RootMismatch`. Restore also rejects a non-empty
+  target, a wrong chain-id and a broken parent chain.
+- **DoD gate: 50 `kill -9` + restore cycles — 0 root mismatches.** Commit
+  counts 1..=12; 17 cycles crash inside the WAL/head window. Each cycle
+  reopens, compares head/root with the independent Python fixture, backs up,
+  restores into a fresh directory, compares the whole WAL record-for-record,
+  then commits the next batch in both stores and requires the same receipt.
+  338 records replayed.
+- Golden vectors: `tools/gen_s7_vectors.py` — reuses the independent S2
+  reference and adds the S7 bundle; 28 fixture lines including the canonical
+  1 261-byte bundle hex, manifest hex and blob SHA-256. Offline, byte-stable.
+- Gate: `make test` -> **177 passed / 0 failed** (169 S6 + 7 S7 + 1 unit),
+  fmt/clippy clean, drift guard 12 plans / 112 rows, dependency gate 95
+  external crates, vector inventory **4 349** across 17 fixtures,
+  `make audit-closeout` green. 6 S7 negative controls, total **104** across
+  C0–C10 + S0–S7.
+- Evidence: `docs/evidence/s7/gates.txt`, `nc.log`, `report.md`,
+  `inventory.txt`, `SHA256SUMS`,
+  `docs/evidence/s7-dependency-addendum.txt`.
+- ⚠️ AUDIT: closing `STATE_PLAN` broke the assumption behind C10 NC-2, which
+  tampered with "the first not-yet-done S phase". `tools/nc_c10.py` now
+  exercises the same rule from the other side once every S phase is shipped
+  (remove the newest `### Sx receipt` heading) and passes 6/6 again. The
+  frozen `docs/evidence/c10/nc.log` is **not** rewritten — it remains the
+  historical record of the C10 run and its SHA256SUMS still verify.
+- **STATE_PLAN closure criterion met and measured:** recover from zero to the
+  current `state_root`, prove any balance with a Merkle proof, survive a
+  sudden `kill -9`. Next plan in dependency order: `EXEC_PLAN` X0.
+- Deferred: distributed/power-loss chaos, incremental and remote backups, key
+  management (OPS_PLAN), VM (X1), `cargo deny` (H1).
+  Validators / blocks / tx remain **0 / 0 / 0**.
+
+## [S6 — pruning + archive] 2026-10-28
+
+**Seventh `STATE_PLAN` phase.** Deliverable:
+`patches/0018-S6-pruning-archive.patch`. No new crate, no new external
+dependency.
+
+- **Measured problem first.** S1 `MerkleTree` rebuilds the entire node arena
+  on every `commit()`, measured at **16.4 ms per commit** with 1 024 leaves
+  (5 000 commits timed) — ~27 minutes for the S6 DoD of 100 000 blocks. The
+  phase therefore starts with a measurement, not with code.
+- Landed `aura-state::HistoryTree`: a compressed sparse Merkle tree in a
+  mutable arena, updating only the changed path (~12 hashes per write).
+  Roots are bit-for-bit S1 and are verified against `MerkleTree` rebuilds at
+  every checkpoint plus an independent Python rebuild.
+- Landed `aura-storage::prune`: `RetentionMode`, `RetentionPolicy`
+  (`prune(keep)` / `archive()`), `VersionRecord`, `RetentionReceipt`,
+  `CompactionReport`, `RetentionStore` (`commit`, `root_at`, `state_at`,
+  `proof_at`, `verify_root_at`, `compact`), exact byte accounting and
+  `PruneError`.
+- **Wire formats:** version records and base snapshots are canonically
+  encoded and domain-separated —
+  `record bytes = payload || BLAKE3(S6_RECORD_CONTEXT || payload)`,
+  `base bytes = payload || BLAKE3(S6_BASE_CONTEXT || payload)`. Strict
+  decode enforces checksum, magic, caps, no trailing bytes and
+  byte-identical re-encoding.
+- **Retention rule:** `base_version = max(base_version, head - keep_versions)`
+  after every commit. Prune mode keeps a materialised base plus the last
+  `keep_versions` deltas; older versions return `PruneError::Pruned`, never a
+  plausible wrong state. Archive mode never prunes and refuses to compact.
+- **DoD gate:** 100 000 blocks, 4 writes per block, 1 024 live keys.
+  Archive: **36 500 045 bytes** retained and every historical root/proof
+  served. Prune (`keep_versions = 128`): peak **113 326 bytes**, under the
+  analytic bound `base_bytes + keep * max_record_bytes` —
+  **322.1x smaller** than the archive. Compaction folds retained deltas into
+  the base without moving the root.
+- Golden vectors: `tools/gen_s6_vectors.py` — pure-Python BLAKE3, C7 key
+  digest, S2 key path, a from-scratch S1 rebuild, full 100 000-block byte
+  accounting and canonical hex for two records and one base snapshot.
+  35 fixture lines, offline and byte-stable.
+- Build-profile decision (measured, no version changes):
+  `[profile.dev.package.blake3]` and `[profile.dev.package.sha2]` are
+  `opt-level = 3`; `blake3_hash(65 B)` 5.785 us -> 0.178 us in a debug build.
+- Gate: `make test` -> **169 passed / 0 failed** (154 S5 + 9 S6 storage +
+  6 S6 tree), fmt/clippy clean, drift guard 12 plans / 112 rows, dependency
+  gate 95 external crates, vector inventory **4 326** across 16 fixtures,
+  `make audit-closeout` green. 6 S6 negative controls, total **98** across
+  C0–C10 + S0–S6.
+- Evidence: `docs/evidence/s6/gates.txt`, `nc.log`, `report.md`,
+  `inventory.txt`, `SHA256SUMS`,
+  `docs/evidence/s6-dependency-addendum.txt`.
+- ⚠️ AUDIT: two tree defects were found by the cross-check gates and fixed in
+  the code, not papered over — a branch prefix derived from the parent instead
+  of the child (sibling slots collided, so later writes navigated into the
+  wrong subtree) and a `split` that returned the deepest branch hash instead
+  of the root. Both are now covered by the S1 rebuild comparison.
+- Deferred: backup/restore + chaos gate (S7), VM (X1), `cargo deny` (H1).
+  Validators / blocks / tx remain **0 / 0 / 0**.
+
+## [S5 — state sync] 2026-10-27
+
+**Sixth `STATE_PLAN` phase.** Deliverable:
+`patches/0017-S5-state-sync.patch`. No new crate, no new external dependency.
+
+- Landed `aura-state::sync`: `SyncHead`, `SyncDelta`, `SyncPackage`,
+  `SyncResult`, `SyncError`, and strict canonical decoders for heads,
+  deltas and packages.
+- **Protocol:** a fresh node downloads ONE package — a quorum of three
+  independent heads, an S4 snapshot and a compact delta of net changes —
+  instead of the full event history. `HEAD_MAGIC`/`DELTA_MAGIC`/
+  `PACKAGE_MAGIC` plus domain-separated SHA-256 checksums on every blob.
+  Verification chain: package -> 3 head checksums -> unanimous quorum ->
+  S4 manifest/chunk digests -> `chunk_root` binding -> apply sorted delta
+  -> recompute S1 `state_root` -> compare with quorum. Substituted diff
+  chunk rejected (NC-6). Wrong chain-id, wrong height, bad magic,
+  checksum, truncation and trailing bytes all rejected.
+- **DoD gate:** 256-key state, snapshot height 90 -> target height 100;
+  package **16,992 bytes** vs full history **998,400 bytes**
+  (**58.8x smaller**). New node reaches the same `state_root` as 3 old
+  nodes within the measured 60 s budget. NC-6 disables the final root
+  comparison and requires the substituted-diff rejection test to go red.
+- Golden vectors: `tools/gen_s5_vectors.py` — pure-Python BLAKE3, hashlib
+  SHA-256, C7 state-key digest, S1 sparse Merkle tree and S4 snapshot
+  format. 48 fixture lines, 11 rejection vectors. Offline and byte-stable.
+- Gate: `make test` -> **154 passed / 0 failed** (146 S4 + 8 S5), fmt/clippy
+  clean, drift guard 12 plans / 112 rows, dependency gate 95 external
+  crates, `make audit-closeout` green. 6 S5 negative controls, total 92
+  across C0–C10 + S0–S5.
+- Evidence: `docs/evidence/s5/gates.txt`, `nc.log`, `report.md`,
+  `inventory.txt`, `SHA256SUMS`. The S5 format report lives in
+  `docs/evidence/s5/report.md`, not `docs/spec/`, because
+  `docs/spec/FORMAT_INDEX.md` is frozen checksummed C10 evidence.
+- Tooling / CI: `make nc-all` now covers 17 NC drivers (92 NC); new targets
+  `make gen-s5-vectors`, `make nc-s5`, `make evidence-s5`,
+  `make record-s5-deps`.
+- **Not claimed:** pruning/archive (S6), backup/chaos (S7), real VM
+  (X1), `cargo deny` (H1). Validators/blocks/tx remain **0/0/0**.
+
+## [S4 — deterministic state snapshots] 2026-10-27
+
+**Fifth `STATE_PLAN` phase.** Deliverable:
+`patches/0016-S4-snapshots.patch`. No new crate and no new external
+dependency: `sha2 = 0.10.9` was already in `Cargo.lock` via `k256` and in
+the frozen C3 baseline; S4 only makes it a DIRECT dependency of
+`aura-state`. Recorded in `docs/evidence/s4-dependency-addendum.txt`.
+
+- Landed `aura-state::snapshot`: `SnapshotManifest`, `ChunkDescriptor`,
+  `Snapshot`, `SnapshotError`, `export_snapshot`, `import_snapshot`,
+  `encode_chunk`, `decode_chunk`, `chunk_hash`, `chunk_root`,
+  `state_root`, `sha256_bytes`, `parallel_chunk_hashes`
+  and `manifest_bytes`.
+- **Format:** `manifest_bytes || data_blob`. The blob is a concatenation
+  of canonical chunk payloads; each chunk has its own
+  `sha256(SNAPSHOT_CHUNK_CONTEXT || payload)`. The manifest carries
+  descriptors `(offset, length, sha256)`, the S1 `state_root`, a BLAKE3
+  `chunk_root` over the ordered digests and a SHA-256 checksum of the
+  payload. Strict decode checks magic, version, minimal LEB128, contiguous
+  offsets, caps, no trailing bytes, byte-identical re-encode and a
+  recomputed `chunk_root`.
+- **Parallel export/import.** `std::thread::scope` with an atomic work
+  index and a bounded worker pool (1..8); deterministic descriptor order.
+  Verified identical digests and `chunk_root` for 1/2/4/8 workers.
+- **DoD gate:** 1,000,000 keys exported to 16 chunks (31,000,048 data
+  bytes) and reimported **byte-identically**. Data SHA-256 and chunk_root
+  match the independent Python reference, which computes the digest without
+  writing 30 MB of hex into the fixture. NC-6 disables the digest
+  comparison and requires the substituted-chunk rejection test to go red.
+- Golden vectors: `tools/gen_s4_vectors.py` — hashlib SHA-256, pure-Python
+  BLAKE3 (self-checked against 7 official vectors), the C7 state-key digest
+  and the S1 sparse Merkle tree. 7-key canonical snapshot (3 chunks),
+  1024-key parallel reference (8 chunks), 1M-key digest, 11 rejection
+  vectors; 58 fixture lines. Offline and byte-stable.
+- Gate: `make test` → **146 passed / 0 failed** (138 S3 + 8 S4),
+  fmt/clippy clean, drift guard 12 plans / 112 rows, dependency gate 95
+  external crates, `make audit-closeout` green. 6 S4 negative controls,
+  total 86 across C0–C10 + S0–S4.
+- Evidence: `docs/evidence/s4/gates.txt`, `nc.log`, `report.md`,
+  `inventory.txt`, `SHA256SUMS`. The S4 format report lives in
+  `docs/evidence/s4/report.md`, not `docs/spec/`, because
+  `docs/spec/FORMAT_INDEX.md` is frozen checksummed C10 evidence.
+- Tooling / CI: `make nc-all` now covers 16 NC drivers (86 NC); new
+  targets `make gen-s4-vectors`, `make nc-s4`, `make evidence-s4`,
+  `make record-s4-deps`.
+- **Not claimed:** state sync (S5), pruning (S6), backup/chaos (S7),
+  real VM (X1), `cargo deny` (H1). Validators/blocks/tx remain **0/0/0**.
+
+## [S3 — execution overlay] 2026-10-27
+
+**Fourth `STATE_PLAN` phase.** Deliverable:
+`patches/0015-S3-execution-overlay.patch`. No new crate and no new
+external dependency — the overlay lives in `aura-state`, which already owns
+`MerkleTree`, `Account` and `StateKey`.
+
+- Landed: `StateView` (copy-on-write overlay over an immutable S1 tree),
+  `StateDiff` (canonical wire format + strict decoder), `events_root()`,
+  `execute()` and `apply_diff()`. Reads fall through to the base tree;
+  writes/deletes are keyed by the C7 state-key digest in a `BTreeMap`.
+- **Wire format:** `payload || BLAKE3(S3_DIFF_CONTEXT || payload)` where
+  `payload = ALD3 || version || base_root || result_root || gas_used ||
+  events || changes`. Strict decode enforces the checksum, magic, minimal
+  LEB128 varints, strictly ascending change paths, caps, no trailing bytes and
+  byte-identical re-encoding. `apply()` re-verifies base and result roots
+  before materialising a new tree.
+
+- **DoD gate:** `revert` and `OutOfGas` both leave `base_root` unchanged and
+  the touched account balance byte-identical; `execute()` rolls back all
+  changes, events and gas. NC-6 removes `rollback()` and requires the revert
+  gate to go red (balance changes) — verified. 6 S3 negative controls,
+  total 80 across C0–C10 + S0–S3.
+- Golden vectors: `tools/gen_s3_vectors.py` — pure-Python BLAKE3
+  (self-checked against 7 official vectors), the C7 state-key digest and the
+  S1 sparse Merkle tree. 3 canonical diffs, 51 fixture lines, 10 rejection
+  vectors. Offline and byte-stable.
+
+- Gate: `make test` -> **138 passed / 0 failed** (132 S2 + 6 S3), fmt/clippy
+  clean, drift guard 12 plans / 112 rows, dependency gate 95 external crates,
+  `make audit-closeout` green.
+- Evidence: `docs/evidence/s3/gates.txt`, `nc.log`, `report.md`,
+  `inventory.txt`, `SHA256SUMS`. The S3 spec/report lives in
+  `docs/evidence/s3/report.md` instead of `docs/spec/` because
+  `docs/spec/FORMAT_INDEX.md` is frozen, checksummed C10 evidence and cannot
+  gain a new indexed item without breaking the C10 checksum and the
+  close-out audit. This mirrors the structure used in S1 and S2.
+- Tooling / CI: `make nc-all` now covers 15 NC drivers (80 NC); new targets
+  `make gen-s3-vectors`, `make nc-s3`, `make evidence-s3`.
+
+- **AUDIT (docs correctness).** `ARCHITECTURE.md` section 3 claimed
+  `aura-state <- aura-block, aura-tx, aura-codec, aura-crypto, aura-storage`,
+  which is false and would be a cycle: `aura-storage` depends on
+  `aura-state`. The graph now reflects the real `Cargo.toml` edges:
+  `aura-state <- aura-types, aura-codec, aura-crypto`; `aura-storage <-
+  aura-types, aura-codec, aura-crypto, aura-state`. No code change.
+
+- **Not claimed:** real VM/WASM (X1), snapshots (S4), state sync (S5),
+  pruning (S6), backup/chaos (S7), `cargo deny` (H1). Validators/blocks/tx
+  remain **0/0/0**.
+
+## [S2 — RocksDB + WAL durable state] 2026-10-26
+
+**Third `STATE_PLAN` phase.** Deliverable:
+`patches/0014-S2-rocksdb-wal.patch`. `aura-storage` gains a real API (it was
+an honest placeholder since C0). The first OPTIONAL native dependency enters
+the workspace: `rocksdb = 0.23.0` + `librocksdb-sys = 0.17.1+9.9.3`, exact
+pinned. Default builds need **no** native library.
+
+- **Architecture.** A `StateBackend` trait with two implementations. The
+  default is a pure-Rust WAL + `BTreeMap` backend so `make test` is
+  reproducible in any CI. The `rocksdb` Cargo feature enables the real
+  RocksDB backend with four column families (`state`, `nonce`, `meta`,
+  `wal_index`) and ONE atomic `sync = true` `WriteBatch` per commit.
+- **WAL-before-head protocol.** A framed record
+  `varint(payload_len) || payload || BLAKE3(S2_WAL_CONTEXT || payload)`,
+  payload = magic `ALW1`, version, parent root, state root, and ordered
+  changes with per-key nonces. The record is appended and `fsync`ed BEFORE
+  head publication. A checksummed `head.bin` is written atomically
+  (tmp + rename + directory fsync). `Storage::open` verifies every WAL
+  checksum and the version/parent-root chain, then replays records newer
+  than the published head. A head without a backing WAL record is refused.
+- **State root** = `BLAKE3(S2_ROOT_CONTEXT || version || tree_root)` where
+  `tree_root` is the S1 sparse Merkle root over
+  `BLAKE3(S2_KEY_CONTEXT || len || key)` paths.
+- **DoD gates:** `kill -9` at 10 commit points AND at 10 WAL/head
+  crash-window points → after restart head and root match the independent
+  golden roots. Clean reopen, recovery replay, missing-record detection and
+  8 independent rejection vectors (bad checksum, bad magic, truncated frame,
+  trailing bytes, non-sequential version, wrong parent root, zeroed root,
+  mutated value). Both backends tested.
+- **Golden vectors:** `tools/gen_s2_vectors.py` — pure-Python BLAKE3
+  (self-checked against 7 official vectors), the S1 sparse Merkle tree and
+  the S2 WAL framing. 11 golden commits, 110 fixture lines; offline and
+  byte-stable. Vector inventory rises to **4,164** across 12 fixtures.
+- **Native dependency governance.** 24 new external crates (rocksdb,
+  librocksdb-sys, bindgen, clang-sys, …) recorded in
+  `docs/evidence/s2-dependency-addendum.txt`; `tools/check_deps.py` now
+  reads addenda from `docs/evidence/` as well as `docs/spec/` because the
+  C10 `FORMAT_INDEX.md` is frozen checksummed evidence and must not gain
+  new files. `tools/record_s2_deps.py` is the reviewed re-record action.
+  ⚠️ AUDIT: Ubuntu 24.04 ships librocksdb 8.9.1, whose C API is
+  incompatible with `rocksdb 0.23` (missing `rocksdb_writebatch_create_with_params`,
+  `rocksdb_get_db_identity`, …). CI therefore runs the native backend in a
+  dedicated **Debian trixie** job (librocksdb 9.10). `tools/s2_native_env.sh`
+  detects librocksdb/libclang and fails loudly rather than silently building
+  the bundled C++ library (which needs GB of RAM). `make test-s2-native`
+  runs native clippy + the S2 store tests against real RocksDB.
+
+- **Gate:** `make test` → **132 passed / 0 failed** (123 S1 + 9 S2),
+  fmt/clippy clean, drift guard 12 plans / 112 rows, dependency gate 95
+  external crates, `make audit-closeout` green.
+- **Negative controls:** `tools/nc_s2.py` → `make nc-s2` →
+  `docs/evidence/s2/nc.log`, **6/6 PASS**: WAL context, key context, root
+  context, independent golden WAL record, checksum verification and the
+  WAL-before-head invariant. Total C0–C10 + S0–S2: **74 NC**.
+- **Evidence:** `docs/evidence/s2/gates.txt`, `nc.log`, `report.md`,
+  `inventory.txt`, `native.txt`, `SHA256SUMS`.
+- **Tooling / CI:** `make nc-all` now covers 14 NC drivers (74 NC); new
+  targets `make gen-s2-vectors`, `make nc-s2`, `make evidence-s2`,
+  `make record-s2-deps`, `make test-s2-native`.
+- **Docs synced (D9):** `README.md`, `docs/STATUS.md`,
+  `docs/ARCHITECTURE.md` (S2 block), `CHANGELOG.md`, `ROADMAP.md` (ledger,
+  §4, §8 → next S3), `CONTRIBUTING.md`, `STATE_PLAN.md` (S2 ✅ + receipt).
+- **Not claimed:** execution overlay / rollback (S3), chunked snapshots
+  (S4), state sync (S5), pruning (S6), backup/chaos (S7), VM (X1),
+  consensus/P2P/node/RPC, `cargo deny` (H1). Validators/blocks/tx remain
+  **0/0/0**.
+
+## [S1 — versioned Merkle tree] 2026-10-26
+
+**Second `STATE_PLAN` phase.** Deliverable:
+`patches/0013-S1-merkle-tree.patch`. No new crate, no new external
+dependency — `aura-state::tree` is a new module.
+
+- **Tree:** deterministic sparse binary Merkle tree over the 256 bits of
+  `StateKey::digest` (C7), MSB first, with single-leaf subtree compression
+  and depth-dependent `empty_hash(depth)`. `leaf_hash`, `node_hash`,
+  `versioned_root`; `state_root = BLAKE3(S1_ROOT_CONTEXT ‖ version ‖
+  tree_root)` binds the root to a block height. `MerkleTree` supports
+  insert/remove/get, `commit()`, `root_at()`, `prove`, `prove_at`, and
+  `prove_many_at` (one node arena for many proofs).
+- **Proofs:** `MerkleProof` carries the version, path, value, leaf depth and
+  bottom-up sibling hashes; `verify_proof` reconstructs the versioned root,
+  and `verify_inclusion` also checks key/value. A proof cannot be replayed
+  against a different height.
+- **DoD gates:** 10,000 deterministic operations with 12 versioned
+  checkpoint roots matching an independent Python reference; 1,000
+  inclusion proofs byte-compared and verified. Tampered sibling, value, key
+  and truncated siblings are rejected. The S0 insertion-order defect is
+  fixed: order no longer changes the root; delete changes it and re-add
+  restores it.
+- **Golden vectors:** `tools/gen_s1_vectors.py` — pure-Python BLAKE3
+  (self-checked against 7 official vectors), the C7 state-key digest and an
+  independent sparse-tree implementation. 3,066 fixture lines; offline and
+  byte-stable. Vector inventory rises to **4,061** across 11 fixtures.
+- **Defects found and fixed by the gate:** proofs initially reconstructed
+  the raw tree root while the published commitment is `versioned_root(...)`;
+  the proof now carries the version. Rebuilding the node arena for each of
+  1,000 proofs took 42 s; `prove_many_at` builds it once and the S1 suite
+  runs in ~1 s in debug mode. Fixed in code, not suppressed.
+- **Gate:** `make test` → **123 passed / 0 failed** (117 CORE+S0 + 6 S1),
+  fmt/clippy clean, drift guard 12 plans / 112 rows, dependency gate 71
+  external crates, `make audit-closeout` green.
+- **Negative controls:** `tools/nc_s1.py` → `make nc-s1` →
+  `docs/evidence/s1/nc.log`, **6/6 PASS**: leaf context, node context,
+  independent checkpoint root, proof root comparison, MSB-first path bit
+  ordering, depth-independent empty subtrees. Total C0–C10 + S0 + S1:
+  **68 NC**.
+- **Audit update:** `tools/audit_closeout.py` now covers 13 phases, expects
+  68 NCs, treats `s0/inventory.txt` as a historical 62-NC snapshot and
+  `closeout.txt` as a historical 56-NC CORE snapshot. Frozen C10 artifacts
+  (`FORMAT_INDEX.md`, `CLOSEOUT_AUDIT.md`) remain untouched; the S1 report
+  lives in `docs/evidence/s1/`.
+- **Tooling / CI:** `make nc-all` covers 13 NC drivers (68 NC); CI adds
+  `make gen-s1-vectors` and regenerates only `make evidence-s1`. New
+  targets: `make gen-s1-vectors`, `make nc-s1`, `make evidence-s1`.
+- **Evidence:** `docs/evidence/s1/gates.txt`, `nc.log`, `report.md`,
+  `inventory.txt`, `SHA256SUMS`.
+- **Rig maintenance:** `tools/nc_c10.py` NC-2 hard-coded `S1` as its
+  "deferred phase" target; once S1 shipped, `make nc-all` went red with
+  "tamper target not found". It now picks the first not-yet-done S phase
+  dynamically with a regex, so the historical C10 NC keeps working as
+  `STATE_PLAN` advances. Found by `make nc-all` during this phase.
+- **Docs synced (D9):** `README.md`, `docs/STATUS.md`,
+  `docs/ARCHITECTURE.md` (S1 block), `CHANGELOG.md`, `ROADMAP.md` (ledger,
+  §4, §8 → next S2), `CONTRIBUTING.md`, `STATE_PLAN.md` (S1 ✅, decision
+  D-S1a + receipt).
+- **Not claimed:** persistence / WAL / crash recovery (S2), execution overlay
+  (S3), snapshots / state sync / pruning / backup (S4–S7), VM (X1),
+  consensus/P2P/node/RPC, `cargo deny` (H1). Validators/blocks/tx remain
+  **0/0/0**.
+
+## [S0 — state baseline] 2026-10-26
+
+**First `STATE_PLAN` phase.** Deliverable:
+`patches/0012-S0-state-baseline.patch`. No new crate, no new external
+dependency — the baseline is a module in the existing `aura-state` crate.
+
+- **This is a measurement, not a design.** `aura-state::baseline` provides
+  `BaselineState` (append-only `Vec<BaselineWrite>` with last-write-wins
+  lookup), `BaselineWrite`, `BaselineError`, `BaselineReport` and
+  `FINAL_VIEW_CONTEXT`. `state_root()` returns `Err(NoRoot)`, `persist()` and
+  `load()` return `Err(NoPersistence)`, and `report().deterministic` is
+  `false`. The module is documented as something S1 must replace, never as a
+  state tree to build consensus on.
+- **Measured defects:** `docs/evidence/s0/baseline-report.md` records no
+  state root, no persistence, and two "nodes" applying the same writes in
+  opposite order ending with different balances (scenario 1: 300 vs 100
+  aalcry). A disjoint-key scenario is order-independent, proving the defect
+  is last-write-wins on conflicting keys rather than a false positive.
+- **Independent golden vectors:** `tools/gen_s0_vectors.py` — a Python model
+  of the write log and final-view serialization. 57 fixture lines for 4
+  scenarios (including `u64`/`u128` boundary values); self-checks that
+  conflicting writes diverge and disjoint writes do not. Offline and
+  byte-stable. Vector inventory rises to **1006** across 10 fixtures.
+- **Gate:** `make test` → **117 passed / 0 failed** (109 CORE + 8 S0),
+  fmt/clippy clean, drift guard 12 plans / 112 rows, dependency gate 71
+  external crates, `make audit-closeout` green.
+- **Negative controls:** `tools/nc_s0.py` → `make nc-s0` →
+  `docs/evidence/s0/nc.log`, **6/6 PASS**: final-view context, golden final
+  view, fake state root, fake persistence, fake determinism, falsified
+  no-root measurement. Total C0–C10 + S0: **62 NC**.
+- **Audit update:** `tools/audit_closeout.py` now accepts ✅ rows in
+  `STATE_PLAN.md` (plan ownership keyed by phase prefix), requires S0's
+  receipt/driver/log/patch/evidence and expects 62 NCs. The frozen CORE
+  `docs/evidence/c10/closeout.txt` still reports its own 56.
+  `docs/spec/FORMAT_INDEX.md` and `docs/CLOSEOUT_AUDIT.md` are checksummed
+  C10 artifacts and were deliberately NOT modified; S0's report lives in
+  `docs/evidence/s0/` instead.
+- **Tooling / CI:** `make nc-all` now covers C0–C10 + S0 (62 NC) via an
+  explicit phase list; CI regenerates only `make evidence-s0`. New targets:
+  `make gen-s0-vectors`, `make nc-s0`, `make evidence-s0`.
+- **Evidence:** `docs/evidence/s0/gates.txt`, `nc.log`,
+  `baseline-report.md`, `inventory.txt`, `SHA256SUMS`.
+- **⚠️ AUDIT — remote CI #1 failure (fixed in this patch).** GitHub Actions
+  run `40379115764` failed only at step 12 (`make evidence-c10`, exit 2);
+  steps 1–11 — `make test`, `make test-core`, 60 s fuzz, close-out audit and
+  all 56 NCs — passed. Root cause: `actions/checkout@v4` defaults to a
+  shallow clone while `tools/write_c10_evidence.py` called `git log HEAD~1`.
+  Fixed with a `|| git log -1 --oneline` fallback, `fetch-depth: 0` in CI,
+  and a new `tools/check_rig.py` rule that rejects any shallow-unsafe
+  history lookup in `write_*_evidence.py`. Historical C10 evidence files
+  were NOT rewritten (their checksums stay valid).
+- **⚠️ AUDIT — evidence regeneration was not idempotent (fixed).** Re-running
+  `make evidence-s0` (or `make evidence-c10`) rewrote that phase's own
+  `nc.log` while its previous `SHA256SUMS` was still present, so the audit
+  and NC restore checks saw a transient checksum mismatch and failed
+  mid-run. Both evidence writers now clear their own phase's receipts before
+  regenerating and re-checksum everything at the end. `make evidence-s0`
+  is now repeatable and all commands in `gates.txt` report `[rc=0]`.
+- **Docs synced (D9):** `README.md`, `docs/STATUS.md`,
+  `docs/ARCHITECTURE.md` (S0 block), `CHANGELOG.md`, `ROADMAP.md` (ledger,
+  §4, §8 → next S1), `CONTRIBUTING.md`, `STATE_PLAN.md` (status, S0 ✅,
+  decision D-S0 + receipt).
+- **Not claimed:** real `state_root` / Merkle tree / proofs (S1), persistence
+  and WAL (S2), execution overlay (S3), VM (X1), consensus/P2P/node/RPC,
+  `cargo deny` (H1). Validators/blocks/tx remain **0/0/0**.
+
 ## [C10 — close-out] 2026-10-26
 
 **Eleventh code phase and closure of `CORE_PLAN`.** Deliverable:

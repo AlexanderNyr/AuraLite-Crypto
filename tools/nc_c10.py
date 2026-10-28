@@ -4,7 +4,10 @@
 Six tamper tests must each turn the close-out audit red:
 
   NC-1: delete a phase receipt from CORE_PLAN.
-  NC-2: mark a deferred STATE_PLAN phase as ✅.
+  NC-2: forge a ✅ row without a receipt. While STATE_PLAN still has a pending
+        phase the tamper marks that phase ✅; once the plan is complete (S7),
+        the tamper removes the newest `### Sx receipt` heading instead. Both
+        are the same rule: no ✅ row without a receipt.
   NC-3: forge an NC log result.
   NC-4: unindex a format spec.
   NC-5: forge a patch subject.
@@ -17,6 +20,7 @@ into docs/evidence/c10/nc.log; a final green audit restore check is mandatory.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -71,6 +75,25 @@ def main() -> int:
     first_hash = C9_SUMS.read_text(encoding="utf-8").splitlines()[0][:64]
     flipped = ("0" if first_hash[0] != "0" else "1") + first_hash[1:]
 
+    # Pick the FIRST not-yet-done S phase dynamically, so this NC keeps
+    # working as STATE_PLAN advances (it used to hard-code S1). Once every S
+    # phase is shipped (STATE_PLAN complete), the same rule is exercised from
+    # the other side: remove the newest receipt heading.
+    state_text = STATE_PLAN.read_text(encoding="utf-8")
+    pending = re.search(r"^\| \*\*(S\d+)\*\* \|", state_text, re.M)
+    if pending is not None:
+        old_row = pending.group(0)
+        new_row = old_row.replace("**", "✅ **", 1)
+        print(f"NC-2 target: {old_row.strip()} -> {new_row.strip()}")
+    else:
+        receipts = re.findall(r"^### (S\d+) receipt", state_text, re.M)
+        if not receipts:
+            print("NC-2 setup: FAIL — no S receipts and no pending S phase")
+            return 1
+        newest = receipts[-1]
+        old_row = f"### {newest} receipt"
+        new_row = f"### {newest} notes (no receipt)"
+        print(f"NC-2 target (STATE_PLAN complete): '{old_row}' -> '{new_row}'")
     results = [
         expect_red(
             "NC-1 missing phase receipt",
@@ -79,10 +102,10 @@ def main() -> int:
             "### C7 notes (no receipt)",
         ),
         expect_red(
-            "NC-2 deferred phase marked done",
+            "NC-2 done phase without a receipt",
             STATE_PLAN,
-            "| **S1** | Merkle tree |",
-            "| ✅ **S1** | Merkle tree |",
+            old_row,
+            new_row,
         ),
         expect_red(
             "NC-3 forged NC log result",

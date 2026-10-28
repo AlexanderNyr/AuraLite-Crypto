@@ -67,6 +67,19 @@ def check() -> list[str]:
         if not (REPO / "tools" / script).exists():
             errors.append(f"tools/{script} missing")
 
+    # CI #1 failed because an evidence generator called `git log HEAD~1` in a
+    # shallow clone. Every history lookup must have a fallback to HEAD.
+    for script in sorted((REPO / "tools").glob("write_*_evidence.py")):
+        for number, line in enumerate(script.read_text(encoding="utf-8").splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            if "HEAD~1" in line and "||" not in line:
+                errors.append(
+                    f"{script.name}:{number}: shallow-unsafe git history lookup "
+                    "(add `|| git log -1 --oneline` fallback)"
+                )
+
     return errors
 
 

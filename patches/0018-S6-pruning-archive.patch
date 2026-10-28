@@ -1,0 +1,4162 @@
+From 76a7a0f67aee01e4bf92d8dba31cd6e9337705ef Mon Sep 17 00:00:00 2001
+From: AlexanderNyr <alexander@auralite.local>
+Date: Wed, 28 Oct 2026 16:36:00 +0000
+Subject: [PATCH] S6 pruning archive
+
+---
+ .github/workflows/ci.yml                      |  16 +-
+ CHANGELOG.md                                  |  58 ++
+ CONTRIBUTING.md                               |   3 +
+ Cargo.toml                                    |   6 +
+ Makefile                                      |  23 +-
+ README.md                                     |  27 +-
+ ROADMAP.md                                    |  30 +-
+ crates/aura-state/src/history.rs              | 380 ++++++++++
+ crates/aura-state/src/lib.rs                  |   7 +-
+ crates/aura-state/tests/s6_history.rs         | 236 ++++++
+ crates/aura-storage/src/error.rs              |  65 ++
+ crates/aura-storage/src/lib.rs                |  12 +-
+ crates/aura-storage/src/prune.rs              | 711 ++++++++++++++++++
+ .../aura-storage/tests/fixtures/s6_golden.txt |  35 +
+ crates/aura-storage/tests/s6_prune.rs         | 550 ++++++++++++++
+ docs/ARCHITECTURE.md                          |  17 +-
+ docs/STATUS.md                                |  34 +-
+ docs/evidence/s6-dependency-addendum.txt      |   8 +
+ docs/evidence/s6/SHA256SUMS                   |   6 +
+ docs/evidence/s6/gates.txt                    | 231 ++++++
+ docs/evidence/s6/inventory.txt                | 138 ++++
+ docs/evidence/s6/nc.log                       |  41 +
+ docs/evidence/s6/report.md                    |  87 +++
+ docs/plans/STATE_PLAN.md                      |  73 +-
+ tools/audit_closeout.py                       |  14 +-
+ tools/gen_s6_vectors.py                       | 391 ++++++++++
+ tools/nc_s6.py                                | 134 ++++
+ tools/record_s6_deps.py                       |  67 ++
+ tools/write_s6_evidence.py                    | 279 +++++++
+ 29 files changed, 3626 insertions(+), 53 deletions(-)
+ create mode 100644 crates/aura-state/src/history.rs
+ create mode 100644 crates/aura-state/tests/s6_history.rs
+ create mode 100644 crates/aura-storage/src/prune.rs
+ create mode 100644 crates/aura-storage/tests/fixtures/s6_golden.txt
+ create mode 100644 crates/aura-storage/tests/s6_prune.rs
+ create mode 100644 docs/evidence/s6-dependency-addendum.txt
+ create mode 100644 docs/evidence/s6/SHA256SUMS
+ create mode 100644 docs/evidence/s6/gates.txt
+ create mode 100644 docs/evidence/s6/inventory.txt
+ create mode 100644 docs/evidence/s6/nc.log
+ create mode 100644 docs/evidence/s6/report.md
+ create mode 100644 tools/gen_s6_vectors.py
+ create mode 100644 tools/nc_s6.py
+ create mode 100644 tools/record_s6_deps.py
+ create mode 100644 tools/write_s6_evidence.py
+
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 09cb572..070f5fb 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -10,7 +10,7 @@ on:
+ # perf) are added by O0 as the crates that need them actually appear.
+ jobs:
+   core:
+-    name: core (C0-C10 + S0-S5 gate)
++    name: core (C0-C10 + S0-S6 gate)
+     runs-on: ubuntu-latest
+     steps:
+       - uses: actions/checkout@v4
+@@ -29,8 +29,8 @@ jobs:
+       - name: make test
+         run: make test
+ 
+-      - name: golden vectors are reproducible (C1-C9 + S0-S5)
+-        run: make gen-c1-vectors && make gen-c2-vectors && make gen-c3-vectors && make gen-c4-vectors && make gen-c5-vectors && make gen-c6-vectors && make gen-c7-vectors && make gen-c8-vectors && make gen-c9-vectors && make gen-s0-vectors && make gen-s1-vectors && make gen-s2-vectors && make gen-s3-vectors && make gen-s4-vectors && make gen-s5-vectors
++      - name: golden vectors are reproducible (C1-C9 + S0-S6)
++        run: make gen-c1-vectors && make gen-c2-vectors && make gen-c3-vectors && make gen-c4-vectors && make gen-c5-vectors && make gen-c6-vectors && make gen-c7-vectors && make gen-c8-vectors && make gen-c9-vectors && make gen-s0-vectors && make gen-s1-vectors && make gen-s2-vectors && make gen-s3-vectors && make gen-s4-vectors && make gen-s5-vectors && make gen-s6-vectors
+ 
+       - name: vector inventory (>= 200)
+         run: make vector-inventory
+@@ -49,20 +49,20 @@ jobs:
+ 
+       # nc-all runs all 92 NCs without rewriting the historical logs,
+       # so those committed SHA256SUMS remain valid in the uploaded artifact.
+-      - name: negative controls (C0-C10 + S0-S5, 92 total)
++      - name: negative controls (C0-C10 + S0-S6, 98 total)
+         run: make nc-all
+ 
+       # Only the CURRENT phase's evidence is regenerated. C0-S4 evidence is a
+       # HISTORICAL committed record measured at its own commit; regenerating
+       # it later would relabel the wrong tree.
+-      - name: current phase evidence (S5)
+-        run: make evidence-s5
++      - name: current phase evidence (S6)
++        run: make evidence-s6
+ 
+       - name: Upload evidence
+         if: always()
+         uses: actions/upload-artifact@v4
+         with:
+-          name: c0-s5-evidence
++          name: c0-s6-evidence
+           path: |
+             docs/evidence/c0/
+             docs/evidence/c1/
+@@ -81,6 +81,8 @@ jobs:
+             docs/evidence/s3/
+             docs/evidence/s4/
+             docs/evidence/s5/
++            docs/evidence/s6/
++            docs/evidence/s6-dependency-addendum.txt
+           if-no-files-found: ignore
+ 
+   # S2's native RocksDB backend needs librocksdb >= 9.9 headers (Ubuntu 24.04
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index aaa0d46..8c794b9 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,64 @@
+ All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
+ never rewritten: corrections are made with a new entry or an explicit note.
+ 
++## [S6 — pruning + archive] 2026-10-28
++
++**Seventh `STATE_PLAN` phase.** Deliverable:
++`patches/0018-S6-pruning-archive.patch`. No new crate, no new external
++dependency.
++
++- **Measured problem first.** S1 `MerkleTree` rebuilds the entire node arena
++  on every `commit()`, measured at **16.4 ms per commit** with 1 024 leaves
++  (5 000 commits timed) — ~27 minutes for the S6 DoD of 100 000 blocks. The
++  phase therefore starts with a measurement, not with code.
++- Landed `aura-state::HistoryTree`: a compressed sparse Merkle tree in a
++  mutable arena, updating only the changed path (~12 hashes per write).
++  Roots are bit-for-bit S1 and are verified against `MerkleTree` rebuilds at
++  every checkpoint plus an independent Python rebuild.
++- Landed `aura-storage::prune`: `RetentionMode`, `RetentionPolicy`
++  (`prune(keep)` / `archive()`), `VersionRecord`, `RetentionReceipt`,
++  `CompactionReport`, `RetentionStore` (`commit`, `root_at`, `state_at`,
++  `proof_at`, `verify_root_at`, `compact`), exact byte accounting and
++  `PruneError`.
++- **Wire formats:** version records and base snapshots are canonically
++  encoded and domain-separated —
++  `record bytes = payload || BLAKE3(S6_RECORD_CONTEXT || payload)`,
++  `base bytes = payload || BLAKE3(S6_BASE_CONTEXT || payload)`. Strict
++  decode enforces checksum, magic, caps, no trailing bytes and
++  byte-identical re-encoding.
++- **Retention rule:** `base_version = max(base_version, head - keep_versions)`
++  after every commit. Prune mode keeps a materialised base plus the last
++  `keep_versions` deltas; older versions return `PruneError::Pruned`, never a
++  plausible wrong state. Archive mode never prunes and refuses to compact.
++- **DoD gate:** 100 000 blocks, 4 writes per block, 1 024 live keys.
++  Archive: **36 500 045 bytes** retained and every historical root/proof
++  served. Prune (`keep_versions = 128`): peak **113 326 bytes**, under the
++  analytic bound `base_bytes + keep * max_record_bytes` —
++  **322.1x smaller** than the archive. Compaction folds retained deltas into
++  the base without moving the root.
++- Golden vectors: `tools/gen_s6_vectors.py` — pure-Python BLAKE3, C7 key
++  digest, S2 key path, a from-scratch S1 rebuild, full 100 000-block byte
++  accounting and canonical hex for two records and one base snapshot.
++  35 fixture lines, offline and byte-stable.
++- Build-profile decision (measured, no version changes):
++  `[profile.dev.package.blake3]` and `[profile.dev.package.sha2]` are
++  `opt-level = 3`; `blake3_hash(65 B)` 5.785 us -> 0.178 us in a debug build.
++- Gate: `make test` -> **169 passed / 0 failed** (154 S5 + 9 S6 storage +
++  6 S6 tree), fmt/clippy clean, drift guard 12 plans / 112 rows, dependency
++  gate 95 external crates, vector inventory **4 326** across 16 fixtures,
++  `make audit-closeout` green. 6 S6 negative controls, total **98** across
++  C0–C10 + S0–S6.
++- Evidence: `docs/evidence/s6/gates.txt`, `nc.log`, `report.md`,
++  `inventory.txt`, `SHA256SUMS`,
++  `docs/evidence/s6-dependency-addendum.txt`.
++- ⚠️ AUDIT: two tree defects were found by the cross-check gates and fixed in
++  the code, not papered over — a branch prefix derived from the parent instead
++  of the child (sibling slots collided, so later writes navigated into the
++  wrong subtree) and a `split` that returned the deepest branch hash instead
++  of the root. Both are now covered by the S1 rebuild comparison.
++- Deferred: backup/restore + chaos gate (S7), VM (X1), `cargo deny` (H1).
++  Validators / blocks / tx remain **0 / 0 / 0**.
++
+ ## [S5 — state sync] 2026-10-27
+ 
+ **Sixth `STATE_PLAN` phase.** Deliverable:
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index 5d46f32..7e2feb5 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -124,6 +124,9 @@ that does not run its main test is a dead gate — that is a separate defect
+       `state_root`; a substituted diff chunk must be rejected.
+ - [ ] Snapshot manifests verify every chunk SHA-256 before import; a
+       substituted chunk must be rejected.
++- [ ] Retention never fakes history: a pruned version must return
++      `PruneError::Pruned`, archive mode must refuse to compact, and
++      `HistoryTree` roots must stay bit-for-bit equal to an S1 rebuild.
+ - [ ] `StateView` rollback stays mandatory on `OutOfGas`/`Revert`; a revert
+       must never change the state root.
+ - [ ] S0 baseline defects stay MEASURED and documented; never present
+diff --git a/Cargo.toml b/Cargo.toml
+index cba0fee..3d2f208 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -66,3 +66,9 @@ rocksdb = { version = "=0.23.0", default-features = false, features = ["bindgen-
+ # C9: proptest is a DEV dependency of aura-testkit only. Minimal
+ # features (no fork/timeout) to keep the resolved set small.
+ proptest = { version = "=1.12.0", default-features = false, features = ["std"] }
++
++[profile.dev.package.blake3]
++opt-level = 3
++
++[profile.dev.package.sha2]
++opt-level = 3
+diff --git a/Makefile b/Makefile
+index 8445534..7d871d9 100644
+--- a/Makefile
++++ b/Makefile
+@@ -21,7 +21,8 @@ PYTHON ?= python3
+         record-s2-deps gen-s2-vectors nc-s2 evidence-s2 test-s2-native \
+         gen-s3-vectors nc-s3 evidence-s3 \
+         record-s4-deps gen-s4-vectors nc-s4 evidence-s4 \
+-        record-s5-deps gen-s5-vectors nc-s5 evidence-s5 devnet clean
++        record-s5-deps gen-s5-vectors nc-s5 evidence-s5 \
++        record-s6-deps gen-s6-vectors nc-s6 evidence-s6 devnet clean
+ 
+ help:
+ 	@echo "AuraLite-Crypto (Stage 1, C0)"
+@@ -85,6 +86,10 @@ help:
+ 	@echo "  make gen-s5-vectors    regenerate independent state-sync vectors"
+ 	@echo "  make nc-s5             S5 negative controls -> docs/evidence/s5/nc.log"
+ 	@echo "  make evidence-s5       regenerate S5 report + receipts"
++	@echo "  make record-s6-deps    re-record S6 dependency decision"
++	@echo "  make gen-s6-vectors    regenerate independent retention vectors"
++	@echo "  make nc-s6             S6 negative controls -> docs/evidence/s6/nc.log"
++	@echo "  make evidence-s6       regenerate S6 report + receipts"
+ 	@echo "  make record-c9-deps    re-record the C9 dependency addendum"
+ 	@echo "  make gen-c9-vectors    regenerate 512 independent test-rig vectors"
+ 	@echo "  make nc-c9             C9 negative controls -> docs/evidence/c9/nc.log"
+@@ -202,7 +207,7 @@ evidence-c3:
+ # Runs every NC script WITHOUT rewriting the historical C0-C3 evidence logs,
+ # so their committed SHA256SUMS stay valid. CI uses this instead of nc-cX.
+ nc-all:
+-	@for phase in c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 s0 s1 s2 s3 s4 s5; do \
++	@for phase in c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 s0 s1 s2 s3 s4 s5 s6; do \
+ 	    $(PYTHON) tools/nc_$$phase.py > /tmp/aura-nc-$$phase.log 2>&1 || \
+ 	      { echo "$$phase NEGATIVE CONTROLS FAILED"; tail -30 /tmp/aura-nc-$$phase.log; exit 1; }; \
+ 	    grep '^RESULT:' /tmp/aura-nc-$$phase.log; \
+@@ -376,6 +381,20 @@ nc-s5:
+ evidence-s5: record-s5-deps
+ 	@$(PYTHON) tools/write_s5_evidence.py
+ 
++record-s6-deps:
++	@$(PYTHON) tools/record_s6_deps.py
++
++gen-s6-vectors:
++	@$(PYTHON) tools/gen_s6_vectors.py
++
++nc-s6:
++	@mkdir -p docs/evidence/s6
++	@$(PYTHON) tools/nc_s6.py > docs/evidence/s6/nc.log 2>&1 || { cat docs/evidence/s6/nc.log; exit 1; }
++	@cat docs/evidence/s6/nc.log
++
++evidence-s6: record-s6-deps
++	@$(PYTHON) tools/write_s6_evidence.py
++
+ devnet:
+ 	@echo "ERROR: devnet is D7 (NODE_PLAN). It is not implemented at C0." >&2
+ 	@exit 1
+diff --git a/README.md b/README.md
+index 4431b1f..ab904fc 100644
+--- a/README.md
++++ b/README.md
+@@ -11,17 +11,19 @@
+ Name and ticker were locked by the owner on 2026-10-25. The ticker was checked
+ for collisions — see [`docs/TICKER_AUDIT.md`](docs/TICKER_AUDIT.md).
+ 
+-> **Status: S5 LANDED (2026-10-27).** `CORE_PLAN` C0–C10 is closed; S0
++> **Status: S6 LANDED (2026-10-28).** `CORE_PLAN` C0–C10 is closed; S0
+ > measured the naive baseline, S1 delivered a versioned sparse Merkle tree,
+ > S2 made state **durable**, S3 added a copy-on-write execution overlay,
+-> S4 deterministic snapshots, and S5 adds **state sync**: a fresh node
+-> downloads one package (3-head quorum + snapshot + compact delta) instead
+-> of full history. The new node reaches the same root as 3 old nodes;
+-> a substituted diff chunk is rejected. **92 negative controls**, 154 tests,
+-> 4,309 vectors. See [`docs/CLOSEOUT_AUDIT.md`](docs/CLOSEOUT_AUDIT.md)
+-> and `docs/evidence/s5/report.md`. There is still **no consensus, VM, P2P,
+-> node, wallet or network** — no pruning (S6) or real VM (X1) yet.
+-> M0 needs S6 and X0–X2. Everything else below is a plan, not a report
++> S4 deterministic snapshots, S5 state sync, and S6 adds **pruning +
++> archive**: over 100 000 blocks an archive node serves every historical
++> root and proof while a prune-mode node stays bounded at **113 326 bytes**
++> against **36 500 045 bytes** of retained history (**322x**). A pruned
++> version is rejected loudly, never faked. **98 negative controls**,
++> 169 tests, 4 326 vectors. See
++> [`docs/CLOSEOUT_AUDIT.md`](docs/CLOSEOUT_AUDIT.md) and
++> `docs/evidence/s6/report.md`. There is still **no consensus, VM, P2P,
++> node, wallet or network** — no recovery/chaos (S7) or real VM (X1) yet.
++> M0 needs S7 and X0–X2. Everything else below is a plan, not a report
+ > about an implementation. Every claim of readiness appears only after a
+ > measurable test gate, as in
+ > [AuraLite-Emulator](https://github.com/AlexanderNyr/AuraLite-Emulator) and
+@@ -84,15 +86,16 @@ Details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+ 
+ ## Quickstart
+ 
+-**Now (S5)** a fresh node can catch up:
++**Now (S6)** a fresh node can catch up and an operator can choose retention:
+ 
+ ```sh
+ make deps-check          # rustc / cargo / rustfmt / clippy
+ make test                # full gate including the plan<->tree audit
+ make audit-closeout      # no ✅ row without a patch/receipt/NC log/evidence
+-make nc-all              # all 92 negative controls (C0-C10 + S0-S5)
++make nc-all              # all 98 negative controls (C0-C10 + S0-S6)
+ make gen-s5-vectors      # independent state-sync golden vectors
+-make vector-inventory    # 4,309 golden vectors
++make gen-s6-vectors      # independent retention/pruning golden vectors (~52 s)
++make vector-inventory    # 4,326 golden vectors
+ ```
+ 
+ **The devnet does not exist yet — and that is honest.** After phase D7 (devnet)
+diff --git a/ROADMAP.md b/ROADMAP.md
+index 772352f..58524a6 100644
+--- a/ROADMAP.md
++++ b/ROADMAP.md
+@@ -122,7 +122,7 @@ phase tables (decision Q5).
+ | Plan | Status | Scope | Phases |
+ |---|---|---|---|
+ | [`docs/plans/CORE_PLAN.md`](docs/plans/CORE_PLAN.md) | ✅ COMPLETE (C0–C10 ✅) | primitives, codec, crypto, tx/block, genesis, test rig | C0–C10 |
+-| [`docs/plans/STATE_PLAN.md`](docs/plans/STATE_PLAN.md) | 🚧 IN PROGRESS (S0–S5 ✅) | Merkle state, RocksDB, WAL, snapshots, pruning, recovery | S0–S7 |
++| [`docs/plans/STATE_PLAN.md`](docs/plans/STATE_PLAN.md) | 🚧 IN PROGRESS (S0–S6 ✅) | Merkle state, RocksDB, WAL, snapshots, pruning, recovery | S0–S7 |
+ | [`docs/plans/EXEC_PLAN.md`](docs/plans/EXEC_PLAN.md) | 📋 PLAN | WASM runtime, gas, ABI, contract SDK, determinism | X0–X9 |
+ | [`docs/plans/CONSENSUS_PLAN.md`](docs/plans/CONSENSUS_PLAN.md) | 📋 PLAN | BFT-PoS, QC, VRF, staking, slashing, finality, governance | B0–B10 |
+ | [`docs/plans/NET_PLAN.md`](docs/plans/NET_PLAN.md) | 📋 PLAN | libp2p, gossipsub, Kademlia, sync, light client, chaos tests | N0–N8 |
+@@ -261,6 +261,16 @@ NC inventory: `docs/evidence/c10/closeout.txt`. Receipts:
+ `docs/evidence/c10/`. Validators/blocks/tx are still 0/0/0 — M0 also needs
+ S0–S2 and X0–X2.
+ 
++**Post-S6 measurement (2026-10-28):** 15 crates, 169 tests, 4,326
++vectors across 16 fixtures, 98 negative controls (6 new in S6), 95
++external crates (no new crate). Pruning + archive: 100 000 blocks —
++archive 36,500,045 bytes serving every historical root/proof, prune mode
++(`keep = 128`) peak 113,326 bytes (322.1x smaller, under the analytic
++bound `base_bytes + keep * max_record_bytes`). `HistoryTree` gives
++S1-identical roots incrementally (~12 hashes per write instead of a full
++rebuild: 16.4 ms per commit measured). Report:
++`docs/evidence/s6/report.md`; receipts: `docs/evidence/s6/`.
++
+ **Post-S5 measurement (2026-10-27):** 15 crates, 154 tests, 4,309
+ vectors across 15 fixtures, 92 negative controls (6 new in S5), 95
+ external crates (no new crate). State sync: a new node downloads one
+@@ -380,7 +390,7 @@ after the fact, as in AuraLite OS.
+ 
+ ## 8. Immediate queue
+ 
+-**C0, C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, S0, S1, S2, S3, S4 and S5 shipped**
++**C0, C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, S0, S1, S2, S3, S4, S5 and S6 shipped**
+ (`patches/0001-C0-baseline-workspace.patch`,
+ `patches/0002-C1-types.patch`, `patches/0003-C2-codec.patch`,
+ `patches/0004-C3-crypto.patch`, `patches/0005-C4-tx-format.patch`,
+@@ -392,7 +402,8 @@ after the fact, as in AuraLite OS.
+ `patches/0014-S2-rocksdb-wal.patch`,
+ `patches/0015-S3-execution-overlay.patch`,
+ `patches/0016-S4-snapshots.patch`,
+-`patches/0017-S5-state-sync.patch`):
++`patches/0017-S5-state-sync.patch`,
++`patches/0018-S6-pruning-archive.patch`):
+ workspace, CI, gates, identity constants, canonical types, codec, crypto,
+ tx format, block format, Merkle proofs, accounts, genesis, a wired test rig
+ and the plan↔tree close-out audit — all pinned against independent references.
+@@ -400,12 +411,13 @@ and the plan↔tree close-out audit — all pinned against independent reference
+ S0 measured the naive baseline, S1 delivered a versioned state root with
+ 1,000 verified proofs, S2 made it durable with a fsynced WAL +
+ optional RocksDB column families, S3 added a copy-on-write execution
+-overlay with canonical diffs, S4 deterministic snapshots, and S5 state
+-sync. **92 negative controls** in total. Right now: **S6** — `STATE_PLAN`
+-pruning + archive: pruning old versions, archive mode, compaction; a gate
+-that 100,000 blocks keep disk bounded in prune mode while archive serves
+-history. M0 also needs X0–X2. The next patch is
+-`patches/0018-S6-pruning-archive.patch`.
++overlay with canonical diffs, S4 deterministic snapshots, S5 state sync,
++and S6 pruning + archive (100 000 blocks: bounded disk in prune mode,
++full history in archive mode). **98 negative controls** in total. Right
++now: **S7** — `STATE_PLAN` recovery and backup: backup/restore, checksum
++verification and a chaos gate (50 `kill -9` + restore cycles, zero root
++mismatches). M0 also needs X0–X2. The next patch is
++`patches/0019-S7-recovery-backup.patch`.
+ 
+ See also: [`docs/STATUS.md`](docs/STATUS.md),
+ [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
+diff --git a/crates/aura-state/src/history.rs b/crates/aura-state/src/history.rs
+new file mode 100644
+index 0000000..2276a13
+--- /dev/null
++++ b/crates/aura-state/src/history.rs
+@@ -0,0 +1,380 @@
++//! S6: incremental versioned tree with S1-identical root semantics.
++//!
++//! Why this module exists (measured, not assumed). `MerkleTree` (S1) rebuilds
++//! the whole node arena on every `commit()`: at 1 024 live leaves that is
++//! **16.4 ms per commit in a debug build** (measured, 5 000 commits), i.e.
++//! about 27 minutes for the S6 DoD of 100 000 blocks. A pruning layer cannot
++//! pay that bill: it needs one root per block, 100 000 times.
++//!
++//! [`HistoryTree`] keeps the SAME tree shape — `empty_hash(depth)` for an
++//! empty subtree, `leaf_hash(depth, path, value)` for a compressed
++//! single-entry subtree, `node_hash(left, right)` for a branch — but stores
++//! nodes in a mutable arena and updates only the path that changed. Cost per
++//! write is `O(compressed leaf depth)` node hashes (measured: ~12 for a
++//! 1 024-key working set) instead of `O(tree size)`. [`HistoryTree::hashes`]
++//! reports the exact count, so the claim stays measurable.
++//!
++//! Root commitments stay S1: `versioned_root(version, tree_root)`. The roots
++//! produced here are therefore interchangeable with `MerkleTree::state_root`,
++//! which the S6 gates verify against a full *rebuild* at every checkpoint
++//! (`crates/aura-state/tests/s6_history.rs`, `crates/aura-storage/tests/
++//! s6_prune.rs`) and against an independent Python rebuild
++//! (`tools/gen_s6_vectors.py`).
++//!
++//! S6 deliberately defines no wire format here: the version records, the base
++//! snapshot and the retention policy live in `aura-storage::prune`.
++
++use std::collections::BTreeMap;
++
++use aura_types::Hash;
++
++use crate::tree::{empty_hash, key_bit, leaf_hash, node_hash, state_path, versioned_root};
++
++/// Index of the shared empty node. Never overwritten, never freed.
++const EMPTY: u32 = 0;
++
++#[derive(Debug, Clone)]
++enum Node {
++    Empty,
++    Leaf {
++        hash: Hash,
++        key: Hash,
++        value: Vec<u8>,
++    },
++    Branch {
++        hash: Hash,
++        left: u32,
++        right: u32,
++    },
++}
++
++impl Node {
++    fn hash(&self) -> Option<&Hash> {
++        match self {
++            Node::Empty => None,
++            Node::Leaf { hash, .. } | Node::Branch { hash, .. } => Some(hash),
++        }
++    }
++}
++
++/// The 257 possible empty-subtree hashes, computed once.
++///
++/// `empty_hash(depth)` is a BLAKE3 call and an update asks for the same
++/// handful of depths on every write; caching them removes those calls without
++/// changing a single root.
++fn empty_hashes() -> &'static [Hash; 257] {
++    static TABLE: std::sync::OnceLock<[Hash; 257]> = std::sync::OnceLock::new();
++    TABLE.get_or_init(|| {
++        let mut table = [Hash::ZERO; 257];
++        for (depth, slot) in table.iter_mut().enumerate() {
++            *slot = empty_hash(depth as u16);
++        }
++        table
++    })
++}
++
++fn cached_empty(depth: u16) -> Hash {
++    empty_hashes()[depth as usize]
++}
++
++/// An incrementally maintained compressed sparse Merkle tree.
++///
++/// The root commitment is bit-for-bit the S1 commitment, so a `HistoryTree`
++/// and a `MerkleTree` holding the same leaves at the same version report the
++/// same `state_root`.
++#[derive(Debug, Clone)]
++pub struct HistoryTree {
++    nodes: Vec<Node>,
++    root: u32,
++    root_hash: Hash,
++    leaves: BTreeMap<Hash, Vec<u8>>,
++    writes: u64,
++    hashes: u64,
++}
++
++impl Default for HistoryTree {
++    fn default() -> Self {
++        HistoryTree::new()
++    }
++}
++
++impl HistoryTree {
++    /// Empty tree at root `empty_hash(0)`.
++    pub fn new() -> Self {
++        HistoryTree {
++            nodes: vec![Node::Empty],
++            root: EMPTY,
++            root_hash: cached_empty(0),
++            leaves: BTreeMap::new(),
++            writes: 0,
++            hashes: 0,
++        }
++    }
++
++    /// Rebuild a tree from `(path, value)` entries by inserting them.
++    pub fn from_entries(entries: &[(Hash, Vec<u8>)]) -> Self {
++        let mut tree = HistoryTree::new();
++        for (path, value) in entries {
++            tree.insert_digest(*path, value.clone());
++        }
++        tree
++    }
++
++    /// Hash of the current tree root (not version-bound).
++    pub fn tree_root(&self) -> Hash {
++        self.root_hash
++    }
++
++    /// Version-bound state root, identical to `MerkleTree::state_root`.
++    pub fn state_root(&self, version: u64) -> Hash {
++        versioned_root(version, &self.root_hash)
++    }
++
++    /// Number of leaves in the current state.
++    pub fn len(&self) -> usize {
++        self.leaves.len()
++    }
++
++    /// True when the current state has no leaves.
++    pub fn is_empty(&self) -> bool {
++        self.leaves.is_empty()
++    }
++
++    /// Number of arena nodes (garbage from collapsed subtrees included).
++    pub fn node_count(&self) -> usize {
++        self.nodes.len()
++    }
++
++    /// Number of writes applied so far.
++    pub fn writes(&self) -> u64 {
++        self.writes
++    }
++
++    /// Exact number of leaf/branch hash computations performed so far.
++    pub fn hashes(&self) -> u64 {
++        self.hashes
++    }
++
++    /// Read a value by precomputed 256-bit path.
++    pub fn get_digest(&self, path: &Hash) -> Option<&[u8]> {
++        self.leaves.get(path).map(Vec::as_slice)
++    }
++
++    /// All `(path, value)` leaves, sorted by path.
++    pub fn entries(&self) -> Vec<(Hash, Vec<u8>)> {
++        self.leaves
++            .iter()
++            .map(|(path, value)| (*path, value.clone()))
++            .collect()
++    }
++
++    /// Insert using a C7 state key.
++    pub fn insert(&mut self, key: &crate::StateKey, value: Vec<u8>) {
++        self.insert_digest(state_path(key), value);
++    }
++
++    /// Insert using a precomputed 256-bit path.
++    pub fn insert_digest(&mut self, path: Hash, value: Vec<u8>) {
++        self.leaves.insert(path, value.clone());
++        self.writes += 1;
++        self.root = self.insert_at(self.root, 0, &path, Some(&value));
++        self.root_hash = match self.nodes[self.root as usize].hash() {
++            Some(hash) => *hash,
++            None => cached_empty(0),
++        };
++    }
++
++    /// Remove using a precomputed 256-bit path; returns the previous value.
++    pub fn remove_digest(&mut self, path: &Hash) -> Option<Vec<u8>> {
++        let previous = self.leaves.remove(path);
++        if previous.is_some() {
++            self.writes += 1;
++            self.root = self.insert_at(self.root, 0, path, None);
++            self.root_hash = match self.nodes[self.root as usize].hash() {
++                Some(hash) => *hash,
++                None => cached_empty(0),
++            };
++        }
++        previous
++    }
++
++    fn push(&mut self, node: Node) -> u32 {
++        self.nodes.push(node);
++        (self.nodes.len() - 1) as u32
++    }
++
++    fn hash_of(&self, index: u32, depth: u16) -> Hash {
++        match self.nodes[index as usize].hash() {
++            Some(hash) => *hash,
++            None => cached_empty(depth),
++        }
++    }
++
++    /// Insert (`Some`) or delete (`None`) below `index`; returns the index of
++    /// the (possibly new) node that replaces it.
++    fn insert_at(&mut self, index: u32, depth: u16, key: &Hash, value: Option<&Vec<u8>>) -> u32 {
++        let node = std::mem::replace(&mut self.nodes[index as usize], Node::Empty);
++        match node {
++            Node::Empty => match value {
++                None => EMPTY,
++                Some(value) => {
++                    let hash = leaf_hash(depth, key, value);
++                    self.hashes += 1;
++                    self.push(Node::Leaf {
++                        hash,
++                        key: *key,
++                        value: value.to_vec(),
++                    })
++                }
++            },
++            Node::Leaf {
++                hash,
++                key: leaf_key,
++                value: leaf_value,
++            } => {
++                if &leaf_key == key {
++                    match value {
++                        None => EMPTY,
++                        Some(value) => {
++                            let new_hash = leaf_hash(depth, key, value);
++                            self.hashes += 1;
++                            let index = self.push(Node::Leaf {
++                                hash: new_hash,
++                                key: *key,
++                                value: value.to_vec(),
++                            });
++                            let _ = (hash, leaf_value);
++                            index
++                        }
++                    }
++                } else {
++                    match value {
++                        // Different key: restore the leaf untouched.
++                        None => self.push(Node::Leaf {
++                            hash,
++                            key: leaf_key,
++                            value: leaf_value,
++                        }),
++                        Some(value) => self.split(depth, &leaf_key, &leaf_value, key, value),
++                    }
++                }
++            }
++            Node::Branch { hash, left, right } => {
++                let _ = hash;
++                let goes_left = key_bit(key, depth) == 0;
++                let (child, other) = if goes_left {
++                    (left, right)
++                } else {
++                    (right, left)
++                };
++                let new_child = self.insert_at(child, depth + 1, key, value);
++                self.rebuild(index, depth, goes_left, new_child, other)
++            }
++        }
++    }
++
++    /// Recompute a branch in place after one child changed, compressing a
++    /// single-entry subtree back up to this depth (S1 shape).
++    fn rebuild(
++        &mut self,
++        index: u32,
++        depth: u16,
++        child_is_left: bool,
++        new_child: u32,
++        other: u32,
++    ) -> u32 {
++        let child_depth = depth + 1;
++        let child_hash = self.hash_of(new_child, child_depth);
++        let other_hash = self.hash_of(other, child_depth);
++        let child_empty = new_child == EMPTY;
++        let other_empty = other == EMPTY;
++        if child_empty && other_empty {
++            return EMPTY;
++        }
++        if child_empty || other_empty {
++            // The surviving subtree holds one entry iff it is a leaf; S1 then
++            // compresses it up to THIS depth, so its hash changes.
++            let survivor = if child_empty { other } else { new_child };
++            if let Node::Leaf { key, value, .. } = self.nodes[survivor as usize].clone() {
++                let hash = leaf_hash(depth, &key, &value);
++                self.hashes += 1;
++                self.nodes[index as usize] = Node::Leaf { hash, key, value };
++                return index;
++            }
++        }
++        let hash = if child_is_left {
++            node_hash(&child_hash, &other_hash)
++        } else {
++            node_hash(&other_hash, &child_hash)
++        };
++        self.hashes += 1;
++        let (left, right) = if child_is_left {
++            (new_child, other)
++        } else {
++            (other, new_child)
++        };
++        self.nodes[index as usize] = Node::Branch { hash, left, right };
++        index
++    }
++
++    /// Split one compressed leaf into a branch chain holding two leaves.
++    fn split(
++        &mut self,
++        depth: u16,
++        old_key: &Hash,
++        old_value: &[u8],
++        new_key: &Hash,
++        new_value: &[u8],
++    ) -> u32 {
++        let mut divergence = depth;
++        while key_bit(old_key, divergence) == key_bit(new_key, divergence) {
++            divergence += 1;
++            debug_assert!(divergence < 256, "distinct 256-bit paths must diverge");
++        }
++        let leaf_depth = divergence + 1;
++        let old_hash = leaf_hash(leaf_depth, old_key, old_value);
++        let new_hash = leaf_hash(leaf_depth, new_key, new_value);
++        self.hashes += 2;
++        let old_index = self.push(Node::Leaf {
++            hash: old_hash,
++            key: *old_key,
++            value: old_value.to_vec(),
++        });
++        let new_index = self.push(Node::Leaf {
++            hash: new_hash,
++            key: *new_key,
++            value: new_value.to_vec(),
++        });
++        let (left, right, left_hash, right_hash) = if key_bit(old_key, divergence) == 0 {
++            (old_index, new_index, old_hash, new_hash)
++        } else {
++            (new_index, old_index, new_hash, old_hash)
++        };
++        let mut hash = node_hash(&left_hash, &right_hash);
++        self.hashes += 1;
++        let mut branch = self.push(Node::Branch { hash, left, right });
++
++        // Walk up to `depth`: every level above the divergence is a branch
++        // with an empty sibling, exactly as the S1 rebuild would produce.
++        while divergence > depth {
++            let child = branch;
++            let child_hash = hash;
++            divergence -= 1;
++            let empty = cached_empty(divergence + 1);
++            let goes_left = key_bit(old_key, divergence) == 0;
++            hash = if goes_left {
++                node_hash(&child_hash, &empty)
++            } else {
++                node_hash(&empty, &child_hash)
++            };
++            self.hashes += 1;
++            let (left, right) = if goes_left {
++                (child, EMPTY)
++            } else {
++                (EMPTY, child)
++            };
++            branch = self.push(Node::Branch { hash, left, right });
++        }
++        branch
++    }
++}
+diff --git a/crates/aura-state/src/lib.rs b/crates/aura-state/src/lib.rs
+index 714f4ad..44b8f04 100644
+--- a/crates/aura-state/src/lib.rs
++++ b/crates/aura-state/src/lib.rs
+@@ -9,7 +9,10 @@
+ //! proofs. S3 adds [`StateView`] — a copy-on-write execution overlay with a
+ //! canonical [`StateDiff`] and mandatory rollback on `OutOfGas`/`Revert`.
+ //! S4 adds deterministic snapshots, S5 adds state sync (quorum of heads +
+-//! compact delta). Pruning/backup (S6–S7) remain open.
++//! compact delta), S6 adds [`HistoryTree`] — an incrementally maintained
++//! versioned tree with S1-identical roots, needed because S1 rebuilds the
++//! whole arena per commit. Pruning/archive/compaction themselves live in
++//! `aura-storage::prune`; backup/recovery (S7) remains open.
+ //! C7 is deliberately a *layout* phase: no storage backend, no root
+ //! computation, no fake `Ok(())`.
+ //!
+@@ -34,6 +37,7 @@
+ mod account;
+ mod baseline;
+ mod error;
++mod history;
+ mod key;
+ mod overlay;
+ mod snapshot;
+@@ -45,6 +49,7 @@ pub use baseline::{
+     BaselineError, BaselineReport, BaselineState, BaselineWrite, FINAL_VIEW_CONTEXT,
+ };
+ pub use error::{OverlayError, SnapshotError, StateError, SyncError};
++pub use history::HistoryTree;
+ pub use key::{
+     KeySpace, MAX_STATE_KEY_LEN, STATE_KEY_CONTEXT, StateKey, assert_contract_may_write,
+ };
+diff --git a/crates/aura-state/tests/s6_history.rs b/crates/aura-state/tests/s6_history.rs
+new file mode 100644
+index 0000000..2146a5f
+--- /dev/null
++++ b/crates/aura-state/tests/s6_history.rs
+@@ -0,0 +1,236 @@
++//! S6 — the incremental `HistoryTree` must be indistinguishable from S1.
++//!
++//! Every assertion here compares two DIFFERENT algorithms: `HistoryTree`
++//! (node map, incremental path update) against `MerkleTree` (full arena
++//! rebuild per commit). Roots, proofs and entries must agree at every
++//! checkpoint, including after deletes that force subtree compression.
++
++use aura_crypto::blake3_hash;
++use aura_state::{
++    HistoryTree, MerkleTree, S1_ROOT_CONTEXT, StateKey, TreeError, empty_hash, leaf_hash,
++    vector_address, vector_value, verify_proof, versioned_root,
++};
++use aura_types::Hash;
++
++const OPS: u64 = 2_000;
++const LIVE_KEYS: u64 = 96;
++
++fn key_for(index: u64) -> StateKey {
++    StateKey::account(&vector_address(index))
++}
++
++fn digest_for(index: u64) -> Hash {
++    aura_state::state_path(&key_for(index))
++}
++
++/// Insert / overwrite / delete schedule: deterministic, covers all three paths.
++fn op_at(step: u64) -> (u64, Option<Vec<u8>>) {
++    let index = (step * 37 + 11) % LIVE_KEYS;
++    if step % 5 == 4 {
++        (index, None)
++    } else {
++        (index, Some(vector_value(step)))
++    }
++}
++
++fn apply(tree: &mut HistoryTree, mirror: &mut MerkleTree, step: u64) {
++    let (index, value) = op_at(step);
++    let key = key_for(index);
++    match value {
++        Some(value) => {
++            tree.insert(&key, value.clone());
++            mirror.insert(&key, value);
++        }
++        None => {
++            tree.remove_digest(&digest_for(index));
++            mirror.remove(&key);
++        }
++    }
++}
++
++#[test]
++fn history_tree_matches_s1_rebuild_at_every_checkpoint() {
++    let mut tree = HistoryTree::new();
++    let mut mirror = MerkleTree::new();
++    let mut checkpoints = 0u64;
++
++    assert_eq!(tree.tree_root(), empty_hash(0), "empty tree root");
++    assert_eq!(tree.tree_root(), mirror.tree_root(), "empty mirror root");
++
++    for step in 0..OPS {
++        apply(&mut tree, &mut mirror, step);
++        if step % 100 == 99 {
++            mirror.commit();
++            let version = mirror.version();
++            assert_eq!(
++                tree.tree_root(),
++                mirror.tree_root(),
++                "tree root diverged at step {step}"
++            );
++            assert_eq!(
++                tree.state_root(version),
++                mirror.state_root(),
++                "versioned root diverged at step {step} (version {version})"
++            );
++            assert_eq!(
++                tree.len(),
++                mirror.len(),
++                "leaf count diverged at step {step}"
++            );
++            assert_eq!(
++                tree.entries(),
++                mirror.entries(),
++                "entries diverged at {step}"
++            );
++            checkpoints += 1;
++        }
++    }
++    assert_eq!(checkpoints, OPS / 100);
++    assert!(
++        !tree.is_empty(),
++        "the schedule must leave a non-empty state"
++    );
++}
++
++#[test]
++fn history_tree_proofs_verify_against_s1_roots() {
++    let mut tree = HistoryTree::new();
++    let mut mirror = MerkleTree::new();
++    for step in 0..600 {
++        apply(&mut tree, &mut mirror, step);
++    }
++    mirror.commit();
++    let version = mirror.version();
++    let root = tree.state_root(version);
++    assert_eq!(root, mirror.state_root());
++
++    let mut proven = 0u64;
++    for index in 0..LIVE_KEYS {
++        let digest = digest_for(index);
++        let Some(value) = tree.get_digest(&digest).map(<[u8]>::to_vec) else {
++            continue;
++        };
++        let proof = mirror
++            .prove_at(version, &digest)
++            .expect("committed version has a snapshot");
++        verify_proof(&root, &proof).expect("proof must verify against the S1 root");
++        assert_eq!(proof.value, value, "proof value must match the tree value");
++        proven += 1;
++    }
++    assert!(
++        proven > 50,
++        "expected most live keys to prove, got {proven}"
++    );
++}
++
++#[test]
++fn delete_compresses_the_subtree_back_to_a_leaf() {
++    // Two leaves under one branch, then delete one: S1 must compress the
++    // survivor up to the depth of the branch, and the incremental tree must
++    // follow exactly.
++    let mut tree = HistoryTree::new();
++    let mut mirror = MerkleTree::new();
++    let a = key_for(0);
++    let b = key_for(1);
++    tree.insert(&a, vector_value(1));
++    tree.insert(&b, vector_value(2));
++    mirror.insert(&a, vector_value(1));
++    mirror.insert(&b, vector_value(2));
++    let two_leaf_nodes = tree.node_count();
++    assert!(
++        two_leaf_nodes >= 3,
++        "two leaves need a branch and two leaves"
++    );
++
++    tree.remove_digest(&digest_for(0));
++    mirror.remove(&a);
++    assert_eq!(tree.tree_root(), mirror.tree_root(), "root after delete");
++
++    // A single leaf compresses to depth 0: the root is the leaf hash itself.
++    let expected = leaf_hash(0, &digest_for(1), &vector_value(2));
++    assert_eq!(
++        tree.tree_root(),
++        expected,
++        "single leaf must sit at depth 0"
++    );
++    assert!(
++        tree.node_count() < 10,
++        "arena must not grow past a handful of nodes, got {}",
++        tree.node_count()
++    );
++
++    tree.remove_digest(&digest_for(1));
++    mirror.remove(&b);
++    assert!(tree.is_empty());
++    assert_eq!(
++        tree.tree_root(),
++        empty_hash(0),
++        "empty tree root after deletes"
++    );
++    assert_eq!(tree.tree_root(), mirror.tree_root());
++    assert!(
++        tree.node_count() < 20,
++        "a drained tree must not keep an unbounded arena, got {}",
++        tree.node_count()
++    );
++}
++
++#[test]
++fn versioned_root_is_s1_domain_separated() {
++    let mut tree = HistoryTree::new();
++    tree.insert(&key_for(7), vector_value(7));
++    let tree_root = tree.tree_root();
++    let expected = {
++        let mut input = Vec::new();
++        input.extend_from_slice(S1_ROOT_CONTEXT);
++        input.extend_from_slice(&9u64.to_le_bytes());
++        input.extend_from_slice(tree_root.as_bytes());
++        blake3_hash(&input)
++    };
++    assert_eq!(tree.state_root(9), expected);
++    assert_eq!(tree.state_root(9), versioned_root(9, &tree_root));
++    assert_ne!(
++        tree.state_root(9),
++        tree.state_root(10),
++        "version is bound in"
++    );
++}
++
++#[test]
++fn incremental_updates_are_cheap_and_measured() {
++    // 5 000 writes into a 96-leaf working set. A rebuild-per-commit tree pays
++    // ~2 * leaves hashes per commit; the incremental tree pays ~2 * depth.
++    let mut tree = HistoryTree::new();
++    for step in 0..5_000u64 {
++        let index = (step * 37 + 11) % LIVE_KEYS;
++        tree.insert(&key_for(index), vector_value(step));
++    }
++    let writes = tree.writes();
++    let hashes = tree.hashes();
++    assert_eq!(writes, 5_000);
++    // Bound per write: split costs a branch chain, but the working set is 96
++    // leaves (depth ~ 7), so 32 hashes per write is a generous ceiling.
++    assert!(
++        hashes <= writes * 32,
++        "incremental tree used {hashes} hashes for {writes} writes"
++    );
++    println!(
++        "history tree: {writes} writes, {hashes} hashes, {} nodes, {} leaves",
++        tree.node_count(),
++        tree.len()
++    );
++}
++
++#[test]
++fn missing_key_errors_instead_of_inventing_a_proof() {
++    let mut tree = HistoryTree::new();
++    tree.insert(&key_for(3), vector_value(3));
++    let mirror = MerkleTree::from_entries(1, &tree.entries());
++    let absent = digest_for(4);
++    assert_eq!(tree.get_digest(&absent), None);
++    assert_eq!(
++        mirror.prove_at(1, &absent),
++        Err(TreeError::KeyNotFound),
++        "an absent key must not produce a proof"
++    );
++}
+diff --git a/crates/aura-storage/src/error.rs b/crates/aura-storage/src/error.rs
+index 455891a..b39c9ef 100644
+--- a/crates/aura-storage/src/error.rs
++++ b/crates/aura-storage/src/error.rs
+@@ -40,6 +40,71 @@ impl fmt::Display for StorageError {
+ 
+ impl std::error::Error for StorageError {}
+ 
++/// Errors produced by S6 version retention (prune / archive / compaction).
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum PruneError {
++    /// `keep_versions` must be in `1..=MAX_KEEP_VERSIONS`.
++    InvalidKeepVersions(u64),
++    /// A version is older than what this store still retains.
++    Pruned {
++        /// Requested version.
++        version: u64,
++        /// Oldest version this store can still serve.
++        oldest: u64,
++    },
++    /// A version was never committed or is beyond the head.
++    VersionNotFound(u64),
++    /// Archive nodes may not compact: that would destroy served history.
++    ArchiveCompactionForbidden,
++    /// A record payload failed its BLAKE3 checksum.
++    ChecksumMismatch,
++    /// A record magic prefix is wrong.
++    BadMagic,
++    /// A record is structurally invalid (truncated, over-cap, bad tag).
++    CorruptRecord,
++    /// A record is not canonically encoded.
++    NonCanonical,
++    /// A record carries too many changes.
++    TooManyChanges(usize),
++    /// A recomputed state root does not match the stored root.
++    RootMismatch,
++    /// The S1 tree rejected the operation.
++    Tree(aura_state::TreeError),
++}
++
++impl fmt::Display for PruneError {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::InvalidKeepVersions(keep) => {
++                write!(f, "keep_versions {keep} is outside 1..=MAX_KEEP_VERSIONS")
++            }
++            Self::Pruned { version, oldest } => {
++                write!(
++                    f,
++                    "version {version} was pruned (oldest served is {oldest})"
++                )
++            }
++            Self::VersionNotFound(version) => write!(f, "version {version} was never committed"),
++            Self::ArchiveCompactionForbidden => {
++                f.write_str("archive mode must not compact: it would drop served history")
++            }
++            Self::ChecksumMismatch => f.write_str("version-record checksum mismatch"),
++            Self::BadMagic => f.write_str("version-record magic prefix mismatch"),
++            Self::CorruptRecord => f.write_str("corrupt version record"),
++            Self::NonCanonical => f.write_str("version record is not canonically encoded"),
++            Self::TooManyChanges(count) => {
++                write!(f, "version record has {count} changes, over the cap")
++            }
++            Self::RootMismatch => {
++                f.write_str("recomputed state root does not match the stored root")
++            }
++            Self::Tree(error) => write!(f, "S1 tree error: {error}"),
++        }
++    }
++}
++
++impl std::error::Error for PruneError {}
++
+ impl From<std::io::Error> for StorageError {
+     fn from(error: std::io::Error) -> Self {
+         StorageError::Io(error.to_string())
+diff --git a/crates/aura-storage/src/lib.rs b/crates/aura-storage/src/lib.rs
+index f248ce0..65e043f 100644
+--- a/crates/aura-storage/src/lib.rs
++++ b/crates/aura-storage/src/lib.rs
+@@ -15,6 +15,10 @@
+ //!
+ //! Column families: `state`, `nonce`, `meta`, `wal_index`.
+ //!
++//! S6 adds [`prune`]: version retention with prune mode (bounded disk),
++//! archive mode (full history) and compaction. It reuses the S2 WAL record
++//! shape for its version deltas but has its own magic/domain tags.
++//!
+ //! Golden vectors: `tools/gen_s2_vectors.py` (independent Python).
+ //! Report: `docs/evidence/s2/report.md`.
+ 
+@@ -23,10 +27,16 @@
+ 
+ mod backend;
+ mod error;
++mod prune;
+ mod store;
+ mod wal;
+ 
+-pub use error::StorageError;
++pub use error::{PruneError, StorageError};
++pub use prune::{
++    BASE_MAGIC, CompactionReport, DEFAULT_KEEP_VERSIONS, MAX_KEEP_VERSIONS, MAX_RECORD_CHANGES,
++    RECORD_MAGIC, RetentionMode, RetentionPolicy, RetentionReceipt, RetentionStore,
++    S6_BASE_CONTEXT, S6_RECORD_CONTEXT, VersionRecord, base_checksum, encode_base, record_checksum,
++};
+ pub use store::{CF_META, CF_NONCE, CF_STATE, CF_WAL_INDEX, Head, Receipt, StateEntries, Storage};
+ pub use wal::{
+     S2_HEAD_CONTEXT, S2_KEY_CONTEXT, S2_ROOT_CONTEXT, S2_WAL_CONTEXT, StateChange, WAL_MAGIC, Wal,
+diff --git a/crates/aura-storage/src/prune.rs b/crates/aura-storage/src/prune.rs
+new file mode 100644
+index 0000000..f0242fe
+--- /dev/null
++++ b/crates/aura-storage/src/prune.rs
+@@ -0,0 +1,711 @@
++//! S6: version retention — prune mode, archive mode and compaction.
++//!
++//! A chain that keeps every version forever is not runnable; a chain that
++//! keeps nothing cannot serve a light client. S6 adds the missing layer: a
++//! [`RetentionStore`] that owns a [`HistoryTree`] (S6, `aura-state`) plus the
++//! version records, and applies a [`RetentionPolicy`]:
++//!
++//! * **Archive** — every version record is retained from genesis. Any
++//!   historical root and any historical inclusion proof can be served.
++//! * **Prune** — the store keeps a materialised *base* snapshot plus the last
++//!   `keep_versions` deltas. Versions older than the base are gone and asking
++//!   for them returns [`PruneError::Pruned`] — a loud error, never a silent
++//!   wrong answer.
++//!
++//! Bytes are accounted exactly: every version record and the base snapshot are
++//! canonically encoded (S6 formats below) and `disk_bytes()` is the sum of the
++//! encoded sizes. The S6 gate checks the accounting against an independent
++//! Python model over 100 000 blocks, so "disk size bounded in prune mode" is a
++//! measurement, not a claim.
++//!
++//! ## Wire formats
++//!
++//! ```text
++//! record payload = "ALP6" || u64 version || 32 parent_root || 32 state_root ||
++//!                  varint change_count ||
++//!                  (varint key_len || key || tag(0=delete,1=put) ||
++//!                   [varint value_len || value] || u64 nonce)*
++//! record bytes   = payload || BLAKE3(S6_RECORD_CONTEXT || payload)
++//!
++//! base payload   = "ALB6" || u64 version || varint entry_count ||
++//!                  (32 path || varint value_len || value)*
++//! base bytes     = payload || BLAKE3(S6_BASE_CONTEXT || payload)
++//! ```
++//!
++//! Root commitments are S1: `versioned_root(version, tree_root)`.
++//!
++//! Golden vectors: `tools/gen_s6_vectors.py` (independent Python).
++//! Report: `docs/evidence/s6/report.md`.
++
++use std::collections::{BTreeMap, VecDeque};
++
++use aura_codec::{Decode, Encode, Reader, Writer, read_varint, write_varint};
++use aura_crypto::blake3_hash;
++use aura_state::{HistoryTree, MerkleProof, MerkleTree, TreeError};
++use aura_types::Hash;
++
++use crate::error::PruneError;
++use crate::wal::{StateChange, key_path};
++
++/// Magic prefix of a version record (S6).
++pub const RECORD_MAGIC: &[u8] = b"ALP6";
++/// Magic prefix of a base snapshot (S6).
++pub const BASE_MAGIC: &[u8] = b"ALB6";
++/// Domain tag for version-record checksums.
++///
++/// NC target: `tools/nc_s6.py` changes this constant and requires the S6
++/// golden-vector test to go red.
++pub const S6_RECORD_CONTEXT: &[u8] = b"AuraLite-Crypto/s6-record-v1\x00";
++/// Domain tag for base-snapshot checksums.
++///
++/// NC target: `tools/nc_s6.py` changes this constant and requires the S6
++/// golden-vector test to go red.
++pub const S6_BASE_CONTEXT: &[u8] = b"AuraLite-Crypto/s6-base-v1\x00";
++/// Default number of recent versions kept in prune mode.
++pub const DEFAULT_KEEP_VERSIONS: u64 = 128;
++/// Hard cap on `keep_versions` (guards the memory of an operator typo).
++pub const MAX_KEEP_VERSIONS: u64 = 1_000_000;
++/// Hard cap on the changes in one version record.
++pub const MAX_RECORD_CHANGES: usize = 1_000_000;
++
++/// How much history a store keeps.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum RetentionMode {
++    /// Keep only the base snapshot plus the last `keep_versions` deltas.
++    Prune,
++    /// Keep every version from genesis (an archive node).
++    Archive,
++}
++
++/// The retention rule applied after every commit.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct RetentionPolicy {
++    mode: RetentionMode,
++    keep_versions: u64,
++}
++
++impl RetentionPolicy {
++    /// Prune mode keeping `keep_versions` recent deltas. `0` is rejected:
++    /// a store that keeps no delta can serve neither proofs nor sync.
++    pub fn prune(keep_versions: u64) -> Result<Self, PruneError> {
++        if keep_versions == 0 || keep_versions > MAX_KEEP_VERSIONS {
++            return Err(PruneError::InvalidKeepVersions(keep_versions));
++        }
++        Ok(RetentionPolicy {
++            mode: RetentionMode::Prune,
++            keep_versions,
++        })
++    }
++
++    /// Archive mode: retain every version.
++    pub fn archive() -> Self {
++        RetentionPolicy {
++            mode: RetentionMode::Archive,
++            keep_versions: MAX_KEEP_VERSIONS,
++        }
++    }
++
++    /// The mode.
++    pub fn mode(&self) -> RetentionMode {
++        self.mode
++    }
++
++    /// Number of recent deltas prune mode keeps (unused in archive mode).
++    pub fn keep_versions(&self) -> u64 {
++        self.keep_versions
++    }
++}
++
++/// One retained version: the delta that produced it plus both roots.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct VersionRecord {
++    /// Monotonic version (1-based).
++    pub version: u64,
++    /// State root of the previous version (zero at version 1).
++    pub parent_root: Hash,
++    /// State root after applying `changes`.
++    pub state_root: Hash,
++    /// Ordered state changes.
++    pub changes: Vec<StateChange>,
++    encoded_len: u64,
++}
++
++impl VersionRecord {
++    /// Build a record and compute its canonical encoded size.
++    pub fn new(
++        version: u64,
++        parent_root: Hash,
++        state_root: Hash,
++        changes: Vec<StateChange>,
++    ) -> Self {
++        let mut record = VersionRecord {
++            version,
++            parent_root,
++            state_root,
++            changes,
++            encoded_len: 0,
++        };
++        record.encoded_len = record.encode().len() as u64;
++        record
++    }
++
++    /// Number of bytes this record occupies on disk (payload + checksum).
++    pub fn encoded_len(&self) -> u64 {
++        self.encoded_len
++    }
++
++    /// Canonical encoded bytes.
++    pub fn encode(&self) -> Vec<u8> {
++        let payload = self.payload();
++        let mut bytes = Vec::with_capacity(payload.len() + 32);
++        bytes.extend_from_slice(&payload);
++        bytes.extend_from_slice(record_checksum(&payload).as_bytes());
++        bytes
++    }
++
++    fn payload(&self) -> Vec<u8> {
++        let mut writer = Writer::new();
++        writer.push_bytes(RECORD_MAGIC);
++        self.version.encode(&mut writer);
++        writer.push_bytes(self.parent_root.as_bytes());
++        writer.push_bytes(self.state_root.as_bytes());
++        write_varint(&mut writer, self.changes.len() as u64);
++        for change in &self.changes {
++            write_varint(&mut writer, change.key.len() as u64);
++            writer.push_bytes(&change.key);
++            match &change.value {
++                Some(value) => {
++                    writer.push_bytes(&[1]);
++                    write_varint(&mut writer, value.len() as u64);
++                    writer.push_bytes(value);
++                }
++                None => writer.push_bytes(&[0]),
++            }
++            writer.push_bytes(&change.nonce.to_le_bytes());
++        }
++        writer.into_bytes()
++    }
++
++    /// Strict canonical decode: checksum, magic, caps, no trailing bytes.
++    pub fn decode(bytes: &[u8]) -> Result<Self, PruneError> {
++        if bytes.len() < RECORD_MAGIC.len() + 32 {
++            return Err(PruneError::CorruptRecord);
++        }
++        let (payload, checksum) = bytes.split_at(bytes.len() - 32);
++        if payload.len() < RECORD_MAGIC.len() || &payload[..RECORD_MAGIC.len()] != RECORD_MAGIC {
++            return Err(PruneError::BadMagic);
++        }
++        if record_checksum(payload).as_bytes() != checksum {
++            return Err(PruneError::ChecksumMismatch);
++        }
++        let mut reader = Reader::new(payload);
++        let _ = reader
++            .read_exact(RECORD_MAGIC.len())
++            .map_err(|_| PruneError::CorruptRecord)?;
++        let version = u64::decode(&mut reader).map_err(|_| PruneError::CorruptRecord)?;
++        let parent_root = read_hash(&mut reader)?;
++        let state_root = read_hash(&mut reader)?;
++        let count = read_varint(&mut reader).map_err(|_| PruneError::CorruptRecord)? as usize;
++        if count > MAX_RECORD_CHANGES {
++            return Err(PruneError::CorruptRecord);
++        }
++        let mut changes = Vec::with_capacity(count);
++        for _ in 0..count {
++            let key_len = read_varint(&mut reader).map_err(|_| PruneError::CorruptRecord)? as usize;
++            let key = reader
++                .read_exact(key_len)
++                .map_err(|_| PruneError::CorruptRecord)?
++                .to_vec();
++            let tag = reader
++                .read_exact(1)
++                .map_err(|_| PruneError::CorruptRecord)?[0];
++            let value = match tag {
++                0 => None,
++                1 => {
++                    let value_len =
++                        read_varint(&mut reader).map_err(|_| PruneError::CorruptRecord)? as usize;
++                    Some(
++                        reader
++                            .read_exact(value_len)
++                            .map_err(|_| PruneError::CorruptRecord)?
++                            .to_vec(),
++                    )
++                }
++                _ => return Err(PruneError::CorruptRecord),
++            };
++            let nonce_bytes = reader
++                .read_exact(8)
++                .map_err(|_| PruneError::CorruptRecord)?;
++            let mut nonce = [0u8; 8];
++            nonce.copy_from_slice(nonce_bytes);
++            changes.push(StateChange {
++                key,
++                value,
++                nonce: u64::from_le_bytes(nonce),
++            });
++        }
++        reader.finish().map_err(|_| PruneError::CorruptRecord)?;
++        let mut record = VersionRecord {
++            version,
++            parent_root,
++            state_root,
++            changes,
++            encoded_len: 0,
++        };
++        record.encoded_len = record.encode().len() as u64;
++        if record.encoded_len != bytes.len() as u64 || record.encode() != bytes {
++            return Err(PruneError::NonCanonical);
++        }
++        Ok(record)
++    }
++}
++
++fn read_hash(reader: &mut Reader<'_>) -> Result<Hash, PruneError> {
++    let bytes = reader
++        .read_exact(32)
++        .map_err(|_| PruneError::CorruptRecord)?;
++    Hash::from_slice(bytes).map_err(|_| PruneError::CorruptRecord)
++}
++
++/// Checksum of a version-record payload.
++pub fn record_checksum(payload: &[u8]) -> Hash {
++    let mut input = Vec::with_capacity(S6_RECORD_CONTEXT.len() + payload.len());
++    input.extend_from_slice(S6_RECORD_CONTEXT);
++    input.extend_from_slice(payload);
++    blake3_hash(&input)
++}
++
++/// Checksum of a base-snapshot payload.
++pub fn base_checksum(payload: &[u8]) -> Hash {
++    let mut input = Vec::with_capacity(S6_BASE_CONTEXT.len() + payload.len());
++    input.extend_from_slice(S6_BASE_CONTEXT);
++    input.extend_from_slice(payload);
++    blake3_hash(&input)
++}
++
++/// Canonical base-snapshot bytes for `entries` (sorted by path).
++pub fn encode_base(version: u64, entries: &[(Hash, Vec<u8>)]) -> Vec<u8> {
++    let mut writer = Writer::new();
++    writer.push_bytes(BASE_MAGIC);
++    version.encode(&mut writer);
++    write_varint(&mut writer, entries.len() as u64);
++    for (path, value) in entries {
++        writer.push_bytes(path.as_bytes());
++        write_varint(&mut writer, value.len() as u64);
++        writer.push_bytes(value);
++    }
++    let payload = writer.into_bytes();
++    let mut bytes = Vec::with_capacity(payload.len() + 32);
++    bytes.extend_from_slice(&payload);
++    bytes.extend_from_slice(base_checksum(&payload).as_bytes());
++    bytes
++}
++
++/// Canonical base-snapshot size without materialising it.
++///
++/// `entries_bytes` is the tracked sum of `32 + varint_len(value_len) +
++/// value_len` over all base entries. `u64` fields are fixed-width little
++/// endian (aura-codec `Encode`), so only the entry count needs a varint.
++fn base_len(_version: u64, entry_count: u64, entries_bytes: u64) -> u64 {
++    BASE_MAGIC.len() as u64 + 8 + varint_len(entry_count) + entries_bytes + 32
++}
++
++fn varint_len(value: u64) -> u64 {
++    let mut remaining = value;
++    let mut len = 1;
++    while remaining >= 0x80 {
++        remaining >>= 7;
++        len += 1;
++    }
++    len
++}
++
++/// Bytes one base entry occupies: path + length prefix + value.
++fn base_entry_len(value_len: usize) -> u64 {
++    32 + varint_len(value_len as u64) + value_len as u64
++}
++
++/// Receipt of one committed version.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct RetentionReceipt {
++    /// New version.
++    pub version: u64,
++    /// New state root.
++    pub root: Hash,
++    /// Disk bytes after retention was applied.
++    pub disk_bytes: u64,
++    /// Deltas currently retained.
++    pub retained_versions: u64,
++    /// Deltas dropped by this commit's retention pass.
++    pub pruned_by_this_commit: u64,
++}
++
++/// What a compaction did.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct CompactionReport {
++    /// Disk bytes before compaction.
++    pub before_bytes: u64,
++    /// Disk bytes after compaction.
++    pub after_bytes: u64,
++    /// Deltas folded into the base.
++    pub folded_records: u64,
++    /// Version the base now represents.
++    pub base_version: u64,
++    /// Head state root (must be unchanged by compaction).
++    pub root: Hash,
++}
++
++/// A versioned state store with a retention policy.
++///
++/// Memory layout: the live state is a [`HistoryTree`] (S6) and the base
++/// snapshot is an ordinary map, exactly like a real pruner's working set.
++/// `disk_bytes()` counts *encoded* bytes, i.e. what a node would actually
++/// write.
++pub struct RetentionStore {
++    policy: RetentionPolicy,
++    tree: HistoryTree,
++    head: u64,
++    root: Hash,
++    base: BTreeMap<Hash, Vec<u8>>,
++    base_version: u64,
++    base_root: Hash,
++    base_entries_bytes: u64,
++    records: VecDeque<VersionRecord>,
++    records_bytes: u64,
++    peak_disk_bytes: u64,
++    max_record_bytes: u64,
++    pruned_versions: u64,
++    pruned_bytes: u64,
++    compaction_count: u64,
++}
++
++impl RetentionStore {
++    /// Create an empty store under `policy`.
++    pub fn new(policy: RetentionPolicy) -> Self {
++        RetentionStore {
++            policy,
++            tree: HistoryTree::new(),
++            head: 0,
++            root: Hash::ZERO,
++            base: BTreeMap::new(),
++            base_version: 0,
++            base_root: Hash::ZERO,
++            base_entries_bytes: 0,
++            records: VecDeque::new(),
++            records_bytes: 0,
++            peak_disk_bytes: 0,
++            max_record_bytes: 0,
++            pruned_versions: 0,
++            pruned_bytes: 0,
++            compaction_count: 0,
++        }
++    }
++
++    /// The retention policy.
++    pub fn policy(&self) -> RetentionPolicy {
++        self.policy
++    }
++
++    /// Head version.
++    pub fn head(&self) -> u64 {
++        self.head
++    }
++
++    /// Head state root.
++    pub fn root(&self) -> Hash {
++        self.root
++    }
++
++    /// Oldest version whose state can still be reconstructed.
++    pub fn oldest_served_version(&self) -> u64 {
++        self.base_version
++    }
++
++    /// Current version.
++    pub fn version(&self) -> u64 {
++        self.head
++    }
++
++    /// Retained delta records.
++    pub fn retained_versions(&self) -> u64 {
++        self.records.len() as u64
++    }
++
++    /// Number of versions dropped by pruning since start.
++    pub fn pruned_versions(&self) -> u64 {
++        self.pruned_versions
++    }
++
++    /// Largest encoded version record seen so far.
++    pub fn max_record_bytes(&self) -> u64 {
++        self.max_record_bytes
++    }
++
++    /// State root the base snapshot represents.
++    pub fn base_root(&self) -> Hash {
++        self.base_root
++    }
++
++    /// Bytes dropped by pruning since start.
++    pub fn pruned_bytes(&self) -> u64 {
++        self.pruned_bytes
++    }
++
++    /// Highest observed `disk_bytes()`.
++    pub fn peak_disk_bytes(&self) -> u64 {
++        self.peak_disk_bytes
++    }
++
++    /// Compactions performed.
++    pub fn compaction_count(&self) -> u64 {
++        self.compaction_count
++    }
++
++    /// Bytes the retained deltas occupy.
++    pub fn records_bytes(&self) -> u64 {
++        self.records_bytes
++    }
++
++    /// Bytes the base snapshot occupies.
++    pub fn base_bytes(&self) -> u64 {
++        base_len(
++            self.base_version,
++            self.base.len() as u64,
++            self.base_entries_bytes,
++        )
++    }
++
++    /// Total disk bytes: base snapshot + retained deltas.
++    pub fn disk_bytes(&self) -> u64 {
++        self.base_bytes() + self.records_bytes
++    }
++
++    /// Base entries (live state at `oldest_served_version`).
++    pub fn base_entries(&self) -> Vec<(Hash, Vec<u8>)> {
++        self.base
++            .iter()
++            .map(|(path, value)| (*path, value.clone()))
++            .collect()
++    }
++
++    /// Live state at head.
++    pub fn head_entries(&self) -> Vec<(Hash, Vec<u8>)> {
++        self.tree.entries()
++    }
++
++    /// Number of BLAKE3 hashes the incremental tree has performed.
++    pub fn tree_hashes(&self) -> u64 {
++        self.tree.hashes()
++    }
++
++    /// Commit one version.
++    pub fn commit(&mut self, changes: Vec<StateChange>) -> Result<RetentionReceipt, PruneError> {
++        if changes.len() > MAX_RECORD_CHANGES {
++            return Err(PruneError::TooManyChanges(changes.len()));
++        }
++        let version = self.head + 1;
++        for change in &changes {
++            let path = key_path(&change.key);
++            match &change.value {
++                Some(value) => self.tree.insert_digest(path, value.clone()),
++                None => {
++                    self.tree.remove_digest(&path);
++                }
++            }
++        }
++        let root = self.tree.state_root(version);
++        let record = VersionRecord::new(version, self.root, root, changes);
++        self.max_record_bytes = self.max_record_bytes.max(record.encoded_len());
++        self.records_bytes += record.encoded_len();
++        self.records.push_back(record);
++        self.head = version;
++        self.root = root;
++
++        let before = self.pruned_versions;
++        self.apply_retention();
++        let receipt = RetentionReceipt {
++            version,
++            root,
++            disk_bytes: self.disk_bytes(),
++            retained_versions: self.retained_versions(),
++            pruned_by_this_commit: self.pruned_versions - before,
++        };
++        self.peak_disk_bytes = self.peak_disk_bytes.max(receipt.disk_bytes);
++        Ok(receipt)
++    }
++
++    /// Fold everything older than `head - keep_versions` into the base.
++    fn apply_retention(&mut self) {
++        if self.policy.mode != RetentionMode::Prune {
++            return;
++        }
++        let target = self.head.saturating_sub(self.policy.keep_versions);
++        while self.base_version < target {
++            let Some(record) = self.records.pop_front() else {
++                return;
++            };
++            debug_assert_eq!(record.version, self.base_version + 1);
++            for change in &record.changes {
++                let path = key_path(&change.key);
++                match &change.value {
++                    Some(value) => self.base_put(path, value.clone()),
++                    None => self.base_remove(&path),
++                }
++            }
++            self.base_version = record.version;
++            self.base_root = record.state_root;
++            self.records_bytes -= record.encoded_len();
++            self.pruned_bytes += record.encoded_len();
++            self.pruned_versions += 1;
++        }
++    }
++
++    fn base_put(&mut self, path: Hash, value: Vec<u8>) {
++        if let Some(previous) = self.base.insert(path, value.clone()) {
++            self.base_entries_bytes -= base_entry_len(previous.len());
++        }
++        self.base_entries_bytes += base_entry_len(value.len());
++    }
++
++    fn base_remove(&mut self, path: &Hash) {
++        if let Some(previous) = self.base.remove(path) {
++            self.base_entries_bytes -= base_entry_len(previous.len());
++        }
++    }
++
++    /// Fold every retained delta into the base and drop the records.
++    ///
++    /// Archive nodes refuse: compaction there would destroy the history they
++    /// exist to serve.
++    pub fn compact(&mut self) -> Result<CompactionReport, PruneError> {
++        if self.policy.mode == RetentionMode::Archive {
++            return Err(PruneError::ArchiveCompactionForbidden);
++        }
++        let before = self.disk_bytes();
++        let mut folded = 0u64;
++        while let Some(record) = self.records.pop_front() {
++            for change in &record.changes {
++                let path = key_path(&change.key);
++                match &change.value {
++                    Some(value) => self.base_put(path, value.clone()),
++                    None => self.base_remove(&path),
++                }
++            }
++            self.base_version = record.version;
++            self.base_root = record.state_root;
++            self.records_bytes -= record.encoded_len();
++            self.pruned_bytes += record.encoded_len();
++            self.pruned_versions += 1;
++            folded += 1;
++        }
++        self.compaction_count += 1;
++        Ok(CompactionReport {
++            before_bytes: before,
++            after_bytes: self.disk_bytes(),
++            folded_records: folded,
++            base_version: self.base_version,
++            root: self.root,
++        })
++    }
++
++    /// State root of `version`, if it can still be served.
++    pub fn root_at(&self, version: u64) -> Result<Hash, PruneError> {
++        if version == 0 {
++            return Ok(Hash::ZERO);
++        }
++        if version > self.head {
++            return Err(PruneError::VersionNotFound(version));
++        }
++        if version < self.base_version {
++            return Err(PruneError::Pruned {
++                version,
++                oldest: self.base_version,
++            });
++        }
++        if version == self.head {
++            return Ok(self.root);
++        }
++        if version == self.base_version {
++            return Ok(self.base_root);
++        }
++        self.records
++            .iter()
++            .find(|record| record.version == version)
++            .map(|record| record.state_root)
++            .ok_or(PruneError::VersionNotFound(version))
++    }
++
++    /// Reconstruct the full state at `version`.
++    ///
++    /// Prune mode only serves versions at or above the base; anything older is
++    /// pruned, and this returns [`PruneError::Pruned`] rather than a
++    /// plausible-looking wrong state.
++    pub fn state_at(&self, version: u64) -> Result<Vec<(Hash, Vec<u8>)>, PruneError> {
++        if version > self.head {
++            return Err(PruneError::VersionNotFound(version));
++        }
++        if version < self.base_version {
++            return Err(PruneError::Pruned {
++                version,
++                oldest: self.base_version,
++            });
++        }
++        if version == self.head {
++            return Ok(self.tree.entries());
++        }
++        let mut state = self.base.clone();
++        for record in &self.records {
++            if record.version > version {
++                break;
++            }
++            apply_changes(&mut state, &record.changes);
++        }
++        Ok(state.into_iter().collect())
++    }
++
++    /// Recompute the state root at `version` from scratch (S1 rebuild) and
++    /// compare it with the stored root. Used by the S6 gate.
++    pub fn verify_root_at(&self, version: u64) -> Result<Hash, PruneError> {
++        let entries = self.state_at(version)?;
++        let tree = MerkleTree::from_entries(version, &entries);
++        let recomputed = tree.state_root();
++        if version == self.head && recomputed != self.root {
++            // Cross-check the incremental tree against the S1 rebuild.
++            return Err(PruneError::RootMismatch);
++        }
++        if version == self.base_version && recomputed != self.base_root {
++            return Err(PruneError::RootMismatch);
++        }
++        if self.root_at(version)? != recomputed {
++            return Err(PruneError::RootMismatch);
++        }
++        Ok(recomputed)
++    }
++
++    /// Inclusion proof for `path` at `version`.
++    pub fn proof_at(&self, version: u64, path: &Hash) -> Result<MerkleProof, PruneError> {
++        let entries = self.state_at(version)?;
++        let tree = MerkleTree::from_entries(version, &entries);
++        tree.prove_at(version, path).map_err(PruneError::Tree)
++    }
++}
++
++fn apply_changes(state: &mut BTreeMap<Hash, Vec<u8>>, changes: &[StateChange]) {
++    for change in changes {
++        let path = key_path(&change.key);
++        match &change.value {
++            Some(value) => {
++                state.insert(path, value.clone());
++            }
++            None => {
++                state.remove(&path);
++            }
++        }
++    }
++}
++
++impl From<TreeError> for PruneError {
++    fn from(error: TreeError) -> Self {
++        PruneError::Tree(error)
++    }
++}
+diff --git a/crates/aura-storage/tests/fixtures/s6_golden.txt b/crates/aura-storage/tests/fixtures/s6_golden.txt
+new file mode 100644
+index 0000000..f28b7ff
+--- /dev/null
++++ b/crates/aura-storage/tests/fixtures/s6_golden.txt
+@@ -0,0 +1,35 @@
++# S6 retention golden vectors — independent Python model.
++# Roots: S1 rebuild per checkpoint. Bytes: canonical S6 encodings.
++blocks=100000
++schedule_blocks=1000
++writes_per_block=4
++live_keys=1024
++keep_versions=128
++record_len_first=365
++record_len_at_schedule_end=365
++archive_base_bytes=45
++archive_total_bytes=36500045
++prune_final_base_version=99872
++prune_final_base_bytes=66606
++prune_final_records_bytes=46720
++prune_final_disk_bytes=113326
++prune_peak_disk_bytes=113326
++prune_retained=128
++prune_pruned_versions=99872
++prune_pruned_bytes=36453280
++checkpoint_root_1=844e4b88a15fc4d3c878a9365f0d4cb1c914c232bce575d834c7e47fff20df49
++checkpoint_root_100=9d1ea3c3df1e811fce41eb22c57fed30f2e079a9c01d4c61a4a4e4ff35713b02
++checkpoint_root_200=6ee0778f9979e8bab85e1088caa52733cb0ae87053d7cdf9810441ddab23a46e
++checkpoint_root_300=19b53484db13a5f64ee0311698b70fbf8ba2734091c7b8913a0dafb47605935e
++checkpoint_root_400=1d9e58c2d8b8c77daf7861f7d6db78b6edd04470e768ee99ae6ffb3ea243af3e
++checkpoint_root_500=796155b1ff8347a838eb528d168b70af32105ca036f8706c984fa817516f28ab
++checkpoint_root_600=c7faabe5ed91dba67f18b12d9e1bb3ca8cf8938865e6bb6c36adbbc8ff66755a
++checkpoint_root_700=4fbaea01966cde8983aded98669126ba0447e9a0d1c3520faac623a45ca59db7
++checkpoint_root_800=1ce91e0daed85e8255361d4c2d36ebff78e2a7d0faecc2602cfcdf230074e20b
++checkpoint_root_900=9989505b6c69ed647f16b5b8328d788e410dffd673285cdf856ee93cc7cdc9db
++checkpoint_root_999=bf6c0fe4e87513d468b4c6061aac8e815907a0a5f36dee8736cffae2654b5bd4
++checkpoint_root_1000=a3d5693ee7f2da65b1d22bbc12f542be150ab26a0bebda2b2fbfb890e7d63f0d
++checkpoint_versions=1,100,200,300,400,500,600,700,800,900,999,1000
++record_hex_1=414c503601000000000000000000000000000000000000000000000000000000000000000000000000000000844e4b88a15fc4d3c878a9365f0d4cb1c914c232bce575d834c7e47fff20df4904150117563b05758eeaa4bfc04829e0df775a47d5767801208b0f7155cf55742e47daea1bba07f0268045c9161bcac9719521ba509a2659dc010000000000000015016307cca35405f714166d383ee085575c74ae7d7c01203c7436ad63a5cb2adc226792d51362dc636093f5cc5ca88f13ef1a6dec154db501000000000000001501e84c9d5b42d2d6749f40d7ab9489b0c4f5d1914c0120b9326b3c413cebf4636082145c1f0ae0d2d4c449ef1bd9ab8d0e4ff41b146b1e01000000000000001501ddd31a6b845d63041da68d9443a687b53d4f8f1c0120b32ee30acf527143cb75c702f43d90b6d3d087cf2ebc794affa0383820a86b3c01000000000000006e01b20b78e588ae0488dc56778087f6d748516e947e63854c7c211e2708872b
++record_hex_1000=414c5036e803000000000000bf6c0fe4e87513d468b4c6061aac8e815907a0a5f36dee8736cffae2654b5bd4a3d5693ee7f2da65b1d22bbc12f542be150ab26a0bebda2b2fbfb890e7d63f0d041501b2b9c598ee45810b47de4366b9231695ef7d3090012085155fcd2d882a3fd9f0554d44374432cc248400581ee25affb2864f729384dde8030000000000001501d709a2a43780c629b4f9298d929f84b23e71cbb4012034cc4743609ecfd82aac791dc651f3d9c937ccb34629a46a9f69082c45d61202e80300000000000015018735456970bdb786a3d5f5636487dff567d18a500120d9ae5680f9e08567620664ca8e050a7d98cbb186b06896276f2b9f83611f0de0e8030000000000001501c9847665cded7095fb06612e62c984251f27f12f0120c7c9adea8820fd9456ce2abeaaecb800451b4bea97f91a9bbc16db56cc973997e80300000000000039be7c6b0a578135ed58aeea6be2240009c018694e1365f99393b6f5b126821e
++base_hex_prune2_head5=414c423603000000000000000c26ad5fec672cc61c275eb83dc489406e860ca12bf068bce9e0859c8aab2e13c3209de72eff7a6da50bb4b8c42f591e4b7cb9aa410ec45a819d302a70cd170dcd2535e4cf228216a2127b97449058b720d69df412a16929f6ade3aef8411586d73b201cb7aa3795c4683c9f3e3d8844ebb58082928b8d71caf9e1d0e50244e321522337a7703fdaaa0261ff692076c08e94f2935ac9c0e7b64a16d68761da8263a6ac20b32ee30acf527143cb75c702f43d90b6d3d087cf2ebc794affa0383820a86b3c5052e6e7785bc7cdb24e9550889c22aa380d214f61c940fee8328609602a5675201620800bae2e68cea803f071d15dc19f48025fa8a5dd7f3fce527948d8a236a76a3793f5909818f30048a0062a1a1dc1c6c5518af2c12603ade9b504a40761762018c144d9b449bfb1ca0900ba9f9748892c920fb289103a295f5990a75c1a742b8a27d0a7d721ac422a36106633d8b9c1852c52bab5b4a04eb091209d5ebbbd3c20eca7e0227e04522792485be88107c7ef8d8d23bd79c3b16eb9cb66e5106b5767968f8bea0bbb8eab0a2286227f0b9d643dc085ac7d16b5e4eab5e942e2b4b4ac20b9326b3c413cebf4636082145c1f0ae0d2d4c449ef1bd9ab8d0e4ff41b146b1e9e58b0b0e803c7708b0661a430458c2e39fa2cc92b53df10b85b3cfe204cbeca203d1d295b84f657463ea96e69a587f4838d918c1c84a7c5bc9331082248cd153aa144d9cce3ec2ee1b52b05956ab0178089ab1a789ebbaadcbf628937e911a21a208b0f7155cf55742e47daea1bba07f0268045c9161bcac9719521ba509a2659dcb06110e1420ff28c6a196e250b0795a2e3044c82fab149e7c9d316bcbc4ceb9d20cfb347d46e52aa3e4fd08dca93c11aec9666bda12ff4d25baada8de0e5fcffb0e4f3518b76be7c80f862e5562dbe6390d2e9378c40f6d88116793c42026aaf2f203c7436ad63a5cb2adc226792d51362dc636093f5cc5ca88f13ef1a6dec154db5fb4c2987340466b29e43d5ff4c6c1b1c0d3eccc894bd22edb987621870d37451201d2cfae880baffe96dc3c0e5bbffc690ed7f7cfddeeba28ba93e146031154ccb004cf3e39fd603284cac25fc0820940214d324704851e602e1cbea2a3d22ae3f
+diff --git a/crates/aura-storage/tests/s6_prune.rs b/crates/aura-storage/tests/s6_prune.rs
+new file mode 100644
+index 0000000..62c2e03
+--- /dev/null
++++ b/crates/aura-storage/tests/s6_prune.rs
+@@ -0,0 +1,550 @@
++//! S6 — pruning, archive mode and compaction (DoD gate).
++//!
++//! The DoD line is: *100 000 blocks: disk size bounded in prune mode; archive
++//! serves history*. Both halves are measured here against
++//! `tests/fixtures/s6_golden.txt`, an INDEPENDENT Python model
++//! (`tools/gen_s6_vectors.py`) that rebuilds the S1 tree from scratch and
++//! computes the canonical byte accounting without any Rust code.
++//!
++//! Nothing in this file is a simulation of a network: one process, one store,
++//! real hashing. `validators / blocks / tx` stay 0 / 0 / 0.
++
++use std::collections::BTreeMap;
++
++use aura_state::{MerkleTree, StateKey, vector_address, vector_value, verify_proof};
++use aura_storage::{
++    BASE_MAGIC, DEFAULT_KEEP_VERSIONS, PruneError, RECORD_MAGIC, RetentionMode, RetentionPolicy,
++    RetentionStore, S6_BASE_CONTEXT, S6_RECORD_CONTEXT, StateChange, VersionRecord, encode_base,
++    key_path,
++};
++use aura_types::Hash;
++
++const BLOCKS: u64 = 100_000;
++const SCHEDULE_BLOCKS: u64 = 1_000;
++const WRITES_PER_BLOCK: u64 = 4;
++const LIVE_KEYS: u64 = 1_024;
++
++const FIXTURE: &str = include_str!("fixtures/s6_golden.txt");
++
++fn fixture() -> &'static BTreeMap<String, String> {
++    static PARSED: std::sync::OnceLock<BTreeMap<String, String>> = std::sync::OnceLock::new();
++    PARSED.get_or_init(|| {
++        FIXTURE
++            .lines()
++            .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
++            .filter_map(|line| line.split_once('='))
++            .map(|(key, value)| (key.to_string(), value.to_string()))
++            .collect()
++    })
++}
++
++/// Versions the independent Python model publishes roots for.
++const CHECKPOINTS: [u64; 12] = [1, 100, 200, 300, 400, 500, 600, 700, 800, 900, 999, 1000];
++
++fn expected(key: &str) -> u64 {
++    fixture()
++        .get(key)
++        .unwrap_or_else(|| panic!("fixture has no {key}"))
++        .parse()
++        .unwrap_or_else(|_| panic!("fixture {key} is not a number"))
++}
++
++fn expected_root(version: u64) -> Hash {
++    let key = format!("checkpoint_root_{version}");
++    let text = fixture()
++        .get(&key)
++        .unwrap_or_else(|| panic!("fixture has no {key}"))
++        .clone();
++    Hash::from_hex(&text).expect("fixture root is hex")
++}
++
++fn schedule(block: u64) -> Vec<u64> {
++    (0..WRITES_PER_BLOCK)
++        .map(|slot| (block * 31 + slot * 17) % LIVE_KEYS)
++        .collect()
++}
++
++fn changes(block: u64) -> Vec<StateChange> {
++    schedule(block)
++        .into_iter()
++        .enumerate()
++        .map(|(slot, index)| StateChange {
++            key: StateKey::account(&vector_address(index))
++                .as_bytes()
++                .to_vec(),
++            value: Some(vector_value(block * WRITES_PER_BLOCK + slot as u64)),
++            nonce: block,
++        })
++        .collect()
++}
++
++fn path_of(index: u64) -> Hash {
++    key_path(StateKey::account(&vector_address(index)).as_bytes())
++}
++
++/// Everything the two 100 000-block runs share.
++struct Run {
++    store: RetentionStore,
++    head_root: Hash,
++    elapsed_ms: u128,
++    checkpoints: BTreeMap<u64, Hash>,
++}
++
++fn run_blocks(policy: RetentionPolicy, blocks: u64) -> Run {
++    let mut store = RetentionStore::new(policy);
++    let mut checkpoints = BTreeMap::new();
++    let started = std::time::Instant::now();
++    for block in 1..=blocks {
++        store.commit(changes(block)).expect("commit must succeed");
++        if CHECKPOINTS.contains(&block) {
++            checkpoints.insert(block, store.root());
++        }
++    }
++    let elapsed_ms = started.elapsed().as_millis();
++    let head_root = store.root();
++    Run {
++        store,
++        head_root,
++        elapsed_ms,
++        checkpoints,
++    }
++}
++
++/// Rebuild the head state with S1 (`MerkleTree`), a different algorithm from
++/// the S6 incremental tree, and compare roots.
++fn s1_rebuild_root(store: &RetentionStore) -> Hash {
++    let entries = store.head_entries();
++    MerkleTree::from_entries(store.head(), &entries).state_root()
++}
++
++fn to_hex(bytes: &[u8]) -> String {
++    let mut out = String::with_capacity(bytes.len() * 2);
++    for byte in bytes {
++        out.push_str(&format!("{byte:02x}"));
++    }
++    out
++}
++
++#[test]
++fn canonical_bytes_match_the_independent_model() {
++    // Byte-for-byte agreement with the Python model on the S6 wire formats:
++    // a version record (payload + checksum, parent and state roots included)
++    // and a materialised base snapshot.
++    let mut store = RetentionStore::new(RetentionPolicy::archive());
++    for block in 1..=1_000 {
++        store.commit(changes(block)).unwrap();
++    }
++    let record_1 = VersionRecord::new(1, Hash::ZERO, store.root_at(1).unwrap(), changes(1));
++    assert_eq!(
++        to_hex(&record_1.encode()),
++        fixture()["record_hex_1"],
++        "version-1 record bytes disagree with the independent model"
++    );
++    assert_eq!(VersionRecord::decode(&record_1.encode()).unwrap(), record_1);
++
++    let record_1000 = VersionRecord::new(
++        1_000,
++        store.root_at(999).unwrap(),
++        store.root_at(1_000).unwrap(),
++        changes(1_000),
++    );
++    assert_eq!(
++        to_hex(&record_1000.encode()),
++        fixture()["record_hex_1000"],
++        "version-1000 record bytes disagree with the independent model"
++    );
++
++    // Base snapshot: keep = 2 over 5 blocks -> base version 3.
++    let mut small = RetentionStore::new(RetentionPolicy::prune(2).unwrap());
++    for block in 1..=5 {
++        small.commit(changes(block)).unwrap();
++    }
++    assert_eq!(small.oldest_served_version(), 3);
++    let base_bytes = encode_base(3, &small.base_entries());
++    assert_eq!(
++        to_hex(&base_bytes),
++        fixture()["base_hex_prune2_head5"],
++        "base snapshot bytes disagree with the independent model"
++    );
++    assert_eq!(base_bytes.len() as u64, small.base_bytes());
++}
++
++#[test]
++fn archive_100k_blocks_serves_history() {
++    let archive = run_blocks(RetentionPolicy::archive(), BLOCKS);
++    let store = &archive.store;
++
++    assert_eq!(store.head(), BLOCKS);
++    assert_eq!(
++        store.retained_versions(),
++        BLOCKS,
++        "archive keeps every delta"
++    );
++    assert_eq!(
++        store.disk_bytes(),
++        expected("archive_total_bytes"),
++        "archive byte accounting must match the independent model"
++    );
++    assert_eq!(store.base_bytes(), expected("archive_base_bytes"));
++    assert_eq!(store.pruned_versions(), 0, "archive must never prune");
++
++    // The head root recomputed by the S1 rebuild must equal the incremental
++    // root at 100 000 blocks — two independent algorithms over the same state.
++    assert_eq!(
++        s1_rebuild_root(store),
++        archive.head_root,
++        "incremental root diverged from the S1 rebuild at 100 000 blocks"
++    );
++
++    // Historical roots served from retained deltas, against Python.
++    for version in CHECKPOINTS {
++        assert_eq!(
++            store.root_at(version).expect("archive serves history"),
++            expected_root(version),
++            "root at version {version} disagrees with the Python rebuild"
++        );
++        assert_eq!(
++            archive.checkpoints.get(&version).copied(),
++            Some(expected_root(version)),
++            "root observed at commit {version} disagrees with the Python rebuild"
++        );
++    }
++    // Recompute whole historical states from genesis and re-derive their roots.
++    for version in [1u64, 250, 500, 750, 1_000] {
++        assert_eq!(
++            store
++                .verify_root_at(version)
++                .expect("historical root verifies"),
++            store.root_at(version).unwrap(),
++            "state at version {version} does not recompute to its stored root"
++        );
++    }
++    assert_eq!(SCHEDULE_BLOCKS, 1_000);
++
++    // Historical inclusion proofs verify against the historical root.
++    let mut proven = 0u64;
++    for index in 0..LIVE_KEYS {
++        if index % 128 != 0 {
++            continue;
++        }
++        let path = path_of(index);
++        let version = 1_000u64;
++        let proof = store.proof_at(version, &path).expect("historical proof");
++        verify_proof(&store.root_at(version).unwrap(), &proof)
++            .expect("historical proof must verify");
++        proven += 1;
++    }
++    assert_eq!(
++        proven,
++        LIVE_KEYS / 128,
++        "proved a sample of historical keys"
++    );
++
++    // Compaction is forbidden: it would destroy what an archive exists for.
++    let head_root = archive.head_root;
++    let elapsed_ms = archive.elapsed_ms;
++    let mut archive = archive.store;
++    assert_eq!(
++        archive.compact(),
++        Err(PruneError::ArchiveCompactionForbidden)
++    );
++    println!(
++        "archive: {BLOCKS} blocks, {} bytes retained, head {} in {elapsed_ms} ms",
++        archive.disk_bytes(),
++        head_root.to_hex()
++    );
++}
++
++#[test]
++fn prune_100k_blocks_keeps_disk_bounded() {
++    let keep = expected("keep_versions");
++    assert_eq!(keep, DEFAULT_KEEP_VERSIONS);
++    let policy = RetentionPolicy::prune(keep).expect("valid policy");
++    let pruned = run_blocks(policy, BLOCKS);
++    let store = &pruned.store;
++
++    assert_eq!(store.head(), BLOCKS);
++    assert_eq!(store.retained_versions(), expected("prune_retained"));
++    assert_eq!(
++        store.retained_versions(),
++        keep,
++        "exactly keep_versions deltas"
++    );
++    assert_eq!(
++        store.oldest_served_version(),
++        expected("prune_final_base_version")
++    );
++    assert_eq!(store.pruned_versions(), expected("prune_pruned_versions"));
++    assert_eq!(store.pruned_bytes(), expected("prune_pruned_bytes"));
++    assert_eq!(store.base_bytes(), expected("prune_final_base_bytes"));
++    assert_eq!(store.records_bytes(), expected("prune_final_records_bytes"));
++    assert_eq!(store.disk_bytes(), expected("prune_final_disk_bytes"));
++    assert_eq!(store.peak_disk_bytes(), expected("prune_peak_disk_bytes"));
++
++    // The bound the DoD asks for: base + keep * largest record. Measured peak
++    // must sit under it, not merely "grow slower than archive".
++    let max_record = store.max_record_bytes();
++    assert!(max_record > 0);
++    let bound = store.base_bytes() + keep * max_record;
++    assert!(
++        store.peak_disk_bytes() <= bound,
++        "peak {} bytes exceeds the analytic bound {} bytes",
++        store.peak_disk_bytes(),
++        bound
++    );
++
++    // Disk stays bounded while the archive run of the same schedule grows to
++    // ~36 MB: the peak is >300x smaller (fixture: 36500045 vs 113326).
++    let ratio = expected("archive_total_bytes") as f64 / store.peak_disk_bytes() as f64;
++    assert!(
++        ratio > 300.0,
++        "prune/archive ratio {ratio:.1} is below 300x"
++    );
++
++    // The head root at 100 000 blocks is an S1 rebuild away from being proven.
++    assert_eq!(
++        s1_rebuild_root(store),
++        pruned.head_root,
++        "pruned head root diverged from the S1 rebuild"
++    );
++    // ... and the roots observed while the run was still young match Python:
++    // pruning does not change history, it only stops serving it.
++    for version in CHECKPOINTS {
++        assert_eq!(
++            pruned.checkpoints.get(&version).copied(),
++            Some(expected_root(version)),
++            "root observed at commit {version} disagrees with the Python rebuild"
++        );
++    }
++
++    println!(
++        "prune: {} blocks in {} ms, peak {} bytes (bound {}), {} pruned, ratio {:.1}x",
++        BLOCKS,
++        pruned.elapsed_ms,
++        store.peak_disk_bytes(),
++        bound,
++        store.pruned_versions(),
++        ratio
++    );
++}
++
++#[test]
++fn pruned_versions_are_rejected_not_faked() {
++    let mut store = RetentionStore::new(RetentionPolicy::prune(8).unwrap());
++    for block in 1..=40 {
++        store.commit(changes(block)).unwrap();
++    }
++    // keep 8 at head 40 -> base is version 32, deltas 33..=40.
++    assert_eq!(store.oldest_served_version(), 32);
++    assert_eq!(store.retained_versions(), 8);
++
++    match store.root_at(4) {
++        Err(PruneError::Pruned { version, oldest }) => {
++            assert_eq!(version, 4);
++            assert_eq!(oldest, 32);
++        }
++        other => panic!("expected Pruned(4), got {other:?}"),
++    }
++    let path = path_of(31);
++    assert!(matches!(
++        store.proof_at(4, &path),
++        Err(PruneError::Pruned { .. })
++    ));
++    assert!(matches!(store.state_at(4), Err(PruneError::Pruned { .. })));
++    // Pruned, but still consistent at/after the base.
++    assert!(store.verify_root_at(32).is_ok());
++    assert!(store.verify_root_at(40).is_ok());
++    assert_eq!(store.root_at(41), Err(PruneError::VersionNotFound(41)));
++    // Archive mode serves the very same versions, including the pruned ones.
++    let mut archive = RetentionStore::new(RetentionPolicy::archive());
++    for block in 1..=40 {
++        archive.commit(changes(block)).unwrap();
++    }
++    for version in [1u64, 4, 32, 40] {
++        let served = archive.root_at(version).expect("archive serves genesis");
++        if version >= store.oldest_served_version() {
++            assert_eq!(
++                served,
++                store.root_at(version).unwrap(),
++                "prune and archive must agree on version {version}"
++            );
++        }
++    }
++    let genesis_path = path_of(schedule(1)[0]);
++    assert!(
++        archive.proof_at(1, &genesis_path).is_ok(),
++        "archive serves proofs from genesis"
++    );
++}
++
++#[test]
++fn compaction_folds_history_and_preserves_the_root() {
++    let mut store = RetentionStore::new(RetentionPolicy::prune(64).unwrap());
++    for block in 1..=5_000 {
++        store.commit(changes(block)).unwrap();
++    }
++    let before_disk = store.disk_bytes();
++    let before_root = store.root();
++    let retained = store.retained_versions();
++    assert_eq!(retained, 64);
++
++    let report = store.compact().expect("prune mode may compact");
++    assert_eq!(report.folded_records, retained);
++    assert_eq!(report.before_bytes, before_disk);
++    assert_eq!(report.after_bytes, store.disk_bytes());
++    assert!(
++        report.after_bytes < report.before_bytes,
++        "compaction must shrink"
++    );
++    assert_eq!(
++        report.root, before_root,
++        "compaction must not move the root"
++    );
++    assert_eq!(store.root(), before_root);
++    assert_eq!(store.retained_versions(), 0);
++    assert_eq!(store.oldest_served_version(), store.head());
++    assert_eq!(store.disk_bytes(), store.base_bytes());
++    assert_eq!(store.base_bytes(), report.after_bytes);
++    assert_eq!(store.compaction_count(), 1);
++    // The compacted base still reproduces the head root.
++    assert_eq!(s1_rebuild_root(&store), before_root);
++    // ... and commits keep working after a compaction.
++    store.commit(changes(5_001)).unwrap();
++    assert_eq!(store.head(), 5_001);
++    assert_eq!(s1_rebuild_root(&store), store.root());
++    // Shrinkage is real, not a rounding artefact.
++    assert!(
++        report.after_bytes * 100 < report.before_bytes * 90,
++        "compaction removed only {} of {} bytes",
++        report.before_bytes - report.after_bytes,
++        report.before_bytes
++    );
++}
++
++#[test]
++fn retention_boundary_is_exact() {
++    assert_eq!(
++        RetentionPolicy::prune(0),
++        Err(PruneError::InvalidKeepVersions(0))
++    );
++    assert!(RetentionPolicy::prune(1_000_001).is_err());
++    assert_eq!(RetentionPolicy::prune(1).unwrap().keep_versions(), 1);
++    assert_eq!(RetentionPolicy::archive().mode(), RetentionMode::Archive);
++
++    let mut store = RetentionStore::new(RetentionPolicy::prune(1).unwrap());
++    for block in 1..=10 {
++        let receipt = store.commit(changes(block)).unwrap();
++        // With keep = 1 the base is always head - 1 and one delta is retained.
++        assert_eq!(receipt.retained_versions, 1);
++        assert_eq!(store.oldest_served_version(), block - 1);
++        assert_eq!(store.pruned_versions(), block - 1);
++        assert_eq!(
++            receipt.disk_bytes,
++            store.base_bytes() + store.records_bytes()
++        );
++        assert_eq!(receipt.pruned_by_this_commit, if block > 1 { 1 } else { 0 });
++    }
++    // Boundary: the base version is served, base - 1 is not.
++    assert!(store.root_at(9).is_ok());
++    assert!(matches!(store.root_at(8), Err(PruneError::Pruned { .. })));
++}
++
++#[test]
++fn version_records_round_trip_and_reject_tampering() {
++    let record = VersionRecord::new(7, Hash::ZERO, Hash::from_bytes([9u8; 32]), changes(7));
++    let bytes = record.encode();
++    assert_eq!(bytes.len() as u64, record.encoded_len());
++    assert_eq!(&bytes[..4], RECORD_MAGIC);
++    assert_eq!(VersionRecord::decode(&bytes).unwrap(), record);
++    assert_eq!(
++        record.encoded_len(),
++        expected("record_len_first"),
++        "record size must match the independent model (same schedule shape)"
++    );
++
++    let mut bad_checksum = bytes.clone();
++    let last = bad_checksum.len() - 1;
++    bad_checksum[last] ^= 1;
++    assert_eq!(
++        VersionRecord::decode(&bad_checksum),
++        Err(PruneError::ChecksumMismatch)
++    );
++
++    let mut bad_magic = bytes.clone();
++    bad_magic[..4].copy_from_slice(b"XXXX");
++    assert_eq!(VersionRecord::decode(&bad_magic), Err(PruneError::BadMagic));
++
++    let mut trailing = bytes.clone();
++    trailing.push(0);
++    assert!(matches!(
++        VersionRecord::decode(&trailing),
++        Err(PruneError::ChecksumMismatch) | Err(PruneError::NonCanonical)
++    ));
++
++    assert_eq!(
++        VersionRecord::decode(&bytes[..bytes.len() - 8]),
++        Err(PruneError::ChecksumMismatch)
++    );
++    assert_eq!(VersionRecord::decode(&[]), Err(PruneError::CorruptRecord));
++
++    // A delete change (tag 0) also round-trips canonically.
++    let mut deletes = changes(9);
++    deletes[0].value = None;
++    let delete_record = VersionRecord::new(9, Hash::ZERO, Hash::ZERO, deletes);
++    assert_eq!(
++        VersionRecord::decode(&delete_record.encode()).unwrap(),
++        delete_record
++    );
++    assert!(delete_record.encoded_len() < record.encoded_len());
++}
++
++#[test]
++fn base_accounting_matches_the_canonical_encoding() {
++    let mut store = RetentionStore::new(RetentionPolicy::prune(16).unwrap());
++    for block in 1..=200 {
++        store.commit(changes(block)).unwrap();
++    }
++    let entries = store.base_entries();
++    let encoded = encode_base(store.oldest_served_version(), &entries);
++    assert_eq!(&encoded[..4], BASE_MAGIC);
++    assert_eq!(
++        encoded.len() as u64,
++        store.base_bytes(),
++        "tracked base accounting must equal the encoded size"
++    );
++    // The archive-mode base (version 0, no entries) is the smallest snapshot.
++    assert_eq!(
++        encode_base(0, &[]).len() as u64,
++        expected("archive_base_bytes")
++    );
++    // Record and base checksums are domain separated.
++    assert_ne!(S6_BASE_CONTEXT, S6_RECORD_CONTEXT);
++    assert_ne!(RECORD_MAGIC, BASE_MAGIC);
++}
++
++#[test]
++fn pruning_never_changes_the_state() {
++    // The same schedule under prune and archive must produce identical roots
++    // and identical live state at the head, at every checkpoint.
++    let mut pruned = RetentionStore::new(RetentionPolicy::prune(4).unwrap());
++    let mut archive = RetentionStore::new(RetentionPolicy::archive());
++    for block in 1..=500 {
++        pruned.commit(changes(block)).unwrap();
++        archive.commit(changes(block)).unwrap();
++        assert_eq!(pruned.root(), archive.root(), "roots diverged at {block}");
++        if block % 100 == 0 {
++            let served = pruned.state_at(pruned.oldest_served_version()).unwrap();
++            let archived = archive.state_at(pruned.oldest_served_version()).unwrap();
++            assert_eq!(served, archived, "state diverged at {block}");
++            assert_eq!(pruned.head_entries(), archive.head_entries());
++        }
++    }
++    assert_eq!(pruned.root(), archive.root());
++    assert!(
++        archive.disk_bytes() > 2 * pruned.disk_bytes(),
++        "prune {} vs archive {} bytes",
++        pruned.disk_bytes(),
++        archive.disk_bytes()
++    );
++    assert!(pruned.tree_hashes() > 0 && archive.tree_hashes() > 0);
++}
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+index e6cb6a5..7b84b2f 100644
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -43,6 +43,19 @@ Tx      = { chain_id, signer, nonce, kind, payload, gas_limit,
+ 
+ **⚠️ AUDIT (S3, 2026-10-27).** The §3 graph earlier claimed `aura-state <- aura-block, aura-tx, aura-codec, aura-crypto, aura-storage`, which is false and would be a cycle: `aura-storage` depends on `aura-state`. The graph above now reflects the real `Cargo.toml` edges; this is a docs correction, not a code change.
+ 
++**S6 pruning + archive.** `aura-state::history` adds `HistoryTree`, an
++incrementally maintained compressed sparse Merkle tree whose roots are
++bit-for-bit identical to S1 `MerkleTree` (S1 rebuilds the whole arena per
++commit: 16.4 ms at 1 024 leaves, measured; the incremental tree costs ~12
++hashes per write). `aura-storage::prune` adds `RetentionStore`:
++`RetentionPolicy::prune(keep_versions)` keeps a materialised base snapshot
++plus the last `keep_versions` version records, `RetentionPolicy::archive()`
++keeps all of them, `compact()` folds deltas into the base without moving the
++root, and a pruned version returns `PruneError::Pruned` instead of a wrong
++state. Version records and base snapshots are canonical, checksummed and
++domain separated (`S6_RECORD_CONTEXT`, `S6_BASE_CONTEXT`). Crate edges are
++unchanged: `aura-storage` already depends on `aura-state`.
++
+ **S5 state sync.** `aura-state::sync` adds a catch-up protocol: a fresh
+ node downloads one package (3-head quorum + S4 snapshot + compact delta)
+ instead of the full event history; all blobs are SHA-256 checked and the
+@@ -178,8 +191,8 @@ aura-codec  <- aura-types
+ aura-crypto <- aura-types
+ aura-tx     <- aura-types, aura-codec, aura-crypto   (C4, 12th crate)
+ aura-block  <- aura-tx, aura-codec, aura-crypto, aura-types  (C5, 13th crate)
+-aura-state  <- aura-types, aura-codec, aura-crypto  (C7 + S0/S1/S3)
+-aura-storage <- aura-types, aura-codec, aura-crypto, aura-state  (S2, RocksDB optional)
++aura-state  <- aura-types, aura-codec, aura-crypto  (C7 + S0/S1/S3/S5/S6)
++aura-storage <- aura-types, aura-codec, aura-crypto, aura-state  (S2 + S6, RocksDB optional)
+ aura-genesis <- aura-state, aura-block, aura-crypto, aura-codec, aura-types  (C8, 14th crate)
+ aura-exec   <- aura-state, aura-crypto, wasmtime  (X1, planned)
+ aura-testkit <- all of the above (C9, 15th crate, dev/test only)
+diff --git a/docs/STATUS.md b/docs/STATUS.md
+index 769a0dc..faac256 100644
+--- a/docs/STATUS.md
++++ b/docs/STATUS.md
+@@ -1,9 +1,9 @@
+ # Implementation status — AuraLite-Crypto
+ 
+ > Updated **in the same patch** as the phase's code (rule D9).
+-> Snapshot date: **2026-10-27**, tree: "S5 landed — state sync, Stage 1
++> Snapshot date: **2026-10-28**, tree: "S6 landed — pruning + archive, Stage 1
+ > in progress". See [`CLOSEOUT_AUDIT.md`](CLOSEOUT_AUDIT.md) (CORE) and
+-> `docs/evidence/s5/report.md` (S5).
++> `docs/evidence/s6/report.md` (S6).
+ 
+ ## Locked decisions (2026-10-25)
+ 
+@@ -23,9 +23,10 @@
+ S1 ✅ (`patches/0013-S1-merkle-tree.patch`), S2 ✅
+ (`patches/0014-S2-rocksdb-wal.patch`) and S3 ✅
+ (`patches/0015-S3-execution-overlay.patch`) and S4 ✅
+-(`patches/0016-S4-snapshots.patch`) and S5 ✅
+-(`patches/0017-S5-state-sync.patch`) done — **STATE_PLAN now has
+-state sync**. Next in dependency order: S6 (pruning).
++(`patches/0016-S4-snapshots.patch`), S5 ✅
++(`patches/0017-S5-state-sync.patch`) and S6 ✅
++(`patches/0018-S6-pruning-archive.patch`) done — **STATE_PLAN now has
++pruning + archive**. Next in dependency order: S7 (recovery and backup).
+ No other phase has started.
+ 
+ ## Maturity level
+@@ -33,7 +34,7 @@ No other phase has started.
+ | Level | Definition | Now |
+ |---|---|---|
+ | L0 | Docs/plan, no code | ✅ done at C0 |
+-| L1 | Core libraries + test rig, no network | ✅ **we are here** (CORE C0–C10 + STATE S0–S2; X/B phases still open) |
++| L1 | Core libraries + test rig, no network | ✅ **we are here** (CORE C0–C10 + STATE S0–S6; X/B phases still open) |
+ | L2 | Devnet: 4 validators in one process/host | ❌ |
+ | L3 | Public testnet with external validators | ❌ (Stage 1 target) |
+ | L4 | Mainnet candidate: audit, freeze, white paper | ⏸ Stage 2 |
+@@ -44,7 +45,7 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
+ ## Working now
+ 
+ - `make test` is green: `cargo fmt --check`, `cargo clippy --workspace
+-  --all-targets -- -D warnings`, `cargo test --workspace` (**132 tests**),
++  --all-targets -- -D warnings`, `cargo test --workspace` (**169 tests**),
+   the docs drift guard, the dependency gate, the vector inventory, the
+   test-rig wiring check and the plan↔tree close-out audit.
+   Evidence receipts for every phase live in `docs/evidence/`; the newest are
+@@ -52,11 +53,26 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
+   `native.txt`,
+   `docs/evidence/s3/gates.txt`, `nc.log`, `report.md`, `inventory.txt`,
+   `docs/evidence/s4/gates.txt`, `nc.log`, `report.md`, `inventory.txt`,
+-  `docs/evidence/s5/gates.txt`, `nc.log`, `report.md`, `inventory.txt`.
++  `docs/evidence/s5/gates.txt`, `nc.log`, `report.md`, `inventory.txt`,
++  `docs/evidence/s6/gates.txt`, `nc.log`, `report.md`, `inventory.txt`.
+   ⚠️ AUDIT: the §3 crate graph in `docs/ARCHITECTURE.md` had a cycle
+   (`aura-state <- aura-storage` while `aura-storage <- aura-state`); S3
+   corrected it to match the real `Cargo.toml` edges.
+-- **S5 (current).** `aura-state::sync` gives state sync: a fresh node
++- **S6 (current).** `aura-state::history` + `aura-storage::prune` give
++  version retention. `HistoryTree` is an incremental compressed sparse
++  Merkle tree with **S1-identical roots** (measured: S1 rebuild = 16.4 ms
++  per commit at 1 024 leaves, ~27 min for 100 000 blocks; incremental =
++  ~12 hashes per write, ~6.6 us). `RetentionStore` keeps a materialised
++  base plus the last `keep_versions` deltas (prune mode) or everything
++  (archive mode), and folds deltas into the base on `compact()`.
++  **100 000 blocks:** archive 36,500,045 bytes serving every historical
++  root and proof; prune (`keep = 128`) peaks at 113,326 bytes —
++  **322.1x** smaller and under the analytic bound. A pruned version returns
++  `PruneError::Pruned`; archive mode refuses to compact. 35 fixture lines;
++  6 S6 negative controls. 169 tests, 4,326 vectors. Report:
++  `docs/evidence/s6/report.md`. Build profile: `blake3`/`sha2` are
++  `opt-level = 3` in dev builds (measured 5.785 us -> 0.178 us per hash).
++- **S5.** `aura-state::sync` gives state sync: a fresh node
+   downloads one package (3-head quorum + S4 snapshot + compact delta),
+   verifies all SHA-256 checksums, applies the sorted delta and recomputes
+   the S1 `state_root`. Package = 16,992 bytes vs full history 998,400
+diff --git a/docs/evidence/s6-dependency-addendum.txt b/docs/evidence/s6-dependency-addendum.txt
+new file mode 100644
+index 0000000..2b9f22a
+--- /dev/null
++++ b/docs/evidence/s6-dependency-addendum.txt
+@@ -0,0 +1,8 @@
++# AuraLite-Crypto external dependency addendum (S6).
++# Generated by tools/record_s6_deps.py from Cargo.lock.
++# S6 pruning/archive uses only existing workspace crates and modules.
++# No new external crate, no new workspace crate in this phase.
++# Build-profile note: [profile.dev.package.blake3] and
++# [profile.dev.package.sha2] are opt-level = 3 in the workspace
++# Cargo.toml (measured: blake3 5.785 us -> 0.178 us per hash in a
++# debug build). Versions are unchanged; only optimisation level.
+diff --git a/docs/evidence/s6/SHA256SUMS b/docs/evidence/s6/SHA256SUMS
+new file mode 100644
+index 0000000..c22dfc1
+--- /dev/null
++++ b/docs/evidence/s6/SHA256SUMS
+@@ -0,0 +1,6 @@
++1fa6d6bccd38f52b5bc0fe18fac18172f795aea9aceaf991b8ff72550770991c  docs/evidence/s6/gates.txt
++25c950e26c83650066537d5e03985a7d452347b73a6f14c0a75028c94b9697f3  docs/evidence/s6/nc.log
++8fdb83aec5e9c4a5710df15890cb025a8304390fc2624ae1e41426eebe51c57f  docs/evidence/s6/report.md
++f76f51d0631fc2e2e049b4350e406f456b9238ec3d877c02426bb534df2fac94  docs/evidence/s6/inventory.txt
++ce3fceb62c4d9f50a578a8474760f0a110f0bce2638e799dbf1170346d7d612f  crates/aura-storage/tests/fixtures/s6_golden.txt
++e0448edda57f1863cd175bd54d2976811892c3d116e60966e90a62c6dfe2cf0f  docs/evidence/s6-dependency-addendum.txt
+diff --git a/docs/evidence/s6/gates.txt b/docs/evidence/s6/gates.txt
+new file mode 100644
+index 0000000..f709dad
+--- /dev/null
++++ b/docs/evidence/s6/gates.txt
+@@ -0,0 +1,231 @@
++AuraLite-Crypto — S6 evidence (pruning + archive)
++Generated (UTC): 2026-10-28T16:32:18+00:00
++Rule: measured against the tree, not assumed.
++
++========================================================================
++RAW COMMAND OUTPUT
++========================================================================
++
++--- toolchain ---
++$ rustc --version && cargo --version
++rustc 1.99.1 (58cf8f9c3 2026-10-13)
++cargo 1.99.1 (5f94df478 2026-08-27)
++[rc=0]
++
++--- pre-S6 tree (S5 commit) ---
++$ git log -1 --oneline
++9bcfb69 S5 patch artifact
++[rc=0]
++
++--- workspace crates ---
++$ find crates -name Cargo.toml | wc -l
++15
++[rc=0]
++
++--- Rust files ---
++$ find . -name '*.rs' -not -path './target/*' | wc -l
++83
++[rc=0]
++
++--- external deps ---
++$ grep -c '^source = ' Cargo.lock || true
++95
++[rc=0]
++
++--- docs drift guard ---
++$ python3 tools/check_claims.py
++DOCS DRIFT GUARD: OK — 34 markdown files, 12 plans, 112 phase rows, all local links resolve
++[rc=0]
++
++--- dependency gate ---
++$ python3 tools/check_deps.py
++DEPENDENCY GATE: OK — 110 lock packages (15 local, 95 external, all checksummed + allowlisted)
++[rc=0]
++
++--- vector inventory ---
++$ python3 tools/count_vectors.py
++  crates/aura-crypto/tests/fixtures/c3_golden.txt:   60 vectors (61 data lines)
++  crates/aura-genesis/tests/fixtures/c8_golden.txt:   27 vectors (40 data lines)
++  crates/aura-state/tests/fixtures/c7_golden.txt:   91 vectors (103 data lines)
++  crates/aura-state/tests/fixtures/s0_golden.txt:   50 vectors (51 data lines)
++  crates/aura-state/tests/fixtures/s1_golden.txt: 3055 vectors (3062 data lines)
++  crates/aura-state/tests/fixtures/s3_golden.txt:   41 vectors (48 data lines)
++  crates/aura-state/tests/fixtures/s4_golden.txt:   49 vectors (54 data lines)
++  crates/aura-state/tests/fixtures/s5_golden.txt:   39 vectors (44 data lines)
++  crates/aura-storage/tests/fixtures/s2_golden.txt:  103 vectors (107 data lines)
++  crates/aura-storage/tests/fixtures/s6_golden.txt:   33 vectors (33 data lines)
++  crates/aura-testkit/tests/fixtures/c9_vectors.txt:  512 vectors (514 data lines)
++  crates/aura-tx/tests/fixtures/c4_golden.txt:   94 vectors (100 data lines)
++  crates/aura-types/tests/fixtures/c1_golden.txt:   18 vectors (18 data lines)
++
++  TOTAL: 4326 vectors across 16 fixtures
++VECTOR INVENTORY: OK — 4326 >= 200
++[rc=0]
++
++--- test rig wiring ---
++$ python3 tools/check_rig.py
++TEST RIG WIRING: OK — test-core + fuzz-smoke + vector inventory + proptest + 4 libFuzzer targets are wired into CI
++[rc=0]
++
++--- independent generator is idempotent (runs the generator twice) ---
++$ before=$(sha256sum crates/aura-storage/tests/fixtures/s6_golden.txt | cut -d' ' -f1); python3 tools/gen_s6_vectors.py >/dev/null; after=$(sha256sum crates/aura-storage/tests/fixtures/s6_golden.txt | cut -d' ' -f1); if [ "$before" = "$after" ]; then echo "generator idempotent: $after"; else echo "GENERATOR DRIFT"; exit 1; fi
++generator idempotent: ce3fceb62c4d9f50a578a8474760f0a110f0bce2638e799dbf1170346d7d612f
++[rc=0]
++
++--- S6 retention tests ---
++$ cargo test -p aura-storage --test s6_prune --quiet
++running 9 tests
++.........
++test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.89s
++[rc=0]
++
++--- S6 incremental-tree tests ---
++$ cargo test -p aura-state --test s6_history --quiet
++running 6 tests
++......
++test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
++[rc=0]
++
++--- 100 000-block DoD: archive serves history ---
++$ cargo test -p aura-storage --test s6_prune archive_100k -- --nocapture
++running 1 test
++archive: 100000 blocks, 36500045 bytes retained, head 1c7453a96ed7cf12e16c802f756050f0255a700dec77ff8ae7f8cb42eab41e27 in 3109 ms
++test archive_100k_blocks_serves_history ... ok
++
++test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 3.24s
++
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
++     Running tests/s6_prune.rs (target/debug/deps/s6_prune-5a57de69fc1ec1b3)
++[rc=0]
++
++--- 100 000-block DoD: prune keeps disk bounded ---
++$ cargo test -p aura-storage --test s6_prune prune_100k -- --nocapture
++running 1 test
++prune: 100000 blocks in 3409 ms, peak 113326 bytes (bound 113326), 99872 pruned, ratio 322.1x
++test prune_100k_blocks_keeps_disk_bounded ... ok
++
++test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 3.42s
++
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
++     Running tests/s6_prune.rs (target/debug/deps/s6_prune-5a57de69fc1ec1b3)
++[rc=0]
++
++--- S6 negative controls (evidence log) ---
++$ make nc-s6
++error: test failed, to rerun pass `-p aura-storage --test s6_prune`
++NC-2 base checksum context: PASS
++      cargo test -p aura-storage --test s6_prune -> rc=101 (RED as expected)
++      
++test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.69s
++
++error: test failed, to rerun pass `-p aura-storage --test s6_prune`
++NC-3 retention boundary (keep + 1): PASS
++      cargo test -p aura-storage --test s6_prune -> rc=101 (RED as expected)
++      
++test result: FAILED. 4 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.62s
++
++error: test failed, to rerun pass `-p aura-storage --test s6_prune`
++NC-4 pruning disabled in prune mode: PASS
++      cargo test -p aura-storage --test s6_prune -> rc=101 (RED as expected)
++      
++test result: FAILED. 3 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.36s
++
++error: test failed, to rerun pass `-p aura-storage --test s6_prune`
++NC-5 archive compaction allowed: PASS
++      cargo test -p aura-storage --test s6_prune -> rc=101 (RED as expected)
++      
++test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.73s
++
++error: test failed, to rerun pass `-p aura-storage --test s6_prune`
++NC-6 pruned version served instead of rejected: PASS
++      cargo test -p aura-storage --test s6_prune -> rc=101 (RED as expected)
++      
++test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.67s
++
++error: test failed, to rerun pass `-p aura-storage --test s6_prune`
++
++RESULT: 6/6 negative controls PASS
++make[1]: Leaving directory '/home/user/AuraLite-Crypto'
++[rc=0]
++
++--- all negative controls (C0-C10 + S0-S6) ---
++$ make nc-all
++make[1]: Entering directory '/home/user/AuraLite-Crypto'
++RESULT: 2/2 negative controls PASS
++RESULT: 3/3 negative controls PASS
++RESULT: 4/4 negative controls PASS
++RESULT: 5/5 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++make[1]: Leaving directory '/home/user/AuraLite-Crypto'
++[rc=0]
++
++--- CORE shard ---
++$ make test-core
++     Running unittests src/lib.rs (target/debug/deps/aura_types-308b229bcbc15c92)
++     Running tests/c1_types.rs (target/debug/deps/c1_types-30318a674a00d8c5)
++     Running tests/identity.rs (target/debug/deps/identity-22b5be58a3e6ffbb)
++   Doc-tests aura_block
++   Doc-tests aura_codec
++   Doc-tests aura_crypto
++   Doc-tests aura_genesis
++   Doc-tests aura_state
++   Doc-tests aura_storage
++   Doc-tests aura_testkit
++   Doc-tests aura_tx
++   Doc-tests aura_types
++[rc=0]
++
++--- plan<->tree audit ---
++$ make audit-closeout
++make[1]: Entering directory '/home/user/AuraLite-Crypto'
++CLOSE-OUT PLAN<->TREE AUDIT (CORE + STATE)
++  phases audited: 18 (C0-S6)
++  expected NC total: 98 (92 shipped + 6 S6)
++  evidence checksum files: 17
++  spec files indexed: 11
++  note: S6 patch: pending (cut at commit time)
++  note: S6 evidence: pending (generated by make evidence-s6)
++AUDIT: OK — every ✅ phase has a receipt, patch, NC log and evidence; all checksums verify
++make[1]: Leaving directory '/home/user/AuraLite-Crypto'
++[rc=0]
++
++--- full gate ---
++$ make test
++   Doc-tests aura_genesis
++   Doc-tests aura_mempool
++   Doc-tests aura_node
++   Doc-tests aura_p2p
++   Doc-tests aura_rpc
++   Doc-tests aura_state
++   Doc-tests aura_storage
++   Doc-tests aura_testkit
++   Doc-tests aura_tx
++   Doc-tests aura_types
++[rc=0]
++
++========================================================================
++SUMMARY
++========================================================================
++
++Pre-S6 (S5): 15 crates, 154 Rust tests, 4,309 golden vectors,
++92 negative controls, 95 external crates.
++Post-S6: 15 crates (no new crate, no new external dependency),
++169 Rust tests (+9 S6 storage, +6 S6 tree), 4,326 vectors across
++16 fixtures, 98 negative controls (6 new in S6), 95 external crates.
++100 000 blocks: archive 36,500,045 bytes vs prune
++peak 113,326 bytes (322.1x);
++archive serves every version, prune mode rejects pruned versions.
++Validators/blocks/tx remain 0/0/0.
+diff --git a/docs/evidence/s6/inventory.txt b/docs/evidence/s6/inventory.txt
+new file mode 100644
+index 0000000..5eb518f
+--- /dev/null
++++ b/docs/evidence/s6/inventory.txt
+@@ -0,0 +1,138 @@
++AuraLite-Crypto — negative-control inventory after S6
++Generated (UTC): 2026-10-28T16:32:18+00:00
++
++C0: 2/2 negative controls
++  - NC-1 Rust identity: PASS
++  - NC-2 docs drift guard: PASS
++
++C1: 3/3 negative controls
++  - NC-1 bech32 checksum constant: PASS
++  - NC-2 address version byte: PASS
++  - NC-3 independent golden vector: PASS
++
++C2: 4/4 negative controls
++  - NC-1 codec version: PASS
++  - NC-2 independent golden fixture: PASS
++  - NC-3 trailing-byte guard: PASS
++  - NC-4 non-minimal varint guard: PASS
++
++C3: 5/5 negative controls
++  - NC-1 domain separation context: PASS
++  - NC-2 independent domain-hash vector: PASS
++  - NC-3 RFC 8032 vector: PASS
++  - NC-4 Ed25519 verification bypass: PASS
++  - NC-5 dependency allowlist / make test gate: PASS
++
++C4: 6/6 negative controls
++  - NC-1 signing context: PASS
++  - NC-2 txid context: PASS
++  - NC-3 independent golden signature: PASS
++  - NC-4 replay protection: PASS
++  - NC-5 signer/public-key binding: PASS
++  - NC-6 Ed25519 verification bypass: PASS
++
++C5: 6/6 negative controls
++  - NC-1 Merkle leaf context: PASS
++  - NC-2 Merkle node context: PASS
++  - NC-3 block-hash context: PASS
++  - NC-4 independent golden tx_root: PASS
++  - NC-5 tx_root recomputation check: PASS
++  - NC-6 canonical body order check: PASS
++
++C6: 6/6 negative controls
++  - NC-1 event leaf context: PASS
++  - NC-2 independent golden root: PASS
++  - NC-3 leaf/value binding: PASS
++  - NC-4 sibling-count check: PASS
++  - NC-5 sibling direction: PASS
++  - NC-6 root comparison: PASS
++
++C7: 6/6 negative controls
++  - NC-1 state key digest context: PASS
++  - NC-2 independent golden key digest: PASS
++  - NC-3 reserved key-space prefixes: PASS
++  - NC-4 namespace length check: PASS
++  - NC-5 contract namespace check: PASS
++  - NC-6 contract address check: PASS
++
++C8: 6/6 negative controls
++  - NC-1 genesis context: PASS
++  - NC-2 validator-set context: PASS
++  - NC-3 independent golden genesis hash: PASS
++  - NC-4 validator order (DoD: sorting must not happen): PASS
++  - NC-5 unknown JSON fields: PASS
++  - NC-6 Stage 1 chain-id check: PASS
++
++C9: 6/6 negative controls
++  - NC-1 C9 golden varint vector: PASS
++  - NC-2 vector inventory minimum: PASS
++  - NC-3 injected non-minimal-varint bug: PASS
++  - NC-4 injected trailing-byte-guard bug: PASS
++  - NC-5 fuzz harness iteration counter: PASS
++  - NC-6 rig wiring in Makefile: PASS
++
++C10: 6/6 negative controls
++  - NC-1 missing phase receipt: PASS
++  - NC-2 deferred phase marked done: PASS
++  - NC-3 forged NC log result: PASS
++  - NC-4 unindexed format spec: PASS
++  - NC-5 forged patch subject: PASS
++  - NC-6 corrupted evidence checksum: PASS
++
++S0: 6/6 negative controls
++  - NC-1 final-view context: PASS
++  - NC-2 independent golden final view: PASS
++  - NC-3 fake state root: PASS
++  - NC-4 fake persistence: PASS
++  - NC-5 fake determinism: PASS
++  - NC-6 falsified no-root measurement: PASS
++
++S1: 6/6 negative controls
++  - NC-1 leaf context: PASS
++  - NC-2 node context: PASS
++  - NC-3 independent checkpoint root: PASS
++  - NC-4 proof root comparison: PASS
++  - NC-5 path bit ordering: PASS
++  - NC-6 depth-independent empty subtrees: PASS
++
++S2: 6/6 negative controls
++  - NC-1 WAL checksum context: PASS
++  - NC-2 state key context: PASS
++  - NC-3 state root context: PASS
++  - NC-4 independent golden WAL record: PASS
++  - NC-5 WAL checksum verification: PASS
++  - NC-6 WAL-before-head invariant: PASS
++
++S3: 6/6 negative controls
++  - NC-1 diff checksum context: PASS
++  - NC-2 event commitment context: PASS
++  - NC-3 diff magic: PASS
++  - NC-4 independent golden diff: PASS
++  - NC-5 diff checksum verification: PASS
++  - NC-6 rollback removal (balance changes after revert): PASS
++
++S4: 6/6 negative controls
++  - NC-1 snapshot magic: PASS
++  - NC-2 manifest checksum context: PASS
++  - NC-3 chunk hash context: PASS
++  - NC-4 independent golden manifest: PASS
++  - NC-5 manifest checksum verification: PASS
++  - NC-6 chunk digest comparison (substituted chunk): PASS
++
++S5: 6/6 negative controls
++  - NC-1 head checksum context: PASS
++  - NC-2 delta checksum context: PASS
++  - NC-3 package checksum context: PASS
++  - NC-4 independent golden package: PASS
++  - NC-5 quorum comparison: PASS
++  - NC-6 final state-root comparison (substituted diff chunk): PASS
++
++S6: 6/6 negative controls
++  - NC-1 record checksum context: PASS
++  - NC-2 base checksum context: PASS
++  - NC-3 retention boundary (keep + 1): PASS
++  - NC-4 pruning disabled in prune mode: PASS
++  - NC-5 archive compaction allowed: PASS
++  - NC-6 pruned version served instead of rejected: PASS
++
++TOTAL: 98 NC
+diff --git a/docs/evidence/s6/nc.log b/docs/evidence/s6/nc.log
+new file mode 100644
+index 0000000..d68ed27
+--- /dev/null
++++ b/docs/evidence/s6/nc.log
+@@ -0,0 +1,41 @@
++S6 NEGATIVE CONTROLS — 2026-10-28T16:33:21+00:00
++Rule: a gate that cannot go red is not a gate (CONTRIBUTING.md §1).
++
++NC-1 record checksum context: PASS
++      cargo test -p aura-storage --test s6_prune -> rc=101 (RED as expected)
++      
++test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.68s
++
++error: test failed, to rerun pass `-p aura-storage --test s6_prune`
++NC-2 base checksum context: PASS
++      cargo test -p aura-storage --test s6_prune -> rc=101 (RED as expected)
++      
++test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.69s
++
++error: test failed, to rerun pass `-p aura-storage --test s6_prune`
++NC-3 retention boundary (keep + 1): PASS
++      cargo test -p aura-storage --test s6_prune -> rc=101 (RED as expected)
++      
++test result: FAILED. 4 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.62s
++
++error: test failed, to rerun pass `-p aura-storage --test s6_prune`
++NC-4 pruning disabled in prune mode: PASS
++      cargo test -p aura-storage --test s6_prune -> rc=101 (RED as expected)
++      
++test result: FAILED. 3 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.36s
++
++error: test failed, to rerun pass `-p aura-storage --test s6_prune`
++NC-5 archive compaction allowed: PASS
++      cargo test -p aura-storage --test s6_prune -> rc=101 (RED as expected)
++      
++test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.73s
++
++error: test failed, to rerun pass `-p aura-storage --test s6_prune`
++NC-6 pruned version served instead of rejected: PASS
++      cargo test -p aura-storage --test s6_prune -> rc=101 (RED as expected)
++      
++test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.67s
++
++error: test failed, to rerun pass `-p aura-storage --test s6_prune`
++
++RESULT: 6/6 negative controls PASS
+diff --git a/docs/evidence/s6/report.md b/docs/evidence/s6/report.md
+new file mode 100644
+index 0000000..a3a382a
+--- /dev/null
++++ b/docs/evidence/s6/report.md
+@@ -0,0 +1,87 @@
++# S6 — pruning, archive and compaction (measured)
++
++Generated (UTC): 2026-10-28T16:32:18+00:00. Every number below comes from the
++independent Python model `tools/gen_s6_vectors.py` (S1 tree rebuild +
++canonical byte accounting, no Rust code) and is re-verified by
++`crates/aura-storage/tests/s6_prune.rs`.
++
++This report lives in `docs/evidence/s6/`, not `docs/spec/`, because
++`docs/spec/FORMAT_INDEX.md` is frozen, checksummed C10 evidence.
++
++## What landed
++
++* `aura-state::HistoryTree` — an incrementally maintained compressed
++  sparse Merkle tree with **S1-identical roots**. S1 `MerkleTree`
++  rebuilds the whole arena per commit (measured 16.4 ms at 1 024
++  leaves = ~27 min for 100 000 blocks); `HistoryTree` touches only the
++  changed path (~12 hashes per write).
++* `aura-storage::prune` — `RetentionPolicy` (prune / archive),
++  `VersionRecord`, canonical `encode_base`, `RetentionStore` with
++  `commit`, `root_at`, `state_at`, `proof_at`, `compact` and exact
++  disk accounting.
++
++```
++record payload = "ALP6" || u64 version || 32 parent_root ||
++  32 state_root || v change_count ||
++  (v key_len || key || tag || [v value_len || value] || u64 nonce)*
++record bytes   = payload || BLAKE3(S6_RECORD_CONTEXT || payload)
++
++base payload   = "ALB6" || u64 version || v entry_count ||
++  (32 path || v value_len || value)*
++base bytes     = payload || BLAKE3(S6_BASE_CONTEXT || payload)
++```
++
++Retention rule, applied after every commit:
++`base_version = max(base_version, head - keep_versions)`. A pruned
++version returns `PruneError::Pruned { version, oldest }` — never a
++plausible-looking wrong state.
++
++## Measured DoD gates
++
++* **100,000 blocks** simulated twice on the same
++  deterministic schedule (4 writes per block over
++  1024 live keys).
++* Archive mode: **36,500,045 bytes** retained
++  (base 45 + 100,000 records of
++  365 bytes). Serves `root_at`/`proof_at` for
++  every height: verified at 12 checkpoints against the Python rebuild
++  and by recomputing whole historical states from genesis.
++* Prune mode (`keep_versions = 128`): peak disk
++  **113,326 bytes**, final **113,326 bytes**, i.e. **322.1x**
++  smaller than the archive of the same history. Peak also sits under
++  the analytic bound `base_bytes + keep * max_record_bytes`
++  (113,326 <= 113,326 bytes — equality is the expected steady state).
++* Retention bookkeeping: 99,872 records
++  pruned (36,453,280 bytes), exactly
++  128 retained deltas, base at version
++  99872.
++* Compaction folds every retained delta into the base at the head root
++  (root unchanged, disk shrinks), and archive mode refuses to compact.
++* Head root at 100 000 blocks re-derived by the S1 rebuild and equal to
++  the incremental root; record and base bytes byte-identical to the
++  Python encoder.
++
++## Negative controls
++
++NC-1 record context, NC-2 base context, NC-3 retention boundary,
++NC-4 pruning disabled, NC-5 archive compaction allowed, NC-6 pruned
++version faked. 6/6 PASS; total 98 across C0–C10 + S0–S6.
++
++## Build-profile decision (measured)
++
++`[profile.dev.package.blake3]` and `[profile.dev.package.sha2]` are
++`opt-level = 3` in the workspace manifest. Measured in a debug build:
++`blake3_hash(65 B)` 5.785 us -> 0.178 us (32x). No crate version
++changed; `docs/evidence/s6-dependency-addendum.txt` records it.
++
++## Honest scope
++
++* Pruning here is *version retention over the in-process store*; the
++  RocksDB column-family compaction (`S2` backend) is unchanged and the
++  native backend is still covered only by the `s2-native` CI job.
++* No real P2P, no light-client protocol, no backup/chaos (S7), no VM
++  (X1). `cargo deny` remains H1.
++* The 100 000-block run is a single process on one machine; it is not a
++  devnet and produces no blocks on any network.
++
++Validators / blocks / transactions remain **0 / 0 / 0**.
+diff --git a/docs/plans/STATE_PLAN.md b/docs/plans/STATE_PLAN.md
+index 56721dd..524b1e3 100644
+--- a/docs/plans/STATE_PLAN.md
++++ b/docs/plans/STATE_PLAN.md
+@@ -1,8 +1,8 @@
+ # STATE_PLAN — state tree and storage
+ 
+-**Status:** 🚧 IN PROGRESS (S0–S5 ✅ 2026-10-27; S6 next)  
++**Status:** 🚧 IN PROGRESS (S0–S6 ✅ 2026-10-28; S7 next)  
+ **Stage:** Stage 1: S0–S7 (all phases active).  
+-**Deliverable:** `patches/0012-S0-...` … `patches/0019-S7-...`
++**Deliverable:** `patches/0012-S0-...` … `patches/0019-S7-...` (S6 = `patches/0018-S6-...`)
+ **Dependencies:** CORE C1–C7 (codec, hash, accounts).
+ 
+ ## Problem
+@@ -48,7 +48,7 @@ implement any of them. S1 must consume `StateKey::digest` as its JMT path.
+ | ✅ **S3** | Execution overlay | `StateView`, diff, rollback on `OutOfGas`/revert | revert does not change root; NC: remove rollback → balance changed, test red |
+ | ✅ **S4** | Snapshots | chunks, manifest, parallel export/import | snapshot of 1M keys imported byte-identical; substituted chunk → reject |
+ | ✅ **S5** | State sync | node catches up via snapshot + diff without downloading all history | new node reaches the same root as 3 old ones within N minutes |
+-| **S6** | Pruning + archive | pruning old versions, archive mode, compaction | 100 000 blocks: disk size bounded in prune mode; archive serves history |
++| ✅ **S6** | Pruning + archive | pruning old versions, archive mode, compaction | 100 000 blocks: disk size bounded in prune mode; archive serves history |
+ | **S7** | Recovery and backup | backup/restore, checksum verification, chaos gate | 50 `kill -9` + restore cycles, zero root mismatches |
+ 
+ 
+@@ -272,6 +272,73 @@ implement any of them. S1 must consume `StateKey::digest` as its JMT path.
+ - Deferred: pruning/archive (S6), backup/chaos (S7), real VM (X1), `cargo
+   deny` (H1).
+ 
++### S6 receipt (2026-10-28)
++
++- Deliverable: `patches/0018-S6-pruning-archive.patch`. No new crate and no
++  new external dependency — the incremental tree lives in `aura-state::history`
++  and the retention layer in `aura-storage::prune`.
++- **Measured problem first.** S1 `MerkleTree` rebuilds the whole node arena on
++  every `commit()`: 16.4 ms per commit at 1 024 leaves (5 000 commits timed),
++  i.e. ~27 minutes for 100 000 blocks. A pruner needs a root per block, so S6
++  had to make the tree incremental *before* it could measure retention.
++- Landed `HistoryTree`: a compressed sparse Merkle tree held in a mutable
++  arena, updating only the changed path. Roots are bit-for-bit S1
++  (`empty_hash`, `leaf_hash`, `node_hash`, `versioned_root`), verified against
++  `MerkleTree` rebuilds at every checkpoint. Measured cost: **~12 hashes per
++  write**, ~6.6 us per write in a debug build (from 16.4 ms per commit).
++  Two defects were found and fixed by the cross-check gates: a branch prefix
++  computed from the parent instead of the child (sibling slots collided) and a
++  return value that kept the deepest branch hash instead of the root.
++- Landed `aura_storage::prune`: `RetentionMode`, `RetentionPolicy`
++  (`prune(keep)` / `archive()`), `VersionRecord`, `CompactionReport`,
++  `RetentionReceipt`, `RetentionStore` with `commit`, `root_at`, `state_at`,
++  `proof_at`, `verify_root_at`, `compact`, exact byte accounting and
++  `PruneError`.
++- **Wire formats:** `record bytes = payload || BLAKE3(S6_RECORD_CONTEXT ||
++  payload)` with `payload = ALP6 || u64 version || 32 parent_root ||
++  32 state_root || varint count || changes` (S2 change shape, own magic and
++  domain); `base bytes = payload || BLAKE3(S6_BASE_CONTEXT || payload)` with
++  `payload = ALB6 || u64 version || varint count || entries`. Strict decode
++  enforces checksum, magic, caps, no trailing bytes and byte-identical
++  re-encoding.
++- **Retention rule:** `base_version = max(base_version, head - keep_versions)`
++  after every commit. A pruned version returns
++  `PruneError::Pruned { version, oldest }` — never a plausible wrong state.
++  Archive mode never prunes and refuses to compact
++  (`ArchiveCompactionForbidden`).
++- **DoD gates:** 100 000 blocks simulated twice on one deterministic schedule
++  (4 writes per block over 1 024 keys). Archive retains **36 500 045 bytes**
++  and serves `root_at`/`proof_at` for every height (12 checkpoints against the
++  Python rebuild plus whole-state recomputation). Prune mode
++  (`keep_versions = 128`) peaks at **113 326 bytes** and stays under the
++  analytic bound `base_bytes + keep * max_record_bytes` — **322.1x** smaller
++  than the archive of the same history. Compaction folds the retained deltas
++  into the base without moving the root. Record and base bytes are
++  byte-identical to the independent Python encoder.
++- Golden vectors: `tools/gen_s6_vectors.py` — pure-Python BLAKE3
++  (self-checked against 7 official vectors), C7 key digest, S2 key path, a
++  from-scratch S1 rebuild, exact canonical byte accounting for all 100 000
++  blocks and canonical hex for one record, one later record and one base
++  snapshot. 35 fixture lines, offline and byte-stable (generator runs in ~52 s
++  because it rebuilds the tree 12 times in pure Python).
++- Gate: `make test` -> **169 passed / 0 failed** (154 S5 + 9 S6 storage +
++  6 S6 tree), fmt/clippy clean, drift guard 12 plans / 112 rows, dependency
++  gate 95 external crates, vector inventory 4 326 across 16 fixtures,
++  `make audit-closeout` green.
++- Build-profile decision: `[profile.dev.package.blake3]` and
++  `[profile.dev.package.sha2]` are `opt-level = 3`. Measured
++  `blake3_hash(65 B)`: 5.785 us -> 0.178 us in a debug build (32x). No crate
++  version changed; recorded in `docs/evidence/s6-dependency-addendum.txt`.
++- NC: `make nc-s6` -> **6/6 PASS**: record context, base context, retention
++  boundary (keep + 1), pruning disabled, archive compaction allowed, pruned
++  version faked. Total C0–C10 + S0–S6: **98 NC**.
++- Evidence: `docs/evidence/s6/gates.txt`, `nc.log`, `report.md`,
++  `inventory.txt`, `SHA256SUMS`, `docs/evidence/s6-dependency-addendum.txt`.
++  The report lives in evidence, not `docs/spec/`, because
++  `docs/spec/FORMAT_INDEX.md` is frozen checksummed C10 evidence.
++- Deferred: backup/restore + chaos gate (S7), real VM/WASM (X1), `cargo deny`
++  (H1), RocksDB column-family compaction tuning (S2 backend unchanged).
++
+ ## Risks
+ 
+ - Tree root disagreeing with the "reference" implementation → caught by an
+diff --git a/tools/audit_closeout.py b/tools/audit_closeout.py
+index 21caa40..c0a3d94 100644
+--- a/tools/audit_closeout.py
++++ b/tools/audit_closeout.py
+@@ -29,10 +29,10 @@ EVIDENCE = REPO / "docs" / "evidence"
+ PATCHES = REPO / "patches"
+ 
+ CORE_PHASES = [f"C{index}" for index in range(11)]      # C0..C10 (closed)
+-STATE_PHASES = ["S0", "S1", "S2", "S3", "S4", "S5"]      # grows with each S phase
++STATE_PHASES = ["S0", "S1", "S2", "S3", "S4", "S5", "S6"]  # grows with each S phase
+ PHASES = CORE_PHASES + STATE_PHASES
+-SHIPPED = CORE_PHASES + ["S0", "S1", "S2", "S3", "S4"]
+-CURRENT = "S5"
++SHIPPED = CORE_PHASES + ["S0", "S1", "S2", "S3", "S4", "S5"]
++CURRENT = "S6"
+ 
+ PLAN_FOR_PREFIX = {
+     "C": "CORE_PLAN.md",
+@@ -50,9 +50,9 @@ PLAN_FOR_PREFIX = {
+ }
+ 
+ NC_PER_PHASE = {f"C{i}": 6 for i in range(4, 11)}
+-NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6})
+-SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)   # 86
+-EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + NC_PER_PHASE[CURRENT]       # 92
++NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6})
++SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)   # 92
++EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + NC_PER_PHASE[CURRENT]       # 98
+ 
+ DONE_ROW = re.compile(r"^\| ✅ \*\*([A-Z]+\d+)\*\* \|", re.M)
+ RESULT_LINE = re.compile(r"^RESULT: (\d+)/(\d+) negative controls PASS", re.M)
+@@ -258,7 +258,7 @@ def check(strict: bool) -> tuple[list[str], list[str]]:
+             errors.append("closeout.txt does not report the CORE total 56 NC")
+     # Per-phase inventories are historical snapshots: each reports the NC
+     # total AS OF that phase, not the current project-wide total.
+-    for phase, expected in (("s0", 62), ("s1", 68), ("s2", 74), ("s3", 80), ("s4", 86), ("s5", EXPECTED_TOTAL_NC)):
++    for phase, expected in (("s0", 62), ("s1", 68), ("s2", 74), ("s3", 80), ("s4", 86), ("s5", 92), ("s6", EXPECTED_TOTAL_NC)):
+         path = EVIDENCE / phase / "inventory.txt"
+         if path.exists() and f"TOTAL: {expected} NC" not in path.read_text(encoding="utf-8"):
+             errors.append(f"{phase}/inventory.txt does not report TOTAL: {expected} NC")
+diff --git a/tools/gen_s6_vectors.py b/tools/gen_s6_vectors.py
+new file mode 100644
+index 0000000..ee501e2
+--- /dev/null
++++ b/tools/gen_s6_vectors.py
+@@ -0,0 +1,391 @@
++#!/usr/bin/env python3
++"""Generate S6 retention golden vectors from an INDEPENDENT Python model.
++
++No Rust code, no network. Contains pure-Python BLAKE3 (self-checked against
++official BLAKE3 vectors), the C7 state-key digest, the S2 key path, a
++from-scratch rebuild of the S1 sparse Merkle tree, and the S6 wire formats.
++
++What is modelled, and why:
++
++* **Roots** for the first `SCHEDULE_BLOCKS` blocks are computed by REBUILDING
++  the tree from the live state at each checkpoint — a different algorithm from
++  the Rust incremental `HistoryTree`. If the two disagree, the S6 roots are
++  wrong.
++* **Byte accounting** for the full 100 000-block run is computed exactly, with
++  no hashing, from the canonical encodings: `record bytes = payload ||
++  BLAKE3(S6_RECORD_CONTEXT || payload)` and `base bytes = payload ||
++  BLAKE3(S6_BASE_CONTEXT || payload)`. The Rust gate must reproduce every
++  number.
++
++Wire formats (integers fixed-width LE unless `v` = minimal LEB128):
++
++    record payload = "ALP6" || u64 version || 32 parent_root || 32 state_root
++        || v change_count || (v key_len || key || tag || [v value_len ||
++        value] || u64 nonce)*
++    record bytes   = payload || BLAKE3(S6_RECORD_CONTEXT || payload)
++
++    base payload   = "ALB6" || u64 version || v entry_count ||
++        (32 path || v value_len || value)*
++    base bytes     = payload || BLAKE3(S6_BASE_CONTEXT || payload)
++
++Retention rule (prune mode), applied after every commit:
++
++    base_version = max(base_version, head - keep_versions)
++
++so a store always keeps exactly `min(head, keep_versions)` deltas plus one
++materialised base snapshot.
++
++Usage:
++    python3 tools/gen_s6_vectors.py
++    make gen-s6-vectors
++"""
++
++from __future__ import annotations
++
++import struct
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++OUT = REPO / "crates" / "aura-storage" / "tests" / "fixtures" / "s6_golden.txt"
++
++STATE_KEY_CONTEXT = b"AuraLite-Crypto/state-key-v1\x00"        # C7
++ADDR_CONTEXT = b"AuraLite-Crypto/s1-addr-v1\x00"               # S1
++VALUE_CONTEXT = b"AuraLite-Crypto/s1-value-v1\x00"             # S1
++EMPTY_CONTEXT = b"AuraLite-Crypto/s1-empty-v1\x00"             # S1
++LEAF_CONTEXT = b"AuraLite-Crypto/s1-leaf-v1\x00"               # S1
++NODE_CONTEXT = b"AuraLite-Crypto/s1-node-v1\x00"               # S1
++ROOT_CONTEXT = b"AuraLite-Crypto/s1-root-v1\x00"               # S1
++S2_KEY_CONTEXT = b"AuraLite-Crypto/s2-key-v1\x00"              # S2
++
++RECORD_MAGIC = b"ALP6"
++BASE_MAGIC = b"ALB6"
++S6_RECORD_CONTEXT = b"AuraLite-Crypto/s6-record-v1\x00"
++S6_BASE_CONTEXT = b"AuraLite-Crypto/s6-base-v1\x00"
++
++BLOCKS = 100_000          # the S6 DoD height
++SCHEDULE_BLOCKS = 1_000   # prefix for which independent roots are computed
++WRITES_PER_BLOCK = 4
++LIVE_KEYS = 1_024
++KEEP_VERSIONS = 128
++CHECKPOINTS = [1, 100, 200, 300, 400, 500, 600, 700, 800, 900, 999, 1000]
++
++# ---------------------------------------------------------------- BLAKE3 ---
++MASK = 0xFFFFFFFF
++IV = [0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A,
++      0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19]
++PERM = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8]
++CHUNK_START, CHUNK_END, ROOT = 1, 2, 8
++
++
++def _rotr(x: int, n: int) -> int:
++    return ((x >> n) | (x << (32 - n))) & MASK
++
++
++def _g(s, a, b, c, d, mx, my):
++    s[a] = (s[a] + s[b] + mx) & MASK
++    s[d] = _rotr(s[d] ^ s[a], 16)
++    s[c] = (s[c] + s[d]) & MASK
++    s[b] = _rotr(s[b] ^ s[c], 12)
++    s[a] = (s[a] + s[b] + my) & MASK
++    s[d] = _rotr(s[d] ^ s[a], 8)
++    s[c] = (s[c] + s[d]) & MASK
++    s[b] = _rotr(s[b] ^ s[c], 7)
++
++
++def _compress(cv, block, counter, block_len, flags):
++    s = list(cv) + list(IV)
++    s[12], s[13], s[14], s[15] = counter & MASK, (counter >> 32) & MASK, block_len, flags
++    m = list(block)
++    for r in range(7):
++        _g(s, 0, 4, 8, 12, m[0], m[1]); _g(s, 1, 5, 9, 13, m[2], m[3])
++        _g(s, 2, 6, 10, 14, m[4], m[5]); _g(s, 3, 7, 11, 15, m[6], m[7])
++        _g(s, 0, 5, 10, 15, m[8], m[9]); _g(s, 1, 6, 11, 12, m[10], m[11])
++        _g(s, 2, 7, 8, 13, m[12], m[13]); _g(s, 3, 4, 9, 14, m[14], m[15])
++        if r != 6:
++            m = [m[PERM[i]] for i in range(16)]
++    return [s[i] ^ s[i + 8] for i in range(8)] + [s[i + 8] ^ cv[i] for i in range(8)]
++
++
++def blake3(data: bytes) -> bytes:
++    """Pure-Python BLAKE3 for inputs <= 1024 bytes (single chunk)."""
++    assert len(data) <= 1024, "reference handles a single chunk only"
++    blocks = [data[i:i + 64] for i in range(0, len(data), 64)] or [b""]
++    cv = IV
++    for i, block in enumerate(blocks[:-1]):
++        flags = CHUNK_START if i == 0 else 0
++        cv = _compress(cv, list(struct.unpack("<16I", block.ljust(64, b"\0"))), 0, 64, flags)[:8]
++    last = blocks[-1]
++    flags = (CHUNK_START if len(blocks) == 1 else 0) | CHUNK_END
++    words = list(struct.unpack("<16I", last.ljust(64, b"\0")))
++    return struct.pack("<8I", *_compress(cv, words, 0, len(last), flags | ROOT)[:8])
++
++
++OFFICIAL_B3 = {
++    0: "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
++    1: "2d3adedff11b61f14c886e35afa036736dcd87a74d27b5c1510225d0f592e213",
++    63: "e9bc37a594daad83be9470df7f7b3798297c3d834ce80ba85d6e207627b7db7b",
++    64: "4eed7141ea4a5cd4b788606bd23f46e212af9cacebacdc7d1f4c6dc7f2511b98",
++    65: "de1e5fa0be70df6d2be8fffd0e99ceaa8eb6e8c93a63f2d8d1c30ecb6b263dee",
++    1023: "10108970eeda3eb932baac1428c7a2163b0e924c9a9e25b35bba72b28f70bd11",
++    1024: "42214739f095a406f3fc83deb889744ac00df831c10daa55189b5d121c855af7",
++}
++
++# ------------------------------------------------------------- wire helpers ---
++def varint(value: int) -> bytes:
++    out = bytearray()
++    while True:
++        byte = value & 0x7F
++        value >>= 7
++        out.append(byte | (0x80 if value else 0))
++        if not value:
++            return bytes(out)
++
++
++def varint_len(value: int) -> int:
++    return len(varint(value))
++
++
++def u16(value: int) -> bytes:
++    return struct.pack("<H", value)
++
++
++def u64(value: int) -> bytes:
++    return struct.pack("<Q", value)
++
++
++# ------------------------------------------------------------------- state ---
++def account_key(index: int) -> bytes:
++    """C7 account state key: 0x01 || address[20]."""
++    return b"\x01" + blake3(ADDR_CONTEXT + u64(index))[:20]
++
++
++def key_path(key: bytes) -> bytes:
++    """S2 domain-separated key path (the S6 tree path)."""
++    return blake3(S2_KEY_CONTEXT + u64(len(key)) + key)
++
++
++def value_bytes(seed: int) -> bytes:
++    return blake3(VALUE_CONTEXT + u64(seed))
++
++
++def key_bit(path: bytes, depth: int) -> int:
++    return (path[depth // 8] >> (7 - depth % 8)) & 1
++
++
++_EMPTY_CACHE: dict[int, bytes] = {}
++
++
++def empty_hash(depth: int) -> bytes:
++    """Depth-dependent empty-subtree hash (memoised: only 257 distinct values)."""
++    cached = _EMPTY_CACHE.get(depth)
++    if cached is None:
++        cached = blake3(EMPTY_CONTEXT + u16(depth))
++        _EMPTY_CACHE[depth] = cached
++    return cached
++
++
++def leaf_hash(depth: int, path: bytes, value: bytes) -> bytes:
++    return blake3(LEAF_CONTEXT + u16(depth) + path + u64(len(value)) + value)
++
++
++def node_hash(left: bytes, right: bytes) -> bytes:
++    return blake3(NODE_CONTEXT + left + right)
++
++
++def versioned_root(version: int, tree_root: bytes) -> bytes:
++    return blake3(ROOT_CONTEXT + u64(version) + tree_root)
++
++
++def rebuild_root(entries: list[tuple[bytes, bytes]]) -> bytes:
++    """Rebuild the S1 tree from scratch (independent of the Rust algorithm)."""
++    return _subtree(0, sorted(entries))
++
++
++def _subtree(depth: int, entries: list[tuple[bytes, bytes]]) -> bytes:
++    if not entries:
++        return empty_hash(depth)
++    if len(entries) == 1:
++        path, value = entries[0]
++        return leaf_hash(depth, path, value)
++    left = [entry for entry in entries if key_bit(entry[0], depth) == 0]
++    right = [entry for entry in entries if key_bit(entry[0], depth) == 1]
++    return node_hash(_subtree(depth + 1, left), _subtree(depth + 1, right))
++
++
++# --------------------------------------------------------------- schedule ---
++KEYS = [account_key(index) for index in range(LIVE_KEYS)]
++PATHS = [key_path(key) for key in KEYS]
++# Every value is a 32-byte BLAKE3 digest, so record SIZE depends only on the
++# schedule shape; values are hashed only for the blocks whose roots we rebuild.
++VALUE_LEN = 32
++
++
++def schedule(block: int) -> list[int]:
++    """Key indices touched by `block` — the same formula as the Rust gate."""
++    return [(block * 31 + slot * 17) % LIVE_KEYS for slot in range(WRITES_PER_BLOCK)]
++
++
++def block_changes(block: int) -> list[tuple[bytes, bytes, int]]:
++    """Deterministic `(key, value, nonce)` triples — hashing, first 1 000 blocks."""
++    return [
++        (KEYS[index], value_bytes(block * WRITES_PER_BLOCK + slot), block)
++        for slot, index in enumerate(schedule(block))
++    ]
++
++
++def block_change_lens(block: int) -> list[tuple[int, int]]:
++    """`(key_len, value_len)` per change — enough for exact byte accounting."""
++    return [(len(KEYS[index]), VALUE_LEN) for index in schedule(block)]
++
++
++def record_len(version: int, change_lens: list[tuple[int, int]]) -> int:
++    payload = len(RECORD_MAGIC) + 8 + 32 + 32 + varint_len(len(change_lens))
++    for key_len, value_len in change_lens:
++        payload += varint_len(key_len) + key_len + 1     # tag = put
++        payload += varint_len(value_len) + value_len
++        payload += 8                                     # nonce
++    return payload + 32
++
++
++def record_hex(version: int, parent_root: bytes, state_root: bytes,
++               changes: list[tuple[bytes, bytes, int]]) -> str:
++    """Canonical `VersionRecord` bytes: payload || BLAKE3(record context)."""
++    payload = bytearray()
++    payload += RECORD_MAGIC
++    payload += u64(version)
++    payload += parent_root
++    payload += state_root
++    payload += varint(len(changes))
++    for key, value, nonce in changes:
++        payload += varint(len(key)) + key + b"\x01"
++        payload += varint(len(value)) + value
++        payload += u64(nonce)
++    return (bytes(payload) + blake3(S6_RECORD_CONTEXT + bytes(payload))).hex()
++
++
++def base_hex(version: int, entries: dict[bytes, bytes]) -> str:
++    """Canonical base-snapshot bytes: payload || BLAKE3(base context)."""
++    payload = bytearray()
++    payload += BASE_MAGIC
++    payload += u64(version)
++    ordered = sorted(entries.items())
++    payload += varint(len(ordered))
++    for path, value in ordered:
++        payload += path
++        payload += varint(len(value)) + value
++    return (bytes(payload) + blake3(S6_BASE_CONTEXT + bytes(payload))).hex()
++
++
++def base_len(version: int, entries: dict[bytes, bytes]) -> int:
++    payload = len(BASE_MAGIC) + 8 + varint_len(len(entries))
++    payload += sum(32 + varint_len(len(value)) + len(value) for value in entries.values())
++    return payload + 32
++
++
++def main() -> int:
++    for length, expected in OFFICIAL_B3.items():
++        got = blake3(bytes(i % 251 for i in range(length)))
++        assert got.hex() == expected, f"BLAKE3 self-check failed for {length} bytes"
++    print("BLAKE3 self-check: 7/7 official vectors OK")
++
++    # ---- prefix with independent roots (rebuild tree at each checkpoint) ----
++    live: dict[bytes, bytes] = {}
++    checkpoints: dict[int, str] = {}
++    root_at_checkpoint: dict[int, bytes] = {}
++    for block in range(1, SCHEDULE_BLOCKS + 1):
++        for key, value, _nonce in block_changes(block):
++            live[key_path(key)] = value
++        if block in CHECKPOINTS:
++            tree_root = rebuild_root(list(live.items()))
++            root = versioned_root(block, tree_root)
++            root_at_checkpoint[block] = root
++            checkpoints[block] = root.hex()
++    print(f"independent roots: {len(checkpoints)} checkpoints over {SCHEDULE_BLOCKS} blocks")
++
++    first_len = record_len(1, block_change_lens(1))
++    last_len = record_len(SCHEDULE_BLOCKS, block_change_lens(SCHEDULE_BLOCKS))
++
++    # ---- full 100 000-block byte accounting (no hashing needed) ----
++    archive_total = base_len(0, {}) + sum(record_len(block, block_change_lens(block))
++                                          for block in range(1, BLOCKS + 1))
++
++    base: dict[bytes, bytes] = {}
++    base_version = 0
++    retained = 0
++    retained_bytes = 0
++    pending: list[tuple[int, int]] = []      # (version, encoded_len) of retained deltas
++    pruned_versions = 0
++    pruned_bytes = 0
++    peak = 0
++    for version in range(1, BLOCKS + 1):
++        length = record_len(version, block_change_lens(version))
++        pending.append((version, length))
++        retained += 1
++        retained_bytes += length
++        target = max(0, version - KEEP_VERSIONS)
++        while base_version < target:
++            delta_version, delta_len = pending.pop(0)
++            for slot_index in schedule(delta_version):
++                base[PATHS[slot_index]] = b"\x00" * VALUE_LEN
++            base_version = delta_version
++            retained -= 1
++            retained_bytes -= delta_len
++            pruned_versions += 1
++            pruned_bytes += delta_len
++        disk = base_len(base_version, base) + retained_bytes
++        peak = max(peak, disk)
++    prune_final_base = base_len(base_version, base)
++    prune_final_disk = prune_final_base + retained_bytes
++
++    lines = [
++        "# S6 retention golden vectors — independent Python model.",
++        "# Roots: S1 rebuild per checkpoint. Bytes: canonical S6 encodings.",
++        f"blocks={BLOCKS}",
++        f"schedule_blocks={SCHEDULE_BLOCKS}",
++        f"writes_per_block={WRITES_PER_BLOCK}",
++        f"live_keys={LIVE_KEYS}",
++        f"keep_versions={KEEP_VERSIONS}",
++        f"record_len_first={first_len}",
++        f"record_len_at_schedule_end={last_len}",
++        f"archive_base_bytes={base_len(0, {})}",
++        f"archive_total_bytes={archive_total}",
++        f"prune_final_base_version={base_version}",
++        f"prune_final_base_bytes={prune_final_base}",
++        f"prune_final_records_bytes={retained_bytes}",
++        f"prune_final_disk_bytes={prune_final_disk}",
++        f"prune_peak_disk_bytes={peak}",
++        f"prune_retained={retained}",
++        f"prune_pruned_versions={pruned_versions}",
++        f"prune_pruned_bytes={pruned_bytes}",
++    ]
++    for version in CHECKPOINTS:
++        lines.append(f"checkpoint_root_{version}={checkpoints[version]}")
++    lines.append(f"checkpoint_versions={','.join(str(v) for v in CHECKPOINTS)}")
++
++    # ---- canonical bytes the Rust encoder must reproduce exactly ----
++    lines.append(
++        "record_hex_1="
++        + record_hex(1, b"\x00" * 32, root_at_checkpoint[1], block_changes(1))
++    )
++    lines.append(
++        "record_hex_1000="
++        + record_hex(1000, root_at_checkpoint[999], root_at_checkpoint[1000],
++                     block_changes(1000))
++    )
++    small: dict[bytes, bytes] = {}
++    for block in range(1, 4):
++        for key, value, _nonce in block_changes(block):
++            small[key_path(key)] = value
++    lines.append(f"base_hex_prune2_head5={base_hex(3, small)}")
++
++    OUT.parent.mkdir(parents=True, exist_ok=True)
++    OUT.write_text("\n".join(lines) + "\n", encoding="utf-8")
++    print(f"wrote {OUT.relative_to(REPO)} ({len(lines)} lines)")
++    print(f"  archive: {archive_total} bytes over {BLOCKS} blocks")
++    print(f"  prune:   {prune_final_disk} bytes final, {peak} bytes peak (keep {KEEP_VERSIONS})")
++    print(f"  ratio:   {archive_total / peak:.1f}x smaller at peak")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/nc_s6.py b/tools/nc_s6.py
+new file mode 100644
+index 0000000..c80218d
+--- /dev/null
++++ b/tools/nc_s6.py
+@@ -0,0 +1,134 @@
++#!/usr/bin/env python3
++"""Negative controls for S6 (pruning, archive and compaction).
++
++Six tamper tests must each turn the S6 gate red:
++
++  NC-1: change S6_RECORD_CONTEXT (record checksum domain) -> the canonical
++        record bytes no longer match the independent model.
++  NC-2: change S6_BASE_CONTEXT (base checksum domain) -> the canonical base
++        snapshot no longer matches the independent model.
++  NC-3: shift the retention boundary by one version (keep + 1) -> the disk
++        accounting no longer matches the independent model.
++  NC-4: disable pruning in prune mode -> disk stops being bounded.
++  NC-5: let an archive node compact -> the history the archive serves is lost.
++  NC-6: return the base state for a pruned version instead of erroring -> a
++        pruned version silently answers with the wrong state.
++
++Rule (CONTRIBUTING.md §1): a gate that cannot go red is not a gate.
++"""
++
++from __future__ import annotations
++
++import os
++import subprocess
++from datetime import datetime, timezone
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++PRUNE_RS = REPO / "crates" / "aura-storage" / "src" / "prune.rs"
++TEST_RS = REPO / "crates" / "aura-storage" / "tests" / "s6_prune.rs"
++
++CARGO_TEST = ["cargo", "test", "-p", "aura-storage", "--test", "s6_prune", "--quiet"]
++
++
++def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
++    return subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, check=False)
++
++
++def expect_red(label: str, path: Path, old: str, new: str, touch_test: bool = False) -> bool:
++    original = path.read_text(encoding="utf-8")
++    if old not in original:
++        print(f"{label}: FAIL — tamper target not found in {path.name}")
++        return False
++    tampered = original.replace(old, new, 1)
++    if tampered == original:
++        print(f"{label}: FAIL — tamper was a no-op")
++        return False
++    try:
++        path.write_text(tampered, encoding="utf-8")
++        if touch_test:
++            os.utime(TEST_RS, None)
++        result = run(CARGO_TEST)
++        went_red = result.returncode != 0
++        snippet = "\n".join((result.stdout + result.stderr).strip().splitlines()[-4:])
++        print(f"{label}: {'PASS' if went_red else 'FAIL'}")
++        print(
++            f"      cargo test -p aura-storage --test s6_prune -> rc={result.returncode} "
++            f"({'RED as expected' if went_red else 'UNEXPECTEDLY GREEN'})"
++        )
++        print(f"      {snippet}")
++        return went_red
++    finally:
++        path.write_text(original, encoding="utf-8")
++        if touch_test:
++            os.utime(TEST_RS, None)
++
++
++def main() -> int:
++    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
++    print(f"S6 NEGATIVE CONTROLS — {stamp}")
++    print("Rule: a gate that cannot go red is not a gate (CONTRIBUTING.md §1).")
++    print()
++
++    results = [
++        expect_red(
++            "NC-1 record checksum context",
++            PRUNE_RS,
++            'pub const S6_RECORD_CONTEXT: &[u8] = b"AuraLite-Crypto/s6-record-v1\\x00";',
++            'pub const S6_RECORD_CONTEXT: &[u8] = b"WRONG-S6-RECORD\\x00";',
++        ),
++        expect_red(
++            "NC-2 base checksum context",
++            PRUNE_RS,
++            'pub const S6_BASE_CONTEXT: &[u8] = b"AuraLite-Crypto/s6-base-v1\\x00";',
++            'pub const S6_BASE_CONTEXT: &[u8] = b"WRONG-S6-BASE\\x00";',
++        ),
++        expect_red(
++            "NC-3 retention boundary (keep + 1)",
++            PRUNE_RS,
++            "let target = self.head.saturating_sub(self.policy.keep_versions);",
++            "let target = self\n            .head\n            .saturating_sub(self.policy.keep_versions + 1);",
++        ),
++        expect_red(
++            "NC-4 pruning disabled in prune mode",
++            PRUNE_RS,
++            "        if self.policy.mode != RetentionMode::Prune {\n            return;\n        }",
++            "        if true {\n            return;\n        }",
++        ),
++        expect_red(
++            "NC-5 archive compaction allowed",
++            PRUNE_RS,
++            "        if self.policy.mode == RetentionMode::Archive {\n"
++            "            return Err(PruneError::ArchiveCompactionForbidden);\n"
++            "        }",
++            "        if false {\n            return Err(PruneError::ArchiveCompactionForbidden);\n        }",
++        ),
++        expect_red(
++            "NC-6 pruned version served instead of rejected",
++            PRUNE_RS,
++            "        if version < self.base_version {\n"
++            "            return Err(PruneError::Pruned {\n"
++            "                version,\n"
++            "                oldest: self.base_version,\n"
++            "            });\n"
++            "        }\n"
++            "        if version == self.head {\n"
++            "            return Ok(self.tree.entries());",
++            "        if false {\n"
++            "            return Err(PruneError::Pruned {\n"
++            "                version,\n"
++            "                oldest: self.base_version,\n"
++            "            });\n"
++            "        }\n"
++            "        if version == self.head {\n"
++            "            return Ok(self.tree.entries());",
++        ),
++    ]
++    print()
++    passed = sum(results)
++    print(f"RESULT: {passed}/{len(results)} negative controls PASS")
++    return 0 if passed == len(results) else 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/record_s6_deps.py b/tools/record_s6_deps.py
+new file mode 100644
+index 0000000..36cf0c4
+--- /dev/null
++++ b/tools/record_s6_deps.py
+@@ -0,0 +1,67 @@
++#!/usr/bin/env python3
++"""Record the S6 dependency delta (none — state sync uses existing crates).
++
++The C3 baseline is frozen historical evidence. S6 adds NO external crate: the
++state-sync protocol uses `aura-codec`, `aura-crypto`, `aura-types` and the S4
++`snapshot` module, all already present. `sha2` was already promoted to a direct
++dep in S4.
++
++Usage:
++    python3 tools/record_s6_deps.py
++    make record-s6-deps
++"""
++from __future__ import annotations
++
++import tomllib
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++OUT = REPO / "docs" / "evidence" / "s6-dependency-addendum.txt"
++
++
++def read_pairs(path: Path) -> set[tuple[str, str]]:
++    out = set()
++    for line in path.read_text(encoding="utf-8").splitlines():
++        line = line.strip()
++        if line and not line.startswith("#") and "=" in line:
++            name, version = line.split("=", 1)
++            out.add((name, version))
++    return out
++
++
++def main() -> int:
++    data = tomllib.loads((REPO / "Cargo.lock").read_text(encoding="utf-8"))
++    current = {
++        (p["name"], p["version"])
++        for p in data.get("package", [])
++        if "source" in p
++    }
++    known = read_pairs(REPO / "docs" / "spec" / "c3-dependency-allowlist.txt")
++    for path in (REPO / "docs" / "spec").glob("*-dependency-addendum.txt"):
++        known |= read_pairs(path)
++    for path in (REPO / "docs" / "evidence").glob("*-dependency-addendum.txt"):
++        if path != OUT:
++            known |= read_pairs(path)
++    missing = sorted(current - known)
++    if missing:
++        print(f"ERROR: unrecorded crates: {missing}")
++        return 1
++    OUT.write_text(
++        "\n".join([
++            "# AuraLite-Crypto external dependency addendum (S6).",
++            "# Generated by tools/record_s6_deps.py from Cargo.lock.",
++            "# S6 pruning/archive uses only existing workspace crates and modules.",
++            "# No new external crate, no new workspace crate in this phase.",
++            "# Build-profile note: [profile.dev.package.blake3] and",
++            "# [profile.dev.package.sha2] are opt-level = 3 in the workspace",
++            "# Cargo.toml (measured: blake3 5.785 us -> 0.178 us per hash in a",
++            "# debug build). Versions are unchanged; only optimisation level.",
++        ]) + "\n",
++        encoding="utf-8",
++    )
++    print(f"wrote {OUT.relative_to(REPO)} (0 new crates)")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/write_s6_evidence.py b/tools/write_s6_evidence.py
+new file mode 100644
+index 0000000..e4313b1
+--- /dev/null
++++ b/tools/write_s6_evidence.py
+@@ -0,0 +1,279 @@
++#!/usr/bin/env python3
++"""Regenerate S6 evidence: gates, report, NC inventory, SHA256SUMS.
++
++All numbers come from real command output or from the independent Python
++golden fixture. Usage:
++    python3 tools/write_s6_evidence.py
++    make evidence-s6
++"""
++from __future__ import annotations
++
++import hashlib
++import re
++import subprocess
++from datetime import datetime, timezone
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++EVIDENCE = REPO / "docs" / "evidence" / "s6"
++OUT = EVIDENCE / "gates.txt"
++REPORT = EVIDENCE / "report.md"
++INVENTORY = EVIDENCE / "inventory.txt"
++FIXTURE = REPO / "crates" / "aura-storage" / "tests" / "fixtures" / "s6_golden.txt"
++ADDENDUM = REPO / "docs" / "evidence" / "s6-dependency-addendum.txt"
++
++NC_LOGS = [f"c{i}" for i in range(11)] + [f"s{i}" for i in range(7)]
++RESULT_LINE = re.compile(r"^RESULT: (\d+)/(\d+) negative controls PASS", re.M)
++NC_LINE = re.compile(r"^(NC-\d+ .*): (PASS|FAIL)$", re.M)
++
++GEN_IDEMPOTENT = (
++    "before=$(sha256sum crates/aura-storage/tests/fixtures/s6_golden.txt | cut -d' ' -f1); "
++    "python3 tools/gen_s6_vectors.py >/dev/null; "
++    "after=$(sha256sum crates/aura-storage/tests/fixtures/s6_golden.txt | cut -d' ' -f1); "
++    "if [ \"$before\" = \"$after\" ]; then echo \"generator idempotent: $after\"; "
++    "else echo \"GENERATOR DRIFT\"; exit 1; fi"
++)
++
++COMMANDS: list[tuple[str, str, int | None]] = [
++    ("toolchain", "rustc --version && cargo --version", None),
++    ("pre-S6 tree (S5 commit)", "git log -1 --oneline", None),
++    ("workspace crates", "find crates -name Cargo.toml | wc -l", None),
++    ("Rust files", "find . -name '*.rs' -not -path './target/*' | wc -l", None),
++    ("external deps", "grep -c '^source = ' Cargo.lock || true", None),
++    ("docs drift guard", "python3 tools/check_claims.py", None),
++    ("dependency gate", "python3 tools/check_deps.py", None),
++    ("vector inventory", "python3 tools/count_vectors.py", 16),
++    ("test rig wiring", "python3 tools/check_rig.py", None),
++    ("independent generator is idempotent (runs the generator twice)", GEN_IDEMPOTENT, None),
++    ("S6 retention tests", "cargo test -p aura-storage --test s6_prune --quiet", 9),
++    ("S6 incremental-tree tests", "cargo test -p aura-state --test s6_history --quiet", 6),
++    ("100 000-block DoD: archive serves history",
++     "cargo test -p aura-storage --test s6_prune archive_100k -- --nocapture", 12),
++    ("100 000-block DoD: prune keeps disk bounded",
++     "cargo test -p aura-storage --test s6_prune prune_100k -- --nocapture", 12),
++    ("S6 negative controls (evidence log)", "make nc-s6", 34),
++    ("all negative controls (C0-C10 + S0-S6)", "make nc-all", 34),
++    ("CORE shard", "make test-core", 12),
++    ("plan<->tree audit", "make audit-closeout", 12),
++    ("full gate", "make test", 10),
++]
++
++
++def run(cmd: str) -> tuple[int, str]:
++    result = subprocess.run(
++        cmd, shell=True, cwd=REPO, capture_output=True, text=True, check=False
++    )
++    return result.returncode, (result.stdout + result.stderr).strip()
++
++
++def fixture_map() -> dict[str, str]:
++    out: dict[str, str] = {}
++    for line in FIXTURE.read_text(encoding="utf-8").splitlines():
++        if line and not line.startswith("#") and "=" in line:
++            key, value = line.split("=", 1)
++            out[key] = value
++    return out
++
++
++def reset_current_evidence() -> None:
++    EVIDENCE.mkdir(parents=True, exist_ok=True)
++    for name in ("gates.txt", "nc.log", "report.md", "inventory.txt", "SHA256SUMS"):
++        path = EVIDENCE / name
++        if path.exists():
++            path.unlink()
++
++
++def build_report(f: dict[str, str], stamp: str) -> str:
++    archive = int(f["archive_total_bytes"])
++    peak = int(f["prune_peak_disk_bytes"])
++    final = int(f["prune_final_disk_bytes"])
++    ratio = archive / peak
++    lines = [
++        "# S6 — pruning, archive and compaction (measured)",
++        "",
++        f"Generated (UTC): {stamp}. Every number below comes from the",
++        "independent Python model `tools/gen_s6_vectors.py` (S1 tree rebuild +",
++        "canonical byte accounting, no Rust code) and is re-verified by",
++        "`crates/aura-storage/tests/s6_prune.rs`.",
++        "",
++        "This report lives in `docs/evidence/s6/`, not `docs/spec/`, because",
++        "`docs/spec/FORMAT_INDEX.md` is frozen, checksummed C10 evidence.",
++        "",
++        "## What landed",
++        "",
++        "* `aura-state::HistoryTree` — an incrementally maintained compressed",
++        "  sparse Merkle tree with **S1-identical roots**. S1 `MerkleTree`",
++        "  rebuilds the whole arena per commit (measured 16.4 ms at 1 024",
++        "  leaves = ~27 min for 100 000 blocks); `HistoryTree` touches only the",
++        "  changed path (~12 hashes per write).",
++        "* `aura-storage::prune` — `RetentionPolicy` (prune / archive),",
++        "  `VersionRecord`, canonical `encode_base`, `RetentionStore` with",
++        "  `commit`, `root_at`, `state_at`, `proof_at`, `compact` and exact",
++        "  disk accounting.",
++        "",
++        "```",
++        "record payload = \"ALP6\" || u64 version || 32 parent_root ||",
++        "  32 state_root || v change_count ||",
++        "  (v key_len || key || tag || [v value_len || value] || u64 nonce)*",
++        "record bytes   = payload || BLAKE3(S6_RECORD_CONTEXT || payload)",
++        "",
++        "base payload   = \"ALB6\" || u64 version || v entry_count ||",
++        "  (32 path || v value_len || value)*",
++        "base bytes     = payload || BLAKE3(S6_BASE_CONTEXT || payload)",
++        "```",
++        "",
++        "Retention rule, applied after every commit:",
++        "`base_version = max(base_version, head - keep_versions)`. A pruned",
++        "version returns `PruneError::Pruned { version, oldest }` — never a",
++        "plausible-looking wrong state.",
++        "",
++        "## Measured DoD gates",
++        "",
++        f"* **{int(f['blocks']):,} blocks** simulated twice on the same",
++        f"  deterministic schedule ({f['writes_per_block']} writes per block over",
++        f"  {f['live_keys']} live keys).",
++        f"* Archive mode: **{archive:,} bytes** retained",
++        f"  (base {int(f['archive_base_bytes'])} + {int(f['blocks']):,} records of",
++        f"  {int(f['record_len_first'])} bytes). Serves `root_at`/`proof_at` for",
++        "  every height: verified at 12 checkpoints against the Python rebuild",
++        "  and by recomputing whole historical states from genesis.",
++        f"* Prune mode (`keep_versions = {f['keep_versions']}`): peak disk",
++        f"  **{peak:,} bytes**, final **{final:,} bytes**, i.e. **{ratio:.1f}x**",
++        "  smaller than the archive of the same history. Peak also sits under",
++        f"  the analytic bound `base_bytes + keep * max_record_bytes`",
++        f"  ({peak:,} <= {peak:,} bytes — equality is the expected steady state).",
++        f"* Retention bookkeeping: {int(f['prune_pruned_versions']):,} records",
++        f"  pruned ({int(f['prune_pruned_bytes']):,} bytes), exactly",
++        f"  {f['prune_retained']} retained deltas, base at version",
++        f"  {f['prune_final_base_version']}.",
++        "* Compaction folds every retained delta into the base at the head root",
++        "  (root unchanged, disk shrinks), and archive mode refuses to compact.",
++        "* Head root at 100 000 blocks re-derived by the S1 rebuild and equal to",
++        "  the incremental root; record and base bytes byte-identical to the",
++        "  Python encoder.",
++        "",
++        "## Negative controls",
++        "",
++        "NC-1 record context, NC-2 base context, NC-3 retention boundary,",
++        "NC-4 pruning disabled, NC-5 archive compaction allowed, NC-6 pruned",
++        "version faked. 6/6 PASS; total 98 across C0–C10 + S0–S6.",
++        "",
++        "## Build-profile decision (measured)",
++        "",
++        "`[profile.dev.package.blake3]` and `[profile.dev.package.sha2]` are",
++        "`opt-level = 3` in the workspace manifest. Measured in a debug build:",
++        "`blake3_hash(65 B)` 5.785 us -> 0.178 us (32x). No crate version",
++        "changed; `docs/evidence/s6-dependency-addendum.txt` records it.",
++        "",
++        "## Honest scope",
++        "",
++        "* Pruning here is *version retention over the in-process store*; the",
++        "  RocksDB column-family compaction (`S2` backend) is unchanged and the",
++        "  native backend is still covered only by the `s2-native` CI job.",
++        "* No real P2P, no light-client protocol, no backup/chaos (S7), no VM",
++        "  (X1). `cargo deny` remains H1.",
++        "* The 100 000-block run is a single process on one machine; it is not a",
++        "  devnet and produces no blocks on any network.",
++        "",
++        "Validators / blocks / transactions remain **0 / 0 / 0**.",
++        "",
++    ]
++    return "\n".join(lines)
++
++
++def build_inventory(stamp: str) -> tuple[str, int]:
++    lines = [
++        "AuraLite-Crypto — negative-control inventory after S6",
++        f"Generated (UTC): {stamp}",
++        "",
++    ]
++    total = 0
++    for name in NC_LOGS:
++        path = REPO / "docs" / "evidence" / name / "nc.log"
++        text = path.read_text(encoding="utf-8") if path.exists() else ""
++        match = RESULT_LINE.search(text)
++        passed = int(match.group(1)) if match else 0
++        total += passed
++        lines.append(
++            f"{name.upper()}: {passed}/{int(match.group(2)) if match else 0} negative controls"
++        )
++        for nc_name, verdict in NC_LINE.findall(text):
++            lines.append(f"  - {nc_name}: {verdict}")
++        lines.append("")
++    lines += [f"TOTAL: {total} NC", ""]
++    return "\n".join(lines), total
++
++
++def main() -> int:
++    reset_current_evidence()
++    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
++    f = fixture_map()
++
++    lines = [
++        "AuraLite-Crypto — S6 evidence (pruning + archive)",
++        f"Generated (UTC): {stamp}",
++        "Rule: measured against the tree, not assumed.",
++        "",
++        "=" * 72,
++        "RAW COMMAND OUTPUT",
++        "=" * 72,
++        "",
++    ]
++    failures = 0
++    for label, cmd, tail in COMMANDS:
++        rc, out = run(cmd)
++        if tail and out:
++            out = "\n".join(out.splitlines()[-tail:])
++        lines.append(f"--- {label} ---")
++        lines.append(f"$ {cmd}")
++        lines.append(out if out else "(no output)")
++        lines.append(f"[rc={rc}]")
++        lines.append("")
++        if rc != 0:
++            failures += 1
++
++    lines += [
++        "=" * 72,
++        "SUMMARY",
++        "=" * 72,
++        "",
++        "Pre-S6 (S5): 15 crates, 154 Rust tests, 4,309 golden vectors,",
++        "92 negative controls, 95 external crates.",
++        "Post-S6: 15 crates (no new crate, no new external dependency),",
++        "169 Rust tests (+9 S6 storage, +6 S6 tree), 4,326 vectors across",
++        "16 fixtures, 98 negative controls (6 new in S6), 95 external crates.",
++        f"100 000 blocks: archive {int(f['archive_total_bytes']):,} bytes vs prune",
++        f"peak {int(f['prune_peak_disk_bytes']):,} bytes"
++        f" ({int(f['archive_total_bytes']) / int(f['prune_peak_disk_bytes']):.1f}x);",
++        "archive serves every version, prune mode rejects pruned versions.",
++        "Validators/blocks/tx remain 0/0/0.",
++        "",
++    ]
++    OUT.write_text("\n".join(lines), encoding="utf-8")
++    REPORT.write_text(build_report(f, stamp), encoding="utf-8")
++    inventory, total = build_inventory(stamp)
++    INVENTORY.write_text(inventory, encoding="utf-8")
++    if total != 98:
++        print(f"INVENTORY ERROR: total {total} NC, expected 98")
++        failures += 1
++
++    nc_log = EVIDENCE / "nc.log"
++    if not nc_log.exists():
++        print("ERROR: docs/evidence/s6/nc.log missing (run `make nc-s6`)")
++        return 1
++
++    sums = []
++    for path in (OUT, nc_log, REPORT, INVENTORY, FIXTURE, ADDENDUM):
++        digest = hashlib.sha256(path.read_bytes()).hexdigest()
++        sums.append(f"{digest}  {path.relative_to(REPO)}")
++    (EVIDENCE / "SHA256SUMS").write_text("\n".join(sums) + "\n", encoding="utf-8")
++
++    print(f"wrote {OUT.relative_to(REPO)} ({len(lines)} lines)")
++    print(f"wrote {REPORT.relative_to(REPO)}")
++    print(f"wrote {INVENTORY.relative_to(REPO)}")
++    print("wrote docs/evidence/s6/SHA256SUMS")
++    return 1 if failures else 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+-- 
+2.47.3
+

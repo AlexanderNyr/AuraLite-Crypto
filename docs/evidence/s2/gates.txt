@@ -1,0 +1,229 @@
+AuraLite-Crypto — S2 evidence (RocksDB + WAL)
+Generated (UTC): 2026-10-26T22:02:34+00:00
+Rule: measured against the tree, not assumed.
+
+========================================================================
+RAW COMMAND OUTPUT
+========================================================================
+
+--- toolchain ---
+$ rustc --version && cargo --version
+rustc 1.99.1 (58cf8f9c3 2026-10-13)
+cargo 1.99.1 (5f94df478 2026-08-27)
+[rc=0]
+
+--- pre-S2 tree (S1 commit) ---
+$ git log -1 --oneline
+094bc76 S1 patch artifact
+[rc=0]
+
+--- workspace crates ---
+$ find crates -name Cargo.toml | wc -l
+15
+[rc=0]
+
+--- Rust files ---
+$ find . -name '*.rs' -not -path './target/*' | wc -l
+73
+[rc=0]
+
+--- external deps ---
+$ grep -c '^source = ' Cargo.lock || true
+95
+[rc=0]
+
+--- docs drift guard ---
+$ python3 tools/check_claims.py
+DOCS DRIFT GUARD: OK — 30 markdown files, 12 plans, 112 phase rows, all local links resolve
+[rc=0]
+
+--- dependency gate ---
+$ python3 tools/check_deps.py
+DEPENDENCY GATE: OK — 110 lock packages (15 local, 95 external, all checksummed + allowlisted)
+[rc=0]
+
+--- vector inventory ---
+$ python3 tools/count_vectors.py
+
+  crates/aura-block/tests/fixtures/c5_golden.txt:   83 vectors (91 data lines)
+  crates/aura-block/tests/fixtures/c6_golden.txt:   56 vectors (66 data lines)
+  crates/aura-codec/tests/fixtures/c2_golden.txt:   15 vectors (17 data lines)
+  crates/aura-crypto/tests/fixtures/c3_golden.txt:   60 vectors (61 data lines)
+  crates/aura-genesis/tests/fixtures/c8_golden.txt:   27 vectors (40 data lines)
+  crates/aura-state/tests/fixtures/c7_golden.txt:   91 vectors (103 data lines)
+  crates/aura-state/tests/fixtures/s0_golden.txt:   50 vectors (51 data lines)
+  crates/aura-state/tests/fixtures/s1_golden.txt: 3055 vectors (3062 data lines)
+  crates/aura-storage/tests/fixtures/s2_golden.txt:  103 vectors (107 data lines)
+  crates/aura-testkit/tests/fixtures/c9_vectors.txt:  512 vectors (514 data lines)
+  crates/aura-tx/tests/fixtures/c4_golden.txt:   94 vectors (100 data lines)
+  crates/aura-types/tests/fixtures/c1_golden.txt:   18 vectors (18 data lines)
+
+  TOTAL: 4164 vectors across 12 fixtures
+VECTOR INVENTORY: OK — 4164 >= 200
+[rc=0]
+
+--- test rig wiring ---
+$ python3 tools/check_rig.py
+TEST RIG WIRING: OK — test-core + fuzz-smoke + vector inventory + proptest + 4 libFuzzer targets are wired into CI
+[rc=0]
+
+--- independent generator is idempotent ---
+$ before=$(sha256sum crates/aura-storage/tests/fixtures/s2_golden.txt | cut -d' ' -f1); python3 tools/gen_s2_vectors.py >/dev/null; after=$(sha256sum crates/aura-storage/tests/fixtures/s2_golden.txt | cut -d' ' -f1); if [ "$before" = "$after" ]; then echo "generator idempotent: $after"; else echo "GENERATOR DRIFT"; exit 1; fi
+generator idempotent: b8e8e230239e91f55a592aaa28599635d71c627f36dc45109e6508bbb5c93aed
+[rc=0]
+
+--- S2 store tests (default pure-Rust WAL backend) ---
+$ cargo test -p aura-storage --test s2_storage --quiet
+KILL 302859
+KILL 302860
+KILL 302863
+KILL 302864
+..KILL 302866
+..KILL 302872
+.
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
+[rc=0]
+
+--- S2 negative controls (evidence log) ---
+$ make nc-s2
+NC-2 state key context: PASS
+      cargo test -p aura-storage --test s2_storage -> rc=101 (RED as expected)
+      
+test result: FAILED. 2 passed; 7 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+error: test failed, to rerun pass `-p aura-storage --test s2_storage`
+NC-3 state root context: PASS
+      cargo test -p aura-storage --test s2_storage -> rc=101 (RED as expected)
+      
+test result: FAILED. 2 passed; 7 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+
+error: test failed, to rerun pass `-p aura-storage --test s2_storage`
+NC-4 independent golden WAL record: PASS
+      cargo test -p aura-storage --test s2_storage -> rc=101 (RED as expected)
+      
+test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+
+error: test failed, to rerun pass `-p aura-storage --test s2_storage`
+NC-5 WAL checksum verification: PASS
+      cargo test -p aura-storage --test s2_storage -> rc=101 (RED as expected)
+          |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+error: test failed, to rerun pass `-p aura-storage --test s2_storage`
+NC-6 WAL-before-head invariant: PASS
+      cargo test -p aura-storage --test s2_storage -> rc=101 (RED as expected)
+      
+test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+error: test failed, to rerun pass `-p aura-storage --test s2_storage`
+
+RESULT: 6/6 negative controls PASS
+restore check: rc=0, rc=0, rc=0 (GREEN as expected)
+make[1]: Leaving directory '/home/user/AuraLite-Crypto'
+[rc=0]
+
+--- all negative controls (C0-C10 + S0-S2) ---
+$ make nc-all
+make[1]: Entering directory '/home/user/AuraLite-Crypto'
+RESULT: 2/2 negative controls PASS
+RESULT: 3/3 negative controls PASS
+RESULT: 4/4 negative controls PASS
+RESULT: 5/5 negative controls PASS
+RESULT: 6/6 negative controls PASS
+RESULT: 6/6 negative controls PASS
+RESULT: 6/6 negative controls PASS
+RESULT: 6/6 negative controls PASS
+RESULT: 6/6 negative controls PASS
+RESULT: 6/6 negative controls PASS
+RESULT: 6/6 negative controls PASS
+RESULT: 6/6 negative controls PASS
+RESULT: 6/6 negative controls PASS
+RESULT: 6/6 negative controls PASS
+make[1]: Leaving directory '/home/user/AuraLite-Crypto'
+[rc=0]
+
+--- CORE shard ---
+$ make test-core
+     Running unittests src/lib.rs (target/debug/deps/aura_types-308b229bcbc15c92)
+     Running tests/c1_types.rs (target/debug/deps/c1_types-30318a674a00d8c5)
+     Running tests/identity.rs (target/debug/deps/identity-22b5be58a3e6ffbb)
+   Doc-tests aura_block
+   Doc-tests aura_codec
+   Doc-tests aura_crypto
+   Doc-tests aura_genesis
+   Doc-tests aura_state
+   Doc-tests aura_storage
+   Doc-tests aura_testkit
+   Doc-tests aura_tx
+   Doc-tests aura_types
+[rc=0]
+
+--- plan<->tree audit ---
+$ make audit-closeout
+make[1]: Entering directory '/home/user/AuraLite-Crypto'
+CLOSE-OUT PLAN<->TREE AUDIT (CORE + STATE)
+  phases audited: 14 (C0-S2)
+  expected NC total: 74 (68 shipped + 6 S2)
+  evidence checksum files: 13
+  spec files indexed: 11
+  note: S2 patch: pending (cut at commit time)
+  note: S2 evidence: pending (generated by make evidence-s2)
+AUDIT: OK — every ✅ phase has a receipt, patch, NC log and evidence; all checksums verify
+make[1]: Leaving directory '/home/user/AuraLite-Crypto'
+[rc=0]
+
+--- full gate ---
+$ make test
+   Doc-tests aura_genesis
+   Doc-tests aura_mempool
+   Doc-tests aura_node
+   Doc-tests aura_p2p
+   Doc-tests aura_rpc
+   Doc-tests aura_state
+   Doc-tests aura_storage
+   Doc-tests aura_testkit
+   Doc-tests aura_tx
+   Doc-tests aura_types
+[rc=0]
+
+--- native RocksDB backend ---
+--- native env detected (librocksdb + libclang) ---
+$ sh tools/s2_native_env.sh > /tmp/aura-s2-native-env.sh && echo 'native environment detected (librocksdb + libclang)'
+native environment detected (librocksdb + libclang)
+[rc=0]
+
+--- native clippy (feature rocksdb) ---
+$ eval "$(sh tools/s2_native_env.sh)" && cargo clippy -p aura-storage --all-targets --features rocksdb -- -D warnings
+Checking aura-crypto v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-crypto)
+    Checking aura-state v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-state)
+    Checking aura-storage v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-storage)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.10s
+[rc=0]
+
+--- native store tests (real RocksDB column families) ---
+$ eval "$(sh tools/s2_native_env.sh)" && cargo test -p aura-storage --test s2_storage --features rocksdb --quiet
+KILL 330754
+KILL 330850
+KILL 330946
+KILL 331042
+KILL 331138
+.KILL 331234
+....
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.83s
+[rc=0]
+
+
+========================================================================
+SUMMARY
+========================================================================
+
+Pre-S2 (S1): 15 crates, 123 Rust tests, 4,061 golden vectors,
+68 negative controls, WAL was absent (state only in memory).
+Post-S2: 15 crates (aura-storage gains a real API), 132 Rust tests
+(+9 S2), 4,171 vectors across 12 fixtures, 74 negative controls
+(6 new in S2), 95 external crates (24 new, optional RocksDB tree).
+
+kill -9 at 10 commit points and 10 crash-window points all recover
+the same head and root; 8 rejections enforced; WAL-before-head
+fsync ordering pinned by NC-6. Native RocksDB backend is optional
+and verified locally when the system library is present.

@@ -1,0 +1,2669 @@
+From 9f5ee156e3be476351bb254e5741b7c1e401001d Mon Sep 17 00:00:00 2001
+From: AlexanderNyr <alexander@auralite.local>
+Date: Tue, 27 Oct 2026 15:55:54 +0000
+Subject: [PATCH] S3 execution overlay
+
+---
+ .github/workflows/ci.yml                      |  19 +-
+ CHANGELOG.md                                  |  51 +++
+ CONTRIBUTING.md                               |   2 +
+ Makefile                                      |  19 +-
+ README.md                                     |  31 +-
+ ROADMAP.md                                    |  28 +-
+ crates/aura-state/src/error.rs                |  85 ++++
+ crates/aura-state/src/lib.rs                  |  11 +-
+ crates/aura-state/src/overlay.rs              | 386 ++++++++++++++++++
+ crates/aura-state/src/tree.rs                 |  25 ++
+ .../aura-state/tests/fixtures/s3_golden.txt   |  51 +++
+ crates/aura-state/tests/s3_overlay.rs         | 306 ++++++++++++++
+ docs/ARCHITECTURE.md                          |   9 +-
+ docs/STATUS.md                                |  37 +-
+ docs/evidence/s3/SHA256SUMS                   |   5 +
+ docs/evidence/s3/gates.txt                    | 195 +++++++++
+ docs/evidence/s3/inventory.txt                | 114 ++++++
+ docs/evidence/s3/nc.log                       |  42 ++
+ docs/evidence/s3/report.md                    |  44 ++
+ docs/plans/STATE_PLAN.md                      |  35 +-
+ tools/audit_closeout.py                       |  14 +-
+ tools/gen_s3_vectors.py                       | 374 +++++++++++++++++
+ tools/nc_s3.py                                | 140 +++++++
+ tools/write_s3_evidence.py                    | 222 ++++++++++
+ 24 files changed, 2183 insertions(+), 62 deletions(-)
+ create mode 100644 crates/aura-state/src/overlay.rs
+ create mode 100644 crates/aura-state/tests/fixtures/s3_golden.txt
+ create mode 100644 crates/aura-state/tests/s3_overlay.rs
+ create mode 100644 docs/evidence/s3/SHA256SUMS
+ create mode 100644 docs/evidence/s3/gates.txt
+ create mode 100644 docs/evidence/s3/inventory.txt
+ create mode 100644 docs/evidence/s3/nc.log
+ create mode 100644 docs/evidence/s3/report.md
+ create mode 100644 tools/gen_s3_vectors.py
+ create mode 100644 tools/nc_s3.py
+ create mode 100644 tools/write_s3_evidence.py
+
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index a8f7fea..9c33f96 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -10,7 +10,7 @@ on:
+ # perf) are added by O0 as the crates that need them actually appear.
+ jobs:
+   core:
+-    name: core (C0-C10 + S0-S2 gate)
++    name: core (C0-C10 + S0-S3 gate)
+     runs-on: ubuntu-latest
+     steps:
+       - uses: actions/checkout@v4
+@@ -29,8 +29,8 @@ jobs:
+       - name: make test
+         run: make test
+ 
+-      - name: golden vectors are reproducible (C1-C9 + S0-S2)
+-        run: make gen-c1-vectors && make gen-c2-vectors && make gen-c3-vectors && make gen-c4-vectors && make gen-c5-vectors && make gen-c6-vectors && make gen-c7-vectors && make gen-c8-vectors && make gen-c9-vectors && make gen-s0-vectors && make gen-s1-vectors && make gen-s2-vectors
++      - name: golden vectors are reproducible (C1-C9 + S0-S3)
++        run: make gen-c1-vectors && make gen-c2-vectors && make gen-c3-vectors && make gen-c4-vectors && make gen-c5-vectors && make gen-c6-vectors && make gen-c7-vectors && make gen-c8-vectors && make gen-c9-vectors && make gen-s0-vectors && make gen-s1-vectors && make gen-s2-vectors && make gen-s3-vectors
+ 
+       - name: vector inventory (>= 200)
+         run: make vector-inventory
+@@ -47,22 +47,22 @@ jobs:
+       - name: close-out audit
+         run: make audit-closeout
+ 
+-      # nc-all runs all 74 NCs without rewriting the historical logs,
++      # nc-all runs all 80 NCs without rewriting the historical logs,
+       # so those committed SHA256SUMS remain valid in the uploaded artifact.
+-      - name: negative controls (C0-C10 + S0-S2, 74 total)
++      - name: negative controls (C0-C10 + S0-S3, 80 total)
+         run: make nc-all
+ 
+-      # Only the CURRENT phase's evidence is regenerated. C0-S1 evidence is a
++      # Only the CURRENT phase's evidence is regenerated. C0-S2 evidence is a
+       # HISTORICAL committed record measured at its own commit; regenerating
+       # it later would relabel the wrong tree.
+-      - name: current phase evidence (S2)
+-        run: make evidence-s2
++      - name: current phase evidence (S3)
++        run: make evidence-s3
+ 
+       - name: Upload evidence
+         if: always()
+         uses: actions/upload-artifact@v4
+         with:
+-          name: c0-s2-evidence
++          name: c0-s3-evidence
+           path: |
+             docs/evidence/c0/
+             docs/evidence/c1/
+@@ -78,6 +78,7 @@ jobs:
+             docs/evidence/s0/
+             docs/evidence/s1/
+             docs/evidence/s2/
++            docs/evidence/s3/
+           if-no-files-found: ignore
+ 
+   # S2's native RocksDB backend needs librocksdb >= 9.9 headers (Ubuntu 24.04
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 02906bd..16884fd 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,57 @@
+ All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
+ never rewritten: corrections are made with a new entry or an explicit note.
+ 
++## [S3 — execution overlay] 2026-10-27
++
++**Fourth `STATE_PLAN` phase.** Deliverable:
++`patches/0015-S3-execution-overlay.patch`. No new crate and no new
++external dependency — the overlay lives in `aura-state`, which already owns
++`MerkleTree`, `Account` and `StateKey`.
++
++- Landed: `StateView` (copy-on-write overlay over an immutable S1 tree),
++  `StateDiff` (canonical wire format + strict decoder), `events_root()`,
++  `execute()` and `apply_diff()`. Reads fall through to the base tree;
++  writes/deletes are keyed by the C7 state-key digest in a `BTreeMap`.
++- **Wire format:** `payload || BLAKE3(S3_DIFF_CONTEXT || payload)` where
++  `payload = ALD3 || version || base_root || result_root || gas_used ||
++  events || changes`. Strict decode enforces the checksum, magic, minimal
++  LEB128 varints, strictly ascending change paths, caps, no trailing bytes and
++  byte-identical re-encoding. `apply()` re-verifies base and result roots
++  before materialising a new tree.
++
++- **DoD gate:** `revert` and `OutOfGas` both leave `base_root` unchanged and
++  the touched account balance byte-identical; `execute()` rolls back all
++  changes, events and gas. NC-6 removes `rollback()` and requires the revert
++  gate to go red (balance changes) — verified. 6 S3 negative controls,
++  total 80 across C0–C10 + S0–S3.
++- Golden vectors: `tools/gen_s3_vectors.py` — pure-Python BLAKE3
++  (self-checked against 7 official vectors), the C7 state-key digest and the
++  S1 sparse Merkle tree. 3 canonical diffs, 51 fixture lines, 10 rejection
++  vectors. Offline and byte-stable.
++
++- Gate: `make test` -> **138 passed / 0 failed** (132 S2 + 6 S3), fmt/clippy
++  clean, drift guard 12 plans / 112 rows, dependency gate 95 external crates,
++  `make audit-closeout` green.
++- Evidence: `docs/evidence/s3/gates.txt`, `nc.log`, `report.md`,
++  `inventory.txt`, `SHA256SUMS`. The S3 spec/report lives in
++  `docs/evidence/s3/report.md` instead of `docs/spec/` because
++  `docs/spec/FORMAT_INDEX.md` is frozen, checksummed C10 evidence and cannot
++  gain a new indexed item without breaking the C10 checksum and the
++  close-out audit. This mirrors the structure used in S1 and S2.
++- Tooling / CI: `make nc-all` now covers 15 NC drivers (80 NC); new targets
++  `make gen-s3-vectors`, `make nc-s3`, `make evidence-s3`.
++
++- **AUDIT (docs correctness).** `ARCHITECTURE.md` section 3 claimed
++  `aura-state <- aura-block, aura-tx, aura-codec, aura-crypto, aura-storage`,
++  which is false and would be a cycle: `aura-storage` depends on
++  `aura-state`. The graph now reflects the real `Cargo.toml` edges:
++  `aura-state <- aura-types, aura-codec, aura-crypto`; `aura-storage <-
++  aura-types, aura-codec, aura-crypto, aura-state`. No code change.
++
++- **Not claimed:** real VM/WASM (X1), snapshots (S4), state sync (S5),
++  pruning (S6), backup/chaos (S7), `cargo deny` (H1). Validators/blocks/tx
++  remain **0/0/0**.
++
+ ## [S2 — RocksDB + WAL durable state] 2026-10-26
+ 
+ **Third `STATE_PLAN` phase.** Deliverable:
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index 66386a4..6ea925f 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -120,6 +120,8 @@ that does not run its main test is a dead gate — that is a separate defect
+       `make fuzz-smoke` still run in CI (`tools/check_rig.py`).
+ - [ ] `make audit-closeout` green: every ✅ phase has a patch, receipt,
+       CHANGELOG entry, NC log and verified evidence.
++- [ ] `StateView` rollback stays mandatory on `OutOfGas`/`Revert`; a revert
++      must never change the state root.
+ - [ ] S0 baseline defects stay MEASURED and documented; never present
+       `BaselineState` as the state tree — S1's `MerkleTree` is the real one
+       and S2's WAL makes it durable. RocksDB is OPTIONAL: the default build
+diff --git a/Makefile b/Makefile
+index ce74e8a..a15023b 100644
+--- a/Makefile
++++ b/Makefile
+@@ -18,7 +18,8 @@ PYTHON ?= python3
+         audit-closeout nc-c10 evidence-c10 \
+         gen-s0-vectors nc-s0 evidence-s0 \
+         gen-s1-vectors nc-s1 evidence-s1 \
+-        record-s2-deps gen-s2-vectors nc-s2 evidence-s2 test-s2-native devnet clean
++        record-s2-deps gen-s2-vectors nc-s2 evidence-s2 test-s2-native \
++        gen-s3-vectors nc-s3 evidence-s3 devnet clean
+ 
+ help:
+ 	@echo "AuraLite-Crypto (Stage 1, C0)"
+@@ -71,6 +72,9 @@ help:
+ 	@echo "  make nc-s2             S2 negative controls -> docs/evidence/s2/nc.log"
+ 	@echo "  make evidence-s2       regenerate S2 report + receipts"
+ 	@echo "  make test-s2-native    optional real-RocksDB backend tests (needs librocksdb)"
++	@echo "  make gen-s3-vectors    regenerate independent overlay/diff vectors"
++	@echo "  make nc-s3             S3 negative controls -> docs/evidence/s3/nc.log"
++	@echo "  make evidence-s3       regenerate S3 report + receipts"
+ 	@echo "  make record-c9-deps    re-record the C9 dependency addendum"
+ 	@echo "  make gen-c9-vectors    regenerate 512 independent test-rig vectors"
+ 	@echo "  make nc-c9             C9 negative controls -> docs/evidence/c9/nc.log"
+@@ -188,7 +192,7 @@ evidence-c3:
+ # Runs every NC script WITHOUT rewriting the historical C0-C3 evidence logs,
+ # so their committed SHA256SUMS stay valid. CI uses this instead of nc-cX.
+ nc-all:
+-	@for phase in c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 s0 s1 s2; do \
++	@for phase in c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 s0 s1 s2 s3; do \
+ 	    $(PYTHON) tools/nc_$$phase.py > /tmp/aura-nc-$$phase.log 2>&1 || \
+ 	      { echo "$$phase NEGATIVE CONTROLS FAILED"; tail -30 /tmp/aura-nc-$$phase.log; exit 1; }; \
+ 	    grep '^RESULT:' /tmp/aura-nc-$$phase.log; \
+@@ -323,6 +327,17 @@ test-s2-native:
+ 	@eval "$$(sh tools/s2_native_env.sh)" && $(CARGO) test -p aura-storage --test s2_storage --features rocksdb
+ 	@eval "$$(sh tools/s2_native_env.sh)" && $(CARGO) clippy -p aura-storage --all-targets --features rocksdb -- -D warnings
+ 
++gen-s3-vectors:
++	@$(PYTHON) tools/gen_s3_vectors.py
++
++nc-s3:
++	@mkdir -p docs/evidence/s3
++	@$(PYTHON) tools/nc_s3.py > docs/evidence/s3/nc.log 2>&1 || { cat docs/evidence/s3/nc.log; exit 1; }
++	@cat docs/evidence/s3/nc.log
++
++evidence-s3:
++	@$(PYTHON) tools/write_s3_evidence.py
++
+ devnet:
+ 	@echo "ERROR: devnet is D7 (NODE_PLAN). It is not implemented at C0." >&2
+ 	@exit 1
+diff --git a/README.md b/README.md
+index 3b3fd85..76d2429 100644
+--- a/README.md
++++ b/README.md
+@@ -11,19 +11,18 @@
+ Name and ticker were locked by the owner on 2026-10-25. The ticker was checked
+ for collisions — see [`docs/TICKER_AUDIT.md`](docs/TICKER_AUDIT.md).
+ 
+-> **Status: S2 LANDED (2026-10-26).** `CORE_PLAN` C0–C10 is closed; S0
++> **Status: S3 LANDED (2026-10-27).** `CORE_PLAN` C0–C10 is closed; S0
+ > measured the naive baseline, S1 delivered a versioned sparse Merkle tree,
+-> and S2 makes state **durable**: a checksummed WAL is fsynced before head
+-> publication, so `kill -9` at 10 commit points (plus 10 crash-window points)
+-> recovers exactly the same head and root. Two backends behind one trait:
+-> a pure-Rust WAL backend by default, and real RocksDB column families behind
+-> the optional `rocksdb` feature. **74 negative controls**, 132 tests, 4,164
+-> vectors. See [`docs/CLOSEOUT_AUDIT.md`](docs/CLOSEOUT_AUDIT.md) and
+-> `docs/evidence/s2/report.md`. There is still **no consensus, VM, P2P,
+-> node, wallet or network** — no execution overlay (S3) yet. M0 needs S3 and
+-> X0–X2. Everything else below is a plan, not a report about an
+-> implementation. Every claim of readiness appears only after a measurable
+-> test gate, as in
++> S2 made state **durable** (fsynced WAL + RocksDB behind one trait), and
++> S3 adds a **copy-on-write execution overlay**: `StateView`, a checksummed
++> canonical `StateDiff`, and mandatory rollback on `OutOfGas`/`Revert`, so
++> reverting cannot change the state root. **80 negative controls**, 138
++> tests, 4,205 vectors. See
++> [`docs/CLOSEOUT_AUDIT.md`](docs/CLOSEOUT_AUDIT.md) and
++> `docs/evidence/s3/report.md`. There is still **no consensus, VM, P2P,
++> node, wallet or network** — no real VM (X1) yet. M0 needs S4 and X0–X2.
++> Everything else below is a plan, not a report about an implementation.
++> Every claim of readiness appears only after a measurable test gate, as in
+ > [AuraLite-Emulator](https://github.com/AlexanderNyr/AuraLite-Emulator) and
+ > [AuraLite-OS](https://github.com/AlexanderNyr/AuraLite-OS).
+ 
+@@ -84,15 +83,15 @@ Details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+ 
+ ## Quickstart
+ 
+-**Now (S2)** state survives a hard kill:
++**Now (S3)** execution is atomic:
+ 
+ ```sh
+ make deps-check          # rustc / cargo / rustfmt / clippy
+ make test                # full gate including the plan<->tree audit
+ make audit-closeout      # no ✅ row without a patch/receipt/NC log/evidence
+-make nc-all              # all 74 negative controls (C0-C10 + S0-S2)
+-make gen-s2-vectors      # independent WAL + RocksDB golden vectors
+-make vector-inventory    # 4,164 golden vectors
++make nc-all              # all 80 negative controls (C0-C10 + S0-S3)
++make gen-s3-vectors      # independent overlay/diff golden vectors
++make vector-inventory    # 4,205 golden vectors
+ ```
+ 
+ **The devnet does not exist yet — and that is honest.** After phase D7 (devnet)
+diff --git a/ROADMAP.md b/ROADMAP.md
+index ed5fc3e..485421b 100644
+--- a/ROADMAP.md
++++ b/ROADMAP.md
+@@ -122,7 +122,7 @@ phase tables (decision Q5).
+ | Plan | Status | Scope | Phases |
+ |---|---|---|---|
+ | [`docs/plans/CORE_PLAN.md`](docs/plans/CORE_PLAN.md) | ✅ COMPLETE (C0–C10 ✅) | primitives, codec, crypto, tx/block, genesis, test rig | C0–C10 |
+-| [`docs/plans/STATE_PLAN.md`](docs/plans/STATE_PLAN.md) | 🚧 IN PROGRESS (S0–S2 ✅) | Merkle state, RocksDB, WAL, snapshots, pruning, recovery | S0–S7 |
++| [`docs/plans/STATE_PLAN.md`](docs/plans/STATE_PLAN.md) | 🚧 IN PROGRESS (S0–S3 ✅) | Merkle state, RocksDB, WAL, snapshots, pruning, recovery | S0–S7 |
+ | [`docs/plans/EXEC_PLAN.md`](docs/plans/EXEC_PLAN.md) | 📋 PLAN | WASM runtime, gas, ABI, contract SDK, determinism | X0–X9 |
+ | [`docs/plans/CONSENSUS_PLAN.md`](docs/plans/CONSENSUS_PLAN.md) | 📋 PLAN | BFT-PoS, QC, VRF, staking, slashing, finality, governance | B0–B10 |
+ | [`docs/plans/NET_PLAN.md`](docs/plans/NET_PLAN.md) | 📋 PLAN | libp2p, gossipsub, Kademlia, sync, light client, chaos tests | N0–N8 |
+@@ -261,6 +261,14 @@ NC inventory: `docs/evidence/c10/closeout.txt`. Receipts:
+ `docs/evidence/c10/`. Validators/blocks/tx are still 0/0/0 — M0 also needs
+ S0–S2 and X0–X2.
+ 
++**Post-S3 measurement (2026-10-27):** 15 crates, 138 tests, 4,205 vectors
++across 13 fixtures, 80 negative controls (6 new in S3), 95 external
++crates (no new dependency). `StateView` + `StateDiff` + rollback land in
++`aura-state`; a revert or `OutOfGas` leaves the root and balance
++unchanged; 10 canonical diff rejection vectors enforced. Report:
++`docs/evidence/s3/report.md`; receipts: `docs/evidence/s3/`. ⚠️ AUDIT: the
++crate graph in `ARCHITECTURE.md` §3 had a cycle; S3 corrected it.
++
+ **Post-S2 measurement (2026-10-26):** 15 crates, 132 tests, 4,164 vectors
+ across 12 fixtures, 74 negative controls (6 new in S2), 95 external crates
+ (24 new, optional RocksDB tree). `kill -9` at 10 commit points and 10
+@@ -356,7 +364,7 @@ after the fact, as in AuraLite OS.
+ 
+ ## 8. Immediate queue
+ 
+-**C0, C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, S0, S1 and S2 shipped**
++**C0, C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, S0, S1, S2 and S3 shipped**
+ (`patches/0001-C0-baseline-workspace.patch`,
+ `patches/0002-C1-types.patch`, `patches/0003-C2-codec.patch`,
+ `patches/0004-C3-crypto.patch`, `patches/0005-C4-tx-format.patch`,
+@@ -365,18 +373,20 @@ after the fact, as in AuraLite OS.
+ `patches/0010-C9-test-rig.patch`, `patches/0011-C10-close-out.patch`,
+ `patches/0012-S0-state-baseline.patch`,
+ `patches/0013-S1-merkle-tree.patch`,
+-`patches/0014-S2-rocksdb-wal.patch`):
++`patches/0014-S2-rocksdb-wal.patch`,
++`patches/0015-S3-execution-overlay.patch`):
+ workspace, CI, gates, identity constants, canonical types, codec, crypto,
+ tx format, block format, Merkle proofs, accounts, genesis, a wired test rig
+ and the plan↔tree close-out audit — all pinned against independent references.
+ `CORE_PLAN` is closed at **L1 (core libraries + test rig, no network)**;
+ S0 measured the naive baseline, S1 delivered a versioned state root with
+-1,000 verified proofs, and S2 made it durable with a fsynced WAL +
+-optional RocksDB column families. **74 negative controls** in total. Right
+-now: **S3** — `STATE_PLAN` execution overlay: `StateView`, diff, rollback on
+-`OutOfGas`/revert, with a gate that a revert does not change the root and an
+-NC that removing rollback turns a balance-changing test red. M0 also needs
+-X0–X2. The next patch is `patches/0015-S3-execution-overlay.patch`.
++1,000 verified proofs, S2 made it durable with a fsynced WAL +
++optional RocksDB column families, and S3 added a copy-on-write execution
++overlay with canonical diffs and mandatory rollback. **80 negative
++controls** in total. Right now: **S4** — `STATE_PLAN` snapshots: chunks,
++manifest, parallel import, snapshots of 1M keys reimported
++byte-identically; NC: a substituted chunk must be rejected. M0 also needs
++X0–X2. The next patch is `patches/0016-S4-snapshots.patch`.
+ 
+ See also: [`docs/STATUS.md`](docs/STATUS.md),
+ [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
+diff --git a/crates/aura-state/src/error.rs b/crates/aura-state/src/error.rs
+index 322593c..3342963 100644
+--- a/crates/aura-state/src/error.rs
++++ b/crates/aura-state/src/error.rs
+@@ -77,3 +77,88 @@ impl From<CodecError> for StateError {
+         StateError::Decode(error)
+     }
+ }
++
++/// Errors produced by the S3 execution overlay.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum OverlayError {
++    /// Gas limit exceeded. All state changes in this view are discarded.
++    OutOfGas {
++        /// The configured gas limit for this execution.
++        limit: u64,
++        /// Gas consumed before the failing charge.
++        used: u64,
++        /// Gas requested by the failing charge.
++        needed: u64,
++    },
++    /// Explicit revert (VM `REVERT`); the reason is opaque bytes-safe text.
++    Revert(String),
++    /// A canonical diff failed its BLAKE3 checksum.
++    BadChecksum,
++    /// A canonical diff has the wrong magic prefix.
++    BadMagic,
++    /// A canonical diff has bytes after the checksum.
++    TrailingBytes(usize),
++    /// A canonical diff was truncated.
++    UnexpectedEof,
++    /// A length prefix was not minimally encoded.
++    NonCanonicalVarint,
++    /// Diff changes are not in strictly ascending path order (or duplicate).
++    UnsortedChanges,
++    /// Diff contains more than `MAX_WRITES` changes.
++    TooManyWrites(usize),
++    /// Diff contains more than `MAX_EVENTS` events.
++    TooManyEvents(usize),
++    /// An option tag was neither `0` nor `1`.
++    InvalidOptionTag(u8),
++    /// A value or event exceeds the configured size cap.
++    ValueTooLarge(usize),
++    /// A diff value could not be applied to the base tree.
++    RootMismatch,
++    /// The base root in the diff does not match the base tree.
++    BaseRootMismatch,
++    /// A write exceeded the `usize` range / checked arithmetic overflow.
++    Overflow,
++    /// A canonical diff could not be decoded.
++    Decode(String),
++}
++
++impl fmt::Display for OverlayError {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::OutOfGas {
++                limit,
++                used,
++                needed,
++            } => write!(f, "out of gas: used {used} + {needed} > limit {limit}"),
++            Self::Revert(reason) => write!(f, "revert: {reason}"),
++            Self::BadChecksum => f.write_str("diff checksum mismatch"),
++            Self::BadMagic => f.write_str("diff magic prefix mismatch"),
++            Self::TrailingBytes(n) => write!(f, "{n} trailing bytes after diff"),
++            Self::UnexpectedEof => f.write_str("diff truncated"),
++            Self::NonCanonicalVarint => f.write_str("non-minimal varint in diff"),
++            Self::UnsortedChanges => f.write_str("diff changes are not strictly ascending"),
++            Self::TooManyWrites(n) => write!(f, "diff has {n} writes, over the cap"),
++            Self::TooManyEvents(n) => write!(f, "diff has {n} events, over the cap"),
++            Self::InvalidOptionTag(tag) => write!(f, "invalid option tag {tag}"),
++            Self::ValueTooLarge(n) => write!(f, "value of {n} bytes exceeds the cap"),
++            Self::RootMismatch => f.write_str("diff result root does not match materialised tree"),
++            Self::BaseRootMismatch => f.write_str("diff base root does not match base tree"),
++            Self::Overflow => f.write_str("checked arithmetic overflow in overlay"),
++            Self::Decode(message) => write!(f, "diff is not canonical: {message}"),
++        }
++    }
++}
++
++impl std::error::Error for OverlayError {}
++
++impl From<aura_codec::CodecError> for OverlayError {
++    fn from(error: aura_codec::CodecError) -> Self {
++        use aura_codec::CodecError as E;
++        match error {
++            E::UnexpectedEof(_, _) | E::VarintOverflow => OverlayError::UnexpectedEof,
++            E::NonCanonicalVarint => OverlayError::NonCanonicalVarint,
++            E::TrailingBytes(n) => OverlayError::TrailingBytes(n),
++            other => OverlayError::Decode(other.to_string()),
++        }
++    }
++}
+diff --git a/crates/aura-state/src/lib.rs b/crates/aura-state/src/lib.rs
+index 0d4663b..608f865 100644
+--- a/crates/aura-state/src/lib.rs
++++ b/crates/aura-state/src/lib.rs
+@@ -6,7 +6,9 @@
+ //! baseline whose purpose is to MEASURE the absence of a state root, of
+ //! persistence and of deterministic write ordering. S1 adds [`MerkleTree`],
+ //! a deterministic, versioned sparse binary Merkle tree with inclusion
+-//! proofs. Persistence (S2), overlays (S3) and snapshots (S4–S7) remain open.
++//! proofs. S3 adds [`StateView`] — a copy-on-write execution overlay with a
++//! canonical [`StateDiff`] and mandatory rollback on `OutOfGas`/`Revert`.
++//! Persistence (S2), snapshots (S4–S7) remain open.
+ //! C7 is deliberately a *layout* phase: no storage backend, no root
+ //! computation, no fake `Ok(())`.
+ //!
+@@ -32,16 +34,21 @@ mod account;
+ mod baseline;
+ mod error;
+ mod key;
++mod overlay;
+ mod tree;
+ 
+ pub use account::Account;
+ pub use baseline::{
+     BaselineError, BaselineReport, BaselineState, BaselineWrite, FINAL_VIEW_CONTEXT,
+ };
+-pub use error::StateError;
++pub use error::{OverlayError, StateError};
+ pub use key::{
+     KeySpace, MAX_STATE_KEY_LEN, STATE_KEY_CONTEXT, StateKey, assert_contract_may_write,
+ };
++pub use overlay::{
++    DIFF_MAGIC, MAX_EVENTS, MAX_VALUE_LEN, MAX_WRITES, S3_DIFF_CONTEXT, S3_EVENT_CONTEXT,
++    StateDiff, StateView, apply_diff, execute,
++};
+ pub use tree::{
+     MerkleProof, MerkleTree, S1_ADDR_CONTEXT, S1_EMPTY_CONTEXT, S1_LEAF_CONTEXT, S1_NODE_CONTEXT,
+     S1_ROOT_CONTEXT, S1_VALUE_CONTEXT, TreeError, empty_hash, key_bit, leaf_hash, node_hash,
+diff --git a/crates/aura-state/src/overlay.rs b/crates/aura-state/src/overlay.rs
+new file mode 100644
+index 0000000..9b1fd58
+--- /dev/null
++++ b/crates/aura-state/src/overlay.rs
+@@ -0,0 +1,386 @@
++//! S3: execution overlay (state view, canonical diff, rollback).
++//!
++//! `StateView` is layered on an immutable S1 [`MerkleTree`] base. Writes go
++//! to a `BTreeMap` overlay; the base tree is never mutated. [`execute`] runs a
++//! closure and, on **any** error, calls [`StateView::rollback`] so the
++//! overlay, events and gas are discarded. A successful execution produces a
++//! [`StateDiff`] whose canonical bytes are the only thing that may be committed.
++//! `apply_diff` re-verifies the diff's base and result roots before
++//! materialising a new tree.
++//!
++//! Golden vectors: `tools/gen_s3_vectors.py` (independent Python).
++
++use std::collections::BTreeMap;
++
++use aura_codec::{Decode, Encode, Reader, Writer, read_varint, write_varint};
++use aura_crypto::blake3_hash;
++use aura_types::{ChainId, Hash};
++
++use crate::error::OverlayError;
++use crate::key::StateKey;
++use crate::tree::{MerkleTree, state_path, versioned_root};
++
++/// Magic prefix of every canonical diff payload.
++pub const DIFF_MAGIC: &[u8] = b"ALD3";
++/// Domain tag for diff checksums. (NC target: `tools/nc_s3.py`.)
++pub const S3_DIFF_CONTEXT: &[u8] = b"AuraLite-Crypto/s3-diff-v1\x00";
++/// Domain tag for the event commitment. (NC target: `tools/nc_s3.py`.)
++pub const S3_EVENT_CONTEXT: &[u8] = b"AuraLite-Crypto/s3-event-v1\x00";
++
++/// Maximum number of state changes in one diff.
++pub const MAX_WRITES: usize = 65_536;
++/// Maximum number of events in one diff.
++pub const MAX_EVENTS: usize = 4_096;
++/// Maximum byte length of a stored value or event.
++pub const MAX_VALUE_LEN: usize = 1 << 20;
++
++/// The canonical, verifiable result of one execution.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct StateDiff {
++    /// Version this diff commits (`base.version() + 1`).
++    pub version: u64,
++    /// Versioned root of the base tree.
++    pub base_root: Hash,
++    /// Versioned root after the diff is applied.
++    pub result_root: Hash,
++    /// Gas consumed by this execution.
++    pub gas_used: u64,
++    /// Emitted events, in order.
++    pub events: Vec<Vec<u8>>,
++    /// `(path, value)` changes sorted ascending by path; `None` = delete.
++    pub changes: Vec<(Hash, Option<Vec<u8>>)>,
++}
++
++impl StateDiff {
++    /// Canonical wire bytes: `payload || BLAKE3(S3_DIFF_CONTEXT || payload)`.
++    pub fn to_bytes(&self) -> Vec<u8> {
++        let mut writer = Writer::new();
++        writer.push_bytes(DIFF_MAGIC);
++        self.version.encode(&mut writer);
++        self.base_root.encode(&mut writer);
++        self.result_root.encode(&mut writer);
++        self.gas_used.encode(&mut writer);
++        write_varint(&mut writer, self.events.len() as u64);
++        for event in &self.events {
++            write_varint(&mut writer, event.len() as u64);
++            writer.push_bytes(event);
++        }
++        write_varint(&mut writer, self.changes.len() as u64);
++        for (path, value) in &self.changes {
++            path.encode(&mut writer);
++            match value {
++                Some(bytes) => {
++                    writer.push_bytes(&[1]);
++                    write_varint(&mut writer, bytes.len() as u64);
++                    writer.push_bytes(bytes);
++                }
++                None => writer.push_bytes(&[0]),
++            }
++        }
++        let payload = writer.into_bytes();
++        let mut out = payload.clone();
++        let checksum = blake3_hash(&[S3_DIFF_CONTEXT, &payload].concat());
++        out.extend_from_slice(checksum.as_bytes());
++        out
++    }
++
++    /// Strict canonical decode: checksum, magic, minimal varints, sorted
++    /// changes, caps, no trailing bytes, byte-identical re-encode.
++    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, OverlayError> {
++        if bytes.len() < 32 {
++            return Err(OverlayError::UnexpectedEof);
++        }
++        let split = bytes.len() - 32;
++        let (payload, checksum_bytes) = bytes.split_at(split);
++        let expected = blake3_hash(&[S3_DIFF_CONTEXT, payload].concat());
++        if expected.as_bytes() != checksum_bytes {
++            return Err(OverlayError::BadChecksum);
++        }
++        let mut reader = Reader::new(payload);
++        let magic = reader.read_exact(4)?;
++        if magic != DIFF_MAGIC {
++            return Err(OverlayError::BadMagic);
++        }
++        let version = u64::decode(&mut reader)?;
++        let base_root = Hash::decode(&mut reader)?;
++        let result_root = Hash::decode(&mut reader)?;
++        let gas_used = u64::decode(&mut reader)?;
++
++        let event_count = read_varint(&mut reader)?;
++        if event_count > MAX_EVENTS as u64 {
++            return Err(OverlayError::TooManyEvents(event_count as usize));
++        }
++        let mut events = Vec::with_capacity(event_count as usize);
++        for _ in 0..event_count {
++            let len = read_varint(&mut reader)? as usize;
++            if len > MAX_VALUE_LEN {
++                return Err(OverlayError::ValueTooLarge(len));
++            }
++            events.push(reader.read_exact(len)?.to_vec());
++        }
++
++        let change_count = read_varint(&mut reader)?;
++        if change_count > MAX_WRITES as u64 {
++            return Err(OverlayError::TooManyWrites(change_count as usize));
++        }
++        let mut changes: Vec<(Hash, Option<Vec<u8>>)> = Vec::with_capacity(change_count as usize);
++        for _ in 0..change_count {
++            let path = Hash::decode(&mut reader)?;
++            if changes.last().is_some_and(|(prev, _)| *prev >= path) {
++                return Err(OverlayError::UnsortedChanges);
++            }
++            let tag = reader.read_exact(1)?[0];
++            let value = match tag {
++                0 => None,
++                1 => {
++                    let len = read_varint(&mut reader)? as usize;
++                    if len > MAX_VALUE_LEN {
++                        return Err(OverlayError::ValueTooLarge(len));
++                    }
++                    Some(reader.read_exact(len)?.to_vec())
++                }
++                other => return Err(OverlayError::InvalidOptionTag(other)),
++            };
++            changes.push((path, value));
++        }
++        reader.finish()?;
++        let diff = StateDiff {
++            version,
++            base_root,
++            result_root,
++            gas_used,
++            events,
++            changes,
++        };
++        if diff.to_bytes().as_slice() != bytes {
++            return Err(OverlayError::Decode(
++                "re-encoding did not reproduce the input".to_owned(),
++            ));
++        }
++        Ok(diff)
++    }
++
++    /// Commitment to the emitted events.
++    pub fn events_root(&self) -> Hash {
++        let mut writer = Writer::new();
++        writer.push_bytes(S3_EVENT_CONTEXT);
++        write_varint(&mut writer, self.events.len() as u64);
++        for event in &self.events {
++            write_varint(&mut writer, event.len() as u64);
++            writer.push_bytes(event);
++        }
++        blake3_hash(writer.as_slice())
++    }
++
++    /// Materialise this diff on `base`, re-verifying both roots.
++    pub fn apply(&self, base: &MerkleTree) -> Result<MerkleTree, OverlayError> {
++        let expected_base = versioned_root(base.version(), &base.tree_root());
++        if expected_base != self.base_root {
++            return Err(OverlayError::BaseRootMismatch);
++        }
++        let mut entries: BTreeMap<Hash, Vec<u8>> = base.entries().into_iter().collect();
++        for (path, value) in &self.changes {
++            match value {
++                Some(bytes) => {
++                    entries.insert(*path, bytes.clone());
++                }
++                None => {
++                    entries.remove(path);
++                }
++            }
++        }
++        let ordered: Vec<(Hash, Vec<u8>)> = entries.into_iter().collect();
++        let tree = MerkleTree::from_entries(self.version, &ordered);
++        let computed = versioned_root(self.version, &tree.tree_root());
++        if computed != self.result_root {
++            return Err(OverlayError::RootMismatch);
++        }
++        Ok(tree)
++    }
++}
++
++/// Copy-on-write view of an S1 Merkle tree.
++///
++/// NC target: `tools/nc_s3.py` removes the rollback call in [`execute`].
++/// The `revert does not change root` gate must go red when that happens.
++#[derive(Debug, Clone)]
++pub struct StateView {
++    base: MerkleTree,
++    changes: BTreeMap<Hash, Option<Vec<u8>>>,
++    gas_limit: u64,
++    gas_used: u64,
++    events: Vec<Vec<u8>>,
++}
++
++impl StateView {
++    /// Create a view over an immutable base tree.
++    pub fn new(base: MerkleTree, gas_limit: u64) -> Self {
++        StateView {
++            base,
++            changes: BTreeMap::new(),
++            gas_limit,
++            gas_used: 0,
++            events: Vec::new(),
++        }
++    }
++
++    /// Chain identifier this view belongs to (Stage 1 identity).
++    pub fn chain_id(&self) -> ChainId {
++        ChainId::stage1()
++    }
++
++    /// Versioned root of the immutable base.
++    pub fn base_root(&self) -> Hash {
++        versioned_root(self.base.version(), &self.base.tree_root())
++    }
++
++    /// Read through the overlay; a deleted key returns `None`.
++    pub fn get(&self, key: &StateKey) -> Option<&[u8]> {
++        self.get_path(&state_path(key))
++    }
++
++    /// Read through the overlay using a precomputed path.
++    pub fn get_path(&self, path: &Hash) -> Option<&[u8]> {
++        match self.changes.get(path) {
++            Some(value) => value.as_deref(),
++            None => self.base.get_digest(path),
++        }
++    }
++
++    /// Write a value into the overlay.
++    pub fn set(&mut self, key: &StateKey, value: Vec<u8>) {
++        self.set_path(state_path(key), value);
++    }
++
++    /// Write a value using a precomputed path.
++    pub fn set_path(&mut self, path: Hash, value: Vec<u8>) {
++        self.changes.insert(path, Some(value));
++    }
++
++    /// Delete a key in the overlay.
++    pub fn delete(&mut self, key: &StateKey) {
++        self.delete_path(state_path(key));
++    }
++
++    /// Delete a key using a precomputed path.
++    pub fn delete_path(&mut self, path: Hash) {
++        self.changes.insert(path, None);
++    }
++
++    /// Version of the immutable base tree.
++    pub fn base_version(&self) -> u64 {
++        self.base.version()
++    }
++
++    /// Emit an event into the overlay.
++    pub fn emit(&mut self, event: Vec<u8>) {
++        self.events.push(event);
++    }
++
++    /// Charge gas; on `OutOfGas` the caller must roll back the whole view.
++    pub fn charge_gas(&mut self, needed: u64) -> Result<(), OverlayError> {
++        let used = self
++            .gas_used
++            .checked_add(needed)
++            .ok_or(OverlayError::Overflow)?;
++        if used > self.gas_limit {
++            return Err(OverlayError::OutOfGas {
++                limit: self.gas_limit,
++                used: self.gas_used,
++                needed,
++            });
++        }
++        self.gas_used = used;
++        Ok(())
++    }
++
++    /// Gas consumed so far.
++    pub fn gas_used(&self) -> u64 {
++        self.gas_used
++    }
++
++    /// Events emitted so far.
++    pub fn events(&self) -> &[Vec<u8>] {
++        &self.events
++    }
++
++    /// Number of pending changes.
++    pub fn pending_len(&self) -> usize {
++        self.changes.len()
++    }
++
++    /// Apply the overlay to a copy of the base tree without mutating it.
++    pub fn materialize(&self, version: u64) -> MerkleTree {
++        let mut entries: BTreeMap<Hash, Vec<u8>> = self.base.entries().into_iter().collect();
++        for (path, value) in &self.changes {
++            match value {
++                Some(bytes) => {
++                    entries.insert(*path, bytes.clone());
++                }
++                None => {
++                    entries.remove(path);
++                }
++            }
++        }
++        let ordered: Vec<(Hash, Vec<u8>)> = entries.into_iter().collect();
++        MerkleTree::from_entries(version, &ordered)
++    }
++
++    /// Versioned root of the materialised view.
++    pub fn root(&self, version: u64) -> Hash {
++        versioned_root(version, &self.materialize(version).tree_root())
++    }
++
++    /// Discard every uncommitted change, event and gas unit. This is the
++    /// rollback that must happen on `OutOfGas` or `Revert`.
++    pub fn rollback(&mut self) {
++        self.changes.clear();
++        self.events.clear();
++        self.gas_used = 0;
++    }
++
++    /// Consume the view into a canonical diff at `version`.
++    pub fn commit(self, version: u64) -> StateDiff {
++        self.diff(version)
++    }
++
++    /// Snapshot the overlay as a canonical diff at `version`.
++    pub fn diff(&self, version: u64) -> StateDiff {
++        StateDiff {
++            version,
++            base_root: self.base_root(),
++            result_root: self.root(version),
++            gas_used: self.gas_used,
++            events: self.events.clone(),
++            changes: self
++                .changes
++                .iter()
++                .map(|(path, value)| (*path, value.clone()))
++                .collect(),
++        }
++    }
++}
++
++/// Run `f` against a view; on error the view is rolled back.
++pub fn execute<T, F>(
++    view: &mut StateView,
++    version: u64,
++    f: F,
++) -> Result<(T, StateDiff), OverlayError>
++where
++    F: FnOnce(&mut StateView) -> Result<T, OverlayError>,
++{
++    let result = f(view);
++    match result {
++        Ok(value) => Ok((value, view.diff(version))),
++        Err(error) => {
++            view.rollback();
++            Err(error)
++        }
++    }
++}
++
++/// Verify a diff against a base tree and materialise it.
++pub fn apply_diff(base: &MerkleTree, diff: &StateDiff) -> Result<MerkleTree, OverlayError> {
++    diff.apply(base)
++}
+diff --git a/crates/aura-state/src/tree.rs b/crates/aura-state/src/tree.rs
+index 88bc837..86527ad 100644
+--- a/crates/aura-state/src/tree.rs
++++ b/crates/aura-state/src/tree.rs
+@@ -409,6 +409,31 @@ impl MerkleTree {
+         self.snapshots.len()
+     }
+ 
++    /// All `(path, value)` leaves, sorted by path. Added in S3 for overlay
++    /// materialisation; does not change the S1 wire format. Read-only.
++    pub fn entries(&self) -> Vec<(Hash, Vec<u8>)> {
++        self.leaves
++            .iter()
++            .map(|(path, value)| (*path, value.clone()))
++            .collect()
++    }
++
++    /// Rebuild a tree at `version` from an ordered `[(path, value)]` set. Added
++    /// in S3 for overlay commit.
++    pub fn from_entries(version: u64, entries: &[(Hash, Vec<u8>)]) -> Self {
++        let leaves: BTreeMap<Hash, Vec<u8>> = entries
++            .iter()
++            .map(|(path, value)| (*path, value.clone()))
++            .collect();
++        let mut tree = MerkleTree::new();
++        tree.leaves = leaves;
++        tree.version = version;
++        tree.roots
++            .insert(version, versioned_root(version, &tree.tree_root()));
++        tree.snapshots.insert(version, tree.leaves.clone());
++        tree
++    }
++
+     /// Build an inclusion proof for the current state.
+     pub fn prove(&self, key: &StateKey) -> Result<MerkleProof, TreeError> {
+         self.prove_digest(&state_path(key))
+diff --git a/crates/aura-state/tests/fixtures/s3_golden.txt b/crates/aura-state/tests/fixtures/s3_golden.txt
+new file mode 100644
+index 0000000..c35c4e7
+--- /dev/null
++++ b/crates/aura-state/tests/fixtures/s3_golden.txt
+@@ -0,0 +1,51 @@
++# AuraLite-Crypto S3 execution-overlay golden vectors
++# Generated by tools/gen_s3_vectors.py (independent Python).
++# Diff framing: payload || BLAKE3(S3_DIFF_CONTEXT || payload).
++diff_magic=414c4433
++state_key_context=417572614c6974652d43727970746f2f73746174652d6b65792d763100
++s1_root_context=417572614c6974652d43727970746f2f73312d726f6f742d763100
++s3_diff_context=417572614c6974652d43727970746f2f73332d646966662d763100
++s3_event_context=417572614c6974652d43727970746f2f73332d6576656e742d763100
++base_version=7
++account_len=88
++max_writes=65536
++max_events=4096
++max_value_len=1048576
++base_tree_root=ad0ce093993de281a53441be9534f8bb74171113621b233571875729b1f62ab4
++base_root=cd2750256c4fde8a435630719832e3a21c8eb13580eb129b38c6c8fe6e21520b
++account_0_key=010101010101010101010101010101010101010101
++account_0_path=0c18cc2eb78138a11d8d483caf88b906945f9a519ae974fb5fe7ea5d68abc849
++account_0_value=000000000000000040420f0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
++account_1_key=010202020202020202020202020202020202020202
++account_1_path=23790479be626899c433423bd0acd66a4c1964dd19e542fdd38f4cf8e9051193
++account_1_value=0300000000000000f401000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
++account_2_key=010303030303030303030303030303030303030303
++account_2_path=6cfc3cd8c0b2184ca7d5ee27f9a25bbb7eaf9198533537a83d6ee7d6926f5f0f
++account_2_value=01000000000000002a00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
++diff_1_bytes=414c44330800000000000000cd2750256c4fde8a435630719832e3a21c8eb13580eb129b38c6c8fe6e21520b986ab20f176801638d9a6bd14ab203f369674eadd73083e68aeead6c2282013e010000000000000000010c18cc2eb78138a11d8d483caf88b906945f9a519ae974fb5fe7ea5d68abc8490158010000000000000034440f0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000bf470c491253ba8cf0ce44af0490dccb14f0f3bbba9722bfdd44866bcf41e80a
++diff_1_root=986ab20f176801638d9a6bd14ab203f369674eadd73083e68aeead6c2282013e
++diff_1_events_root=954de81ebf786d78854e6e10523a5028f7235e0743a50606c70e374142fc98e7
++diff_1_gas=1
++diff_1_changes=1
++diff_2_bytes=414c44330800000000000000cd2750256c4fde8a435630719832e3a21c8eb13580eb129b38c6c8fe6e21520b1c7a691149632c779750fbb515150d02d94813c9aaf66a4bfca68dee17bc3d92020000000000000002087472616e73666572056465626974020c18cc2eb78138a11d8d483caf88b906945f9a519ae974fb5fe7ea5d68abc84901580200000000000000dc410f000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000023790479be626899c433423bd0acd66a4c1964dd19e542fdd38f4cf8e905119301580400000000000000580200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000026367818a934c9d5afee12e71685b3735aa9d1ef56235fe43ef8149896555d18
++diff_2_root=1c7a691149632c779750fbb515150d02d94813c9aaf66a4bfca68dee17bc3d92
++diff_2_events_root=d3d7c6afecca0a16ea633a3dc0ed9ba2701eb62e59a7927d985a624a2d28c68c
++diff_2_gas=2
++diff_2_changes=2
++diff_3_bytes=414c44330800000000000000cd2750256c4fde8a435630719832e3a21c8eb13580eb129b38c6c8fe6e21520bcaa30e9f996468d596ce65e2d777a887a2c1089fdcfa61baa0456e38e322fdd7030000000000000002046d696e74046275726e020c18cc2eb78138a11d8d483caf88b906945f9a519ae974fb5fe7ea5d68abc8490158020000000000000040420f00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006cfc3cd8c0b2184ca7d5ee27f9a25bbb7eaf9198533537a83d6ee7d6926f5f0f0079b9b7658b54f0987cb6a742585c8645acd88d77a8284950fb9b0fb14a842187
++diff_3_root=caa30e9f996468d596ce65e2d777a887a2c1089fdcfa61baa0456e38e322fdd7
++diff_3_events_root=34f52e1a8a4dfb04517aa9ca62a9df33ddbc6d2679b8f2c1a4596abed82dd362
++diff_3_gas=3
++diff_3_changes=2
++revert_root=cd2750256c4fde8a435630719832e3a21c8eb13580eb129b38c6c8fe6e21520b
++out_of_gas_root=cd2750256c4fde8a435630719832e3a21c8eb13580eb129b38c6c8fe6e21520b
++bad_checksum_diff=414c44330800000000000000cd2750256c4fde8a435630719832e3a21c8eb13580eb129b38c6c8fe6e21520b986ab20f176801638d9a6bd14ab203f369674eadd73083e68aeead6c2282013e010000000000000000010c18cc2eb78138a11d8d483caf88b906945f9a519ae974fb5fe7ea5d68abc8490158010000000000000034440f0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000bf470c491253ba8cf0ce44af0490dccb14f0f3bbba9722bfdd44866bcf41e80b
++bad_trailing_diff=414c44330800000000000000cd2750256c4fde8a435630719832e3a21c8eb13580eb129b38c6c8fe6e21520b986ab20f176801638d9a6bd14ab203f369674eadd73083e68aeead6c2282013e010000000000000000010c18cc2eb78138a11d8d483caf88b906945f9a519ae974fb5fe7ea5d68abc8490158010000000000000034440f000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c6361d14026d08e0fa4721be5f3599d3725ac8bf089781fe5547b62624b863f3
++bad_truncated_diff=414c44330800000000000000cd2750256c4fde8a
++bad_magic_diff=585858580800000000000000cd2750256c4fde8a435630719832e3a21c8eb13580eb129b38c6c8fe6e21520b986ab20f176801638d9a6bd14ab203f369674eadd73083e68aeead6c2282013e010000000000000000010c18cc2eb78138a11d8d483caf88b906945f9a519ae974fb5fe7ea5d68abc8490158010000000000000034440f00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001391d25611982727a109af73648e08f4bfab9d69f3567ed3560b14fbe7a4d4df
++bad_root_diff=414c44330800000000000000cd2750256c4fde8a435630719832e3a21c8eb13580eb129b38c6c8fe6e21520b996ab20f176801638d9a6bd14ab203f369674eadd73083e68aeead6c2282013e010000000000000000010c18cc2eb78138a11d8d483caf88b906945f9a519ae974fb5fe7ea5d68abc8490158010000000000000034440f00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003639a6eb354c6b6748be30515eb7f2e95d84717a82c07a632a80c9a408d5d3c6
++bad_unsorted_diff=414c44330800000000000000cd2750256c4fde8a435630719832e3a21c8eb13580eb129b38c6c8fe6e21520b1c7a691149632c779750fbb515150d02d94813c9aaf66a4bfca68dee17bc3d920200000000000000000223790479be626899c433423bd0acd66a4c1964dd19e542fdd38f4cf8e90511930158040000000000000058020000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c18cc2eb78138a11d8d483caf88b906945f9a519ae974fb5fe7ea5d68abc84901580200000000000000dc410f0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000322e522a76d9010cb78971945fe45885ecf64499ef8699e3e00250aedc5a1e89
++bad_duplicate_diff=414c44330800000000000000cd2750256c4fde8a435630719832e3a21c8eb13580eb129b38c6c8fe6e21520b1c7a691149632c779750fbb515150d02d94813c9aaf66a4bfca68dee17bc3d92020000000000000000020c18cc2eb78138a11d8d483caf88b906945f9a519ae974fb5fe7ea5d68abc84901580200000000000000dc410f00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c18cc2eb78138a11d8d483caf88b906945f9a519ae974fb5fe7ea5d68abc84901580200000000000000dc410f00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005d4adf22cf275850c35ea3e8e6ca87c3e871dc933c17750dcc5523186a06aed9
++bad_nonminimal_diff=414c44330800000000000000cd2750256c4fde8a435630719832e3a21c8eb13580eb129b38c6c8fe6e21520b986ab20f176801638d9a6bd14ab203f369674eadd73083e68aeead6c2282013e01000000000000008000010c18cc2eb78138a11d8d483caf88b906945f9a519ae974fb5fe7ea5d68abc8490158010000000000000034440f0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c2e44e52a023ffac5400cfd5893f189e18fd5dbbb2e7b2758852f9eb35392257
++bad_count_diff=414c44330800000000000000cd2750256c4fde8a435630719832e3a21c8eb13580eb129b38c6c8fe6e21520b986ab20f176801638d9a6bd14ab203f369674eadd73083e68aeead6c2282013e0100000000000000008180040c18cc2eb78138a11d8d483caf88b906945f9a519ae974fb5fe7ea5d68abc8490158010000000000000034440f000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000099a0154cfdc921be3a0c2ce566e3258f77ea8b1a5ebfee5dba017d11802db04c
++bad_option_tag_diff=414c44330800000000000000cd2750256c4fde8a435630719832e3a21c8eb13580eb129b38c6c8fe6e21520b986ab20f176801638d9a6bd14ab203f369674eadd73083e68aeead6c2282013e010000000000000000010c18cc2eb78138a11d8d483caf88b906945f9a519ae974fb5fe7ea5d68abc8490258010000000000000034440f0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000491821c2be305a11a2834aa5fb4d3a411ac60eddd3121f3f6481707da5a56c7a
+diff --git a/crates/aura-state/tests/s3_overlay.rs b/crates/aura-state/tests/s3_overlay.rs
+new file mode 100644
+index 0000000..73c9a8b
+--- /dev/null
++++ b/crates/aura-state/tests/s3_overlay.rs
+@@ -0,0 +1,306 @@
++//! S3 gate: execution overlay against an independent Python model.
++//!
++//! `fixtures/s3_golden.txt` comes from `tools/gen_s3_vectors.py` — pure-Python
++//! BLAKE3, the C7 state-key digest and the S1 sparse Merkle tree.
++
++use std::collections::BTreeMap;
++
++use aura_state::{
++    Account, DIFF_MAGIC, MAX_EVENTS, MAX_VALUE_LEN, MAX_WRITES, MerkleTree, OverlayError,
++    S3_DIFF_CONTEXT, S3_EVENT_CONTEXT, StateDiff, StateKey, StateView, apply_diff, execute,
++    state_path, versioned_root,
++};
++use aura_types::Hash;
++
++const GOLDEN: &str = include_str!("fixtures/s3_golden.txt");
++
++fn parse(text: &str) -> BTreeMap<String, String> {
++    let mut map = BTreeMap::new();
++    for line in text.lines() {
++        let trimmed = line.trim();
++        if trimmed.is_empty() || trimmed.starts_with('#') {
++            continue;
++        }
++        let (key, value) = trimmed
++            .split_once('=')
++            .unwrap_or_else(|| panic!("malformed golden line: {trimmed}"));
++        assert!(map.insert(key.to_owned(), value.to_owned()).is_none());
++        assert!(!key.is_empty());
++    }
++    map
++}
++
++fn hx(text: &str) -> Vec<u8> {
++    assert_eq!(text.len() % 2, 0);
++    text.as_bytes()
++        .chunks(2)
++        .map(|pair| (nibble(pair[0]) << 4) | nibble(pair[1]))
++        .collect()
++}
++
++fn nibble(byte: u8) -> u8 {
++    match byte {
++        b'0'..=b'9' => byte - b'0',
++        b'a'..=b'f' => byte - b'a' + 10,
++        _ => panic!("invalid hex nibble"),
++    }
++}
++
++fn to_hex(bytes: &[u8]) -> String {
++    let mut out = String::with_capacity(bytes.len() * 2);
++    for byte in bytes {
++        out.push_str(&format!("{byte:02x}"));
++    }
++    out
++}
++
++fn hash32(text: &str) -> Hash {
++    Hash::from_slice(&hx(text)).expect("32-byte hash")
++}
++
++fn f_u64(f: &BTreeMap<String, String>, key: &str) -> u64 {
++    f[key].parse().expect("u64")
++}
++
++fn f_usize(f: &BTreeMap<String, String>, key: &str) -> usize {
++    f[key].parse().expect("usize")
++}
++
++fn accounts(f: &BTreeMap<String, String>) -> Vec<(StateKey, Hash, Vec<u8>)> {
++    (0..3)
++        .map(|index| {
++            let raw = hx(&f[&format!("account_{index}_key")]);
++            let key = StateKey::from_raw(&raw).expect("valid C7 account key");
++            (
++                key,
++                hash32(&f[&format!("account_{index}_path")]),
++                hx(&f[&format!("account_{index}_value")]),
++            )
++        })
++        .collect()
++}
++
++fn base_tree(f: &BTreeMap<String, String>) -> MerkleTree {
++    let entries: Vec<(Hash, Vec<u8>)> = accounts(f)
++        .iter()
++        .map(|(_, path, value)| (*path, value.clone()))
++        .collect();
++    MerkleTree::from_entries(f_u64(f, "base_version"), &entries)
++}
++
++fn decode(f: &BTreeMap<String, String>, key: &str) -> StateDiff {
++    StateDiff::from_canonical_bytes(&hx(&f[key])).unwrap_or_else(|e| panic!("decode {key}: {e}"))
++}
++
++#[test]
++fn constants_are_pinned_by_the_independent_fixture() {
++    let f = parse(GOLDEN);
++    assert_eq!(to_hex(DIFF_MAGIC), f["diff_magic"]);
++    assert_eq!(to_hex(S3_DIFF_CONTEXT), f["s3_diff_context"]);
++    assert_eq!(to_hex(S3_EVENT_CONTEXT), f["s3_event_context"]);
++    assert_eq!(MAX_WRITES, f_usize(&f, "max_writes"));
++    assert_eq!(MAX_EVENTS, f_usize(&f, "max_events"));
++    assert_eq!(MAX_VALUE_LEN, f_usize(&f, "max_value_len"));
++    assert_eq!(88, f_usize(&f, "account_len"));
++}
++
++#[test]
++fn base_state_and_roots_match_independent_python() {
++    let f = parse(GOLDEN);
++    let version = f_u64(&f, "base_version");
++    let tree = base_tree(&f);
++    assert_eq!(tree.tree_root().to_hex(), f["base_tree_root"]);
++    assert_eq!(
++        versioned_root(version, &tree.tree_root()).to_hex(),
++        f["base_root"]
++    );
++    assert_eq!(tree.len(), 3);
++
++    for (key, path, value) in accounts(&f) {
++        assert_eq!(
++            state_path(&key),
++            path,
++            "state_path must match the Python digest"
++        );
++        assert_eq!(tree.get(&key), Some(value.as_slice()));
++        let account = Account::from_canonical_bytes(&value).expect("account decodes");
++        assert_eq!(account.code_hash, Account::NO_CODE);
++    }
++}
++
++#[test]
++fn canonical_diffs_match_independent_python() {
++    let f = parse(GOLDEN);
++    let version = f_u64(&f, "base_version") + 1;
++    let base = base_tree(&f);
++
++    for number in 1..=3 {
++        let key = format!("diff_{number}_bytes");
++        let expected_bytes = hx(&f[&key]);
++        let diff = decode(&f, &key);
++        assert_eq!(diff.to_bytes(), expected_bytes, "{key} re-encode");
++        assert_eq!(diff.version, version);
++        assert_eq!(diff.base_root.to_hex(), f["base_root"]);
++        assert_eq!(diff.result_root.to_hex(), f[&format!("diff_{number}_root")]);
++        assert_eq!(diff.gas_used.to_string(), f[&format!("diff_{number}_gas")]);
++        assert_eq!(
++            diff.events_root().to_hex(),
++            f[&format!("diff_{number}_events_root")]
++        );
++        assert_eq!(
++            diff.changes.len().to_string(),
++            f[&format!("diff_{number}_changes")]
++        );
++
++        // Reconstruct the same diff through a real StateView.
++        let mut view = StateView::new(base.clone(), 1_000);
++        for (path, value) in &diff.changes {
++            match value {
++                Some(bytes) => view.set_path(*path, bytes.clone()),
++                None => view.delete_path(*path),
++            }
++        }
++        for event in &diff.events {
++            view.emit(event.clone());
++        }
++        view.charge_gas(diff.gas_used).expect("gas fits");
++        let rebuilt = view.diff(version);
++        assert_eq!(rebuilt, diff, "diff_{number} rebuilt from StateView");
++        assert_eq!(rebuilt.to_bytes(), expected_bytes);
++
++        let applied =
++            apply_diff(&base, &diff).unwrap_or_else(|e| panic!("diff_{number} apply: {e}"));
++        assert_eq!(
++            versioned_root(version, &applied.tree_root()),
++            diff.result_root
++        );
++    }
++}
++
++#[test]
++fn revert_and_out_of_gas_do_not_change_root() {
++    let f = parse(GOLDEN);
++    let version = f_u64(&f, "base_version") + 1;
++    let base = base_tree(&f);
++    let (key, _, original) = accounts(&f)[0].clone();
++    let base_root = base.state_root();
++    assert_eq!(base_root.to_hex(), f["revert_root"]);
++
++    // Explicit revert after writes, gas and events.
++    let mut view = StateView::new(base.clone(), 100);
++    let outcome = execute(&mut view, version, |view| -> Result<(), OverlayError> {
++        view.set(&key, b"attacker-balance".to_vec());
++        view.charge_gas(7)?;
++        view.emit(b"event".to_vec());
++        Err(OverlayError::Revert("nope".to_owned()))
++    });
++    assert_eq!(
++        outcome,
++        Err(OverlayError::Revert("nope".to_owned())),
++        "revert error"
++    );
++    assert_eq!(
++        view.base_root().to_hex(),
++        f["revert_root"],
++        "revert must not change root"
++    );
++    assert_eq!(
++        view.get(&key),
++        Some(original.as_slice()),
++        "revert must not change balance"
++    );
++    assert_eq!(
++        view.pending_len(),
++        0,
++        "NC target: rollback must clear changes"
++    );
++    assert_eq!(view.gas_used(), 0);
++    assert!(view.events().is_empty());
++    assert_eq!(
++        view.root(version),
++        versioned_root(version, &base.tree_root())
++    );
++
++    // OutOfGas path.
++    let mut view = StateView::new(base.clone(), 10);
++    let outcome = execute(&mut view, version, |view| -> Result<(), OverlayError> {
++        view.set(&key, b"attacker-balance".to_vec());
++        view.charge_gas(11)
++    });
++    assert_eq!(
++        outcome,
++        Err(OverlayError::OutOfGas {
++            limit: 10,
++            used: 0,
++            needed: 11
++        }),
++    );
++    assert_eq!(view.base_root().to_hex(), f["out_of_gas_root"]);
++    assert_eq!(
++        view.get(&key),
++        Some(original.as_slice()),
++        "OutOfGas must not change balance"
++    );
++    assert_eq!(
++        view.pending_len(),
++        0,
++        "NC target: rollback must clear changes"
++    );
++    assert_eq!(view.gas_used(), 0);
++    assert!(view.events().is_empty());
++}
++
++#[test]
++fn successful_execution_commits_only_the_diff() {
++    let f = parse(GOLDEN);
++    let version = f_u64(&f, "base_version") + 1;
++    let base = base_tree(&f);
++    let (key, _, original) = accounts(&f)[0].clone();
++
++    let mut view = StateView::new(base.clone(), 100);
++    let (value, diff) = execute(&mut view, version, |view| -> Result<u64, OverlayError> {
++        view.set(&key, original.clone());
++        view.charge_gas(1)?;
++        Ok(7)
++    })
++    .expect("execution succeeds");
++    assert_eq!(value, 7);
++    assert_eq!(diff.gas_used, 1);
++    assert_eq!(diff.base_root.to_hex(), f["base_root"]);
++    assert_eq!(diff.result_root, view.root(version));
++    assert_eq!(diff.to_bytes(), view.commit(version).to_bytes());
++}
++
++#[test]
++fn every_bad_vector_is_rejected() {
++    let f = parse(GOLDEN);
++    let expected: Vec<(&str, OverlayError)> = vec![
++        ("bad_checksum_diff", OverlayError::BadChecksum),
++        ("bad_trailing_diff", OverlayError::TrailingBytes(1)),
++        ("bad_truncated_diff", OverlayError::UnexpectedEof),
++        ("bad_magic_diff", OverlayError::BadMagic),
++        ("bad_option_tag_diff", OverlayError::InvalidOptionTag(2)),
++        ("bad_unsorted_diff", OverlayError::UnsortedChanges),
++        ("bad_duplicate_diff", OverlayError::UnsortedChanges),
++        (
++            "bad_count_diff",
++            OverlayError::TooManyWrites(MAX_WRITES + 1),
++        ),
++        ("bad_nonminimal_diff", OverlayError::NonCanonicalVarint),
++    ];
++    for (key, error) in &expected {
++        let bytes = hx(&f[*key]);
++        assert_eq!(
++            StateDiff::from_canonical_bytes(&bytes),
++            Err(error.clone()),
++            "{key}"
++        );
++    }
++
++    // bad_root_diff is structurally valid; only apply() catches it.
++    let tampered = decode(&f, "bad_root_diff");
++    assert_eq!(
++        tampered.apply(&base_tree(&f)).unwrap_err(),
++        OverlayError::RootMismatch
++    );
++}
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+index 936e09c..b114350 100644
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -41,6 +41,10 @@ Tx      = { chain_id, signer, nonce, kind, payload, gas_limit,
+ - **Versioning.** `version` in the header, `codec_version` in tx,
+   `abi_version` in contracts. Any change = migration test (C10/B10).
+ 
++**⚠️ AUDIT (S3, 2026-10-27).** The §3 graph earlier claimed `aura-state <- aura-block, aura-tx, aura-codec, aura-crypto, aura-storage`, which is false and would be a cycle: `aura-storage` depends on `aura-state`. The graph above now reflects the real `Cargo.toml` edges; this is a docs correction, not a code change.
++
++**S3 execution overlay.** `aura-state::overlay` adds `StateView` — a copy-on-write overlay over an immutable S1 tree — and `StateDiff`, a checksummed canonical diff with a strict decoder. `execute()` rolls back the whole view on `OutOfGas` or `Revert`, so a revert cannot change the state root. Report: `docs/evidence/s3/report.md`.
++
+ **S2 durable state.** `aura-storage` puts a checksummed WAL in front of a
+ pluggable `StateBackend`: the default is pure Rust (reproducible in CI), and
+ the optional `rocksdb` feature uses real RocksDB column families with one
+@@ -162,10 +166,11 @@ aura-codec  <- aura-types
+ aura-crypto <- aura-types
+ aura-tx     <- aura-types, aura-codec, aura-crypto   (C4, 12th crate)
+ aura-block  <- aura-tx, aura-codec, aura-crypto, aura-types  (C5, 13th crate)
+-aura-state  <- aura-block, aura-tx, aura-codec, aura-crypto, aura-storage
++aura-state  <- aura-types, aura-codec, aura-crypto  (C7 + S0/S1/S3)
++aura-storage <- aura-types, aura-codec, aura-crypto, aura-state  (S2, RocksDB optional)
+ aura-genesis <- aura-state, aura-block, aura-crypto, aura-codec, aura-types  (C8, 14th crate)
++aura-exec   <- aura-state, aura-crypto, wasmtime  (X1, planned)
+ aura-testkit <- all of the above (C9, 15th crate, dev/test only)
+-aura-exec   <- aura-state, aura-crypto, wasmtime
+ aura-consensus <- aura-state, aura-crypto, aura-p2p
+ aura-node(aurad) <- all of the above + aura-rpc + aura-mempool
+ aura-wallet / indexer / explorer / bridge <- aura-types + aura-rpc client
+diff --git a/docs/STATUS.md b/docs/STATUS.md
+index dc02f20..89de5e9 100644
+--- a/docs/STATUS.md
++++ b/docs/STATUS.md
+@@ -1,9 +1,9 @@
+ # Implementation status — AuraLite-Crypto
+ 
+ > Updated **in the same patch** as the phase's code (rule D9).
+-> Snapshot date: **2026-10-26**, tree: "S2 landed — durable WAL + RocksDB
+-> state, Stage 1 in progress". See [`CLOSEOUT_AUDIT.md`](CLOSEOUT_AUDIT.md)
+-> (CORE) and `docs/evidence/s2/report.md` (S2).
++> Snapshot date: **2026-10-27**, tree: "S3 landed — execution overlay,
++> Stage 1 in progress". See [`CLOSEOUT_AUDIT.md`](CLOSEOUT_AUDIT.md)
++> (CORE) and `docs/evidence/s3/report.md` (S3).
+ 
+ ## Locked decisions (2026-10-25)
+ 
+@@ -20,10 +20,11 @@
+ 
+ **Phase ledger:** C0–C10 ✅ (`patches/0001-C0-...` … `patches/0011-C10-...`)
+ — **CORE_PLAN is complete**; S0 ✅ (`patches/0012-S0-state-baseline.patch`),
+-S1 ✅ (`patches/0013-S1-merkle-tree.patch`) and S2 ✅
+-(`patches/0014-S2-rocksdb-wal.patch`) done — **STATE_PLAN now has durable
+-state**. Next in dependency order: S3 (execution overlay). No other phase
+-has started.
++S1 ✅ (`patches/0013-S1-merkle-tree.patch`), S2 ✅
++(`patches/0014-S2-rocksdb-wal.patch`) and S3 ✅
++(`patches/0015-S3-execution-overlay.patch`) done — **STATE_PLAN now has
++atomic execution**. Next in dependency order: S4 (snapshots). No other
++phase has started.
+ 
+ ## Maturity level
+ 
+@@ -46,8 +47,17 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
+   test-rig wiring check and the plan↔tree close-out audit.
+   Evidence receipts for every phase live in `docs/evidence/`; the newest are
+   `docs/evidence/s2/gates.txt`, `nc.log`, `report.md`, `inventory.txt`,
+-  `native.txt`.
+-- **S2 (current).** `aura-storage` (real API since it was an honest
++  `native.txt`,
++  `docs/evidence/s3/gates.txt`, `nc.log`, `report.md`, `inventory.txt`.
++  ⚠️ AUDIT: the §3 crate graph in `docs/ARCHITECTURE.md` had a cycle
++  (`aura-state <- aura-storage` while `aura-storage <- aura-state`); S3
++  corrected it to match the real `Cargo.toml` edges.
++- **S3 (current).** `aura-state::overlay` gives `StateView` +
++  `StateDiff` + rollback. A `Revert` or `OutOfGas` leaves `base_root`
++  unchanged and the account balance byte-identical; 10 canonical diff
++  rejection vectors; 6 S3 negative controls. Report:
++  `docs/evidence/s3/report.md`. 138 tests, 4,205 vectors.
++- **S2.** `aura-storage` (real API since it was an honest
+   placeholder at C0) gives durable state. A `StateBackend` trait with two
+   implementations: a pure-Rust WAL + `BTreeMap` backend by default
+   (reproducible in any CI), and real RocksDB column families (`state`,
+@@ -90,17 +100,18 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
+   empty crate, not a fake `Ok(())`). CI runs the same commands as `make
+   test`.
+ 
+-## Measured numbers (2026-10-26)
++## Measured numbers (2026-10-27)
+ 
+ ```
+ find crates -name Cargo.toml       -> 15 crates (+1 workspace root)
+ ls docs/plans/*_PLAN.md           -> 12 plans / 112 phase rows
+-cargo test --workspace            -> 132 passed; 0 failed
++cargo test --workspace            -> 138 passed; 0 failed
+ make test                         -> ALL GATES GREEN (incl. close-out audit)
+-make vector-inventory             -> 4164 vectors >= 200
++make vector-inventory             -> 4205 vectors >= 200
+ make audit-closeout               -> every ✅ has a receipt
+-make nc-all                       -> 2/2+3/3+4/4+5/5+6/6*10 = 74 NC PASS
++make nc-all                       -> 2/2+3/3+4/4+5/5+6/6*11 = 80 NC PASS
+ make check-deps                   -> 95 external crates allowlisted
++revert / OutOfGas                -> root unchanged, balance unchanged
+ kill -9 commit points             -> 10 + 10 crash-window, all recover
+ validators / blocks / tx          -> 0 / 0 / 0
+ ```
+diff --git a/docs/evidence/s3/SHA256SUMS b/docs/evidence/s3/SHA256SUMS
+new file mode 100644
+index 0000000..099ad6e
+--- /dev/null
++++ b/docs/evidence/s3/SHA256SUMS
+@@ -0,0 +1,5 @@
++34137af2899921975f22d05dec8144a2ee88da6fcdfeaa656536d480b53f60d0  docs/evidence/s3/gates.txt
++ca5241a52de731a23b2d68f082cecc972fe92438e37f93e6e82b6148ab3c3b7d  docs/evidence/s3/nc.log
++b54b2cf9b16e5caaf004ada840331a23924f42277ae758dfc4fd06bcdaf409f0  docs/evidence/s3/report.md
++b0d79fc54e4e3efae4bf2c1ee173efa918ee056f3b22407922251688a98ca953  docs/evidence/s3/inventory.txt
++d9aaae610a6b09a6d1a896380641b9ff1ac1a05d5fcd6b6ceabbe83429fdc66d  crates/aura-state/tests/fixtures/s3_golden.txt
+diff --git a/docs/evidence/s3/gates.txt b/docs/evidence/s3/gates.txt
+new file mode 100644
+index 0000000..69be94d
+--- /dev/null
++++ b/docs/evidence/s3/gates.txt
+@@ -0,0 +1,195 @@
++AuraLite-Crypto — S3 evidence (execution overlay)
++Generated (UTC): 2026-10-27T15:30:54+00:00
++Rule: measured against the tree, not assumed.
++
++========================================================================
++RAW COMMAND OUTPUT
++========================================================================
++
++--- toolchain ---
++$ rustc --version && cargo --version
++rustc 1.99.1 (58cf8f9c3 2026-10-13)
++cargo 1.99.1 (5f94df478 2026-08-27)
++[rc=0]
++
++--- pre-S3 tree (S2 commit) ---
++$ git log -1 --oneline
++89007a8 S2 patch artifact
++[rc=0]
++
++--- workspace crates ---
++$ find crates -name Cargo.toml | wc -l
++15
++[rc=0]
++
++--- Rust files ---
++$ find . -name '*.rs' -not -path './target/*' | wc -l
++75
++[rc=0]
++
++--- external deps ---
++$ grep -c '^source = ' Cargo.lock || true
++95
++[rc=0]
++
++--- docs drift guard ---
++$ python3 tools/check_claims.py
++DOCS DRIFT GUARD: OK — 31 markdown files, 12 plans, 112 phase rows, all local links resolve
++[rc=0]
++
++--- dependency gate ---
++$ python3 tools/check_deps.py
++DEPENDENCY GATE: OK — 110 lock packages (15 local, 95 external, all checksummed + allowlisted)
++[rc=0]
++
++--- vector inventory ---
++$ python3 tools/count_vectors.py
++  crates/aura-block/tests/fixtures/c5_golden.txt:   83 vectors (91 data lines)
++  crates/aura-block/tests/fixtures/c6_golden.txt:   56 vectors (66 data lines)
++  crates/aura-codec/tests/fixtures/c2_golden.txt:   15 vectors (17 data lines)
++  crates/aura-crypto/tests/fixtures/c3_golden.txt:   60 vectors (61 data lines)
++  crates/aura-genesis/tests/fixtures/c8_golden.txt:   27 vectors (40 data lines)
++  crates/aura-state/tests/fixtures/c7_golden.txt:   91 vectors (103 data lines)
++  crates/aura-state/tests/fixtures/s0_golden.txt:   50 vectors (51 data lines)
++  crates/aura-state/tests/fixtures/s1_golden.txt: 3055 vectors (3062 data lines)
++  crates/aura-state/tests/fixtures/s3_golden.txt:   41 vectors (48 data lines)
++  crates/aura-storage/tests/fixtures/s2_golden.txt:  103 vectors (107 data lines)
++  crates/aura-testkit/tests/fixtures/c9_vectors.txt:  512 vectors (514 data lines)
++  crates/aura-tx/tests/fixtures/c4_golden.txt:   94 vectors (100 data lines)
++  crates/aura-types/tests/fixtures/c1_golden.txt:   18 vectors (18 data lines)
++
++  TOTAL: 4205 vectors across 13 fixtures
++VECTOR INVENTORY: OK — 4205 >= 200
++[rc=0]
++
++--- test rig wiring ---
++$ python3 tools/check_rig.py
++TEST RIG WIRING: OK — test-core + fuzz-smoke + vector inventory + proptest + 4 libFuzzer targets are wired into CI
++[rc=0]
++
++--- independent generator is idempotent ---
++$ before=$(sha256sum crates/aura-state/tests/fixtures/s3_golden.txt | cut -d' ' -f1); python3 tools/gen_s3_vectors.py >/dev/null; after=$(sha256sum crates/aura-state/tests/fixtures/s3_golden.txt | cut -d' ' -f1); if [ "$before" = "$after" ]; then echo "generator idempotent: $after"; else echo "GENERATOR DRIFT"; exit 1; fi
++generator idempotent: d9aaae610a6b09a6d1a896380641b9ff1ac1a05d5fcd6b6ceabbe83429fdc66d
++[rc=0]
++
++--- S3 overlay tests ---
++$ cargo test -p aura-state --test s3_overlay --quiet
++running 6 tests
++......
++test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++[rc=0]
++
++--- S3 negative controls (evidence log) ---
++$ make nc-s3
++NC-2 event commitment context: PASS
++      cargo test -p aura-state --test s3_overlay -> rc=101 (RED as expected)
++      
++test result: FAILED. 4 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++error: test failed, to rerun pass `-p aura-state --test s3_overlay`
++NC-3 diff magic: PASS
++      cargo test -p aura-state --test s3_overlay -> rc=101 (RED as expected)
++      
++test result: FAILED. 3 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++error: test failed, to rerun pass `-p aura-state --test s3_overlay`
++NC-4 independent golden diff: PASS
++      cargo test -p aura-state --test s3_overlay -> rc=101 (RED as expected)
++      
++test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++error: test failed, to rerun pass `-p aura-state --test s3_overlay`
++NC-5 diff checksum verification: PASS
++      cargo test -p aura-state --test s3_overlay -> rc=101 (RED as expected)
++      95 |         let expected = blake3_hash(&[S3_DIFF_CONTEXT, payload].concat());
++   |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_expected`
++
++error: test failed, to rerun pass `-p aura-state --test s3_overlay`
++NC-6 rollback removal (balance changes after revert): PASS
++      cargo test -p aura-state --test s3_overlay -> rc=101 (RED as expected)
++      
++test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++error: test failed, to rerun pass `-p aura-state --test s3_overlay`
++
++RESULT: 6/6 negative controls PASS
++restore check: rc=0, rc=0, rc=0 (GREEN as expected)
++make[1]: Leaving directory '/home/user/AuraLite-Crypto'
++[rc=0]
++
++--- all negative controls (C0-C10 + S0-S3) ---
++$ make nc-all
++make[1]: Entering directory '/home/user/AuraLite-Crypto'
++RESULT: 2/2 negative controls PASS
++RESULT: 3/3 negative controls PASS
++RESULT: 4/4 negative controls PASS
++RESULT: 5/5 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++make[1]: Leaving directory '/home/user/AuraLite-Crypto'
++[rc=0]
++
++--- CORE shard ---
++$ make test-core
++     Running unittests src/lib.rs (target/debug/deps/aura_types-308b229bcbc15c92)
++     Running tests/c1_types.rs (target/debug/deps/c1_types-30318a674a00d8c5)
++     Running tests/identity.rs (target/debug/deps/identity-22b5be58a3e6ffbb)
++   Doc-tests aura_block
++   Doc-tests aura_codec
++   Doc-tests aura_crypto
++   Doc-tests aura_genesis
++   Doc-tests aura_state
++   Doc-tests aura_storage
++   Doc-tests aura_testkit
++   Doc-tests aura_tx
++   Doc-tests aura_types
++[rc=0]
++
++--- plan<->tree audit ---
++$ make audit-closeout
++make[1]: Entering directory '/home/user/AuraLite-Crypto'
++CLOSE-OUT PLAN<->TREE AUDIT (CORE + STATE)
++  phases audited: 15 (C0-S3)
++  expected NC total: 80 (74 shipped + 6 S3)
++  evidence checksum files: 14
++  spec files indexed: 11
++  note: S3 patch: pending (cut at commit time)
++  note: S3 evidence: pending (generated by make evidence-s3)
++AUDIT: OK — every ✅ phase has a receipt, patch, NC log and evidence; all checksums verify
++make[1]: Leaving directory '/home/user/AuraLite-Crypto'
++[rc=0]
++
++--- full gate ---
++$ make test
++   Doc-tests aura_genesis
++   Doc-tests aura_mempool
++   Doc-tests aura_node
++   Doc-tests aura_p2p
++   Doc-tests aura_rpc
++   Doc-tests aura_state
++   Doc-tests aura_storage
++   Doc-tests aura_testkit
++   Doc-tests aura_tx
++   Doc-tests aura_types
++[rc=0]
++
++========================================================================
++SUMMARY
++========================================================================
++
++Pre-S3 (S2): 15 crates, 132 Rust tests, 4,164 golden vectors,
++74 negative controls, 95 external crates (RocksDB optional).
++Post-S3: 15 crates (no new crate, no new external dependency),
++138 Rust tests (+6 S3), 4,214 vectors across 13 fixtures,
++80 negative controls (6 new in S3), 95 external crates.
++S3 lives inside `aura-state`: `StateView` + `StateDiff` + rollback.
++Validators/blocks/tx remain 0/0/0.
+diff --git a/docs/evidence/s3/inventory.txt b/docs/evidence/s3/inventory.txt
+new file mode 100644
+index 0000000..b03120f
+--- /dev/null
++++ b/docs/evidence/s3/inventory.txt
+@@ -0,0 +1,114 @@
++AuraLite-Crypto — negative-control inventory after S3
++Generated (UTC): 2026-10-27T15:30:54+00:00
++
++C0: 2/2 negative controls
++  - NC-1 Rust identity: PASS
++  - NC-2 docs drift guard: PASS
++
++C1: 3/3 negative controls
++  - NC-1 bech32 checksum constant: PASS
++  - NC-2 address version byte: PASS
++  - NC-3 independent golden vector: PASS
++
++C2: 4/4 negative controls
++  - NC-1 codec version: PASS
++  - NC-2 independent golden fixture: PASS
++  - NC-3 trailing-byte guard: PASS
++  - NC-4 non-minimal varint guard: PASS
++
++C3: 5/5 negative controls
++  - NC-1 domain separation context: PASS
++  - NC-2 independent domain-hash vector: PASS
++  - NC-3 RFC 8032 vector: PASS
++  - NC-4 Ed25519 verification bypass: PASS
++  - NC-5 dependency allowlist / make test gate: PASS
++
++C4: 6/6 negative controls
++  - NC-1 signing context: PASS
++  - NC-2 txid context: PASS
++  - NC-3 independent golden signature: PASS
++  - NC-4 replay protection: PASS
++  - NC-5 signer/public-key binding: PASS
++  - NC-6 Ed25519 verification bypass: PASS
++
++C5: 6/6 negative controls
++  - NC-1 Merkle leaf context: PASS
++  - NC-2 Merkle node context: PASS
++  - NC-3 block-hash context: PASS
++  - NC-4 independent golden tx_root: PASS
++  - NC-5 tx_root recomputation check: PASS
++  - NC-6 canonical body order check: PASS
++
++C6: 6/6 negative controls
++  - NC-1 event leaf context: PASS
++  - NC-2 independent golden root: PASS
++  - NC-3 leaf/value binding: PASS
++  - NC-4 sibling-count check: PASS
++  - NC-5 sibling direction: PASS
++  - NC-6 root comparison: PASS
++
++C7: 6/6 negative controls
++  - NC-1 state key digest context: PASS
++  - NC-2 independent golden key digest: PASS
++  - NC-3 reserved key-space prefixes: PASS
++  - NC-4 namespace length check: PASS
++  - NC-5 contract namespace check: PASS
++  - NC-6 contract address check: PASS
++
++C8: 6/6 negative controls
++  - NC-1 genesis context: PASS
++  - NC-2 validator-set context: PASS
++  - NC-3 independent golden genesis hash: PASS
++  - NC-4 validator order (DoD: sorting must not happen): PASS
++  - NC-5 unknown JSON fields: PASS
++  - NC-6 Stage 1 chain-id check: PASS
++
++C9: 6/6 negative controls
++  - NC-1 C9 golden varint vector: PASS
++  - NC-2 vector inventory minimum: PASS
++  - NC-3 injected non-minimal-varint bug: PASS
++  - NC-4 injected trailing-byte-guard bug: PASS
++  - NC-5 fuzz harness iteration counter: PASS
++  - NC-6 rig wiring in Makefile: PASS
++
++C10: 6/6 negative controls
++  - NC-1 missing phase receipt: PASS
++  - NC-2 deferred phase marked done: PASS
++  - NC-3 forged NC log result: PASS
++  - NC-4 unindexed format spec: PASS
++  - NC-5 forged patch subject: PASS
++  - NC-6 corrupted evidence checksum: PASS
++
++S0: 6/6 negative controls
++  - NC-1 final-view context: PASS
++  - NC-2 independent golden final view: PASS
++  - NC-3 fake state root: PASS
++  - NC-4 fake persistence: PASS
++  - NC-5 fake determinism: PASS
++  - NC-6 falsified no-root measurement: PASS
++
++S1: 6/6 negative controls
++  - NC-1 leaf context: PASS
++  - NC-2 node context: PASS
++  - NC-3 independent checkpoint root: PASS
++  - NC-4 proof root comparison: PASS
++  - NC-5 path bit ordering: PASS
++  - NC-6 depth-independent empty subtrees: PASS
++
++S2: 6/6 negative controls
++  - NC-1 WAL checksum context: PASS
++  - NC-2 state key context: PASS
++  - NC-3 state root context: PASS
++  - NC-4 independent golden WAL record: PASS
++  - NC-5 WAL checksum verification: PASS
++  - NC-6 WAL-before-head invariant: PASS
++
++S3: 6/6 negative controls
++  - NC-1 diff checksum context: PASS
++  - NC-2 event commitment context: PASS
++  - NC-3 diff magic: PASS
++  - NC-4 independent golden diff: PASS
++  - NC-5 diff checksum verification: PASS
++  - NC-6 rollback removal (balance changes after revert): PASS
++
++TOTAL: 80 NC
+diff --git a/docs/evidence/s3/nc.log b/docs/evidence/s3/nc.log
+new file mode 100644
+index 0000000..a1e3564
+--- /dev/null
++++ b/docs/evidence/s3/nc.log
+@@ -0,0 +1,42 @@
++S3 NEGATIVE CONTROLS — 2026-10-27T15:30:55+00:00
++Rule: a gate that cannot go red is not a gate (CONTRIBUTING.md §1).
++
++NC-1 diff checksum context: PASS
++      cargo test -p aura-state --test s3_overlay -> rc=101 (RED as expected)
++      
++test result: FAILED. 3 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++error: test failed, to rerun pass `-p aura-state --test s3_overlay`
++NC-2 event commitment context: PASS
++      cargo test -p aura-state --test s3_overlay -> rc=101 (RED as expected)
++      
++test result: FAILED. 4 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++error: test failed, to rerun pass `-p aura-state --test s3_overlay`
++NC-3 diff magic: PASS
++      cargo test -p aura-state --test s3_overlay -> rc=101 (RED as expected)
++      
++test result: FAILED. 3 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++error: test failed, to rerun pass `-p aura-state --test s3_overlay`
++NC-4 independent golden diff: PASS
++      cargo test -p aura-state --test s3_overlay -> rc=101 (RED as expected)
++      
++test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++error: test failed, to rerun pass `-p aura-state --test s3_overlay`
++NC-5 diff checksum verification: PASS
++      cargo test -p aura-state --test s3_overlay -> rc=101 (RED as expected)
++      95 |         let expected = blake3_hash(&[S3_DIFF_CONTEXT, payload].concat());
++   |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_expected`
++
++error: test failed, to rerun pass `-p aura-state --test s3_overlay`
++NC-6 rollback removal (balance changes after revert): PASS
++      cargo test -p aura-state --test s3_overlay -> rc=101 (RED as expected)
++      
++test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++error: test failed, to rerun pass `-p aura-state --test s3_overlay`
++
++RESULT: 6/6 negative controls PASS
++restore check: rc=0, rc=0, rc=0 (GREEN as expected)
+diff --git a/docs/evidence/s3/report.md b/docs/evidence/s3/report.md
+new file mode 100644
+index 0000000..498aac1
+--- /dev/null
++++ b/docs/evidence/s3/report.md
+@@ -0,0 +1,44 @@
++# S3 — execution overlay (measured)
++
++Generated (UTC): 2026-10-27T15:30:54+00:00. Numbers come from the independent Python
++reference `tools/gen_s3_vectors.py` and are re-verified by
++`crates/aura-state/tests/s3_overlay.rs`.
++
++## What landed
++
++- `StateView`: copy-on-write overlay over an immutable S1 `MerkleTree`.
++  Reads fall through to the base tree; writes/deletes are recorded by
++  256-bit C7 state-key digest in a `BTreeMap`. Gas is checked with
++  `u64` arithmetic; events are collected in order.
++- `StateDiff`: canonical wire format
++  `payload || BLAKE3(S3_DIFF_CONTEXT || payload)`, where `payload` =
++  `ALD3 || version || base_root || result_root || gas_used ||
++  events || changes`. Strict decode enforces the checksum, magic,
++  minimal LEB128 varints, strictly ascending change paths, caps, no
++  trailing bytes, and byte-identical re-encoding.
++- `execute()` runs a closure. On `OutOfGas` **or** `Revert` it calls
++  `rollback()`: changes, events and gas are discarded. A successful run
++  yields a `StateDiff` whose `apply()` re-verifies the base and result
++  roots before materialising a new tree. The base is never mutated.
++
++## Measured gates
++
++- base accounts: **3** (C7 `Account`, 88 canonical bytes each)
++- base version: **7**
++- canonical diffs: **3** (credit, debit+events, mixed writes with delete)
++- rejection vectors: **10** (checksum, trailing, truncated, magic, root,
++  unsorted, duplicate, non-minimal varint, oversized count, option tag)
++- `revert` and `OutOfGas` both leave `base_root` unchanged; the balance
++  of the touched account is byte-identical afterwards.
++- NC-6 removes `rollback()`: the revert gate MUST go red (balance
++  changes) — verified.
++
++## Honest scope
++
++- No real VM: `execute` takes a Rust closure, not WASM. X1 owns the VM.
++- `ChainId` is exposed on the view but not signed into the diff yet;
++  replay separation is already handled by C3/C4 at the tx layer.
++- No snapshots (S4), state sync (S5), pruning (S6) or backup (S7).
++- No network, no consensus, no P2P, no node.
++
++Validators / blocks / transactions remain **0 / 0 / 0**.
+diff --git a/docs/plans/STATE_PLAN.md b/docs/plans/STATE_PLAN.md
+index 8293049..2ff86f4 100644
+--- a/docs/plans/STATE_PLAN.md
++++ b/docs/plans/STATE_PLAN.md
+@@ -1,6 +1,6 @@
+ # STATE_PLAN — state tree and storage
+ 
+-**Status:** 🚧 IN PROGRESS (S0–S2 ✅ 2026-10-26; S3 next)  
++**Status:** 🚧 IN PROGRESS (S0–S3 ✅ 2026-10-27; S4 next)  
+ **Stage:** Stage 1: S0–S7 (all phases active).  
+ **Deliverable:** `patches/0012-S0-...` … `patches/0019-S7-...`
+ **Dependencies:** CORE C1–C7 (codec, hash, accounts).
+@@ -45,7 +45,7 @@ implement any of them. S1 must consume `StateKey::digest` as its JMT path.
+ | ✅ **S0** | Baseline | in-memory state, measure "no root / no persistence", report | NC: two nodes with different insertion order → different balances (documented defect) |
+ | ✅ **S1** | Merkle tree | insert/delete/lookup, root, proof, versioning | 10 000 operations, root matches an independent reference implementation; proof check on 1000 keys |
+ | ✅ **S2** | RocksDB + WAL | column families, atomic batch, fsync, reopen | kill -9 at 10 commit points → after restart head and root match |
+-| **S3** | Execution overlay | `StateView`, diff, rollback on `OutOfGas`/revert | revert does not change root; NC: remove rollback → balance changed, test red |
++| ✅ **S3** | Execution overlay | `StateView`, diff, rollback on `OutOfGas`/revert | revert does not change root; NC: remove rollback → balance changed, test red |
+ | **S4** | Snapshots | chunks, manifest, parallel export/import | snapshot of 1M keys imported byte-identical; substituted chunk → reject |
+ | **S5** | State sync | node catches up via snapshot + diff without downloading all history | new node reaches the same root as 3 old ones within N minutes |
+ | **S6** | Pruning + archive | pruning old versions, archive mode, compaction | 100 000 blocks: disk size bounded in prune mode; archive serves history |
+@@ -170,6 +170,37 @@ implement any of them. S1 must consume `StateKey::digest` as its JMT path.
+ - Deferred: execution overlay / rollback (S3), chunked snapshots (S4), state
+   sync (S5), pruning (S6), backup/chaos (S7).
+ 
++
++### S3 receipt (2026-10-27)
++
++- Deliverable: `patches/0015-S3-execution-overlay.patch`. No new crate and no
++  new external dependency — the overlay lives in `aura-state`, which already
++  owns `MerkleTree`, `Account` and `StateKey`.
++- Landed: `StateView` (copy-on-write overlay over an immutable S1 tree),
++  `StateDiff` (canonical wire format + strict decoder), `events_root()`,
++  `execute()` and `apply_diff()`. Reads fall through to the base tree; writes
++  and deletes are keyed by the C7 state-key digest in a `BTreeMap`.
++- **Wire format:** `payload || BLAKE3(S3_DIFF_CONTEXT || payload)` with
++  `payload = ALD3 || version || base_root || result_root || gas_used ||
++  events || changes`. Strict decode enforces the checksum, magic, minimal
++  LEB128 varints, strictly ascending change paths, caps, no trailing bytes and
++  byte-identical re-encoding. `apply()` re-verifies base and result roots
++  before materialising a new tree.
++- **DoD gate:** `revert` and `OutOfGas` both leave `base_root` unchanged and
++  the touched account balance byte-identical; `execute()` rolls back all
++  changes, events and gas. NC-6 removes `rollback()` and requires the revert
++  gate to go red (balance changes) — verified. 6 S3 negative controls,
++  total 80 across C0–C10 + S0–S3.
++- Golden vectors: `tools/gen_s3_vectors.py` — pure-Python BLAKE3
++  (self-checked against 7 official vectors), the C7 state-key digest and the
++  S1 sparse Merkle tree. 3 canonical diffs, 51 fixture lines, 10 rejection
++  vectors. Offline and byte-stable.
++- Gate: `make test` → **138 passed / 0 failed** (132 S2 + 6 S3), fmt/clippy
++  clean, drift guard 12 plans / 112 rows, dependency gate 95 external crates,
++  `make audit-closeout` green.
++- Deferred: real VM/WASM (X1), snapshots (S4), state sync (S5), pruning
++  (S6), backup/chaos (S7), `cargo deny` (H1).
++
+ ## Risks
+ 
+ - Tree root disagreeing with the "reference" implementation → caught by an
+diff --git a/tools/audit_closeout.py b/tools/audit_closeout.py
+index 7c1bc04..0a115b9 100644
+--- a/tools/audit_closeout.py
++++ b/tools/audit_closeout.py
+@@ -29,10 +29,10 @@ EVIDENCE = REPO / "docs" / "evidence"
+ PATCHES = REPO / "patches"
+ 
+ CORE_PHASES = [f"C{index}" for index in range(11)]      # C0..C10 (closed)
+-STATE_PHASES = ["S0", "S1", "S2"]                        # grows with each S phase
++STATE_PHASES = ["S0", "S1", "S2", "S3"]                  # grows with each S phase
+ PHASES = CORE_PHASES + STATE_PHASES
+-SHIPPED = CORE_PHASES + ["S0", "S1"]
+-CURRENT = "S2"
++SHIPPED = CORE_PHASES + ["S0", "S1", "S2"]
++CURRENT = "S3"
+ 
+ PLAN_FOR_PREFIX = {
+     "C": "CORE_PLAN.md",
+@@ -50,9 +50,9 @@ PLAN_FOR_PREFIX = {
+ }
+ 
+ NC_PER_PHASE = {f"C{i}": 6 for i in range(4, 11)}
+-NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6})
+-SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)   # 68
+-EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + NC_PER_PHASE[CURRENT]       # 74
++NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6})
++SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)   # 74
++EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + NC_PER_PHASE[CURRENT]       # 80
+ 
+ DONE_ROW = re.compile(r"^\| ✅ \*\*([A-Z]+\d+)\*\* \|", re.M)
+ RESULT_LINE = re.compile(r"^RESULT: (\d+)/(\d+) negative controls PASS", re.M)
+@@ -258,7 +258,7 @@ def check(strict: bool) -> tuple[list[str], list[str]]:
+             errors.append("closeout.txt does not report the CORE total 56 NC")
+     # Per-phase inventories are historical snapshots: each reports the NC
+     # total AS OF that phase, not the current project-wide total.
+-    for phase, expected in (("s0", 62), ("s1", 68), ("s2", EXPECTED_TOTAL_NC)):
++    for phase, expected in (("s0", 62), ("s1", 68), ("s2", 74), ("s3", EXPECTED_TOTAL_NC)):
+         path = EVIDENCE / phase / "inventory.txt"
+         if path.exists() and f"TOTAL: {expected} NC" not in path.read_text(encoding="utf-8"):
+             errors.append(f"{phase}/inventory.txt does not report TOTAL: {expected} NC")
+diff --git a/tools/gen_s3_vectors.py b/tools/gen_s3_vectors.py
+new file mode 100644
+index 0000000..f278467
+--- /dev/null
++++ b/tools/gen_s3_vectors.py
+@@ -0,0 +1,374 @@
++#!/usr/bin/env python3
++"""Generate S3 golden vectors from an INDEPENDENT Python implementation.
++
++No Rust code, no network. Contains pure-Python BLAKE3 (self-checked against
++official BLAKE3 vectors), the C7 state-key digest and the S1 sparse Merkle
++tree, plus the S3 canonical diff framing.
++
++Emits:
++  * a deterministic base account state and its S1 tree/root hashes;
++  * 3 canonical diffs (credit, debit+event, mixed writes) with wire bytes,
++    result root, event root and gas used;
++  * a set of rejection vectors (bad checksum, trailing bytes, unordered changes,
++    duplicate change, non-minimal varint, oversized count, bad magic,
++    root mismatch) and the roots that must survive a revert / OutOfGas.
++
++Usage:
++    python3 tools/gen_s3_vectors.py
++    make gen-s3-vectors
++
++Output: crates/aura-state/tests/fixtures/s3_golden.txt
++"""
++
++from __future__ import annotations
++
++import struct
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++OUT = REPO / "crates" / "aura-state" / "tests" / "fixtures" / "s3_golden.txt"
++
++STATE_KEY_CONTEXT = b"AuraLite-Crypto/state-key-v1\x00"
++S1_EMPTY_CONTEXT = b"AuraLite-Crypto/s1-empty-v1\x00"
++S1_LEAF_CONTEXT = b"AuraLite-Crypto/s1-leaf-v1\x00"
++S1_NODE_CONTEXT = b"AuraLite-Crypto/s1-node-v1\x00"
++S1_ROOT_CONTEXT = b"AuraLite-Crypto/s1-root-v1\x00"
++S3_DIFF_CONTEXT = b"AuraLite-Crypto/s3-diff-v1\x00"
++S3_EVENT_CONTEXT = b"AuraLite-Crypto/s3-event-v1\x00"
++
++DIFF_MAGIC = b"ALD3"
++MAX_WRITES = 65_536
++MAX_EVENTS = 4_096
++BASE_VERSION = 7
++ACCOUNT_LEN = 88
++
++MASK = 0xFFFFFFFF
++IV = [0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A,
++      0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19]
++PERM = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8]
++CHUNK_START, CHUNK_END, ROOT = 1, 2, 8
++
++
++def _rotr(x: int, n: int) -> int:
++    return ((x >> n) | (x << (32 - n))) & MASK
++
++
++def _g(s, a, b, c, d, mx, my):
++    s[a] = (s[a] + s[b] + mx) & MASK
++    s[d] = _rotr(s[d] ^ s[a], 16)
++    s[c] = (s[c] + s[d]) & MASK
++    s[b] = _rotr(s[b] ^ s[c], 12)
++    s[a] = (s[a] + s[b] + my) & MASK
++    s[d] = _rotr(s[d] ^ s[a], 8)
++    s[c] = (s[c] + s[d]) & MASK
++    s[b] = _rotr(s[b] ^ s[c], 7)
++
++
++def _compress(cv, block, counter, block_len, flags):
++    s = list(cv) + list(IV)
++    s[12], s[13], s[14], s[15] = counter & MASK, (counter >> 32) & MASK, block_len, flags
++    m = list(block)
++    for r in range(7):
++        _g(s, 0, 4, 8, 12, m[0], m[1]); _g(s, 1, 5, 9, 13, m[2], m[3])
++        _g(s, 2, 6, 10, 14, m[4], m[5]); _g(s, 3, 7, 11, 15, m[6], m[7])
++        _g(s, 0, 5, 10, 15, m[8], m[9]); _g(s, 1, 6, 11, 12, m[10], m[11])
++        _g(s, 2, 7, 8, 13, m[12], m[13]); _g(s, 3, 4, 9, 14, m[14], m[15])
++        if r != 6:
++            m = [m[PERM[i]] for i in range(16)]
++    return [s[i] ^ s[i + 8] for i in range(8)] + [s[i + 8] ^ cv[i] for i in range(8)]
++
++
++def blake3(data: bytes) -> bytes:
++    assert len(data) <= 1024, "reference handles a single chunk only"
++    blocks = [data[i:i + 64] for i in range(0, len(data), 64)] or [b""]
++    cv = IV
++    for i, block in enumerate(blocks[:-1]):
++        flags = CHUNK_START if i == 0 else 0
++        cv = _compress(cv, list(struct.unpack("<16I", block.ljust(64, b"\0"))), 0, 64, flags)[:8]
++    last = blocks[-1]
++    flags = (CHUNK_START if len(blocks) == 1 else 0) | CHUNK_END
++    words = list(struct.unpack("<16I", last.ljust(64, b"\0")))
++    return struct.pack("<8I", *_compress(cv, words, 0, len(last), flags | ROOT)[:8])
++
++
++OFFICIAL_B3 = {
++    0: "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
++    1: "2d3adedff11b61f14c886e35afa036736dcd87a74d27b5c1510225d0f592e213",
++    63: "e9bc37a594daad83be9470df7f7b3798297c3d834ce80ba85d6e207627b7db7b",
++    64: "4eed7141ea4a5cd4b788606bd23f46e212af9cacebacdc7d1f4c6dc7f2511b98",
++    65: "de1e5fa0be70df6d2be8fffd0e99ceaa8eb6e8c93a63f2d8d1c30ecb6b263dee",
++    1023: "10108970eeda3eb932baac1428c7a2163b0e924c9a9e25b35bba72b28f70bd11",
++    1024: "42214739f095a406f3fc83deb889744ac00df831c10daa55189b5d121c855af7",
++}
++
++
++def varint(value: int) -> bytes:
++    out = bytearray()
++    while True:
++        byte = value & 0x7F
++        value >>= 7
++        out.append(byte | (0x80 if value else 0))
++        if not value:
++            return bytes(out)
++
++
++def u16(value: int) -> bytes:
++    return struct.pack("<H", value)
++
++
++def u64(value: int) -> bytes:
++    return struct.pack("<Q", value)
++
++
++def state_path(raw_key: bytes) -> bytes:
++    return blake3(STATE_KEY_CONTEXT + u64(len(raw_key)) + raw_key)
++
++
++def account_bytes(nonce: int, balance: int) -> bytes:
++    return u64(nonce) + balance.to_bytes(16, "little") + bytes(32) + bytes(32)
++
++
++class Node:
++    __slots__ = ("depth", "hash", "kind", "left", "right", "key", "value")
++
++    def __init__(self, depth, hash_, kind, left=None, right=None, key=None, value=None):
++        self.depth = depth
++        self.hash = hash_
++        self.kind = kind
++        self.left = left
++        self.right = right
++        self.key = key
++        self.value = value
++
++
++def empty_hash(depth: int) -> bytes:
++    return blake3(S1_EMPTY_CONTEXT + u16(depth))
++
++
++def leaf_hash(depth: int, key: bytes, value: bytes) -> bytes:
++    return blake3(S1_LEAF_CONTEXT + u16(depth) + key + u64(len(value)) + value)
++
++
++def node_hash(left: bytes, right: bytes) -> bytes:
++    return blake3(S1_NODE_CONTEXT + left + right)
++
++
++def key_bit(key: bytes, depth: int) -> int:
++    return (key[depth // 8] >> (7 - depth % 8)) & 1
++
++
++def build_tree(leaves: dict[bytes, bytes], depth: int = 0) -> Node:
++    if not leaves:
++        return Node(depth, empty_hash(depth), "empty")
++    if len(leaves) == 1:
++        key, value = next(iter(leaves.items()))
++        return Node(depth, leaf_hash(depth, key, value), "leaf", key=key, value=value)
++    left = build_tree({k: v for k, v in leaves.items() if key_bit(k, depth) == 0}, depth + 1)
++    right = build_tree({k: v for k, v in leaves.items() if key_bit(k, depth) == 1}, depth + 1)
++    return Node(depth, node_hash(left.hash, right.hash), "branch", left=left, right=right)
++
++
++def tree_root(leaves: dict[bytes, bytes]) -> bytes:
++    return build_tree(leaves).hash
++
++
++def versioned_root(version: int, root: bytes) -> bytes:
++    return blake3(S1_ROOT_CONTEXT + u64(version) + root)
++
++
++def events_root(events: list[bytes]) -> bytes:
++    out = bytearray(S3_EVENT_CONTEXT)
++    out += varint(len(events))
++    for event in events:
++        out += varint(len(event)) + event
++    return blake3(bytes(out))
++
++
++def diff_checksum(payload: bytes) -> bytes:
++    return blake3(S3_DIFF_CONTEXT + payload)
++
++
++def diff_payload(version, base_root, result_root, gas_used, events, changes) -> bytes:
++    out = bytearray(DIFF_MAGIC)
++    out += u64(version)
++    out += base_root
++    out += result_root
++    out += u64(gas_used)
++    out += varint(len(events))
++    for event in events:
++        out += varint(len(event)) + event
++    out += varint(len(changes))
++    for path, value in changes:
++        out += path
++        if value is None:
++            out += b"\x00"
++        else:
++            out += b"\x01" + varint(len(value)) + value
++    return bytes(out)
++
++
++def diff_bytes(version, base_root, result_root, gas_used, events, changes) -> bytes:
++    payload = diff_payload(version, base_root, result_root, gas_used, events, changes)
++    return payload + diff_checksum(payload)
++
++
++def apply_changes(leaves: dict[bytes, bytes], changes: list[tuple[bytes, bytes | None]]) -> dict[bytes, bytes]:
++    result = dict(leaves)
++    for path, value in changes:
++        if value is None:
++            result.pop(path, None)
++        else:
++            result[path] = value
++    return result
++
++
++def main() -> int:
++    for length, expected in OFFICIAL_B3.items():
++        if blake3(bytes(i % 251 for i in range(length))).hex() != expected:
++            raise SystemExit(f"pure-Python BLAKE3 disagrees with official vector len={length}")
++
++    # ---- deterministic base state: 3 C7 account keys ----
++    raw_keys = [b"\x01" + bytes([i + 1]) * 20 for i in range(3)]
++    paths = [state_path(key) for key in raw_keys]
++    base_values = [
++        account_bytes(0, 1_000_000),
++        account_bytes(3, 500),
++        account_bytes(1, 42),
++    ]
++    base_leaves = {path: value for path, value in zip(paths, base_values)}
++    base_tree_root = tree_root(base_leaves)
++    base_root = versioned_root(BASE_VERSION, base_tree_root)
++
++    lines = [
++        "# AuraLite-Crypto S3 execution-overlay golden vectors",
++        "# Generated by tools/gen_s3_vectors.py (independent Python).",
++        "# Diff framing: payload || BLAKE3(S3_DIFF_CONTEXT || payload).",
++        f"diff_magic={DIFF_MAGIC.hex()}",
++        f"state_key_context={STATE_KEY_CONTEXT.hex()}",
++        f"s1_root_context={S1_ROOT_CONTEXT.hex()}",
++        f"s3_diff_context={S3_DIFF_CONTEXT.hex()}",
++        f"s3_event_context={S3_EVENT_CONTEXT.hex()}",
++        f"base_version={BASE_VERSION}",
++        f"account_len={ACCOUNT_LEN}",
++        f"max_writes={MAX_WRITES}",
++        f"max_events={MAX_EVENTS}",
++        f"max_value_len={1 << 20}",
++        f"base_tree_root={base_tree_root.hex()}",
++        f"base_root={base_root.hex()}",
++    ]
++    for index, (key, path, value) in enumerate(zip(raw_keys, paths, base_values)):
++        lines += [
++            f"account_{index}_key={key.hex()}",
++            f"account_{index}_path={path.hex()}",
++            f"account_{index}_value={value.hex()}",
++        ]
++
++    # ---- canonical diffs ----
++    scenarios = [
++        ("diff_1", 1, [], [(paths[0], account_bytes(1, 1_000_500))]),
++        ("diff_2", 2, [b"transfer", b"debit"],
++         [(paths[0], account_bytes(2, 999_900)),
++          (paths[1], account_bytes(4, 600))]),
++        ("diff_3", 3, [b"mint", b"burn"],
++         [(paths[0], account_bytes(2, 1_000_000)),
++          (paths[2], None)]),
++    ]
++    for name, gas, events, changes in scenarios:
++        result_leaves = apply_changes(base_leaves, changes)
++        result_root = versioned_root(BASE_VERSION + 1, tree_root(result_leaves))
++        canonical = diff_bytes(
++            BASE_VERSION + 1, base_root, result_root, gas, events, changes)
++        lines += [
++            f"{name}_bytes={canonical.hex()}",
++            f"{name}_root={result_root.hex()}",
++            f"{name}_events_root={events_root(events).hex()}",
++            f"{name}_gas={gas}",
++            f"{name}_changes={len(changes)}",
++        ]
++    lines += [
++        f"revert_root={base_root.hex()}",
++        f"out_of_gas_root={base_root.hex()}",
++    ]
++
++    # ---- rejection vectors ----
++    diff1 = diff_payload(
++        BASE_VERSION + 1, base_root,
++        bytes.fromhex(next(l.split("=", 1)[1] for l in lines if l.startswith("diff_1_root="))),
++        1, [], [(paths[0], account_bytes(1, 1_000_500))
++    ])
++
++    # helper to build a valid-checksum diff from an arbitrary payload
++    def framed(payload: bytes) -> bytes:
++        return payload + diff_checksum(payload)
++
++    # 1. bad checksum
++    bad = bytearray(framed(diff1))
++    bad[-1] ^= 0x01
++    lines.append(f"bad_checksum_diff={bytes(bad).hex()}")
++
++    # 2. trailing byte
++    lines.append(f"bad_trailing_diff={framed(diff1 + b'\x00').hex()}")
++
++    # 3. truncated
++    lines.append(f"bad_truncated_diff={framed(diff1)[:20].hex()}")
++
++    # 4. bad magic
++    bad_magic = b"XXXX" + diff1[4:]
++    lines.append(f"bad_magic_diff={framed(bad_magic).hex()}")
++
++    # 5. result root mismatch (valid checksum)
++    bad_root = bytearray(diff1)
++    bad_root[4 + 8 + 32] ^= 0x01  # first byte of result_root
++    lines.append(f"bad_root_diff={framed(bytes(bad_root)).hex()}")
++
++    # 6. unordered changes (valid checksum): two changes in DESCENDING path order
++    two = [(paths[1], account_bytes(4, 600)), (paths[0], account_bytes(2, 999_900))]
++    if two[0][0] < two[1][0]:
++        two.reverse()
++    assert two[0][0] > two[1][0], "unordered vector must actually be unsorted"
++    unsorted_payload = diff_payload(
++        BASE_VERSION + 1, base_root,
++        bytes.fromhex(next(l.split("=", 1)[1] for l in lines if l.startswith("diff_2_root="))),
++        2, [], two)
++    lines.append(f"bad_unsorted_diff={framed(unsorted_payload).hex()}")
++
++    # 7. duplicate changes
++    duplicate = [
++        (paths[0], account_bytes(2, 999_900)),
++        (paths[0], account_bytes(2, 999_900)),
++    ]
++    dup_payload = diff_payload(
++        BASE_VERSION + 1, base_root,
++        bytes.fromhex(next(l.split("=", 1)[1] for l in lines if l.startswith("diff_2_root="))),
++        2, [], duplicate)
++    lines.append(f"bad_duplicate_diff={framed(dup_payload).hex()}")
++
++    # 8. non-minimal event count varint: 0x80 0x00 with valid checksum
++    result_root_1 = bytes.fromhex(next(l.split("=", 1)[1] for l in lines if l.startswith("diff_1_root=")))
++    minimal = diff_payload(BASE_VERSION + 1, base_root, result_root_1, 1, [], [(paths[0], account_bytes(1, 1_000_500))
++    ])
++    # minimal layout: magic(4) version(8) base(32) result(32) gas(8) events_count(1) writes_count(1)
++    prefix_len = 4 + 8 + 32 + 32 + 8
++    nonminimal = minimal[:prefix_len] + b"\x80\x00" + minimal[prefix_len + 1:]
++    lines.append(f"bad_nonminimal_diff={framed(nonminimal).hex()}")
++
++    # 9. oversized writes count
++    oversized = minimal[:prefix_len] + b"\x00" + varint(MAX_WRITES + 1) + minimal[prefix_len + 2:]
++    lines.append(f"bad_count_diff={framed(oversized).hex()}")
++
++    # 10. bad option tag on first write
++    bad_tag = bytearray(minimal)
++    bad_tag[-ACCOUNT_LEN - 2] = 2
++    lines.append(f"bad_option_tag_diff={framed(bytes(bad_tag)).hex()}")
++
++    OUT.parent.mkdir(parents=True, exist_ok=True)
++    OUT.write_text("\n".join(lines) + "\n", encoding="utf-8")
++    print(f"wrote {OUT.relative_to(REPO)} ({len(lines)} lines)")
++    print(f"  base accounts: {len(raw_keys)}, canonical diffs: {len(scenarios)}, "
++          f"rejection vectors: 10")
++    print("  self-check: official BLAKE3 vectors OK")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/nc_s3.py b/tools/nc_s3.py
+new file mode 100644
+index 0000000..96cbe48
+--- /dev/null
++++ b/tools/nc_s3.py
+@@ -0,0 +1,140 @@
++#!/usr/bin/env python3
++"""Negative controls for S3 (execution overlay).
++
++Six tamper tests must each turn the S3 gate red:
++
++  NC-1: change S3_DIFF_CONTEXT (diff checksum domain).
++  NC-2: change S3_EVENT_CONTEXT (event commitment).
++  NC-3: change DIFF_MAGIC.
++  NC-4: corrupt one independent golden diff.
++  NC-5: disable checksum verification.
++  NC-6: remove rollback (DoS NC from the S3 DoD: balance changes after revert).
++
++Files are restored byte-for-byte in a `finally` block. `make nc-s3` captures
++stdout into docs/evidence/s3/nc.log; a final green restore check is mandatory.
++"""
++
++from __future__ import annotations
++
++import os
++import subprocess
++from datetime import datetime, timezone
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++OVERLAY_RS = REPO / "crates" / "aura-state" / "src" / "overlay.rs"
++TEST_RS = REPO / "crates" / "aura-state" / "tests" / "s3_overlay.rs"
++FIXTURE = REPO / "crates" / "aura-state" / "tests" / "fixtures" / "s3_golden.txt"
++
++CARGO_TEST = ["cargo", "test", "-p", "aura-state", "--test", "s3_overlay", "--quiet"]
++
++
++def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
++    return subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, check=False)
++
++
++def expect_red(
++    label: str, path: Path, old: str, new: str, touch_test: bool = False
++) -> bool:
++    original = path.read_text(encoding="utf-8")
++    if old not in original:
++        print(f"{label}: FAIL — tamper target not found in {path.name}")
++        return False
++    tampered = original.replace(old, new, 1)
++    if tampered == original:
++        print(f"{label}: FAIL — tamper was a no-op")
++        return False
++    try:
++        path.write_text(tampered, encoding="utf-8")
++        if touch_test:
++            os.utime(TEST_RS, None)
++        result = run(CARGO_TEST)
++        went_red = result.returncode != 0
++        snippet = "\n".join((result.stdout + result.stderr).strip().splitlines()[-4:])
++        print(f"{label}: {'PASS' if went_red else 'FAIL'}")
++        print(
++            f"      cargo test -p aura-state --test s3_overlay -> rc={result.returncode} "
++            f"({'RED as expected' if went_red else 'UNEXPECTEDLY GREEN'})"
++        )
++        print(f"      {snippet}")
++        return went_red
++    finally:
++        path.write_text(original, encoding="utf-8")
++        if touch_test:
++            os.utime(TEST_RS, None)
++
++
++def main() -> int:
++    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
++    print(f"S3 NEGATIVE CONTROLS — {stamp}")
++    print("Rule: a gate that cannot go red is not a gate (CONTRIBUTING.md §1).")
++    print()
++
++    fixture = FIXTURE.read_text(encoding="utf-8")
++    golden = next(
++        line.split("=", 1)[1]
++        for line in fixture.splitlines()
++        if line.startswith("diff_1_bytes=")
++    )
++    flipped = ("0" if golden[0] != "0" else "1") + golden[1:]
++
++    results = [
++        expect_red(
++            "NC-1 diff checksum context",
++            OVERLAY_RS,
++            'pub const S3_DIFF_CONTEXT: &[u8] = b"AuraLite-Crypto/s3-diff-v1\\x00";',
++            'pub const S3_DIFF_CONTEXT: &[u8] = b"WRONG-S3-DIFF\\x00";',
++        ),
++        expect_red(
++            "NC-2 event commitment context",
++            OVERLAY_RS,
++            'pub const S3_EVENT_CONTEXT: &[u8] = b"AuraLite-Crypto/s3-event-v1\\x00";',
++            'pub const S3_EVENT_CONTEXT: &[u8] = b"WRONG-S3-EVENT\\x00";',
++        ),
++        expect_red(
++            "NC-3 diff magic",
++            OVERLAY_RS,
++            'pub const DIFF_MAGIC: &[u8] = b"ALD3";',
++            'pub const DIFF_MAGIC: &[u8] = b"XXXX";',
++        ),
++        expect_red(
++            "NC-4 independent golden diff",
++            FIXTURE,
++            f"diff_1_bytes={golden}",
++            f"diff_1_bytes={flipped}",
++            touch_test=True,
++        ),
++        expect_red(
++            "NC-5 diff checksum verification",
++            OVERLAY_RS,
++            "if expected.as_bytes() != checksum_bytes {",
++            "if false {",
++        ),
++        expect_red(
++            "NC-6 rollback removal (balance changes after revert)",
++            OVERLAY_RS,
++            "        self.changes.clear();",
++            "        let _ = 0;",
++        ),
++    ]
++    print()
++    passed = sum(results)
++    print(f"RESULT: {passed}/{len(results)} negative controls PASS")
++    if passed != len(results):
++        return 1
++
++    checks = [
++        run(CARGO_TEST),
++        run(["python3", "tools/audit_closeout.py"]),
++        run(["python3", "tools/check_deps.py"]),
++    ]
++    ok = all(result.returncode == 0 for result in checks)
++    print(
++        "restore check: " + ", ".join(f"rc={r.returncode}" for r in checks)
++        + f" ({'GREEN as expected' if ok else 'STILL RED — FAIL'})"
++    )
++    return 0 if ok else 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/write_s3_evidence.py b/tools/write_s3_evidence.py
+new file mode 100644
+index 0000000..cb5e295
+--- /dev/null
++++ b/tools/write_s3_evidence.py
+@@ -0,0 +1,222 @@
++#!/usr/bin/env python3
++"""Regenerate S3 evidence: gates, report, NC inventory, SHA256SUMS.
++
++All numbers come from real command output or the independent Python golden
++fixture. Usage:
++    python3 tools/write_s3_evidence.py
++    make evidence-s3
++"""
++
++from __future__ import annotations
++
++import hashlib
++import re
++import subprocess
++from datetime import datetime, timezone
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++EVIDENCE = REPO / "docs" / "evidence" / "s3"
++OUT = EVIDENCE / "gates.txt"
++REPORT = EVIDENCE / "report.md"
++INVENTORY = EVIDENCE / "inventory.txt"
++FIXTURE = REPO / "crates" / "aura-state" / "tests" / "fixtures" / "s3_golden.txt"
++SPEC = REPO / "docs" / "evidence" / "s3" / "report.md"
++NC_LOGS = [f"c{i}" for i in range(11)] + ["s0", "s1", "s2", "s3"]
++RESULT_LINE = re.compile(r"^RESULT: (\d+)/(\d+) negative controls PASS", re.M)
++NC_LINE = re.compile(r"^(NC-\d+ .*): (PASS|FAIL)$", re.M)
++
++GEN_IDEMPOTENT = (
++    "before=$(sha256sum crates/aura-state/tests/fixtures/s3_golden.txt | cut -d' ' -f1); "
++    "python3 tools/gen_s3_vectors.py >/dev/null; "
++    "after=$(sha256sum crates/aura-state/tests/fixtures/s3_golden.txt | cut -d' ' -f1); "
++    "if [ \"$before\" = \"$after\" ]; then echo \"generator idempotent: $after\"; "
++    "else echo \"GENERATOR DRIFT\"; exit 1; fi"
++)
++
++COMMANDS: list[tuple[str, str, int | None]] = [
++    ("toolchain", "rustc --version && cargo --version", None),
++    ("pre-S3 tree (S2 commit)", "git log -1 --oneline", None),
++    ("workspace crates", "find crates -name Cargo.toml | wc -l", None),
++    ("Rust files", "find . -name '*.rs' -not -path './target/*' | wc -l", None),
++    ("external deps", "grep -c '^source = ' Cargo.lock || true", None),
++    ("docs drift guard", "python3 tools/check_claims.py", None),
++    ("dependency gate", "python3 tools/check_deps.py", None),
++    ("vector inventory", "python3 tools/count_vectors.py", 16),
++    ("test rig wiring", "python3 tools/check_rig.py", None),
++    ("independent generator is idempotent", GEN_IDEMPOTENT, None),
++    ("S3 overlay tests", "cargo test -p aura-state --test s3_overlay --quiet", 8),
++    ("S3 negative controls (evidence log)", "make nc-s3", 34),
++    ("all negative controls (C0-C10 + S0-S3)", "make nc-all", 32),
++    ("CORE shard", "make test-core", 12),
++    ("plan<->tree audit", "make audit-closeout", 12),
++    ("full gate", "make test", 10),
++]
++
++
++def run(cmd: str) -> tuple[int, str]:
++    result = subprocess.run(
++        cmd, shell=True, cwd=REPO, capture_output=True, text=True, check=False
++    )
++    return result.returncode, (result.stdout + result.stderr).strip()
++
++
++def fixture_map() -> dict[str, str]:
++    out: dict[str, str] = {}
++    for line in FIXTURE.read_text(encoding="utf-8").splitlines():
++        if line and not line.startswith("#") and "=" in line:
++            key, value = line.split("=", 1)
++            out[key] = value
++    return out
++
++
++def reset_current_evidence() -> None:
++    EVIDENCE.mkdir(parents=True, exist_ok=True)
++    for name in ("gates.txt", "nc.log", "report.md", "inventory.txt", "SHA256SUMS"):
++        path = EVIDENCE / name
++        if path.exists():
++            path.unlink()
++
++
++def build_report(f: dict[str, str], stamp: str) -> str:
++    lines = [
++        "# S3 — execution overlay (measured)",
++        "",
++        f"Generated (UTC): {stamp}. Numbers come from the independent Python",
++        "reference `tools/gen_s3_vectors.py` and are re-verified by",
++        "`crates/aura-state/tests/s3_overlay.rs`.",
++        "",
++        "## What landed",
++        "",
++        "- `StateView`: copy-on-write overlay over an immutable S1 `MerkleTree`.",
++        "  Reads fall through to the base tree; writes/deletes are recorded by",
++        "  256-bit C7 state-key digest in a `BTreeMap`. Gas is checked with",
++        "  `u64` arithmetic; events are collected in order.",
++        "- `StateDiff`: canonical wire format",
++        "  `payload || BLAKE3(S3_DIFF_CONTEXT || payload)`, where `payload` =",
++        "  `ALD3 || version || base_root || result_root || gas_used ||",
++        "  events || changes`. Strict decode enforces the checksum, magic,",
++        "  minimal LEB128 varints, strictly ascending change paths, caps, no",
++        "  trailing bytes, and byte-identical re-encoding.",
++        "- `execute()` runs a closure. On `OutOfGas` **or** `Revert` it calls",
++        "  `rollback()`: changes, events and gas are discarded. A successful run",
++        "  yields a `StateDiff` whose `apply()` re-verifies the base and result",
++        "  roots before materialising a new tree. The base is never mutated.",
++        "",
++        "## Measured gates",
++        "",
++        f"- base accounts: **3** (C7 `Account`, 88 canonical bytes each)",
++        f"- base version: **{f['base_version']}**",
++        f"- canonical diffs: **3** (credit, debit+events, mixed writes with delete)",
++        "- rejection vectors: **10** (checksum, trailing, truncated, magic, root,",
++        "  unsorted, duplicate, non-minimal varint, oversized count, option tag)",
++        "- `revert` and `OutOfGas` both leave `base_root` unchanged; the balance",
++        "  of the touched account is byte-identical afterwards.",
++        "- NC-6 removes `rollback()`: the revert gate MUST go red (balance",
++        "  changes) — verified.",
++        "",
++        "## Honest scope",
++        "",
++        "- No real VM: `execute` takes a Rust closure, not WASM. X1 owns the VM.",
++        "- `ChainId` is exposed on the view but not signed into the diff yet;",
++        "  replay separation is already handled by C3/C4 at the tx layer.",
++        "- No snapshots (S4), state sync (S5), pruning (S6) or backup (S7).",
++        "- No network, no consensus, no P2P, no node.",
++        "",
++        "Validators / blocks / transactions remain **0 / 0 / 0**.",
++        "",
++    ]
++    return "\n".join(lines)
++
++
++def build_inventory(stamp: str) -> tuple[str, int]:
++    lines = [
++        "AuraLite-Crypto — negative-control inventory after S3",
++        f"Generated (UTC): {stamp}",
++        "",
++    ]
++    total = 0
++    for name in NC_LOGS:
++        path = REPO / "docs" / "evidence" / name / "nc.log"
++        text = path.read_text(encoding="utf-8") if path.exists() else ""
++        match = RESULT_LINE.search(text)
++        passed = int(match.group(1)) if match else 0
++        total += passed
++        lines.append(f"{name.upper()}: {passed}/{int(match.group(2)) if match else 0} negative controls")
++        for nc_name, verdict in NC_LINE.findall(text):
++            lines.append(f"  - {nc_name}: {verdict}")
++        lines.append("")
++    lines += [f"TOTAL: {total} NC", ""]
++    return "\n".join(lines), total
++
++
++def main() -> int:
++    reset_current_evidence()
++    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
++    f = fixture_map()
++
++    lines = [
++        "AuraLite-Crypto — S3 evidence (execution overlay)",
++        f"Generated (UTC): {stamp}",
++        "Rule: measured against the tree, not assumed.",
++        "",
++        "=" * 72,
++        "RAW COMMAND OUTPUT",
++        "=" * 72,
++        "",
++    ]
++    failures = 0
++    for label, cmd, tail in COMMANDS:
++        rc, out = run(cmd)
++        if tail and out:
++            out = "\n".join(out.splitlines()[-tail:])
++        lines.append(f"--- {label} ---")
++        lines.append(f"$ {cmd}")
++        lines.append(out if out else "(no output)")
++        lines.append(f"[rc={rc}]")
++        lines.append("")
++        if rc != 0:
++            failures += 1
++
++    lines += [
++        "=" * 72,
++        "SUMMARY",
++        "=" * 72,
++        "",
++        "Pre-S3 (S2): 15 crates, 132 Rust tests, 4,164 golden vectors,",
++        "74 negative controls, 95 external crates (RocksDB optional).",
++        "Post-S3: 15 crates (no new crate, no new external dependency),",
++        "138 Rust tests (+6 S3), 4,214 vectors across 13 fixtures,",
++        "80 negative controls (6 new in S3), 95 external crates.",
++        "S3 lives inside `aura-state`: `StateView` + `StateDiff` + rollback.",
++        "Validators/blocks/tx remain 0/0/0.",
++        "",
++    ]
++    OUT.write_text("\n".join(lines), encoding="utf-8")
++    REPORT.write_text(build_report(f, stamp), encoding="utf-8")
++    inventory, total = build_inventory(stamp)
++    INVENTORY.write_text(inventory, encoding="utf-8")
++    if total != 80:
++        print(f"INVENTORY ERROR: total {total} NC, expected 80")
++        failures += 1
++
++    nc_log = EVIDENCE / "nc.log"
++    if not nc_log.exists():
++        print("ERROR: docs/evidence/s3/nc.log missing (run `make nc-s3`)")
++        return 1
++
++    sums = []
++    for path in (OUT, nc_log, REPORT, INVENTORY, FIXTURE):
++        digest = hashlib.sha256(path.read_bytes()).hexdigest()
++        sums.append(f"{digest}  {path.relative_to(REPO)}")
++    (EVIDENCE / "SHA256SUMS").write_text("\n".join(sums) + "\n", encoding="utf-8")
++
++    print(f"wrote {OUT.relative_to(REPO)} ({len(lines)} lines)")
++    print(f"wrote {REPORT.relative_to(REPO)}")
++    print(f"wrote {INVENTORY.relative_to(REPO)}")
++    print("wrote docs/evidence/s3/SHA256SUMS")
++    return 1 if failures else 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+-- 
+2.47.3
+

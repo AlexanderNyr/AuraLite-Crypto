@@ -32,7 +32,10 @@ NC_LINE = re.compile(r"^(NC-\d+ .*): (PASS|FAIL)$", re.M)
 
 COMMANDS: list[tuple[str, str, int | None]] = [
     ("toolchain", "rustc --version && cargo --version", None),
-    ("pre-C10 tree (C9 commit)", "git log -1 --oneline HEAD~1", None),
+    # GitHub Actions checks out with fetch-depth=1 by default: HEAD~1 does
+    # not exist. Fall back to HEAD instead of failing the whole evidence run.
+    ("pre-C10 tree (C9 commit, shallow-safe)",
+     "git log -1 --oneline HEAD~1 2>/dev/null || git log -1 --oneline", None),
     ("workspace crates", "find crates -name Cargo.toml | wc -l", None),
     ("Rust files", "find . -name '*.rs' -not -path './target/*' | wc -l", None),
     ("external deps", "grep -c '^source = ' Cargo.lock || true", None),
@@ -92,8 +95,16 @@ def build_inventory(stamp: str) -> tuple[str, list[str]]:
     return "\n".join(lines), errors
 
 
-def main() -> int:
+def reset_current_evidence() -> None:
     EVIDENCE.mkdir(parents=True, exist_ok=True)
+    for name in ("gates.txt", "nc.log", "closeout.txt", "SHA256SUMS"):
+        path = EVIDENCE / name
+        if path.exists():
+            path.unlink()
+
+
+def main() -> int:
+    reset_current_evidence()
     stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     lines = [
         "AuraLite-Crypto — C10 evidence (close-out)",

@@ -122,7 +122,7 @@ phase tables (decision Q5).
 | Plan | Status | Scope | Phases |
 |---|---|---|---|
 | [`docs/plans/CORE_PLAN.md`](docs/plans/CORE_PLAN.md) | ✅ COMPLETE (C0–C10 ✅) | primitives, codec, crypto, tx/block, genesis, test rig | C0–C10 |
-| [`docs/plans/STATE_PLAN.md`](docs/plans/STATE_PLAN.md) | 📋 PLAN | Merkle state, RocksDB, WAL, snapshots, pruning, recovery | S0–S7 |
+| [`docs/plans/STATE_PLAN.md`](docs/plans/STATE_PLAN.md) | ✅ COMPLETE (S0–S7 ✅) | Merkle state, RocksDB, WAL, snapshots, pruning, recovery | S0–S7 |
 | [`docs/plans/EXEC_PLAN.md`](docs/plans/EXEC_PLAN.md) | 📋 PLAN | WASM runtime, gas, ABI, contract SDK, determinism | X0–X9 |
 | [`docs/plans/CONSENSUS_PLAN.md`](docs/plans/CONSENSUS_PLAN.md) | 📋 PLAN | BFT-PoS, QC, VRF, staking, slashing, finality, governance | B0–B10 |
 | [`docs/plans/NET_PLAN.md`](docs/plans/NET_PLAN.md) | 📋 PLAN | libp2p, gossipsub, Kademlia, sync, light client, chaos tests | N0–N8 |
@@ -261,6 +261,71 @@ NC inventory: `docs/evidence/c10/closeout.txt`. Receipts:
 `docs/evidence/c10/`. Validators/blocks/tx are still 0/0/0 — M0 also needs
 S0–S2 and X0–X2.
 
+**Post-S7 measurement (2026-10-28):** `STATE_PLAN` is **closed**. 15 crates
+(no new crate or external dependency; one new binary target `s7-chaos`),
+177 tests, 4,349 vectors across 17 fixtures, 104 negative controls (6 new in
+S7), 95 external crates. Recovery: self-verifying backup bundle (BLAKE3
+manifest + SHA-256 blob + per-record BLAKE3 + parent chain) and a restore
+that **replays** records instead of trusting the manifest; **50 `kill -9` +
+restore cycles -> 0 root mismatches** (17 cycles inside the WAL/head crash
+window, 338 records replayed). Report: `docs/evidence/s7/report.md`;
+receipts: `docs/evidence/s7/`.
+
+**Post-S6 measurement (2026-10-28):** 15 crates, 169 tests, 4,326
+vectors across 16 fixtures, 98 negative controls (6 new in S6), 95
+external crates (no new crate). Pruning + archive: 100 000 blocks —
+archive 36,500,045 bytes serving every historical root/proof, prune mode
+(`keep = 128`) peak 113,326 bytes (322.1x smaller, under the analytic
+bound `base_bytes + keep * max_record_bytes`). `HistoryTree` gives
+S1-identical roots incrementally (~12 hashes per write instead of a full
+rebuild: 16.4 ms per commit measured). Report:
+`docs/evidence/s6/report.md`; receipts: `docs/evidence/s6/`.
+
+**Post-S5 measurement (2026-10-27):** 15 crates, 154 tests, 4,309
+vectors across 15 fixtures, 92 negative controls (6 new in S5), 95
+external crates (no new crate). State sync: a new node downloads one
+package (3-head quorum + S4 snapshot + compact delta) instead of full
+history; package 16,992 bytes vs 998,400 bytes of history (58.8x
+smaller). Substituted diff chunk rejected. Report:
+`docs/evidence/s5/report.md`; receipts: `docs/evidence/s5/`.
+
+**Post-S4 measurement (2026-10-27):** 15 crates, 146 tests, 4,254
+vectors across 14 fixtures, 86 negative controls (6 new in S4), 95
+external crates (no new crate; sha2 promoted to a direct dep).
+Deterministic snapshots: SHA-256 chunk digests, checksummed manifest,
+BLAKE3 chunk_root, parallel export/import. 1,000,000 keys reimport
+byte-identically; substituted chunk rejected. Report:
+`docs/evidence/s4/report.md`; receipts: `docs/evidence/s4/`.
+
+**Post-S3 measurement (2026-10-27):** 15 crates, 138 tests, 4,205 vectors
+across 13 fixtures, 80 negative controls (6 new in S3), 95 external
+crates (no new dependency). `StateView` + `StateDiff` + rollback land in
+`aura-state`; a revert or `OutOfGas` leaves the root and balance
+unchanged; 10 canonical diff rejection vectors enforced. Report:
+`docs/evidence/s3/report.md`; receipts: `docs/evidence/s3/`. ⚠️ AUDIT: the
+crate graph in `ARCHITECTURE.md` §3 had a cycle; S3 corrected it.
+
+**Post-S2 measurement (2026-10-26):** 15 crates, 132 tests, 4,164 vectors
+across 12 fixtures, 74 negative controls (6 new in S2), 95 external crates
+(24 new, optional RocksDB tree). `kill -9` at 10 commit points and 10
+crash-window points all recover the same head and root; 8 WAL rejection
+vectors enforced. Report: `docs/evidence/s2/report.md`; receipts:
+`docs/evidence/s2/`. Default builds need no native library; the native
+RocksDB backend is verified in a dedicated Debian trixie CI job.
+
+**Post-S1 measurement (2026-10-26):** 15 crates, 123 tests, 4,061 vectors
+across 11 fixtures, 68 negative controls (6 new in S1), still 71 external
+crates. 10,000 operations matched an independent Python reference at 12
+versioned roots; 1,000 proofs verified. Report: `docs/evidence/s1/report.md`;
+receipts: `docs/evidence/s1/`. The S0 order-dependence defect is fixed.
+
+**Post-S0 measurement (2026-10-26):** `STATE_PLAN` started. 15 crates, 64
+`.rs` files, 117 tests, 1006 vectors across 10 fixtures, 62 negative
+controls (6 new in S0), still 71 external crates. Measured baseline defects:
+`state_root()` → `Err(NoRoot)`, `persist()`/`load()` → `Err(NoPersistence)`,
+and two write orders → 300 vs 100 aalcry. Report:
+`docs/evidence/s0/baseline-report.md`; receipts: `docs/evidence/s0/`.
+
 ### Measured gaps to the north star
 
 | # | Gap | Evidence in the tree | Plan |
@@ -335,22 +400,36 @@ after the fact, as in AuraLite OS.
 
 ## 8. Immediate queue
 
-**C0, C1, C2, C3, C4, C5, C6, C7, C8, C9 and C10 shipped**
+**C0, C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, S0, S1, S2, S3, S4, S5, S6 and S7 shipped**
 (`patches/0001-C0-baseline-workspace.patch`,
 `patches/0002-C1-types.patch`, `patches/0003-C2-codec.patch`,
 `patches/0004-C3-crypto.patch`, `patches/0005-C4-tx-format.patch`,
 `patches/0006-C5-block-header.patch`, `patches/0007-C6-merkle-proofs.patch`,
 `patches/0008-C7-account-model.patch`, `patches/0009-C8-genesis.patch`,
-`patches/0010-C9-test-rig.patch`, `patches/0011-C10-close-out.patch`):
+`patches/0010-C9-test-rig.patch`, `patches/0011-C10-close-out.patch`,
+`patches/0012-S0-state-baseline.patch`,
+`patches/0013-S1-merkle-tree.patch`,
+`patches/0014-S2-rocksdb-wal.patch`,
+`patches/0015-S3-execution-overlay.patch`,
+`patches/0016-S4-snapshots.patch`,
+`patches/0017-S5-state-sync.patch`,
+`patches/0018-S6-pruning-archive.patch`,
+`patches/0019-S7-recovery-backup.patch`):
 workspace, CI, gates, identity constants, canonical types, codec, crypto,
 tx format, block format, Merkle proofs, accounts, genesis, a wired test rig
-and the plan↔tree close-out audit — all pinned against independent references
-and guarded by **56 negative controls**. `CORE_PLAN` is closed; the maturity
-level is **L1 (core libraries + test rig, no network)**. Right now:
-**S0** — `STATE_PLAN` baseline: an in-memory state, a measured "no root / no
-persistence" report, and NC documenting that two nodes with different
-insertion order produce different balances. M0 also needs S1–S2 and X0–X2.
-The next patch is `patches/0012-S0-state-baseline.patch`.
+and the plan↔tree close-out audit — all pinned against independent references.
+`CORE_PLAN` is closed at **L1 (core libraries + test rig, no network)**;
+S0 measured the naive baseline, S1 delivered a versioned state root with
+1,000 verified proofs, S2 made it durable with a fsynced WAL +
+optional RocksDB column families, S3 added a copy-on-write execution
+overlay with canonical diffs, S4 deterministic snapshots, S5 state sync,
+S6 pruning + archive (100 000 blocks: bounded disk in prune mode, full
+history in archive mode) and S7 recovery and backup (50 `kill -9` + restore
+cycles, zero root mismatches). **104 negative controls** in total, and
+**both `CORE_PLAN` and `STATE_PLAN` are closed**. Right now: **X0** —
+`EXEC_PLAN` WASM runtime: load a module, define gas metering and the ABI
+boundary, and keep execution deterministic. M0 needs X0–X2. The next patch
+is `patches/0020-X0-wasm-runtime.patch`.
 
 See also: [`docs/STATUS.md`](docs/STATUS.md),
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),

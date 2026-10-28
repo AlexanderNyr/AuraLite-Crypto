@@ -120,5 +120,22 @@ that does not run its main test is a dead gate — that is a separate defect
       `make fuzz-smoke` still run in CI (`tools/check_rig.py`).
 - [ ] `make audit-closeout` green: every ✅ phase has a patch, receipt,
       CHANGELOG entry, NC log and verified evidence.
+- [ ] State sync requires a unanimous head quorum and a recomputed
+      `state_root`; a substituted diff chunk must be rejected.
+- [ ] Snapshot manifests verify every chunk SHA-256 before import; a
+      substituted chunk must be rejected.
+- [ ] Backup verification stays layered (manifest checksum, blob SHA-256,
+      per-record BLAKE3, parent chain, replayed roots) and restore keeps
+      refusing a non-empty target; the chaos gate must stay at 50 cycles.
+- [ ] Retention never fakes history: a pruned version must return
+      `PruneError::Pruned`, archive mode must refuse to compact, and
+      `HistoryTree` roots must stay bit-for-bit equal to an S1 rebuild.
+- [ ] `StateView` rollback stays mandatory on `OutOfGas`/`Revert`; a revert
+      must never change the state root.
+- [ ] S0 baseline defects stay MEASURED and documented; never present
+      `BaselineState` as the state tree — S1's `MerkleTree` is the real one
+      and S2's WAL makes it durable. RocksDB is OPTIONAL: the default build
+      must stay reproducible without any native library. Any new external
+      dependency needs `make record-deps` + a reviewed addendum.
 - [ ] No new `unsafe` without justification.
 - [ ] The north star was not pushed aside by a "temporary" solution.

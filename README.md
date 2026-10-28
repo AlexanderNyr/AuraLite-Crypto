@@ -11,16 +11,21 @@
 Name and ticker were locked by the owner on 2026-10-25. The ticker was checked
 for collisions — see [`docs/TICKER_AUDIT.md`](docs/TICKER_AUDIT.md).
 
-> **Status: CORE COMPLETE (C10, 2026-10-26).** Eleven phases shipped:
-> types, codec, crypto, tx, block, Merkle proofs, accounts, genesis, test rig
-> and a plan↔tree close-out audit. Every ✅ phase row now has a patch, a
-> receipt, a CHANGELOG entry, an NC log and evidence with verified checksums —
-> **56 negative controls**, 109 tests, 956 vectors. See
-> [`docs/CLOSEOUT_AUDIT.md`](docs/CLOSEOUT_AUDIT.md) for what is real and
-> what is not: there is still **no consensus, VM, P2P, node, wallet, state
-> tree or network**. M0 also needs STATE S0–S2 and EXEC X0–X2. Everything
-> else below is a plan, not a report about an implementation. Every claim of
-> readiness appears only after a measurable test gate, as in
+> **Status: STATE_PLAN COMPLETE (2026-10-28).** `CORE_PLAN` C0–C10 and
+> `STATE_PLAN` S0–S7 are closed. S0
+> measured the naive baseline, S1 delivered a versioned sparse Merkle tree,
+> S2 made state **durable**, S3 added a copy-on-write execution overlay,
+> S4 deterministic snapshots, S5 state sync, S6 pruning + archive (100 000
+> blocks: **322x** smaller in prune mode than the retained history), and S7
+> **recovery and backup**: a self-verifying bundle whose restore replays
+> every record instead of trusting the manifest — **50 `kill -9` + restore
+> cycles, 0 root mismatches**. **104 negative controls**, 177 tests,
+> 4 349 vectors. See [`docs/CLOSEOUT_AUDIT.md`](docs/CLOSEOUT_AUDIT.md) and
+> `docs/evidence/s7/report.md`. State is now durable, provable, syncable,
+> prunable and restorable; there is still **no consensus, VM, P2P, node,
+> wallet or network** — M0 needs X0–X2. Everything else below is a plan, not a report
+> about an implementation. Every claim of readiness appears only after a
+> measurable test gate, as in
 > [AuraLite-Emulator](https://github.com/AlexanderNyr/AuraLite-Emulator) and
 > [AuraLite-OS](https://github.com/AlexanderNyr/AuraLite-OS).
 
@@ -81,15 +86,17 @@ Details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Quickstart
 
-**Now (C10)** the CORE plan is closed and auditable:
+**Now (S7)** a fresh node can catch up, an operator can choose retention and
+a store can be backed up and restored:
 
 ```sh
 make deps-check          # rustc / cargo / rustfmt / clippy
-make test                # full gate including the close-out audit
+make test                # full gate including the plan<->tree audit
 make audit-closeout      # no ✅ row without a patch/receipt/NC log/evidence
-make nc-all              # all 56 negative controls (C0-C10)
-make fuzz-smoke          # 60 s fuzz over 6 decoders, 0 crashes
-make vector-inventory    # 956 golden vectors
+make nc-all              # all 104 negative controls (C0-C10 + S0-S7)
+make gen-s6-vectors      # independent retention/pruning golden vectors (~52 s)
+make gen-s7-vectors      # independent backup/restore golden vectors
+make vector-inventory    # 4,349 golden vectors
 ```
 
 **The devnet does not exist yet — and that is honest.** After phase D7 (devnet)
