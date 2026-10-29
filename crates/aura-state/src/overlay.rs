@@ -299,6 +299,15 @@ impl StateView {
         self.gas_used
     }
 
+    /// Gas still available to the current execution.
+    ///
+    /// X2 uses this as the *single* budget: the instruction meter is reset to
+    /// this number at every host-call boundary, so instruction fuel and host
+    /// charges are two views of one counter and can never disagree.
+    pub fn gas_left(&self) -> u64 {
+        self.gas_limit.saturating_sub(self.gas_used)
+    }
+
     /// Events emitted so far.
     pub fn events(&self) -> &[Vec<u8>] {
         &self.events

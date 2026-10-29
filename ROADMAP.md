@@ -123,7 +123,7 @@ phase tables (decision Q5).
 |---|---|---|---|
 | [`docs/plans/CORE_PLAN.md`](docs/plans/CORE_PLAN.md) | ✅ COMPLETE (C0–C10 ✅) | primitives, codec, crypto, tx/block, genesis, test rig | C0–C10 |
 | [`docs/plans/STATE_PLAN.md`](docs/plans/STATE_PLAN.md) | ✅ COMPLETE (S0–S7 ✅) | Merkle state, RocksDB, WAL, snapshots, pruning, recovery | S0–S7 |
-| [`docs/plans/EXEC_PLAN.md`](docs/plans/EXEC_PLAN.md) | 📋 PLAN | WASM runtime, gas, ABI, contract SDK, determinism | X0–X9 |
+| [`docs/plans/EXEC_PLAN.md`](docs/plans/EXEC_PLAN.md) | 🚧 IN PROGRESS (X0 ✅) | WASM runtime, gas, ABI, contract SDK, determinism | X0–X9 |
 | [`docs/plans/CONSENSUS_PLAN.md`](docs/plans/CONSENSUS_PLAN.md) | 📋 PLAN | BFT-PoS, QC, VRF, staking, slashing, finality, governance | B0–B10 |
 | [`docs/plans/NET_PLAN.md`](docs/plans/NET_PLAN.md) | 📋 PLAN | libp2p, gossipsub, Kademlia, sync, light client, chaos tests | N0–N8 |
 | [`docs/plans/NODE_PLAN.md`](docs/plans/NODE_PLAN.md) | 📋 PLAN | `aurad`, mempool, RPC/WS/gRPC, metrics, CLI, devnet | D0–D8 |
@@ -152,7 +152,7 @@ libp2p (N1–N2) connects at B5+ and is mandatory for M1. This is the same trick
 as the `--kernel=` lane in AuraLite-Emulator: isolated stand first, real
 machine later.
 
-Critical path: `C0 → C4 → S2 → X2 → B3 → N4 → D7 → O4 → H8 → O6`.
+Critical path: `C0 → C4 → S2 → X2 → B3 → N4 → D7 → O4 → H8 → O6` (X2 ✅, X3 ✅, X4 ✅).
 
 ---
 
@@ -259,7 +259,239 @@ no ✅ row lacks a receipt, patch, NC log or verified evidence. Index:
 `docs/spec/FORMAT_INDEX.md`; maturity: [`docs/CLOSEOUT_AUDIT.md`](docs/CLOSEOUT_AUDIT.md);
 NC inventory: `docs/evidence/c10/closeout.txt`. Receipts:
 `docs/evidence/c10/`. Validators/blocks/tx are still 0/0/0 — M0 also needs
-S0–S2 and X0–X2.
+S0–S2 and X0–X4.
+
+**Post-D0 measurement (2026-10-29):** `NODE_PLAN` opens the way the other plans did —
+with a measurement. **The libraries exist, the node does not**, and the deliverable is a
+binary that says so instead of a stub that exits 0. `aura_node::baseline` surveys
+`crates/<layer>/src` (files, lines, public item declarations) across thirteen layers and
+classifies each: measured **9 implemented, 4 placeholders, 0 missing** — `aura-consensus`
+(B1), `aura-p2p` (N1), `aura-mempool` (D3) and `aura-rpc` (D4) declare no public item at
+all. `aurad` with no arguments exits **2** and prints all nine missing capabilities with
+the phase that owes each; the five node flags are recognised and refused the same way; an
+unknown command exits **64**; `report` measures the tree and exits **3** when there is no
+workspace; `--version` says `(D0 baseline — the node does not exist)`. The survey is
+pinned in `crates/aura-node/tests/fixtures/d0_baseline.txt` from the binary's own
+`report --fixture` output, so landing consensus code (B1) fails the build until the plan
+and the fixture move in the same patch. 374 tests, 4,857 vectors across 27 fixtures, 165
+negative controls (6 new), 239 external crates - no new crate and no new dependency.
+Honest scope: a static count is not an audit, "implemented" says nothing about
+correctness, nothing starts a process, binds a port or parses a config file, and **M0
+still needs B (consensus), N (network) and D1–D7**. Reports: `docs/NODE.md`,
+`docs/evidence/d0/report.md`.
+
+**Post-X8 measurement (2026-10-29):** `EXEC_PLAN` is **complete for Stage 1** — the
+subset the census banned is now **enforced by a verifier rather than described by a
+document**. `aura_exec::verify` is a pure function over bytes: no engine, no
+execution, one `Report` (verdict, size, functions, instructions, peak stack depth,
+peak body) and one `Problem { code, offset, detail }` per defect with the offset
+pointing into the **module**. It checks section order and uniqueness, the
+`function`/`code` counts against each other, every value type and local, the import
+whitelist (three ABI surfaces, function imports only, plus a restrictive
+configuration that refuses all imports), integer-only globals, a declared memory
+maximum against the census ceiling, the `run` export, and — per body — the
+instruction and local budgets, the operand-stack depth with callee signatures
+resolved out of the type section, label depth and the `local` / `global` / `call` /
+`call_indirect` index spaces. **Measured on 100 golden mutants** produced by an
+independent Python mutator (15 kinds of damage, 6 per kind over the six shipped
+artifacts plus a second round for five kinds): every mutant refused with the code its
+damage deserves, **zero mismatches**; all six shipped artifacts accepted — `kv` 33
+functions / 1 905 instructions, `store` 29 / 1 921, `events` 25 / 1 871, `vault` 53 /
+3 692, `evil` 61 / 4 235, `recurse` 51 / 3 331 — peak stack depth 7, peak body 630
+instructions, pinned in the gate so a change in a shipped contract fails the build.
+359 tests, 4,826 vectors across 26 fixtures, 159 negative controls (6 new), 239
+external crates — X8 adds no crate and no dependency. Honest scope: **it is a depth
+check, not a type check** (the stack is tracked as a length; the engine remains the
+authority on instantiation), **no phase calls it yet** — wiring it into the deploy
+path is D-phase work — the budget constants are policy set far above the measured
+peaks, and there is no differential run against `wasmparser` yet. Defects found:
+`call` originally read no callee signature (so `store.wasm` was refused and every
+stack number was fiction), and body offsets were relative to the body slice instead
+of the module. Reports: `docs/evidence/x8/report.md`.
+
+**Post-X7 measurement (2026-10-29):** the **decisive M0 gate** is measured, not
+asserted. `EXEC_PLAN` X7 adds a gate rather than a subsystem: `aura_exec::detcheck`
+generates a 1 004-step workload — 4 deploys, then 1 000 transactions mixing 60% ABI v1
+calls, 12% ABI v3 calls with a nested frame, 10% native transfers, 3% calls to an
+address with no code and 2% calls that run out of gas — from **one constant**
+(SplitMix64 seeded by `X7_SEED`, no clock, no entropy, no iteration order), and
+replays it over the X3 lifecycle and the S3 overlay. Measured: **890 commits, 60
+refusals, 54 failures** (19 out of gas, 35 no-code, 0 traps), gas **46,375,290**, and
+one state root. The gate spawns **eight separate processes** — different hasher
+seeds, allocator histories, address layouts — and all eight reproduce the root, the
+gas bill, the events chain and the rolling digest; `make x7-matrix` reproduces the
+same three numbers again under `debug`, `release` and `release-cgu16`, two processes
+each. The gate executes the **shipped** `kv`, `store`, `events` and `vault` bytecode
+and re-verifies their BLAKE3 on every run, so X7 also re-pins X4 and X6. 322 tests,
+4,692 vectors across 24 fixtures, 153 negative controls (6 new), 239 external crates
+— X7 adds no crate and no dependency. Every step is classified committed / refused /
+failed and the failure split is kept, because two nodes that disagreed about which
+transactions were *accepted* would produce different roots: the counters attribute a
+divergence instead of merely reporting one. Defects found: the deployer constant was
+not a funded account (one byte), an argument was passed to `run()` of contracts that
+take none so a third of the workload never ran, the vault's `withdraw` was sent an
+address in front of its amount (every withdrawal refused `-21`), and the first
+negative control was green until it removed the *root* from the digest fold. Honest
+scope: three **build configurations** on one machine, not three operating systems —
+the OS matrix is the CI job `determinism` and stays **unproven** until it runs;
+concurrency is untested because it does not exist; the root includes the version, so
+the gate fixes the input rather than permuting blocks; different CPUs are X8's
+problem. Reports: `docs/DETERMINISM.md`, `docs/evidence/x7/report.md`.
+
+**Post-X6 measurement (2026-10-29):** `EXEC_PLAN` continues — contracts now
+**compose**. **ABI v3** ships in the import module `env3` with four functions
+(`call`, `returndata_len`, `returndata_read`, `depth`), and it carries two rules
+enforced by the **host**, not by the SDK: a frame may not call an address already
+on the stack (`-14`) and a stack may not exceed 8 frames (`-15`). That is stricter
+than a per-account lock and much simpler — the withdraw-then-reenter attack is
+*unrepresentable*, not merely detected — and the cost is named: a callback into a
+live frame does not exist on this chain, so a receiver is notified **forward**, after
+the money has moved. Three contracts, each its own workspace, each built twice into
+independent target directories and pinned by `sha256` **and** by the node's own
+BLAKE3 over the shipped bytes: the **vault** (9,759 B — pays *before* it debits, the
+bug X6 exists to survive), the **attacker** (11,607 B — re-enters from the payout
+callback, probes, sends value, records statuses instead of trapping) and the
+**chain** (9,093 B) — 30,459 bytes in total. Measured gas through the real
+`Lifecycle`: vault deploy 107,369 / evil deploy 117,100 / recurse deploy 100,132 /
+fund 41,188 / attack 87,697 / honest withdrawal after the attack 35,116 / nine-frame
+descent 28,414. What the attack proves, measured: the attacker gets **one** attempt
+(the node refused the second with `-14`), its ledger is debited once, the vault ends
+**empty rather than short**, and the honest depositor is paid her 9,800 in full. The
+depth limit is measured on a chain of nine *distinct* copies, because a contract may
+not call itself. 311 tests, 4,692 vectors across 24 fixtures, 147 negative controls
+(6 new), 239 external crates — X6 adds **no dependency at all**, and
+`docs/evidence/x6-dependency-addendum.txt` records that checkably. Defects found: the
+`wasmi` backend kept its own copy of the allowed import modules and refused `env3`,
+a child's status was dropped so a callee's `-14` reached its caller as `0`, the
+vault's first draft paid *through* `env3.call` (which cannot pay an account with no
+code), and the first depth fixture called itself, which the guard correctly refuses.
+Honest scope: no callbacks into a live frame (Stage 1), no gas reservation before a
+call (the T-phase owns multi-frame fee accounting), and a single call that both
+sends value and runs code is not tested and not claimed. Reports:
+`docs/ABI_V3.md`, `docs/CALLS.md`, `docs/evidence/x6/report.md`.
+
+**Post-X5 measurement (2026-10-29):** `EXEC_PLAN` continues. **ABI v2** ships in
+the import module `env2` — `calldata_len`, `calldata_read`, `return_write`,
+`caller`, `self_address`, `abi_version` — deliberately a *different module name*
+rather than a new version of `env`, so the 23 frozen X2 vectors and every v1
+contract keep their meaning; the census enforces the two surfaces as separate
+whitelists. Three standards are real Rust contracts, each its own workspace, each
+with a pinned `abi.json`: **ARC-20** (12,733 B), **ARC-721** (13,224 B) and the
+**ARC-M1** 3-signer multisig (15,268 B) — 41,225 bytes in total, deployed and
+driven through the real `Lifecycle` by 43 tests. Measured gas: ARC-20 deploy
+140,694 / mint 56,410 / transfer 55,951 / balance_of 39,221; ARC-721 deploy
+145,604 / mint 63,946 / transfer 71,514; multisig deploy 162,108 / policy 56,066 /
+propose 72,930 / approve 76,281. 296 tests, 4,659 vectors across 23 fixtures, 141
+negative controls (6 new), 239 external crates — the standards add **no lock
+entry**. The phase's rule: X2 commits any `Returned(_)`, negative included, so a
+standard's refusal is a status code **and zero writes**, and every gate asserts
+the empty change set rather than a plausible balance. Defects found: an ARC-721
+`approve` that trapped on every call (a 40-byte event buffer holding a 16-byte
+amount), a multisig that could not name itself (hence `self_address`), `RUSTFLAGS`
+carrying a wasm-only linker flag into host build scripts, and a harness that read a
+stale tree between calls. Honest scope: no cross-contract calls, so no
+cross-contract reentrancy claim — that is X6; the multisig policy is immutable;
+allowance/vote keys use 80 bits of BLAKE3 because a slot is 32 bytes; and the
+pins are **path-scoped** — measured on a clean clone: `arc20` reproduced byte for
+byte, `arc721` and `multisig` kept their size but permuted their type/function
+sections, because cargo folds the SDK's absolute path into `-C metadata` (X7 owns
+making the build path-independent). Reports:
+`docs/ABI_V2.md`, `docs/STANDARDS.md`, `docs/evidence/x5/report.md`.
+
+**Post-X4 measurement (2026-10-29):** `EXEC_PLAN` continues. 17 crates (+`aura-sdk`,
++`aura-sdk-macros`), **no new external dependency** (syn/quote/proc-macro2 were
+already in the lock: 239 external crates, 17 local packages), 253 tests, 4,624
+vectors across 22 fixtures, 135 negative controls (6 new in X4). A contract is
+now **Rust**: `aura-sdk` is a `no_std` guest library with the seven ABI v1
+functions typed, a length-exact fixed-layout codec, typed storage (`Slot<T>`,
+composed `Key`) and events; `aura-sdk-macros` turns a function into the export
+the lifecycle calls and rejects a wrong arity at compile time. Three reference
+contracts (`store`, `kv`, `events`) build to **5,187 / 5,290 / 5,033 bytes**,
+byte-identical across two independent target directories, are committed and
+**pinned by sha256**, and the engine gate deploys the artifact itself (measured
+gas: deploy 58,495, call 13,115; deploy 62,353, call 8,506, upgrade 62,261;
+deploy 51,330, call 12,940). The gate's big finding: the **X0 census rejected
+every Rust contract** — mutable `__stack_pointer`, `memcpy` → `memory.copy`, and
+`call_indirect` from `core::fmt`. The hosted policy now allows exactly one
+mutable global, only the two deterministic byte ops, and `call_indirect` **only
+when the element table contains no import**, so a function pointer can never
+reach host code; `restrictive()` is untouched, so every X0 verdict stands. Also
+found and fixed: `rustc` memory has no declared maximum (the canonical build
+passes `--max-memory=16MiB`), `wasmi`'s `Config` was stricter than the census,
+and the codec could silently truncate a wider value. Honest scope: no allocator
+in a contract, `call_indirect` bounded but unverified (X8), and reproducibility
+is path-scoped (measured: a clean clone at another path matched `kv` but not
+`store`/`events`). Report: `docs/evidence/x4/report.md`; receipts:
+`docs/evidence/x4/`.
+
+**Post-X3 measurement (2026-10-28):** `EXEC_PLAN` continues. 15 crates, **no new
+dependency at all** — not external (lock stays at 239 external crates), not even
+a new workspace edge: X3 is code inside `aura-exec`. 221 tests, 4,595 vectors
+across 21 fixtures, 129 negative controls (6 new in X3). A contract is now a
+**record in state**: `CodeRecord` (`magic "ALCRYCD1" || format || abi ||
+version || len || code`, decoded strictly) under `StateKey::code`, with
+`Account::code_hash = BLAKE3(code)` as the identity of the logic — so "is this a
+contract?" is answerable from the account alone. Deploy is **atomic with
+instantiation** (a trapping or out-of-gas `init` leaves no account, no code and
+no moved value); upgrade is **optimistic and explicit** (`expected_version`
+refused if stale) and never touches balance or storage, because migration is
+contract logic (`migrate(from, to)`). Code is **priced, not capped**
+(1,000 + 10 × bytes ⇒ ≤ ~100 KiB per transaction at the Stage 1 budget). Nine
+programs and twelve tests pin measured gas: deploy 3,560, call 30, upgrade 4,527,
+call-after-upgrade 30, `run`-only deploy 2,860 — an upgrade costs more than a
+first deploy because it runs `migrate`, and a call costs the same before and
+after it because code version is not rent. Four defects found by the gates and
+fixed in the patch: the X0 import ban made the X2 ABI unloadable, `entry_arity`
+could not go through `prepare`, a deploy without `init` was reported as a trap,
+and `LifecycleError::code()` collapsed every refusal into `refused:censored`.
+Still wasmi-only for hosted execution, and `deploy`/`upgrade` are explicit but
+**not permissioned**. Report: `docs/evidence/x3/report.md`; receipts:
+`docs/evidence/x3/`.
+
+**Post-X2 measurement (2026-10-28):** `EXEC_PLAN` continues. 15 crates (no new
+crate, **no new external dependency** — `aura-exec` gains three *workspace*
+dependencies, so the lock stays at 239 external crates), 208 tests, 4,555
+vectors across 20 fixtures, 123 negative controls (7 new in X2). ABI v1: module
+`env`, version 1, **seven** host functions (`storage_read`, `storage_write`,
+`balance`, `transfer`, `emit`, `hash`, `block_ctx`) behind one dispatcher, a
+closed status-code set (`0`, `-1`…`-8`, `-9`, `-10`, `-11`) and published limits
+(key 32 B, value 4 KiB, topic 64 B, 64 KiB per buffer). Gas: **1 fuel = 1 gas,
+one counter** — the instruction meter is reset to `gas_left` at every host-call
+boundary, which is what closes the X1 under-report. **23 vectors — 13 returned,
+5 out of gas, 3 trapped, 3 refused**; a successful call commits a canonical
+`StateDiff`, everything else leaves the root byte-identical. The gas table is
+validated against a second, hand-written copy in Python, row by row. Three
+defects found by the gates and fixed in the patch: a rollback that was not
+load-bearing, a fuel trap that was not reported as out-of-gas, and a documented
+key-padding collision. Report: `docs/evidence/x2/report.md`; receipts:
+`docs/evidence/x2/`.
+
+**Post-X1 measurement (2026-10-28):** `EXEC_PLAN` continues. 15 crates (no new
+crate; `aura-exec` gains its **first external dependency**, the engine), 193
+tests, 4,532 vectors across 19 fixtures, 116 negative controls (6 new in X1),
+239 external crates in the lock — 95 + 144, of which `wasmi` contributes 10 and
+the optional `wasmtime` subtree 134 (`wasmtime` is feature-gated and not
+compiled by the default build). Sandbox: **19 programs — 6 executed, 5 trapped,
+8 refused**, fuel pinned per program, **zero host imports**, closed trap set
+(`out_of_fuel`, `unreachable`, `memory_oob`, `div_by_zero`,
+`stack_exhausted`). Engine: `wasmi =2.0.0` (default, portable dispatch +
+deterministic) and `wasmtime =50.0.0` (feature `wasmtime-engine`); both agree
+on all 19 outcomes. Three real defects were found by the gates and fixed in the
+same patch: a missing `wasmi` dispatch feature that turned `loop { br 0 }` into
+a native stack overflow instead of an out-of-fuel trap, an under-specified trap
+classifier, and a component-model/`reference-types` conflict that made
+`wasmtime` reject every module. Report: `docs/evidence/x1/report.md`;
+receipts: `docs/evidence/x1/`.
+
+**Post-X0 measurement (2026-10-28):** `EXEC_PLAN` has started. 15 crates (no
+new crate, no new external dependency, **no VM engine**), 184 tests, 4,415
+vectors across 18 fixtures, 110 negative controls (6 new in X0), 95 external
+crates. Determinism census: 16 published policy rows, restrictive limits
+(512 KiB module, 4096-page memory cap with a mandatory maximum, zero imports),
+and **21 WASM programs — 5 allowed, 16 banned** — each assembled by an
+independent Python assembler. X0 executes nothing and claims nothing about a
+runtime; `wasmtime` is pinned in X1. Report:
+`docs/evidence/x0/report.md`; receipts: `docs/evidence/x0/`.
 
 **Post-S7 measurement (2026-10-28):** `STATE_PLAN` is **closed**. 15 crates
 (no new crate or external dependency; one new binary target `s7-chaos`),
@@ -333,9 +565,10 @@ and two write orders → 300 vs 100 aalcry. Report:
 | 1 | No transaction, block or address format | no `crates/aura-types` | CORE C1–C5 |
 | 2 | No state and no state root | no `aura-state` | STATE S1–S7 |
 | 3 | No contract execution | no `aura-exec` | EXEC X1–X8 |
+| 3b | No static enforcement of the accepted subset | no verifier (X8 closed this) | EXEC X8 ✅ |
 | 4 | No consensus and no validators | no `aura-consensus` | CONSENSUS B1–B10 |
 | 5 | No P2P and no sync | no `aura-p2p` | NET N1–N8 |
-| 6 | No node, RPC or wallet | no `aurad`/`aura-wallet` | NODE, WALLET |
+| 6 | No node, RPC or wallet | `aurad` is a refusal (D0); no `aura-wallet` | NODE D1–D8, WALLET |
 | 7 | No applications or economics | no `contracts/`, `sim/` | ECOSYSTEM, ECONOMICS |
 | 8 | No security evidence | no `fuzz/`, audit | SECURITY, PERF, OPS |
 
@@ -370,7 +603,7 @@ after the fact, as in AuraLite OS.
    `patches/0001-C0-baseline-workspace.patch`.
 2. **STATE_PLAN S1–S2** — state tree and RocksDB: Execution and Consensus get a
    shared `state_root`.
-3. **EXEC_PLAN X1–X2** — wasmtime in a sandbox + gas + ABI.
+3. **EXEC_PLAN X1–X4** — wasmtime in a sandbox, gas + ABI, contract lifecycle, Rust SDK.
 4. **CONSENSUS_PLAN B1–B3** — PoA → QC → BFT pipeline.
 5. **NET_PLAN N1–N4 + NODE_PLAN D1–D7** — devnet (M1): the first network you
    can touch with your hands.
@@ -400,7 +633,7 @@ after the fact, as in AuraLite OS.
 
 ## 8. Immediate queue
 
-**C0, C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, S0, S1, S2, S3, S4, S5, S6 and S7 shipped**
+**C0, C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, S0, S1, S2, S3, S4, S5, S6, S7 and X0 shipped**
 (`patches/0001-C0-baseline-workspace.patch`,
 `patches/0002-C1-types.patch`, `patches/0003-C2-codec.patch`,
 `patches/0004-C3-crypto.patch`, `patches/0005-C4-tx-format.patch`,
@@ -414,7 +647,8 @@ after the fact, as in AuraLite OS.
 `patches/0016-S4-snapshots.patch`,
 `patches/0017-S5-state-sync.patch`,
 `patches/0018-S6-pruning-archive.patch`,
-`patches/0019-S7-recovery-backup.patch`):
+`patches/0019-S7-recovery-backup.patch`,
+`patches/0020-X0-determinism-census.patch`):
 workspace, CI, gates, identity constants, canonical types, codec, crypto,
 tx format, block format, Merkle proofs, accounts, genesis, a wired test rig
 and the plan↔tree close-out audit — all pinned against independent references.
@@ -425,11 +659,13 @@ optional RocksDB column families, S3 added a copy-on-write execution
 overlay with canonical diffs, S4 deterministic snapshots, S5 state sync,
 S6 pruning + archive (100 000 blocks: bounded disk in prune mode, full
 history in archive mode) and S7 recovery and backup (50 `kill -9` + restore
-cycles, zero root mismatches). **104 negative controls** in total, and
-**both `CORE_PLAN` and `STATE_PLAN` are closed**. Right now: **X0** —
-`EXEC_PLAN` WASM runtime: load a module, define gas metering and the ABI
-boundary, and keep execution deterministic. M0 needs X0–X2. The next patch
-is `patches/0020-X0-wasm-runtime.patch`.
+cycles, zero root mismatches) and X0 the determinism census (21 programs,
+fail-closed whitelist, restrictive limits, no engine). **110 negative
+controls** in total; **`CORE_PLAN` and `STATE_PLAN` are closed** and
+`EXEC_PLAN` has begun. Right now: **X1** — the sandbox: pin `wasmtime`, fuel
+metering, memory/stack ceilings, zero host imports, and an NC that a module
+importing `wasi_snapshot_preview1` fails at deploy. M0 needs X1–X4. The next
+patch is `patches/0021-X1-sandbox.patch`.
 
 See also: [`docs/STATUS.md`](docs/STATUS.md),
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),

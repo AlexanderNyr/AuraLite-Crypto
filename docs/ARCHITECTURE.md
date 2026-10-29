@@ -43,6 +43,66 @@ Tx      = { chain_id, signer, nonce, kind, payload, gas_limit,
 
 **⚠️ AUDIT (S3, 2026-10-27).** The §3 graph earlier claimed `aura-state <- aura-block, aura-tx, aura-codec, aura-crypto, aura-storage`, which is false and would be a cycle: `aura-storage` depends on `aura-state`. The graph above now reflects the real `Cargo.toml` edges; this is a docs correction, not a code change.
 
+**X0 determinism census.** `aura_exec::census` is a static, fail-closed WASM
+classifier — the first real API of `aura-exec`, which was an honest empty
+placeholder since C0. It parses magic/version, section framing and order,
+imports, tables, memories, globals and every instruction of every function
+body, and publishes the `CENSUS` table (source, feature, policy, enforcement
+layer, why) plus `ModuleLimits::restrictive()`. Floats, imports, shared
+memory, atomics, SIMD, bulk memory, indirect calls, the start section and
+mutable globals are banned; an unlisted opcode is rejected (`UnknownOpcode`).
+No engine is linked in X0, so the crate graph was unchanged by that phase.
+
+**X1 sandbox.** `aura_exec::sandbox` is the runtime half, a pipeline whose every
+step can only reject: size check → X0 census → engine compile → **zero-import**
+check → instantiate with store limits → call `run` → closed trap classification.
+`SandboxLimits::restrictive()` publishes fuel 1,000,000, memory 4096 pages,
+module 512 KiB, stack 512 KiB and trace 4096 events; `validate()` refuses any
+value looser than the X0 census ceiling, so the static gate and the runtime
+cannot drift. The engine is behind the `Engine` trait: `wasmi` (default,
+deterministic interpreter, `portable-dispatch`) and `wasmtime` (feature
+`wasmtime-engine`, Cranelift). Both are configured from the same limits and
+return the same `Execution { outcome, fuel_used, trace, exports }`, which is what
+makes the X7 cross-engine determinism gate expressible. `Execution` carries a
+bounded trace (call enter/exit) so a divergence is visible as an event stream
+difference, not just a different number.
+
+**X2 gas + ABI v1.** `aura_exec::abi` is the host interface a contract
+compiles against: module `env`, version 1, **seven** functions
+(`storage_read`, `storage_write`, `balance`, `transfer`, `emit`, `hash`,
+`block_ctx`), all `(i32, …) -> i32`, with a closed status-code set (`0` success,
+`-1` out-of-bounds, `-2` key too long, `-3` value too long, `-4` topic too long,
+`-5` not owned, `-6` insufficient balance, `-7` overflow, `-8` out of gas,
+`-11` too many events, plus the non-error statuses `-9` absent key and `-10`
+unknown block field) and published limits (`MAX_KEY_LEN` 32, `MAX_VALUE_LEN`
+4096, `MAX_TOPIC_LEN` 64, `MAX_ABI_BUFFER` 65 536). A storage key becomes a
+32-byte slot by zero padding, which is documented (trailing NULs are not
+significant) rather than accidental. `aura_exec::contract` adds `HostState`
+(S3 overlay + call + gas), `Executor::call(wasm, base_tree, call, arg)` and
+`ContractReceipt { status, gas_used, host_gas, events, writes, diff,
+result_root }`. **Gas has exactly one counter**: 1 fuel = 1 gas, and the engine's
+instruction meter is reset to `gas_left` at every host-call boundary, so
+instruction gas and host charges cannot be counted twice or under-counted (the
+X1 defect). Commit rule: a `Returned` outcome commits a canonical `StateDiff`
+from the overlay; `OutOfGas`, any trap and any refusal roll the overlay back and
+report the base root. **X5 ABI v2 + standards.** `aura_exec::abi_v2` is a **second** import module,
+`env2`, with six functions (`calldata_len`, `calldata_read`, `return_write`,
+`caller`, `self_address`, `abi_version`). It is a separate module name rather
+than a new version of `env` because `env` is frozen by 23 golden vectors and by
+every contract already deployed: a v1 module cannot even link `env2`, so its
+meaning cannot move. Calldata is bounded at 1 KiB and the answer at 1 KiB
+(`MAX_CALLDATA_LEN` / `MAX_RETURN_LEN`), both refused by the *session* before
+the engine runs; `return_data` on the receipt is empty unless the call committed.
+Three contracts under `standards/` — ARC-20, ARC-721 and a 3-signer multisig —
+are written against `aura-sdk`, dispatch on a 4-byte little-endian selector, and
+are built to wasm and pinned by size and hash. Because a negative `Returned`
+status still commits under X2, a standard's refusal is a code **and zero
+writes**, and every standards gate asserts the empty change set.
+
+The ABI is linked only on the default `wasmi` backend —
+the `wasmtime` backend returns `EngineUnavailable` for hosted calls instead of
+claiming support.
+
 **S7 recovery and backup.** `aura-storage::backup` builds a self-verifying
 bundle — `u32le(manifest_len) || manifest || WAL blob` — where the manifest
 carries a BLAKE3 checksum (domain `S7_MANIFEST_CONTEXT`), the chain-id, head
@@ -204,12 +264,29 @@ aura-block  <- aura-tx, aura-codec, aura-crypto, aura-types  (C5, 13th crate)
 aura-state  <- aura-types, aura-codec, aura-crypto  (C7 + S0/S1/S3/S5/S6)
 aura-storage <- aura-types, aura-codec, aura-crypto, aura-state  (S2 + S6 + S7, RocksDB optional)
 aura-genesis <- aura-state, aura-block, aura-crypto, aura-codec, aura-types  (C8, 14th crate)
-aura-exec   <- aura-state, aura-crypto, wasmtime  (X1, planned)
+aura-exec   <- aura-types, aura-crypto, aura-state, wasmi  (X1 engine; X2 state/ABI;
+               wasmtime behind feature `wasmtime-engine`)
+aura-sdk    <- aura-sdk-macros only  (X4, 16th crate: `no_std` CONTRACT side of
+               ABI v1; never linked by the node)
+aura-sdk-macros <- syn, quote, proc-macro2  (X4, 17th crate: the three attributes)
+examples/{store,kv,events} <- aura-sdk  (X4 reference contracts: separate
+               workspaces, built to wasm32-unknown-unknown, pinned by hash)
+standards/{arc20,arc721,multisig} <- aura-sdk  (X5 reference STANDARDS: separate
+               workspaces, dispatched by 4-byte selector over ABI v2, pinned by hash)
 aura-testkit <- all of the above (C9, 15th crate, dev/test only)
 aura-consensus <- aura-state, aura-crypto, aura-p2p
 aura-node(aurad) <- all of the above + aura-rpc + aura-mempool
 aura-wallet / indexer / explorer / bridge <- aura-types + aura-rpc client
 ```
+
+`standards/` is the same shape one level up: a standard is a contract with a
+published method table, so it lives beside the examples but is depended on by
+nothing in the node — the node only ever sees its bytecode.
+
+The SDK is the one edge that points *outward*: a contract depends on `aura-sdk`,
+and `aura-sdk` depends on nothing in the node. That is why `examples/` is a
+separate workspace and why `aura-exec` only ever sees the SDK's *output* (a wasm
+module), never its code.
 
 Rule: a lower layer **does not know** about a higher one. `aura-types` does not
 depend on the VM, `aura-crypto` does not know about consensus. Violation =

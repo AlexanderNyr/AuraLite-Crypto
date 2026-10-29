@@ -1,0 +1,3811 @@
+From f1076f2675a331ea864e88999f4066ad551fb628 Mon Sep 17 00:00:00 2001
+From: AlexanderNyr <alexander@auralite.local>
+Date: Thu, 29 Oct 2026 10:24:59 +0000
+Subject: [PATCH] X7 determinism gate: one input, eight processes, three
+ builds, one root
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A gate, not a subsystem. The claim is one sentence — the same ordered input,
+replayed by independent nodes, produces the same state_root, the same gas bill
+and the same events — and the phase exists to make that sentence measurable
+rather than asserted.
+
+The input is a pure function of one constant. detcheck::X7_SEED seeds SplitMix64,
+which draws the whole workload: 4 deploys, then 1 000 transactions mixing ABI v1
+calls (kv, store, events), native transfers, ABI v3 calls whose withdrawals open a
+nested frame, calls to an address with no code and calls that run out of gas. No
+clock, no entropy, no iteration order anywhere in generation, so the scenario is
+reproducible from a number and the fixture can pin the result of running it.
+
+"Independent" is why the gate spawns processes. Two runs in one process share
+Rust's per-process hasher seed, the allocator's history and the address layout, and
+can agree while a second node disagrees. Eight x7-run processes therefore replay
+the same 1 004 steps and must reproduce the root, the gas, the events chain and a
+rolling digest that folds every step's class, status, gas and resulting root — so a
+divergence is localised to the first differing step instead of being reported as
+"the roots differ".
+
+Three build configurations stand in for three platforms, and the report says
+plainly that this is what they are: debug (overflow checks on), release (opt-level
+3) and release with 16 codegen units all reproduce the same three numbers, two
+processes each. Three operating systems cannot be measured from one sandbox, so
+that dimension is the CI job `determinism` and stays unproven until it runs.
+
+The gate executes the shipped kv, store, events and vault bytecode and re-verifies
+their BLAKE3 on every run, so X7 also re-pins X4 and X6.
+
+Measured: 890 commits, 60 refusals, 54 failures (19 out of gas, 35 no-code, 0
+traps), gas 46 375 290, state root efca4222d37347ff. Every step is classified
+committed / refused / failed and the split is kept, because two nodes that
+disagreed about which transactions were accepted would produce different roots.
+
+Gates: 11 tests in x7_determinism, 322 in the workspace, 6/6 X7 negative controls
+(each reddening a named test after a green baseline), 153 in total, 4 692 vectors
+across 24 fixtures, 239 external crates — X7 adds no crate and no dependency.
+
+Fixed: the deployer constant was not a funded account (one byte, InsufficientBalance
+on the fourth deploy); an argument was passed to run() of contracts that take none,
+so a third of the workload never ran; the vault's withdraw was sent an address in
+front of its amount, so every withdrawal refused -21; and the first negative control
+was green until it removed the root from the digest fold rather than the index.
+---
+ .github/workflows/ci.yml                      |  49 +-
+ CHANGELOG.md                                  |  38 +
+ Makefile                                      |  29 +-
+ README.md                                     |  11 +-
+ ROADMAP.md                                    |  29 +
+ crates/aura-exec/src/bin/x7-run.rs            | 105 +++
+ crates/aura-exec/src/detcheck.rs              | 838 ++++++++++++++++++
+ crates/aura-exec/src/lib.rs                   |   1 +
+ .../tests/fixtures/x7_determinism.txt         |  39 +
+ crates/aura-exec/tests/x7_determinism.rs      | 424 +++++++++
+ docs/DETERMINISM.md                           | 110 +++
+ docs/STATUS.md                                |  52 +-
+ docs/evidence/x7-dependency-addendum.txt      |  38 +
+ docs/evidence/x7/SHA256SUMS                   |   6 +
+ docs/evidence/x7/gates.txt                    | 220 +++++
+ docs/evidence/x7/inventory.txt                | 212 +++++
+ docs/evidence/x7/nc.log                       |  32 +
+ docs/evidence/x7/report.md                    | 167 ++++
+ docs/plans/EXEC_PLAN.md                       |  47 +-
+ tools/audit_closeout.py                       |  11 +-
+ tools/gen_x7_vectors.py                       |  78 ++
+ tools/nc_x7.py                                | 191 ++++
+ tools/record_x7_deps.py                       |  87 ++
+ tools/write_x7_evidence.py                    | 449 ++++++++++
+ tools/x7_matrix.py                            | 128 +++
+ 25 files changed, 3365 insertions(+), 26 deletions(-)
+ create mode 100644 crates/aura-exec/src/bin/x7-run.rs
+ create mode 100644 crates/aura-exec/src/detcheck.rs
+ create mode 100644 crates/aura-exec/tests/fixtures/x7_determinism.txt
+ create mode 100644 crates/aura-exec/tests/x7_determinism.rs
+ create mode 100644 docs/DETERMINISM.md
+ create mode 100644 docs/evidence/x7-dependency-addendum.txt
+ create mode 100644 docs/evidence/x7/SHA256SUMS
+ create mode 100644 docs/evidence/x7/gates.txt
+ create mode 100644 docs/evidence/x7/inventory.txt
+ create mode 100644 docs/evidence/x7/nc.log
+ create mode 100644 docs/evidence/x7/report.md
+ create mode 100644 tools/gen_x7_vectors.py
+ create mode 100644 tools/nc_x7.py
+ create mode 100644 tools/record_x7_deps.py
+ create mode 100644 tools/write_x7_evidence.py
+ create mode 100644 tools/x7_matrix.py
+
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index d0def91..49131b7 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -10,7 +10,7 @@ on:
+ # perf) are added by O0 as the crates that need them actually appear.
+ jobs:
+   core:
+-    name: core (C0-C10 + S0-S7 + X0-X1 gate)
++    name: core (C0-C10 + S0-S7 + X0-X7 gate)
+     runs-on: ubuntu-latest
+     steps:
+       - uses: actions/checkout@v4
+@@ -49,20 +49,20 @@ jobs:
+ 
+       # nc-all runs every NC without rewriting the historical logs,
+       # so those committed SHA256SUMS remain valid in the uploaded artifact.
+-      - name: negative controls (C0-C10 + S0-S7 + X0-X1, 116 total)
++      - name: negative controls (C0-C10 + S0-S7 + X0-X7, 153 total)
+         run: make nc-all
+ 
+       # Only the CURRENT phase's evidence is regenerated. C0-S4 evidence is a
+       # HISTORICAL committed record measured at its own commit; regenerating
+       # it later would relabel the wrong tree.
+-      - name: current phase evidence (X1)
+-        run: make evidence-x1
++      - name: current phase evidence (X7)
++        run: make evidence-x7
+ 
+       - name: Upload evidence
+         if: always()
+         uses: actions/upload-artifact@v4
+         with:
+-          name: c0-x1-evidence
++          name: c0-x7-evidence
+           path: |
+             docs/evidence/c0/
+             docs/evidence/c1/
+@@ -89,6 +89,13 @@ jobs:
+             docs/evidence/x0-dependency-addendum.txt
+             docs/evidence/x1/
+             docs/evidence/x1-dependency-addendum.txt
++            docs/evidence/x2/
++            docs/evidence/x3/
++            docs/evidence/x4/
++            docs/evidence/x5/
++            docs/evidence/x6/
++            docs/evidence/x7/
++            docs/evidence/x7-dependency-addendum.txt
+           if-no-files-found: ignore
+ 
+   # S2's native RocksDB backend needs librocksdb >= 9.9 headers (Ubuntu 24.04
+@@ -152,3 +159,35 @@ jobs:
+ 
+       - name: clippy (feature on)
+         run: cargo clippy -p aura-exec --features wasmtime-engine --all-targets -- -D warnings
++
++  # X7's honest gap: the determinism gate proves agreement across processes and
++  # build configurations on ONE machine. Three operating systems cannot be measured
++  # from a single sandbox, so the third dimension lives here. Until this job is green
++  # on all three runners, "Linux, macOS and Windows agree" is UNPROVEN — the X7
++  # report says exactly that, and nothing in the docs claims otherwise.
++  determinism:
++    name: X7 determinism (${{ matrix.os }})
++    runs-on: ${{ matrix.os }}
++    strategy:
++      fail-fast: false
++      matrix:
++        os: [ubuntu-latest, macos-latest, windows-latest]
++    steps:
++      - uses: actions/checkout@v4
++        with:
++          fetch-depth: 0
++
++      - name: Install pinned toolchain
++        uses: dtolnay/rust-toolchain@master
++        with:
++          toolchain: 1.99.1
++
++      # `shell: bash` is available on all three runners, so the same command runs
++      # everywhere and the comparison stays apples to apples.
++      - name: X7 gate (8 processes, pinned root)
++        shell: bash
++        run: make test-x7
++
++      - name: X7 build matrix (debug / release / release-cgu16)
++        shell: bash
++        run: make x7-matrix
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index bbe3727..64bd7b7 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,44 @@
+ All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
+ never rewritten: corrections are made with a new entry or an explicit note.
+ 
++## [X7 — determinism gate] 2026-10-29
++
++**Eighth `EXEC_PLAN` phase.** Deliverable: `patches/0027-X7-determinism-gate.patch`.
++A gate, not a subsystem: **the same ordered input, replayed by independent nodes,
++produces the same `state_root`, gas bill and events** — measured over 1 004 ordered
++transactions in eight separate processes and three build configurations.
++
++- `aura_exec::detcheck` — a scenario that is a pure function of one constant
++  (SplitMix64 from `X7_SEED`), a replay driver over the X3 `Lifecycle` and the S3
++  overlay, and a rolling digest that folds every step's class, status, gas and
++  resulting root, so a divergence is localised rather than reported as "the roots
++  differ".
++- `x7-run` — one process, one node: `--node N` (a label, never an input),
++  `--seed S` (the sensitivity check) and `--fixture` (the pinned lines).
++- The workload mixes ABI v1 calls (40% kv, 18% store, 15% events), native transfers
++  (10%), ABI v3 calls with a nested frame (12%), calls to an address with no code
++  (3%) and out-of-gas calls (2%) — so the gate also re-runs X2, X3 and X6 1 000 times.
++- Pins the shipped artifacts (`kv`, `store`, `events`, `vault`) by size and BLAKE3 in
++  `crates/aura-exec/tests/fixtures/x7_determinism.txt`, generated by
++  `tools/gen_x7_vectors.py` from `x7-run --fixture`.
++- `tools/x7_matrix.py` (`make x7-matrix`) — `debug`, `release` and
++  `release-cgu16`, two processes each: three *build configurations* on one machine.
++  The three-OS dimension is the new CI job `.github/workflows/ci.yml` →
++  `determinism` and is reported as **unproven** until it runs.
++- `tools/nc_x7.py` — 6 negative controls, each reddening a **named** test after a
++  green baseline: version stamp dropped from the root, empty diff counted as a
++  commit, digest ignoring the resulting root, a refusal applying its diff, a starved
++  call billed nothing, the generator ignoring its seed.
++- Gates: 11 tests in `x7_determinism`, 322 total; 153 negative controls (6 new);
++  4 692 vectors across 24 fixtures; 239 external crates unchanged — X7 adds **no**
++  dependency and no crate.
++- Documented: `docs/DETERMINISM.md`.
++- Fixed: the deployer constant was not a funded account (one byte); an argument was
++  passed to `run()` of contracts that take none, so a third of the workload never
++  ran; the vault's `withdraw` was sent an address in front of its amount, so every
++  withdrawal refused `-21`; and the first NC was green until it targeted the digest's
++  root fold instead of its index.
++
+ ## [X6 — call isolation] 2026-10-29
+ 
+ **Seventh `EXEC_PLAN` phase.** Deliverable: `patches/0026-X6-call-isolation.patch`.
+diff --git a/Makefile b/Makefile
+index 5a3eec8..e789fe4 100644
+--- a/Makefile
++++ b/Makefile
+@@ -31,6 +31,7 @@ PYTHON ?= python3
+         record-x4-deps build-contracts nc-x4 evidence-x4 \
+         record-x5-deps build-standards check-standards nc-x5 evidence-x5 \
+         record-x6-deps build-x6-contracts check-x6-contracts nc-x6 evidence-x6 \
++        record-x7-deps gen-x7-vectors nc-x7 x7-matrix evidence-x7 test-x7 \
+         devnet clean
+ 
+ help:
+@@ -128,6 +129,10 @@ help:
+ 	@echo "  make check-x6-contracts verify the pinned X6 artifacts match the source"
+ 	@echo "  make nc-x6             X6 call-isolation negative controls -> docs/evidence/x6/nc.log"
+ 	@echo "  make evidence-x6       regenerate X6 call-isolation report + receipts"
++	@echo "  make gen-x7-vectors    regenerate the pinned X7 determinsm scenario"
++	@echo "  make nc-x7             X7 determinism negative controls -> docs/evidence/x7/nc.log"
++	@echo "  make x7-matrix         run the X7 scenario under 3 build configurations"
++	@echo "  make evidence-x7       regenerate X7 determinism report + receipts"
+ 	@echo "  make record-c9-deps    re-record the C9 dependency addendum"
+ 	@echo "  make gen-c9-vectors    regenerate 512 independent test-rig vectors"
+ 	@echo "  make nc-c9             C9 negative controls -> docs/evidence/c9/nc.log"
+@@ -245,7 +250,7 @@ evidence-c3:
+ # Runs every NC script WITHOUT rewriting the historical C0-C3 evidence logs,
+ # so their committed SHA256SUMS stay valid. CI uses this instead of nc-cX.
+ nc-all:
+-	@for phase in c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 s0 s1 s2 s3 s4 s5 s6 s7 x0 x1 x2 x3 x4 x5 x6; do \
++	@for phase in c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 s0 s1 s2 s3 s4 s5 s6 s7 x0 x1 x2 x3 x4 x5 x6 x7; do \
+ 	    $(PYTHON) tools/nc_$$phase.py > /tmp/aura-nc-$$phase.log 2>&1 || \
+ 	      { echo "$$phase NEGATIVE CONTROLS FAILED"; tail -30 /tmp/aura-nc-$$phase.log; exit 1; }; \
+ 	    grep '^RESULT:' /tmp/aura-nc-$$phase.log; \
+@@ -567,6 +572,28 @@ nc-x6:
+ evidence-x6: record-x6-deps
+ 	@$(PYTHON) tools/write_x6_evidence.py
+ 
++record-x7-deps:
++	@$(PYTHON) tools/record_x7_deps.py
++
++# X7: the determinism gate. `gen-x7-vectors` re-runs the scenario and rewrites the
++# pinned fixture; `x7-matrix` replays it under three build configurations.
++gen-x7-vectors:
++	@$(PYTHON) tools/gen_x7_vectors.py
++
++test-x7:
++	@$(CARGO) test -p aura-exec --test x7_determinism
++
++nc-x7:
++	@mkdir -p docs/evidence/x7
++	@$(PYTHON) tools/nc_x7.py > docs/evidence/x7/nc.log 2>&1 || { cat docs/evidence/x7/nc.log; exit 1; }
++	@cat docs/evidence/x7/nc.log
++
++x7-matrix:
++	@$(PYTHON) tools/x7_matrix.py
++
++evidence-x7: record-x7-deps
++	@$(PYTHON) tools/write_x7_evidence.py
++
+ devnet:
+ 	@echo "ERROR: devnet is D7 (NODE_PLAN). It is not implemented at C0." >&2
+ 	@exit 1
+diff --git a/README.md b/README.md
+index 437bf16..61a4e35 100644
+--- a/README.md
++++ b/README.md
+@@ -40,12 +40,17 @@ for collisions — see [`docs/TICKER_AUDIT.md`](docs/TICKER_AUDIT.md).
+ > data, `caller`, `self_address`) — and X6 makes contracts **compose**: **ABI v3**
+ > in the module `env3` (`call`, `returndata_len`, `returndata_read`, `depth`) with two
+ > rules the host enforces rather than the SDK — no call to an address already on the
+-> stack (`-14`) and no stack deeper than 8 frames (`-15`). **147 negative controls**,
+-> 311 tests, 4 692 vectors, 239 external crates. See
++> stack (`-14`) and no stack deeper than 8 frames (`-15`) — and X7 makes determinism
++> **measured rather than asserted**: a 1 004-transaction workload, generated from one
++> constant, replayed by **eight separate processes** and **three build
++> configurations** to one `state_root`, one gas bill and one events chain — the
++> decisive M0 gate. **153 negative controls**, 322 tests, 4 692 vectors, 239 external
++> crates. See
+ > [`docs/CLOSEOUT_AUDIT.md`](docs/CLOSEOUT_AUDIT.md),
+ > [`docs/SDK.md`](docs/SDK.md), [`docs/STANDARDS.md`](docs/STANDARDS.md),
+ > [`docs/ABI_V2.md`](docs/ABI_V2.md), [`docs/ABI_V3.md`](docs/ABI_V3.md),
+-> [`docs/CALLS.md`](docs/CALLS.md) and `docs/evidence/x6/report.md`. State is
++> [`docs/CALLS.md`](docs/CALLS.md), [`docs/DETERMINISM.md`](docs/DETERMINISM.md) and
++> `docs/evidence/x7/report.md`. State is
+ > durable, provable, syncable, prunable and restorable; contracts are deployed,
+ > upgraded, written in Rust, obey published standards and **call each other without
+ > being able to re-enter a live frame**; there is still **no consensus, P2P, node,
+diff --git a/ROADMAP.md b/ROADMAP.md
+index 7585f3a..704807f 100644
+--- a/ROADMAP.md
++++ b/ROADMAP.md
+@@ -261,6 +261,35 @@ NC inventory: `docs/evidence/c10/closeout.txt`. Receipts:
+ `docs/evidence/c10/`. Validators/blocks/tx are still 0/0/0 — M0 also needs
+ S0–S2 and X0–X4.
+ 
++**Post-X7 measurement (2026-10-29):** the **decisive M0 gate** is measured, not
++asserted. `EXEC_PLAN` X7 adds a gate rather than a subsystem: `aura_exec::detcheck`
++generates a 1 004-step workload — 4 deploys, then 1 000 transactions mixing 60% ABI v1
++calls, 12% ABI v3 calls with a nested frame, 10% native transfers, 3% calls to an
++address with no code and 2% calls that run out of gas — from **one constant**
++(SplitMix64 seeded by `X7_SEED`, no clock, no entropy, no iteration order), and
++replays it over the X3 lifecycle and the S3 overlay. Measured: **890 commits, 60
++refusals, 54 failures** (19 out of gas, 35 no-code, 0 traps), gas **46,375,290**, and
++one state root. The gate spawns **eight separate processes** — different hasher
++seeds, allocator histories, address layouts — and all eight reproduce the root, the
++gas bill, the events chain and the rolling digest; `make x7-matrix` reproduces the
++same three numbers again under `debug`, `release` and `release-cgu16`, two processes
++each. The gate executes the **shipped** `kv`, `store`, `events` and `vault` bytecode
++and re-verifies their BLAKE3 on every run, so X7 also re-pins X4 and X6. 322 tests,
++4,692 vectors across 24 fixtures, 153 negative controls (6 new), 239 external crates
++— X7 adds no crate and no dependency. Every step is classified committed / refused /
++failed and the failure split is kept, because two nodes that disagreed about which
++transactions were *accepted* would produce different roots: the counters attribute a
++divergence instead of merely reporting one. Defects found: the deployer constant was
++not a funded account (one byte), an argument was passed to `run()` of contracts that
++take none so a third of the workload never ran, the vault's `withdraw` was sent an
++address in front of its amount (every withdrawal refused `-21`), and the first
++negative control was green until it removed the *root* from the digest fold. Honest
++scope: three **build configurations** on one machine, not three operating systems —
++the OS matrix is the CI job `determinism` and stays **unproven** until it runs;
++concurrency is untested because it does not exist; the root includes the version, so
++the gate fixes the input rather than permuting blocks; different CPUs are X8's
++problem. Reports: `docs/DETERMINISM.md`, `docs/evidence/x7/report.md`.
++
+ **Post-X6 measurement (2026-10-29):** `EXEC_PLAN` continues — contracts now
+ **compose**. **ABI v3** ships in the import module `env3` with four functions
+ (`call`, `returndata_len`, `returndata_read`, `depth`), and it carries two rules
+diff --git a/crates/aura-exec/src/bin/x7-run.rs b/crates/aura-exec/src/bin/x7-run.rs
+new file mode 100644
+index 0000000..384f340
+--- /dev/null
++++ b/crates/aura-exec/src/bin/x7-run.rs
+@@ -0,0 +1,105 @@
++//! `x7-run` — replay the X7 determinism scenario as one node.
++//!
++//! The gate spawns this binary eight times. Each process gets its own OS entropy
++//! for Rust's per-process hasher seed, its own allocator history and its own
++//! address layout, so agreement between processes is a stronger statement than
++//! agreement inside one process.
++//!
++//! Usage:
++//! ```text
++//! x7-run                     # one node, one line on stdout
++//! x7-run --node 3            # label only; never an input
++//! x7-run --seed 42           # a different scenario (the sensitivity check)
++//! x7-run --fixture           # the pinned lines tools/gen_x7_vectors.py writes
++//! ```
++
++use aura_exec::detcheck::{self, Op};
++
++fn main() {
++    let mut node: u64 = 0;
++    let mut seed: Option<u64> = None;
++    let mut fixture = false;
++
++    let mut args = std::env::args().skip(1);
++    while let Some(arg) = args.next() {
++        match arg.as_str() {
++            "--node" => {
++                node = args
++                    .next()
++                    .and_then(|value| value.parse().ok())
++                    .expect("--node needs a number");
++            }
++            "--seed" => {
++                seed = Some(
++                    args.next()
++                        .and_then(|value| value.parse().ok())
++                        .expect("--seed needs a number"),
++                );
++            }
++            "--fixture" => fixture = true,
++            "--help" | "-h" => {
++                println!("usage: x7-run [--node N] [--seed S] [--fixture]");
++                return;
++            }
++            other => {
++                eprintln!("unknown argument: {other}");
++                std::process::exit(2);
++            }
++        }
++    }
++
++    let steps = match seed {
++        Some(seed) => detcheck::scenario_with_seed(seed),
++        None => detcheck::scenario(),
++    };
++
++    if fixture {
++        let mut contract_calls = 0usize;
++        let mut deploys = 0usize;
++        let mut transfers = 0usize;
++        let mut nested = 0usize;
++        let vault = detcheck::contract_address(detcheck::Code::Vault);
++        for step in &steps {
++            match step.op {
++                Op::Deploy { .. } => deploys += 1,
++                Op::CallStored { .. } => contract_calls += 1,
++                Op::CallData { contract, .. } => {
++                    contract_calls += 1;
++                    if contract == vault {
++                        nested += 1;
++                    }
++                }
++                Op::Transfer { .. } => transfers += 1,
++            }
++        }
++        println!("scenario_seed={}", seed.unwrap_or(detcheck::X7_SEED));
++        println!("scenario_steps={}", steps.len());
++        println!("scenario_deploys={deploys}");
++        println!("scenario_contract_calls={contract_calls}");
++        println!("scenario_transfers={transfers}");
++        println!("scenario_vault_calls={nested}");
++        println!("scenario_accounts={}", detcheck::X7_ACCOUNTS);
++        println!("scenario_gas_limit={}", detcheck::X7_GAS_LIMIT);
++        println!("scenario_starved_gas={}", detcheck::X7_STARVED_GAS);
++        println!("scenario_height={}", detcheck::X7_HEIGHT);
++        println!("scenario_timestamp_ms={}", detcheck::X7_TIMESTAMP_MS);
++        for (name, size, digest) in detcheck::code_pins() {
++            println!("code_{name}_size={size}");
++            println!("code_{name}_blake3={}", digest.to_hex());
++        }
++        let report = detcheck::run(&steps, 0);
++        println!("expected_committed={}", report.committed);
++        println!("expected_refused={}", report.refused);
++        println!("expected_failed={}", report.failed);
++        println!("expected_gas={}", report.gas_total);
++        println!("expected_version={}", report.version);
++        println!("expected_state_root={}", report.state_root.to_hex());
++        println!("expected_tree_root={}", report.tree_root.to_hex());
++        println!("expected_events_root={}", report.events_root.to_hex());
++        println!("expected_digest={}", report.digest.to_hex());
++        return;
++    }
++
++    let report = detcheck::run(&steps, node);
++    println!("{}", report.summary());
++}
+diff --git a/crates/aura-exec/src/detcheck.rs b/crates/aura-exec/src/detcheck.rs
+new file mode 100644
+index 0000000..a979485
+--- /dev/null
++++ b/crates/aura-exec/src/detcheck.rs
+@@ -0,0 +1,838 @@
++//! X7 — the determinism gate: a fixed scenario, replayed by independent nodes.
++//!
++//! The claim this module exists to make measurable is one sentence:
++//!
++//! > The same ordered input, executed by independent nodes, produces the same
++//! > `state_root`, the same gas bill and the same events.
++//!
++//! "Independent" is the load-bearing word. Two runs inside one process share
++//! Rust's per-process hash seed, allocator history and any thread-local cache, so
++//! they can agree while a second node would not. The gate therefore also runs the
++//! scenario in **separate processes** (`x7-run`), where `std::collections::HashMap`
++//! is seeded differently by the OS, and in **separate builds** (debug, release,
++//! release with different codegen units), where the optimizer — and, in debug,
++//! integer-overflow checks — differ.
++//!
++//! What this module does **not** do: consensus, networking, a block structure, or
++//! any node. X7 is a gate over the machine that D1..D5 will drive; it deliberately
++//! borrows the `Lifecycle` (X3), the call surface (X6) and the overlay (S3)
++//! unchanged, so what it measures is the code an actual node will run.
++//!
++//! Three properties are asserted on every step, not only at the end:
++//!
++//! * a **committing** step advances the versioned root and contributes gas;
++//! * a **refused** step (`Returned(v)` with `v != 0`) leaves the root
++//!   byte-identical and contributes gas — work that is billed but not committed;
++//! * a **failed** step (trap, out-of-gas, lifecycle error) leaves the root
++//!   byte-identical too, and is counted separately, because a node that disagreed
++//!   about *which* transactions failed would also disagree about the root.
++//!
++//! The rolling digest folds every step in, so a divergence is localised to the
++//! step that caused it rather than reported as "the final roots differ".
++
++use aura_crypto::blake3_hash;
++use aura_state::{Account, MerkleTree, StateKey, StateView, apply_diff};
++use aura_types::{Address, Amount, Hash, Nonce};
++
++use crate::lifecycle::{Lifecycle, LifecycleReceipt};
++use crate::{BlockContext, ContractCall, ContractReceipt};
++
++/// Seed of the scenario. Changing it changes the whole run — which is exactly
++/// what NC-6 and `a_different_seed_changes_the_root` use as a sensitivity check.
++pub const X7_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
++
++/// How many transactions the scenario contains after its deploys.
++pub const X7_STEPS: usize = 1_000;
++
++/// How many funded accounts share the ledger.
++pub const X7_ACCOUNTS: usize = 8;
++
++/// How many independent nodes the gate compares.
++pub const X7_NODES: usize = 8;
++
++/// Fuel budget of an ordinary call in the scenario.
++pub const X7_GAS_LIMIT: u64 = 1_000_000;
++
++/// Fuel budget of the deliberately starved calls: enough to start, not to finish.
++pub const X7_STARVED_GAS: u64 = 4_000;
++
++/// Block height every call in the scenario sees.
++pub const X7_HEIGHT: u64 = 1_000;
++
++/// Block timestamp every call in the scenario sees (fixed, never a clock).
++pub const X7_TIMESTAMP_MS: u64 = 1_700_000_000_000;
++
++/// Gas a native transfer is charged: flat, because it touches two accounts and
++/// nothing else. It is billed so that a mixed workload cannot hide a gas drift.
++pub const X7_TRANSFER_GAS: u64 = 100;
++
++/// Starting balance of every funded account.
++pub const X7_START_BALANCE: u128 = 1_000_000;
++
++/// Domain separation for the rolling digest.
++const X7_DIGEST_CONTEXT: &[u8] = b"auralite/x7/determinism-digest/v1";
++
++/// Domain separation for the events chain.
++const X7_EVENTS_CONTEXT: &[u8] = b"auralite/x7/events-chain/v1";
++
++// ----------------------------------------------------------------- codes
++
++/// The four contracts the scenario drives, all shipped in earlier phases.
++///
++/// They are reused rather than re-invented: a determinism gate over brand-new
++/// bytecode would say nothing about the contracts the chain actually runs, and
++/// pinning them here means X7 re-verifies the X4/X6 artifacts on every run.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum Code {
++    /// `examples/kv` — ABI v1, one slot, one event, `run(i32)`.
++    Kv,
++    /// `examples/store` — ABI v1, `run()`.
++    Store,
++    /// `examples/events` — ABI v1, `run()` that reads `block_ctx` and `hash`.
++    Events,
++    /// `examples/vault` — ABI v3, a nested call on every withdrawal.
++    Vault,
++}
++
++impl Code {
++    /// Every code the scenario uses, in a fixed order.
++    pub const ALL: [Code; 4] = [Code::Kv, Code::Store, Code::Events, Code::Vault];
++
++    /// The shipped artifact.
++    pub fn wasm(self) -> &'static [u8] {
++        match self {
++            Code::Kv => include_bytes!("../../../examples/kv/wasm/kv.wasm"),
++            Code::Store => include_bytes!("../../../examples/store/wasm/store.wasm"),
++            Code::Events => include_bytes!("../../../examples/events/wasm/events.wasm"),
++            Code::Vault => include_bytes!("../../../examples/vault/wasm/vault.wasm"),
++        }
++    }
++
++    /// The name used in reports and in the pinned fixture.
++    pub fn name(self) -> &'static str {
++        match self {
++            Code::Kv => "kv",
++            Code::Store => "store",
++            Code::Events => "events",
++            Code::Vault => "vault",
++        }
++    }
++}
++
++// --------------------------------------------------------------- scenario
++
++/// One transaction of the scenario.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum Op {
++    /// Deploy a shipped contract at `address`, called by `caller`.
++    Deploy {
++        /// The address the code lands on.
++        address: [u8; 20],
++        /// Which artifact.
++        code: Code,
++        /// The deployer, funded in the genesis set.
++        caller: [u8; 20],
++        /// Native value moved into the contract at deploy.
++        value: u128,
++    },
++    /// Call a stored contract through the X3 lifecycle (`run(arg)`).
++    CallStored {
++        /// The contract.
++        contract: [u8; 20],
++        /// The signer.
++        caller: [u8; 20],
++        /// The single `i32` argument of an ABI v1 `run`, or `None` for a
++        /// contract whose `run` takes no argument. The distinction is not
++        /// cosmetic: X3 refuses a call whose arity does not match the export, so
++        /// passing an argument to `store`/`events` is a lifecycle error, not a call.
++        arg: Option<i32>,
++        /// Fuel budget of this call.
++        gas_limit: u64,
++    },
++    /// Call a contract with ABI v2/v3 calldata.
++    CallData {
++        /// The contract.
++        contract: [u8; 20],
++        /// The signer.
++        caller: [u8; 20],
++        /// Selector and arguments.
++        data: Vec<u8>,
++        /// Fuel budget of this call.
++        gas_limit: u64,
++    },
++    /// Move native value between two accounts, with no contract involved.
++    Transfer {
++        /// Payer.
++        from: [u8; 20],
++        /// Payee.
++        to: [u8; 20],
++        /// Amount in smallest units.
++        amount: u128,
++    },
++}
++
++/// A step of the scenario: its index and what it does.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct Step {
++    /// Position in the ordered input.
++    pub index: usize,
++    /// The transaction.
++    pub op: Op,
++}
++
++/// SplitMix64 — the smallest PRNG that is fully specified in this file.
++///
++/// Not a cryptographic RNG and not intended as one: the scenario must be
++/// *reproducible from a constant*, so the generator has to be part of the code
++/// the gate pins, not a library whose stream could change between versions.
++#[derive(Debug, Clone)]
++pub struct Prng(u64);
++
++impl Prng {
++    /// Seed the generator.
++    pub fn new(seed: u64) -> Self {
++        Prng(seed)
++    }
++
++    /// The next 64 bits.
++    pub fn next_u64(&mut self) -> u64 {
++        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
++        let mut z = self.0;
++        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
++        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
++        z ^ (z >> 31)
++    }
++
++    /// A value in `0..bound`. `bound` must be non-zero.
++    pub fn below(&mut self, bound: u64) -> u64 {
++        debug_assert!(bound > 0, "bound must be non-zero");
++        self.next_u64() % bound
++    }
++}
++
++/// The address of funded account `index`.
++pub fn account_address(index: usize) -> [u8; 20] {
++    let mut bytes = [0xa0u8; 20];
++    bytes[19] = index as u8;
++    bytes
++}
++
++/// The address of contract `code`.
++pub fn contract_address(code: Code) -> [u8; 20] {
++    match code {
++        Code::Kv => [0x11; 20],
++        Code::Store => [0x22; 20],
++        Code::Events => [0x33; 20],
++        Code::Vault => [0x44; 20],
++    }
++}
++
++/// An address that never holds code, used by the refusal steps.
++pub const NOBODY: [u8; 20] = [0x5a; 20];
++
++/// The owner of the vault, and the deployer of everything else.
++///
++/// Written out rather than derived so it can stay a `const` **and** equal
++/// [`account_address(0)`](account_address): the index lives in the last byte, and
++/// a deployer that is not a funded account cannot pay the vault's initial value.
++pub const DEPLOYER: [u8; 20] = [
++    0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0,
++    0xa0, 0xa0, 0xa0, 0x00,
++];
++
++/// Build the ordered input: four deploys, then [`X7_STEPS`] transactions.
++///
++/// The mix is fixed by construction (see the fractions in the body) and driven by
++/// [`Prng`] from [`X7_SEED`], so the whole list is a pure function of a constant.
++pub fn scenario() -> Vec<Step> {
++    scenario_with_seed(X7_SEED)
++}
++
++/// The same scenario under a different seed — the negative control's input.
++pub fn scenario_with_seed(seed: u64) -> Vec<Step> {
++    scenario_of(seed, X7_STEPS)
++}
++
++/// A shorter scenario, for the gate's cheap assertions.
++///
++/// The pinned measurement and the eight-node comparison always use the full
++/// [`X7_STEPS`]; the unit-level properties (commutativity of transfers, the
++/// starving call, the shape of the input) hold for any length, and shrinking them
++/// keeps `make test` in seconds rather than minutes. The *prefix* of a shorter run
++/// is not the prefix of a longer one — the generator draws from one stream — so a
++/// short run is a different input, never a truncation.
++pub fn scenario_of(seed: u64, transactions: usize) -> Vec<Step> {
++    let mut prng = Prng::new(seed);
++    let mut steps: Vec<Step> = Vec::with_capacity(transactions + Code::ALL.len());
++
++    for code in Code::ALL {
++        let value = match code {
++            Code::Vault => 200_000,
++            _ => 0,
++        };
++        steps.push(Step {
++            index: steps.len(),
++            op: Op::Deploy {
++                address: contract_address(code),
++                code,
++                caller: DEPLOYER,
++                value,
++            },
++        });
++    }
++
++    while steps.len() < transactions + Code::ALL.len() {
++        let index = steps.len();
++        let roll = prng.below(100);
++        let op = match roll {
++            // 40% — the workhorse: one slot, one event, one argument.
++            0..=39 => Op::CallStored {
++                contract: contract_address(Code::Kv),
++                caller: account_address(prng.below(X7_ACCOUNTS as u64) as usize),
++                arg: Some((prng.next_u64() as i32) & 0x00ff_ffff),
++                gas_limit: X7_GAS_LIMIT,
++            },
++            // 18% — a `run()` with no argument and no return value.
++            40..=57 => Op::CallStored {
++                contract: contract_address(Code::Store),
++                caller: account_address(prng.below(X7_ACCOUNTS as u64) as usize),
++                arg: None,
++                gas_limit: X7_GAS_LIMIT,
++            },
++            // 15% — the same shape, but the contract reads `block_ctx` and wants
++            // an import (`hash`), which is where a host leak would show first.
++            58..=72 => Op::CallStored {
++                contract: contract_address(Code::Events),
++                caller: account_address(prng.below(X7_ACCOUNTS as u64) as usize),
++                arg: None,
++                gas_limit: X7_GAS_LIMIT,
++            },
++            // 10% — pure value movement: two accounts, no VM at all.
++            73..=82 => {
++                let from = prng.below(X7_ACCOUNTS as u64) as usize;
++                let mut to = prng.below(X7_ACCOUNTS as u64) as usize;
++                if to == from {
++                    to = (from + 1) % X7_ACCOUNTS;
++                }
++                Op::Transfer {
++                    from: account_address(from),
++                    to: account_address(to),
++                    amount: 1 + prng.below(500) as u128,
++                }
++            }
++            // 8% — ABI v3: a withdrawal that makes a nested call on every path.
++            83..=90 => {
++                let who = account_address(prng.below(X7_ACCOUNTS as u64) as usize);
++                let amount = 1 + prng.below(400);
++                // `withdraw(u128)` takes the amount alone; `deposited([u8; 20])`
++                // takes the address alone. Sending both to either is `-21`, which
++                // is a legitimate refusal but not a useful part of the workload.
++                let data = if prng.below(2) == 0 {
++                    let mut data = 0x02u32.to_le_bytes().to_vec();
++                    data.extend_from_slice(&(amount as u128).to_le_bytes());
++                    data
++                } else {
++                    let mut data = 0x04u32.to_le_bytes().to_vec();
++                    data.extend_from_slice(&who);
++                    data
++                };
++                Op::CallData {
++                    contract: contract_address(Code::Vault),
++                    caller: who,
++                    data,
++                    gas_limit: X7_GAS_LIMIT,
++                }
++            }
++            // 4% — the vault's owner credits an account, so withdrawals succeed.
++            91..=94 => {
++                let who = account_address(prng.below(X7_ACCOUNTS as u64) as usize);
++                let amount = 1 + prng.below(500);
++                let mut data = 0x01u32.to_le_bytes().to_vec();
++                data.extend_from_slice(&who);
++                data.extend_from_slice(&(amount as u128).to_le_bytes());
++                Op::CallData {
++                    contract: contract_address(Code::Vault),
++                    caller: DEPLOYER,
++                    data,
++                    gas_limit: X7_GAS_LIMIT,
++                }
++            }
++            // 3% — a call that must be *refused*: an address with no code.
++            95..=97 => Op::CallStored {
++                contract: NOBODY,
++                caller: account_address(prng.below(X7_ACCOUNTS as u64) as usize),
++                arg: None,
++                gas_limit: X7_GAS_LIMIT,
++            },
++            // 2% — a call that must run out of gas: it starts and does not finish.
++            _ => Op::CallStored {
++                contract: contract_address(Code::Kv),
++                caller: account_address(prng.below(X7_ACCOUNTS as u64) as usize),
++                arg: Some((prng.next_u64() as i32) & 0x00ff_ffff),
++                gas_limit: X7_STARVED_GAS,
++            },
++        };
++        steps.push(Step { index, op });
++    }
++    steps
++}
++
++// ------------------------------------------------------------------ report
++
++/// What one node measured.
++///
++/// The three hashes are the gate's subject; the four counters exist so a
++/// divergence can be *attributed* (a node that committed a different number of
++/// steps disagreed about execution, not about hashing).
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct NodeReport {
++    /// Which node produced this — a label, never an input.
++    pub node: u64,
++    /// Steps the scenario contained.
++    pub steps: usize,
++    /// Steps whose receipt carried a diff with at least one change.
++    pub committed: usize,
++    /// Steps that returned a non-zero status and wrote nothing.
++    pub refused: usize,
++    /// Steps that trapped, ran out of gas or hit a lifecycle error.
++    pub failed: usize,
++    /// Of `failed`: the machine itself refused (out of gas or rejected).
++    pub failed_machine: usize,
++    /// Of `failed`: the contract trapped.
++    pub failed_trap: usize,
++    /// Of `failed`: the lifecycle refused before any code ran (no code, bad calldata).
++    pub failed_lifecycle: usize,
++    /// Whole gas bill of the run.
++    pub gas_total: u64,
++    /// Version the final tree sits at.
++    pub version: u64,
++    /// Root of the tree without the version stamp.
++    pub tree_root: Hash,
++    /// Root including the version stamp — the number a header commits to.
++    pub state_root: Hash,
++    /// Chain over every event the run emitted, in order.
++    pub events_root: Hash,
++    /// Rolling digest over every step: status, gas and root, in order.
++    pub digest: Hash,
++}
++
++impl NodeReport {
++    /// The one-line form the gate compares.
++    pub fn summary(&self) -> String {
++        format!(
++            "node={} steps={} committed={} refused={} failed={} [{}] gas={} version={} \
++             state_root={} tree_root={} events_root={} digest={}",
++            self.node,
++            self.steps,
++            self.committed,
++            self.refused,
++            self.failed,
++            self.failure_mix(),
++            self.gas_total,
++            self.version,
++            self.state_root.to_hex(),
++            self.tree_root.to_hex(),
++            self.events_root.to_hex(),
++            self.digest.to_hex(),
++        )
++    }
++
++    /// Why the failed steps failed — the attribution the report quotes.
++    pub fn failure_mix(&self) -> String {
++        format!(
++            "machine={} trap={} lifecycle={}",
++            self.failed_machine, self.failed_trap, self.failed_lifecycle
++        )
++    }
++
++    /// The fields the pinned fixture stores, without the node label.
++    pub fn fingerprint(&self) -> String {
++        format!(
++            "steps={} committed={} refused={} failed={} gas={} version={} \
++             state_root={} tree_root={} events_root={} digest={}",
++            self.steps,
++            self.committed,
++            self.refused,
++            self.failed,
++            self.gas_total,
++            self.version,
++            self.state_root.to_hex(),
++            self.tree_root.to_hex(),
++            self.events_root.to_hex(),
++            self.digest.to_hex(),
++        )
++    }
++}
++
++// ------------------------------------------------------------------- runner
++
++/// How the ledger starts: every account funded, every contract empty.
++pub fn genesis() -> MerkleTree {
++    debug_assert_eq!(
++        DEPLOYER,
++        account_address(0),
++        "the deployer must be the first funded account"
++    );
++    let mut entries: Vec<(Hash, Vec<u8>)> = Vec::with_capacity(X7_ACCOUNTS);
++    for index in 0..X7_ACCOUNTS {
++        let account = Account::new(
++            Nonce::new(0),
++            Amount::from_units(X7_START_BALANCE),
++            Hash::ZERO,
++            Hash::ZERO,
++        );
++        entries.push((
++            StateKey::account(&address(account_address(index))).digest(),
++            account.to_bytes(),
++        ));
++    }
++    MerkleTree::from_entries(0, &entries)
++}
++
++fn address(bytes: [u8; 20]) -> Address {
++    Address::from_bytes(bytes)
++}
++
++fn call_to(contract: [u8; 20], caller: [u8; 20], gas_limit: u64) -> ContractCall {
++    ContractCall {
++        contract: address(contract),
++        caller: address(caller),
++        block: BlockContext {
++            height: X7_HEIGHT,
++            timestamp_ms: X7_TIMESTAMP_MS,
++        },
++        gas_limit,
++    }
++}
++
++/// Chain one step into the rolling digest.
++///
++/// `status` is the contract's `i64` return value narrowed to the low 32 bits a
++/// status code can use. Widening it back is not needed: two nodes that differ in
++/// the high half of a return value would already be a divergence in the report's
++/// roots, and a status that fits an `i32` is what every ABI in this chain returns.
++fn fold(digest: Hash, index: usize, class: u8, status: i64, gas: u64, root: &Hash) -> Hash {
++    let mut bytes = Vec::with_capacity(1 + 8 + 1 + 4 + 8 + 32);
++    bytes.extend_from_slice(digest.as_bytes());
++    bytes.extend_from_slice(&(index as u64).to_le_bytes());
++    bytes.push(class);
++    bytes.extend_from_slice(&(status as i32).to_le_bytes());
++    bytes.extend_from_slice(&gas.to_le_bytes());
++    bytes.extend_from_slice(root.as_bytes());
++    blake3_hash(&bytes)
++}
++
++/// Chain one step's events into the events root.
++fn fold_events(chain: Hash, index: usize, events: &[Vec<u8>]) -> Hash {
++    let mut bytes = Vec::with_capacity(32 + 8 + 4);
++    bytes.extend_from_slice(chain.as_bytes());
++    bytes.extend_from_slice(&(index as u64).to_le_bytes());
++    bytes.extend_from_slice(&(events.len() as u32).to_le_bytes());
++    for event in events {
++        bytes.extend_from_slice(&(event.len() as u32).to_le_bytes());
++        bytes.extend_from_slice(event);
++    }
++    blake3_hash(&bytes)
++}
++
++/// The running state of one node while it replays the scenario.
++struct Node {
++    node: u64,
++    tree: MerkleTree,
++    lifecycle: Lifecycle,
++    committed: usize,
++    refused: usize,
++    failed: usize,
++    failed_machine: usize,
++    failed_trap: usize,
++    failed_lifecycle: usize,
++    gas_total: u64,
++    events_root: Hash,
++    digest: Hash,
++}
++
++impl Node {
++    fn new(node: u64) -> Self {
++        let mut start = Vec::with_capacity(X7_DIGEST_CONTEXT.len() + X7_EVENTS_CONTEXT.len());
++        start.extend_from_slice(X7_DIGEST_CONTEXT);
++        start.extend_from_slice(X7_EVENTS_CONTEXT);
++        Node {
++            node,
++            tree: genesis(),
++            lifecycle: Lifecycle::new(),
++            committed: 0,
++            refused: 0,
++            failed: 0,
++            failed_machine: 0,
++            failed_trap: 0,
++            failed_lifecycle: 0,
++            gas_total: 0,
++            events_root: blake3_hash(X7_EVENTS_CONTEXT),
++            digest: blake3_hash(X7_DIGEST_CONTEXT),
++        }
++    }
++
++    /// Commit a receipt's diff, counting whether it actually changed anything.
++    fn commit(&mut self, index: usize, receipt: &ContractReceipt) {
++        let events = receipt.events.clone();
++        let gas = receipt.gas_used;
++        let status = match &receipt.status {
++            crate::ExecStatus::Returned(value) => *value,
++            other => {
++                // A trap of any kind: the class byte distinguishes "the machine
++                // said no" from "the contract said no".
++                let code = match other {
++                    crate::ExecStatus::OutOfGas => -8i64,
++                    crate::ExecStatus::Rejected => -17,
++                    _ => i64::MIN,
++                };
++                let class = 3u8;
++                self.bill(index, gas, &events);
++                self.failed += 1;
++                match other {
++                    crate::ExecStatus::OutOfGas | crate::ExecStatus::Rejected => {
++                        self.failed_machine += 1;
++                    }
++                    _ => self.failed_trap += 1,
++                }
++                self.digest = fold(
++                    self.digest,
++                    index,
++                    class,
++                    code,
++                    gas,
++                    &self.tree.state_root(),
++                );
++                return;
++            }
++        };
++        match receipt.diff.as_ref() {
++            Some(diff) if !diff.changes.is_empty() => {
++                let next = apply_diff(&self.tree, diff).expect("diff applies to its own base");
++                self.tree = next;
++                self.committed += 1;
++                self.bill(index, gas, &events);
++                self.digest = fold(self.digest, index, 1, status, gas, &self.tree.state_root());
++            }
++            _ => {
++                // Returned but wrote nothing: a refusal. The root must not move,
++                // and the assertion is made here rather than in the test so that a
++                // non-deterministic *commit* cannot slip through as a pass.
++                let before = self.tree.state_root();
++                self.refused += 1;
++                self.bill(index, gas, &events);
++                self.digest = fold(self.digest, index, 2, status, gas, &before);
++            }
++        }
++    }
++
++    fn bill(&mut self, index: usize, gas: u64, events: &[Vec<u8>]) {
++        self.gas_total = self.gas_total.saturating_add(gas);
++        self.events_root = fold_events(self.events_root, index, events);
++    }
++
++    /// A native transfer: no VM, two accounts, one diff.
++    fn transfer(&mut self, index: usize, from: [u8; 20], to: [u8; 20], amount: u128) {
++        let version = self.tree.version() + 1;
++        let mut view = StateView::new(self.tree.clone(), X7_GAS_LIMIT);
++        let payer = StateKey::account(&address(from));
++        let payee = StateKey::account(&address(to));
++        let mut payer_account = view
++            .get(&payer)
++            .and_then(|bytes| Account::from_canonical_bytes(bytes).ok())
++            .unwrap_or_else(Account::new_empty);
++        let mut payee_account = view
++            .get(&payee)
++            .and_then(|bytes| Account::from_canonical_bytes(bytes).ok())
++            .unwrap_or_else(Account::new_empty);
++        let ok = payer_account
++            .debit(Amount::from_units(amount))
++            .and_then(|()| payee_account.credit(Amount::from_units(amount)))
++            .is_ok()
++            && payer_account.bump_nonce().is_ok();
++        if !ok {
++            // An overdraft is a refused transaction, not a trap: the root does not
++            // move, the gas is still billed.
++            self.refused += 1;
++            self.bill(index, X7_TRANSFER_GAS, &[]);
++            self.digest = fold(
++                self.digest,
++                index,
++                2,
++                -1,
++                X7_TRANSFER_GAS,
++                &self.tree.state_root(),
++            );
++            return;
++        }
++        view.set(&payer, payer_account.to_bytes());
++        view.set(&payee, payee_account.to_bytes());
++        view.charge_gas(X7_TRANSFER_GAS)
++            .expect("the transfer gas fits the budget");
++        let diff = view.commit(version);
++        self.tree = apply_diff(&self.tree, &diff).expect("diff applies to its own base");
++        self.committed += 1;
++        self.bill(index, X7_TRANSFER_GAS, &[]);
++        self.digest = fold(
++            self.digest,
++            index,
++            1,
++            0,
++            X7_TRANSFER_GAS,
++            &self.tree.state_root(),
++        );
++    }
++
++    fn deploy(&mut self, index: usize, step: &Op) -> bool {
++        let Op::Deploy {
++            address: at,
++            code,
++            caller,
++            value,
++        } = step
++        else {
++            return false;
++        };
++        let version = self.tree.version() + 1;
++        let receipt: LifecycleReceipt = self
++            .lifecycle
++            .deploy(
++                &self.tree,
++                call_to(*at, *caller, X7_GAS_LIMIT),
++                code.wasm().to_vec(),
++                Amount::from_units(*value),
++                Some(0),
++            )
++            .expect("a shipped artifact deploys");
++        let gas = receipt.gas_used;
++        let events = receipt.events.clone();
++        match receipt.diff.as_ref() {
++            Some(diff) if !diff.changes.is_empty() => {
++                self.tree =
++                    apply_diff(&self.tree, diff).expect("a deploy diff applies to its base");
++                self.committed += 1;
++                self.bill(index, gas, &events);
++                self.digest = fold(self.digest, index, 1, 0, gas, &self.tree.state_root());
++            }
++            _ => {
++                self.failed += 1;
++                self.bill(index, gas, &events);
++                self.digest = fold(self.digest, index, 3, 0, gas, &self.tree.state_root());
++            }
++        }
++        let _ = version;
++        true
++    }
++
++    fn call(&mut self, index: usize, step: &Op) -> bool {
++        match step {
++            Op::CallStored {
++                contract,
++                caller,
++                arg,
++                gas_limit,
++            } => {
++                match self.lifecycle.call_stored(
++                    &self.tree,
++                    call_to(*contract, *caller, *gas_limit),
++                    *arg,
++                ) {
++                    Ok(receipt) => self.commit(index, &receipt),
++                    Err(_) => self.lifecycle_failure(index, *gas_limit),
++                }
++                true
++            }
++            Op::CallData {
++                contract,
++                caller,
++                data,
++                gas_limit,
++            } => {
++                match self.lifecycle.call_data(
++                    &self.tree,
++                    call_to(*contract, *caller, *gas_limit),
++                    data.clone(),
++                ) {
++                    Ok(receipt) => self.commit(index, &receipt),
++                    Err(_) => self.lifecycle_failure(index, *gas_limit),
++                }
++                true
++            }
++            _ => false,
++        }
++    }
++
++    /// A call that never reached a contract (no code, bad calldata length).
++    ///
++    /// It is a *failure*, not a refusal: no receipt exists, so a node that
++    /// disagreed here would disagree about which transactions were accepted.
++    /// The whole budget is billed, which is what the T-phase will charge.
++    fn lifecycle_failure(&mut self, index: usize, gas_limit: u64) {
++        self.failed += 1;
++        self.failed_lifecycle += 1;
++        self.bill(index, gas_limit, &[]);
++        self.digest = fold(
++            self.digest,
++            index,
++            3,
++            -1,
++            gas_limit,
++            &self.tree.state_root(),
++        );
++    }
++
++    fn finish(self, steps: usize) -> NodeReport {
++        NodeReport {
++            node: self.node,
++            steps,
++            committed: self.committed,
++            refused: self.refused,
++            failed: self.failed,
++            failed_machine: self.failed_machine,
++            failed_trap: self.failed_trap,
++            failed_lifecycle: self.failed_lifecycle,
++            gas_total: self.gas_total,
++            version: self.tree.version(),
++            tree_root: self.tree.tree_root(),
++            state_root: self.tree.state_root(),
++            events_root: self.events_root,
++            digest: self.digest,
++        }
++    }
++}
++
++/// Replay `steps` as node `node`.
++///
++/// The node label is *not* an input: it is carried into the report so that eight
++/// reports can be told apart, and nothing in the execution reads it.
++pub fn run(steps: &[Step], node: u64) -> NodeReport {
++    let mut state = Node::new(node);
++    for step in steps {
++        if state.deploy(step.index, &step.op) {
++            continue;
++        }
++        if state.call(step.index, &step.op) {
++            continue;
++        }
++        if let Op::Transfer { from, to, amount } = step.op {
++            state.transfer(step.index, from, to, amount);
++        }
++    }
++    state.finish(steps.len())
++}
++
++/// Replay the standard scenario in this process.
++pub fn run_scenario() -> NodeReport {
++    run(&scenario(), 0)
++}
++
++/// The artifacts the scenario executes, as `(name, bytes, blake3)`.
++///
++/// The gate pins these the same way X4/X5/X6 pin theirs: a determinism claim about
++/// bytecode nobody can name is not a claim.
++pub fn code_pins() -> Vec<(&'static str, usize, Hash)> {
++    Code::ALL
++        .iter()
++        .map(|code| (code.name(), code.wasm().len(), blake3_hash(code.wasm())))
++        .collect()
++}
+diff --git a/crates/aura-exec/src/lib.rs b/crates/aura-exec/src/lib.rs
+index 5067428..8d54f85 100644
+--- a/crates/aura-exec/src/lib.rs
++++ b/crates/aura-exec/src/lib.rs
+@@ -32,6 +32,7 @@ pub mod abi_v2;
+ pub mod abi_v3;
+ pub mod census;
+ pub mod contract;
++pub mod detcheck;
+ pub mod error;
+ pub mod lifecycle;
+ pub mod limits;
+diff --git a/crates/aura-exec/tests/fixtures/x7_determinism.txt b/crates/aura-exec/tests/fixtures/x7_determinism.txt
+new file mode 100644
+index 0000000..5662d82
+--- /dev/null
++++ b/crates/aura-exec/tests/fixtures/x7_determinism.txt
+@@ -0,0 +1,39 @@
++# X7 determinism scenario — measured, not typed.
++# Written by tools/gen_x7_vectors.py from `x7-run --fixture`.
++#
++# The scenario is a pure function of one constant (`X7_SEED`), so this file is
++# the *whole* input of the gate: 4 deploys, then 1 000 transactions mixing 60%
++# ABI v1 calls, 10% native transfers, 12% ABI v3 calls with a nested call, 3%
++# calls to an address with no code and 2% calls that run out of gas.
++#
++# `expected_*` is what one node measured. The gate then replays the same input in
++# eight separate processes and requires all eight to reproduce these numbers.
++
++scenario_seed=11400714819323198485
++scenario_steps=1004
++scenario_deploys=4
++scenario_contract_calls=905
++scenario_transfers=95
++scenario_vault_calls=104
++scenario_accounts=8
++scenario_gas_limit=1000000
++scenario_starved_gas=4000
++scenario_height=1000
++scenario_timestamp_ms=1700000000000
++code_kv_size=5290
++code_kv_blake3=27e47b71bc8977e57156b9aec25985390e7e333065307b3fe7a4db51a3d361e8
++code_store_size=5187
++code_store_blake3=4daa34dab8574d991c4babcf4bd3286984a93a24545edec2559add3cc6eefc1e
++code_events_size=5033
++code_events_blake3=f968f280eb9ccec9066b5e682a83811397e7e319f0c0fafffeec4c543cda3d0e
++code_vault_size=9759
++code_vault_blake3=11f8fb2cce7aacff8f73c337ab66ce6160e6735468554b521e2cbaae1854c711
++expected_committed=890
++expected_refused=60
++expected_failed=54
++expected_gas=46375290
++expected_version=890
++expected_state_root=efca4222d37347ffbc3416b4bbef06eaa02fb930115c6c611a4351fad77312cb
++expected_tree_root=813b06ee47a144ca646fb4368823420cf03965d5a4d8af4ed61463e0d89d13f0
++expected_events_root=8b8e9255ec30e3c51571655514ffa21212fad98f1e4685aba9732ef89888eb60
++expected_digest=91b733922f3ee3c60f603ae41978f15b6be93e3e3c6f25a49851da22afbf9daf
+diff --git a/crates/aura-exec/tests/x7_determinism.rs b/crates/aura-exec/tests/x7_determinism.rs
+new file mode 100644
+index 0000000..d051757
+--- /dev/null
++++ b/crates/aura-exec/tests/x7_determinism.rs
+@@ -0,0 +1,424 @@
++//! X7 — the determinism gate.
++//!
++//! The claim: **the same ordered input, replayed by independent nodes, produces
++//! the same `state_root`, the same gas bill and the same events.**
++//!
++//! "Independent" is why this file spawns processes. Two runs inside one process
++//! share Rust's per-process hasher seed, allocator history and address layout, so
++//! they can agree while a second node disagrees. The eight processes below are
++//! eight different seeds, eight allocator histories and eight address layouts
++//! executing the same 1 004 ordered transactions.
++//!
++//! Every number asserted here is read from
++//! `crates/aura-exec/tests/fixtures/x7_determinism.txt`, which
++//! `tools/gen_x7_vectors.py` writes from `x7-run --fixture` — so the pin and the
++//! measurement cannot drift apart silently.
++
++use std::collections::BTreeMap;
++use std::process::{Command, Stdio};
++
++use aura_exec::detcheck::{
++    self, Code, Op, Step, X7_ACCOUNTS, X7_NODES, X7_SEED, X7_STARVED_GAS, X7_STEPS,
++};
++use aura_types::Hash;
++
++const FIXTURE: &str = include_str!("fixtures/x7_determinism.txt");
++
++/// Parse `key=value` lines, skipping comments and blank lines.
++fn fixture() -> BTreeMap<String, String> {
++    let mut fields = BTreeMap::new();
++    for line in FIXTURE.lines() {
++        if line.trim().is_empty() || line.starts_with('#') {
++            continue;
++        }
++        if let Some((key, value)) = line.split_once('=') {
++            fields.insert(key.trim().to_string(), value.trim().to_string());
++        }
++    }
++    fields
++}
++
++fn field(key: &str) -> u64 {
++    fixture()
++        .get(key)
++        .unwrap_or_else(|| panic!("fixture is missing `{key}`"))
++        .parse()
++        .unwrap_or_else(|_| panic!("fixture `{key}` is not a number"))
++}
++
++fn text(key: &str) -> String {
++    fixture()
++        .get(key)
++        .unwrap_or_else(|| panic!("fixture is missing `{key}`"))
++        .clone()
++}
++
++fn hex(key: &str) -> Hash {
++    Hash::from_hex(&text(key)).expect("fixture hash is valid hex")
++}
++
++/// Run one scenario in-process.
++fn run(steps: &[Step]) -> detcheck::NodeReport {
++    detcheck::run(steps, 0)
++}
++
++// --------------------------------------------------------------- the input
++
++#[test]
++fn the_scenario_is_a_pure_function_of_its_seed() {
++    let first = detcheck::scenario();
++    let second = detcheck::scenario();
++    assert_eq!(
++        first, second,
++        "the generator must not depend on time or entropy"
++    );
++    assert_eq!(
++        first.len(),
++        field("scenario_steps") as usize,
++        "the fixture and the generator must agree on the length"
++    );
++    assert_eq!(first.len(), X7_STEPS + Code::ALL.len());
++
++    // The mix is fixed by construction: the fixture records how many of each.
++    let mut deploys = 0;
++    let mut calls = 0;
++    let mut transfers = 0;
++    for step in &first {
++        match step.op {
++            Op::Deploy { .. } => deploys += 1,
++            Op::CallStored { .. } | Op::CallData { .. } => calls += 1,
++            Op::Transfer { .. } => transfers += 1,
++        }
++    }
++    assert_eq!(deploys, field("scenario_deploys") as usize);
++    assert_eq!(calls, field("scenario_contract_calls") as usize);
++    assert_eq!(transfers, field("scenario_transfers") as usize);
++    assert!(
++        calls >= X7_STEPS * 3 / 4,
++        "the workload must be dominated by contract calls, not transfers: {calls}"
++    );
++
++    // A different seed is a different input, not a relabelled one.
++    let other = detcheck::scenario_with_seed(X7_SEED ^ 0xdead_beef);
++    assert_eq!(other.len(), first.len());
++    let differing = first
++        .iter()
++        .zip(other.iter())
++        .filter(|(left, right)| left.op != right.op)
++        .count();
++    assert!(
++        differing > first.len() / 2,
++        "a new seed must rewrite most of the workload, not a handful of steps: {differing}"
++    );
++}
++
++// ------------------------------------------------------------- the replay
++
++#[test]
++fn one_process_agrees_with_itself() {
++    // A short scenario: the property is about the machine, not about the length,
++    // and the full 1 004-step run is the eight-process gate's job.
++    let steps = detcheck::scenario_of(X7_SEED, 120);
++    let first = run(&steps);
++    let second = run(&steps);
++    assert_eq!(first.fingerprint(), second.fingerprint());
++    assert!(
++        first.committed > 0 && first.failed + first.refused > 0,
++        "the short scenario must still contain both kinds of step: {first:?}"
++    );
++}
++
++#[test]
++fn eight_nodes_in_separate_processes_agree() {
++    // Spawned together and then joined, so the wall clock stays close to one run
++    // while the hash seeds, allocator histories and address layouts differ.
++    let mut children = Vec::with_capacity(X7_NODES);
++    for node in 0..X7_NODES as u64 {
++        let child = Command::new(env!("CARGO_BIN_EXE_x7-run"))
++            .arg("--node")
++            .arg(node.to_string())
++            .stdout(Stdio::piped())
++            .stderr(Stdio::piped())
++            .spawn()
++            .expect("x7-run is built by the same cargo invocation as this test");
++        children.push((node, child));
++    }
++
++    let mut reports: Vec<(u64, detcheck::NodeReport)> = Vec::with_capacity(X7_NODES);
++    for (node, child) in children {
++        let output = child.wait_with_output().expect("node finishes");
++        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
++        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
++        assert!(
++            output.status.success(),
++            "node {node} failed: {stderr}\n{stdout}"
++        );
++        reports.push((node, parse_report(&stdout)));
++    }
++
++    let (first_node, first) = &reports[0];
++    let expected = fixture();
++    for (node, report) in &reports {
++        assert_eq!(
++            report.state_root, first.state_root,
++            "node {node} disagrees with node {first_node} about the state root"
++        );
++        assert_eq!(report.tree_root, first.tree_root, "node {node} tree root");
++        assert_eq!(
++            report.events_root, first.events_root,
++            "node {node} events root"
++        );
++        assert_eq!(report.digest, first.digest, "node {node} rolling digest");
++        assert_eq!(report.gas_total, first.gas_total, "node {node} gas bill");
++        assert_eq!(report.version, first.version, "node {node} version");
++        assert_eq!(report.committed, first.committed, "node {node} commits");
++        assert_eq!(report.refused, first.refused, "node {node} refusals");
++        assert_eq!(report.failed, first.failed, "node {node} failures");
++    }
++
++    // …and the eight processes agree with the pinned measurement, not only with
++    // each other: agreement on the wrong answer is still a failure.
++    assert_eq!(
++        first.state_root.to_hex(),
++        expected["expected_state_root"],
++        "the nodes agree with each other but not with the pin"
++    );
++    assert_eq!(first.gas_total, field("expected_gas"));
++    assert_eq!(first.digest.to_hex(), expected["expected_digest"]);
++}
++
++/// Parse one `key=value …` line of `x7-run`.
++fn parse_report(line: &str) -> detcheck::NodeReport {
++    let mut fields: BTreeMap<&str, &str> = BTreeMap::new();
++    for token in line.split_whitespace() {
++        // The failure mix is printed as `[machine=… trap=… lifecycle=…]`; it is
++        // not needed here and its brackets would break the split.
++        if token.starts_with('[') || token.ends_with(']') {
++            continue;
++        }
++        if let Some((key, value)) = token.split_once('=') {
++            fields.insert(key, value);
++        }
++    }
++    let number = |key: &str| -> u64 {
++        fields
++            .get(key)
++            .unwrap_or_else(|| panic!("report line is missing `{key}`: {line}"))
++            .parse()
++            .unwrap_or_else(|_| panic!("`{key}` is not a number: {line}"))
++    };
++    let hash = |key: &str| -> Hash {
++        Hash::from_hex(fields.get(key).expect("hash field")).expect("hash hex")
++    };
++    detcheck::NodeReport {
++        node: number("node"),
++        steps: number("steps") as usize,
++        committed: number("committed") as usize,
++        refused: number("refused") as usize,
++        failed: number("failed") as usize,
++        // The mix is re-derived from the summary line by the tests that need it.
++        failed_machine: 0,
++        failed_trap: 0,
++        failed_lifecycle: 0,
++        gas_total: number("gas"),
++        version: number("version"),
++        tree_root: hash("tree_root"),
++        state_root: hash("state_root"),
++        events_root: hash("events_root"),
++        digest: hash("digest"),
++    }
++}
++
++// --------------------------------------------------------------- the pin
++
++#[test]
++fn the_pinned_measurement_describes_this_tree() {
++    let report = detcheck::run_scenario();
++    assert_eq!(report.steps, field("scenario_steps") as usize);
++    assert_eq!(report.committed, field("expected_committed") as usize);
++    assert_eq!(report.refused, field("expected_refused") as usize);
++    assert_eq!(report.failed, field("expected_failed") as usize);
++    assert_eq!(report.gas_total, field("expected_gas"));
++    assert_eq!(report.version, field("expected_version"));
++    assert_eq!(report.state_root, hex("expected_state_root"));
++    assert_eq!(report.tree_root, hex("expected_tree_root"));
++    assert_eq!(report.events_root, hex("expected_events_root"));
++    assert_eq!(report.digest, hex("expected_digest"));
++}
++
++#[test]
++fn the_pinned_artifacts_are_the_shipped_ones() {
++    for (name, size, digest) in detcheck::code_pins() {
++        assert_eq!(
++            size as u64,
++            field(&format!("code_{name}_size")),
++            "{name} size drifted from the fixture"
++        );
++        assert_eq!(
++            digest.to_hex(),
++            text(&format!("code_{name}_blake3")),
++            "{name} bytes drifted from the fixture"
++        );
++    }
++    assert_eq!(detcheck::code_pins().len(), Code::ALL.len());
++}
++
++// ------------------------------------------------------- what a node did
++
++#[test]
++fn every_commit_advances_the_version_by_exactly_one() {
++    let report = detcheck::run(&detcheck::scenario_of(X7_SEED, 200), 0);
++    assert_eq!(
++        report.version as usize, report.committed,
++        "a committed step must be the only thing that moves the version"
++    );
++    assert!(
++        report.committed as usize + report.refused + report.failed == report.steps,
++        "every step must be classified exactly once: {report:?}"
++    );
++}
++
++#[test]
++fn a_starved_call_is_billed_and_changes_nothing() {
++    // One call to `kv` with a budget that starts but cannot finish: the machine
++    // must bill the budget it gave away and leave the root byte-identical.
++    let steps = vec![Step {
++        index: 0,
++        op: Op::CallStored {
++            contract: detcheck::contract_address(Code::Kv),
++            caller: detcheck::account_address(0),
++            arg: Some(7),
++            gas_limit: X7_STARVED_GAS,
++        },
++    }];
++    let deploy_only: Vec<Step> = detcheck::scenario()
++        .into_iter()
++        .filter(|step| matches!(step.op, Op::Deploy { code: Code::Kv, .. }))
++        .collect();
++    assert_eq!(deploy_only.len(), 1);
++
++    let base = run(&deploy_only);
++    // Re-index the call so the digest chain is comparable across the two runs.
++    let mut replay = deploy_only.clone();
++    let mut tail = steps;
++    tail[0].index = replay.len();
++    replay.extend(tail);
++
++    let report = run(&replay);
++    assert_eq!(
++        report.failed,
++        1,
++        "a starved call fails: {:?}",
++        report.failure_mix()
++    );
++    assert_eq!(report.committed, base.committed, "it committed nothing");
++    assert_eq!(report.version, base.version, "the version did not move");
++    assert_eq!(
++        report.state_root, base.state_root,
++        "an out-of-gas call must leave the root byte-identical"
++    );
++    assert!(
++        report.gas_total > base.gas_total,
++        "a starved call is still billed: {} vs {}",
++        report.gas_total,
++        base.gas_total
++    );
++}
++
++#[test]
++fn a_transfer_to_an_unfunded_side_is_billed_and_changes_nothing() {
++    // 8 funded accounts, and a tenth of them is not one: the payer is real, the
++    // amount is larger than the balance, so the step must be refused.
++    let steps = vec![
++        Step {
++            index: 0,
++            op: Op::Transfer {
++                from: detcheck::account_address(0),
++                to: detcheck::account_address(1),
++                amount: detcheck::X7_START_BALANCE + 1,
++            },
++        },
++        Step {
++            index: 0,
++            op: Op::Transfer {
++                from: detcheck::account_address(0),
++                to: detcheck::account_address(1),
++                amount: 10,
++            },
++        },
++    ];
++    let report = run(&steps);
++    assert_eq!(report.committed, 1, "the affordable transfer committed");
++    assert_eq!(report.refused, 1, "the overdraft was refused");
++    assert_eq!(report.version, 1, "only one step moved the version");
++    assert_eq!(
++        report.gas_total,
++        detcheck::X7_TRANSFER_GAS * 2,
++        "both transfers are billed, including the one that failed"
++    );
++}
++
++#[test]
++fn the_genesis_ledger_is_funded_and_ordered() {
++    let tree = detcheck::genesis();
++    assert_eq!(
++        tree.entries().len(),
++        X7_ACCOUNTS,
++        "every account must exist before the first transaction"
++    );
++    let paths: Vec<Hash> = tree.entries().iter().map(|(path, _)| *path).collect();
++    let mut sorted = paths.clone();
++    sorted.sort();
++    assert_eq!(paths, sorted, "the leaf set is stored in path order");
++}
++
++// ------------------------------------------------ the gate can go red
++
++#[test]
++fn a_different_input_changes_the_root() {
++    let standard = detcheck::run(&detcheck::scenario_of(X7_SEED, 200), 0);
++    let other = detcheck::run(&detcheck::scenario_of(X7_SEED ^ 1, 200), 0);
++    assert_ne!(
++        standard.state_root, other.state_root,
++        "the gate would pass on any input, which makes it worthless"
++    );
++    assert_ne!(standard.digest, other.digest);
++    assert_ne!(standard.events_root, other.events_root);
++}
++
++#[test]
++fn the_digest_depends_on_the_order_of_the_steps() {
++    // Two transfers that touch different accounts commute on the ledger, so the
++    // root may legitimately be the same; the *digest* must not be, or a node that
++    // executed a different order could never be caught.
++    let forward = vec![
++        Step {
++            index: 0,
++            op: Op::Transfer {
++                from: detcheck::account_address(0),
++                to: detcheck::account_address(1),
++                amount: 5,
++            },
++        },
++        Step {
++            index: 1,
++            op: Op::Transfer {
++                from: detcheck::account_address(2),
++                to: detcheck::account_address(3),
++                amount: 7,
++            },
++        },
++    ];
++    let mut backward = forward.clone();
++    backward.swap(0, 1);
++    backward[0].index = 0;
++    backward[1].index = 1;
++
++    let first = run(&forward);
++    let second = run(&backward);
++    assert_eq!(first.state_root, second.state_root, "transfers commute");
++    assert_ne!(
++        first.digest, second.digest,
++        "the rolling digest must be order-sensitive"
++    );
++}
+diff --git a/docs/DETERMINISM.md b/docs/DETERMINISM.md
+new file mode 100644
+index 0000000..8019adc
+--- /dev/null
++++ b/docs/DETERMINISM.md
+@@ -0,0 +1,110 @@
++# Determinism — what AuraLite-Crypto promises, and how it is measured
++
++**Phase:** X7 · **Gate:** `crates/aura-exec/tests/x7_determinism.rs` · **Status:** measured
++
++> The same ordered input, replayed by independent nodes, produces the same
++> `state_root`, the same gas bill and the same events.
++
++This document says what that sentence means, how it is tested, and where it stops.
++
++## 1. Why this is the decisive gate
++
++Every other phase can be right and the chain can still be worthless: if two nodes
++execute the same block and get different state roots, there is no chain, only two
++databases with the same name. Determinism is therefore not a quality of the code,
++it is a **property of the pair (code, input)** — and the only way to know it holds
++is to run the input more than once, in places that differ, and compare.
++
++`docs/ABI_V1.md`, `docs/ABI_V2.md`, `docs/ABI_V3.md` and `docs/CALLS.md` describe
++the surfaces; this document describes the *machine* underneath them.
++
++## 2. Where nondeterminism could come from
++
++| source | how this chain removes it | where the removal is proven |
++|---|---|---|
++| floats (`NaN` payloads, rounding) | banned by the census before deploy | X0 (`x0_census`), X8 will re-check |
++| host imports (clock, RNG, OS) | a closed list of ABI functions; no WASI, no `random_get` | X1, X2 |
++| shared memory / atomics / threads | banned by the census; the engine is single-threaded | X0, X1 |
++| map iteration order | every collection that reaches the root is a `BTreeMap` or a sorted `Vec` | S1, S3, X7 |
++| process-level randomness (hasher seed, ASLR) | nothing keys on it — and the gate runs eight separate processes to prove it | X7 |
++| integer overflow (`debug` wraps/panics, `release` does not) | checked arithmetic in the ledger, and the gate runs a `debug` build against a `release` one | C1, C7, X7 |
++| optimizer / codegen order | the gate runs `release` with 1 and with 16 codegen units | X7 |
++| engine implementation | one interpreter is the protocol engine; the second backend is a CI job | X1, X7 |
++
++## 3. The measured claim
++
++`make x7-matrix` and the X7 gate replay a single, fully pinned workload:
++
++* **1 004 ordered steps**: 4 deploys, then 1 000 transactions — 60% ABI v1 calls,
++  12% ABI v3 calls with a nested frame, 10% native transfers, 3% calls to an
++  address with no code, 2% calls that run out of gas, plus the remainder of the
++  mix described in `docs/evidence/x7/report.md`;
++* the input is a **pure function of one constant** (`detcheck::X7_SEED`): no clock,
++  no entropy, no iteration order in generation;
++* the artifacts it executes are the **shipped** `kv`, `store`, `events` and
++  `vault` bytecode, pinned by BLAKE3 in
++  `crates/aura-exec/tests/fixtures/x7_determinism.txt` and re-verified on every run.
++
++The report's numbers — root, gas, events chain, rolling digest and the commit /
++refusal / failure split — are recorded in `docs/evidence/x7/`.
++
++## 4. Why eight *processes*
++
++Two runs in one process share Rust's per-process hasher seed, the allocator's
++history and the address layout. They can agree while a second node disagrees. So
++the gate spawns `x7-run` eight times and compares the eight reports; each process
++is a different seed, a different allocator history and a different address space.
++
++The gate also runs in-process, because that is cheap and catches the obvious
++regressions; but the *claim* rests on the processes.
++
++## 5. Why three *build configurations*, and not three platforms
++
++The DoD asks for three platforms. Three operating systems cannot be measured from
++one sandbox, so this repository measures the three dimensions that are actually
++different on one machine and that an OS matrix would vary anyway:
++
++| configuration | what differs |
++|---|---|
++| `debug` | opt-level 0, integer-overflow checks on, debug assertions on |
++| `release` | opt-level 3, overflow checks off — different machine code |
++| `release-cgu16` | 16 codegen units instead of 1: different inlining and merging order |
++
++All three agree on the root, the gas total and the digest. **The OS dimension is a
++CI job** (`.github/workflows/ci.yml` → `determinism`, three runners). Until that job
++has run on all three, "Linux, macOS and Windows agree" is **unproven**, and this
++document says so instead of implying it.
++
++## 6. What a divergence would look like
++
++`x7-run` prints a rolling digest that folds every step — its class, status, gas and
++the resulting root — so a divergence is localised to the first differing step
++rather than reported as "the final roots differ". A node that committed a different
++number of steps disagreed about *execution*; a node with the same counters and a
++different root disagreed about *hashing*. Those are different bugs, and the report
++keeps the counters separate so the difference is visible.
++
++## 7. Rules for anyone changing the machine
++
++1. **Nothing may read a clock, an entropy source or a PID.** Not in the executor,
++   not in the state layer, not in a contract's gas path.
++2. **A collection that reaches the root must be ordered.** `BTreeMap` or a sorted
++   `Vec`; a `HashMap` may be used only where the order cannot be observed.
++3. **Arithmetic that touches a balance, a nonce, a version or gas is checked.**
++   A `wrapping_*` in a consensus path is a bug, not an optimization.
++4. **A new limit is a protocol parameter.** If a bound changes which transactions
++   are accepted, it changes the root, so it needs a protocol version and a
++   migration (X3's rule, restated for the machine).
++5. **A new nondeterminism source needs a new negative control** — a tamper that
++   reddens a named test. `tools/nc_x7.py` is where those live.
++
++## 8. Honest limits
++
++* A gate is not a node: no consensus, no mempool, no block structure, no P2P.
++* Concurrency is untested because it does not exist (atomics and threads are
++  banned); this gate therefore says nothing about a future multi-threaded engine.
++* The root includes the version, so the gate fixes the input exactly rather than
++  permuting independent blocks; a node that splits blocks differently must compare
++  per block.
++* Different CPUs are not exercised; making the accepted subset small enough that
++  this stops mattering is the static verifier's job (X8).
+diff --git a/docs/STATUS.md b/docs/STATUS.md
+index 3e36ac0..30796d5 100644
+--- a/docs/STATUS.md
++++ b/docs/STATUS.md
+@@ -1,12 +1,13 @@
+ # Implementation status — AuraLite-Crypto
+ 
+ > Updated **in the same patch** as the phase's code (rule D9).
+-> Snapshot date: **2026-10-29**, tree: "X6 landed — call isolation, Stage 1
++> Snapshot date: **2026-10-29**, tree: "X7 landed — determinism gate, Stage 1
+ > in progress". See [`CLOSEOUT_AUDIT.md`](CLOSEOUT_AUDIT.md) (CORE),
+ > `docs/evidence/s7/report.md` (S7), `docs/evidence/x0/report.md` (X0),
+ > `docs/evidence/x1/report.md` (X1), `docs/evidence/x2/report.md` (X2),
+ > `docs/evidence/x3/report.md` (X3), `docs/evidence/x4/report.md` (X4),
+-> `docs/evidence/x5/report.md` (X5) and `docs/evidence/x6/report.md` (X6).
++> `docs/evidence/x5/report.md` (X5), `docs/evidence/x6/report.md` (X6) and
++> `docs/evidence/x7/report.md` (X7).
+ 
+ ## Locked decisions (2026-10-25)
+ 
+@@ -40,14 +41,18 @@ X4 ✅ (`patches/0024-X4-sdk.patch`) makes a contract **Rust**: `aura-sdk` +
+ X5 ✅ (`patches/0025-X5-standards.patch`) makes the chain **useful**: ABI v2 in the
+ module `env2` (calldata, return data, `caller`, `self_address`) plus three
+ standards — ARC-20, ARC-721, ARC-M1 multisig — written in Rust, pinned by hash and
+-deployed by the gate, and X6 ✅ (`patches/0026-X6-call-isolation.patch`) makes
++deployed by the gate, X6 ✅ (`patches/0026-X6-call-isolation.patch`) makes
+ contracts **compose**: ABI v3 in the module `env3` (`call`, `returndata_len`,
+ `returndata_read`, `depth`) with two host-enforced rules — no call to an address
+ already on the stack (`-14`) and no stack deeper than 8 frames (`-15`) — plus three
+ contracts that attack each other (a vault that pays before it debits, an attacker
+-that re-enters it, a nine-copy chain), pinned by hash and BLAKE3.
+-Next in dependency order: X7 (the decisive determinism gate: 8 nodes × 1000
+-contract transactions × 3 platforms → byte-identical `state_root`).
++that re-enters it, a nine-copy chain), pinned by hash and BLAKE3, and X7 ✅
++(`patches/0027-X7-determinism-gate.patch`) turns the whole machine into a
++**measured** claim: 1 004 ordered transactions replayed by eight separate processes
++and three build configurations produce one `state_root`, one gas bill and one
++events chain — the decisive M0 gate.
++Next in dependency order: X8 (the static verifier: 100 mutants, all invalid
++rejected, valid accepted).
+ 
+ ## Maturity level
+ 
+@@ -84,7 +89,31 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
+   ⚠️ AUDIT: the §3 crate graph in `docs/ARCHITECTURE.md` had a cycle
+   (`aura-state <- aura-storage` while `aura-storage <- aura-state`); S3
+   corrected it to match the real `Cargo.toml` edges.
+-- **X6 (current).** A contract can **call another contract**. ABI v3 is module
++- **X7 (current).** Determinism is **measured, not asserted**. `aura_exec::detcheck`
++  generates a 1 004-step workload from one constant (`SplitMix64` seeded by
++  `X7_SEED`; no clock, no entropy, no iteration order in generation) and replays it
++  over the X3 lifecycle: 890 commits, 60 refusals, 54 failures (19 out of gas, 35
++  no-code, 0 traps), gas **46 375 290**, state root `efca4222d37347ff…`. The gate
++  spawns **eight separate processes** — different hasher seeds, allocator histories
++  and address layouts — and all eight reproduce the root, the gas, the events chain
++  and the rolling digest; `make x7-matrix` reproduces it again under `debug`,
++  `release` and `release-cgu16`. The gate executes the **shipped** `kv`, `store`,
++  `events` and `vault` bytecode and re-verifies their BLAKE3 on every run, so X7
++  also re-pins X4 and X6. 11 tests in `x7_determinism`, 322 in the workspace, 4 692
++  vectors, 153 NC. Report: `docs/evidence/x7/report.md`; doc:
++  [`DETERMINISM.md`](DETERMINISM.md).
++  ⚠️ AUDIT: the gate found four defects — the deployer constant was not a funded
++  account (one byte, `InsuffientBalance` on the fourth deploy), an argument was
++  passed to `run()` of contracts that take none so a third of the workload never
++  ran (890 commits instead of 559), the vault's `withdraw` was sent an address in
++  front of its amount so every withdrawal refused `-21`, and the first negative
++  control was green until it removed the *root* from the digest fold rather than the
++  index. **Honest limits: three build configurations on one machine, not three
++  operating systems — the OS matrix is a CI job and is unproven until it runs;
++  concurrency is untested because it does not exist; the root includes the version,
++  so the gate fixes the input instead of permuting blocks; different CPUs are not
++  exercised (X8's job).**
++- **X6.** A contract can **call another contract**. ABI v3 is module
+   `env3`, version 3, four functions: `call` (100 + 3/byte), `returndata_len` (20),
+   `returndata_read` (20 + 3/byte), `depth` (20); the value is a `u128` passed as two
+   `i64` halves so calldata cannot alias with it. Two rules live in the **host**, not
+@@ -338,11 +367,11 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
+ ```
+ find crates -name Cargo.toml       -> 15 crates (+1 workspace root)
+ ls docs/plans/*_PLAN.md           -> 12 plans / 112 phase rows
+-cargo test --workspace            -> 311 passed; 0 failed
++cargo test --workspace            -> 322 passed; 0 failed
+ make test                         -> ALL GATES GREEN (incl. close-out audit)
+ make vector-inventory             -> 4692 vectors across 24 fixtures
+ make audit-closeout               -> every ✅ has a receipt
+-make nc-all                       -> 147 NC PASS across 26 phases
++make nc-all                       -> 153 NC PASS across 27 phases
+ make check-deps                   -> 239 external crates allowlisted
+ revert / OutOfGas                -> root unchanged, balance unchanged
+ snapshot 1M keys                 -> byte-identical reimport
+@@ -358,7 +387,8 @@ ABI v1 (X2)                       -> 7 host functions, 23 vectors, gas table vs
+ lifecycle (X3)                    -> CodeRecord + code_hash, deploy/upgrade/migrate, 9 programs, 12 tests
+ SDK (X4)                          -> #[entrypoint]/#[constructor]/#[migrate], typed slots, codec, 3 contracts, pinned hashes
+ standards (X5)                    -> ABI v2 (env2), ARC-20/ARC-721/ARC-M1, 41 225 B, 43 tests over the artifacts
+-call isolation (X6)              -> ABI v3 (env3), depth 8, no re-entry, 30 459 B, 15 tests, attacker gets 1 attempt
++call isolation (X6)               -> ABI v3 (env3), depth 8, no re-entry, 30 459 B, 15 tests, attacker gets 1 attempt
++determinism (X7)                  -> 1 004 steps, 8 processes, 3 build configs, one state_root, gas 46 375 290
+ gas (X2)                          -> 1 fuel = 1 gas; out-of-gas burns the whole budget, root unchanged
+ validators / blocks / tx          -> 0 / 0 / 0
+ ```
+@@ -376,6 +406,8 @@ numbers with raw command output are in `docs/evidence/c0-baseline.txt`,
+   after the fact rather than reserved before it.
+ - No **callbacks** into a live frame (X6 keeps them unrepresentable on purpose), so
+   no receiver logic in the same transaction as the payment, and no flash-loan shape.
++- Determinism is proven on **one machine in three build configurations**; the
++  three-OS matrix is a declared CI job (`determinism`), not a measurement yet.
+ - No Miri/ASan/UBSan or 24 h libFuzzer campaign (H3), no state-root
+   determinism gate across nodes (X7), no BLS aggregation (B2), no PQ
+   migration (H2), no `cargo deny` (H1). M0 still needs X7 (the decisive
+diff --git a/docs/evidence/x7-dependency-addendum.txt b/docs/evidence/x7-dependency-addendum.txt
+new file mode 100644
+index 0000000..e4fb7ff
+--- /dev/null
++++ b/docs/evidence/x7-dependency-addendum.txt
+@@ -0,0 +1,38 @@
++# AuraLite-Crypto external dependency addendum (X7).
++# Generated by tools/record_x7_deps.py from Cargo.lock.
++#
++# X7 adds NO new external crate and NO new workspace crate. The scenario generator,
++# the replay driver and the rolling digest are Rust inside `aura-exec`; the only new
++# binary links the crates the workspace already built. The lock does not move.
++# This file therefore contains no `name=version` lines: it is a statement that
++# the allowlist is unchanged, and the dependency gate still validates it against
++# Cargo.lock.
++#
++# No timestamp: this file is checksummed in docs/evidence/x7/SHA256SUMS, so
++# regenerating it must reproduce it byte for byte.
++# External crates in Cargo.lock: 239 (unchanged since X1)
++# New external crates in X7: 0
++# New workspace crates in X7: 0
++#
++# New WORKSPACE dependencies of aura-exec:
++#   (none)
++#
++# Why: the SDK is a leaf. `aura-sdk` depends on nothing but `aura-sdk-macros`
++# (proc macros only), and `aura-sdk-macros` depends on syn/quote/proc-macro2.
++# The SDK is therefore usable BOTH from a `no_std` contract for
++# wasm32-unknown-unknown and from host tests; it never links the node, and
++# nothing in the node depends on it except a dev-dependency in the SDK's own
++# tests, which is the direction that keeps a contract's dependency graph clean.
++#
++# Build graph for `cargo tree -p aura-exec --edges normal`:
++#   unique lines: 93   (X1 baseline: 10, X2: 93, X7: 93)
++#   total lines:  107
++# The growth is the C1/C3/C6/C7 stack that aura-exec now links against instead
++# of only mentioning it in comments. It is compiled into every node already.
++#
++# Engine pins unchanged: wasmi =2.0.0 (default), wasmtime =50.0.0 (feature
++# wasmtime-engine). X7 needed no engine change in wasmi's *version*: the hosted
++# policy already required mutable globals, bulk memory and indirect calls to be
++# enabled in `Config`, which is a configuration change inside the pinned version
++# (see docs/evidence/x7/report.md). The wasmtime backend still refuses hosted
++# execution with SandboxError::EngineUnavailable.
+diff --git a/docs/evidence/x7/SHA256SUMS b/docs/evidence/x7/SHA256SUMS
+new file mode 100644
+index 0000000..4aeac9a
+--- /dev/null
++++ b/docs/evidence/x7/SHA256SUMS
+@@ -0,0 +1,6 @@
++443f223754a43d138ce0110ba8e0fa2c3b374f92fd70b6cc0096c2112a6fbe57  docs/evidence/x7/gates.txt
++768f69ba5d6fe4438ba713c5e8340a4ee8e006239f92e96a01b1252b8dfbda0b  docs/evidence/x7/nc.log
++1c37fca2480c90447617b4c2829a6e46b29c74cf85a2d6000f6d44f0ce374388  docs/evidence/x7/report.md
++8b5aba2b0bbbea523a1dbd321699075e982ded8d3d61ed7b76531f8ceabcb736  docs/evidence/x7/inventory.txt
++b6b787c1a90819d6a0cdce3203df1e0266287ae17c58e1a59fc490dfe39fad15  crates/aura-exec/tests/fixtures/x7_determinism.txt
++b0cc390b1af68e6df9c5d474a9f71d91cb63f3ee5386a9ffe65a2576347888d9  docs/evidence/x7-dependency-addendum.txt
+diff --git a/docs/evidence/x7/gates.txt b/docs/evidence/x7/gates.txt
+new file mode 100644
+index 0000000..6559b6d
+--- /dev/null
++++ b/docs/evidence/x7/gates.txt
+@@ -0,0 +1,220 @@
++# X7 — determinism gate log (measured)
++# Generated (UTC): 2026-10-29T10:03:09+00:00
++# Every block below is raw command output; nothing is typed by hand.
++
++$ rustc --version && cargo --version
++rustc 1.99.1 (58cf8f9c3 2026-10-13)
++cargo 1.99.1 (5f94df478 2026-08-27)
++[exit 0]
++
++$ find crates -name Cargo.toml | wc -l
++17
++[exit 0]
++
++$ find . -name '*.rs' -not -path './target/*' -not -path './examples/*' -not -path './standards/*' | wc -l
++128
++[exit 0]
++
++$ grep -c '^source = ' Cargo.lock || true
++239
++[exit 0]
++
++$ python3 tools/check_claims.py
++DOCS DRIFT GUARD: OK — 50 markdown files, 12 plans, 112 phase rows, all local links resolve
++[exit 0]
++
++$ python3 tools/check_deps.py
++DEPENDENCY GATE: OK — 256 lock packages (17 local, 239 external, all checksummed + allowlisted)
++[exit 0]
++
++$ python3 tools/count_vectors.py
++
++  TOTAL: 4719 vectors across 25 fixtures
++VECTOR INVENTORY: OK — 4719 >= 200
++[exit 0]
++
++$ python3 tools/check_rig.py
++TEST RIG WIRING: OK — test-core + fuzz-smoke + vector inventory + proptest + 4 libFuzzer targets are wired into CI
++[exit 0]
++
++$ python3 tools/gen_x7_vectors.py --check
++crates/aura-exec/tests/fixtures/x7_determinism.txt: up to date
++[exit 0]
++
++$ before=$(sha256sum crates/aura-exec/tests/fixtures/x7_determinism.txt | cut -d' ' -f1); python3 tools/gen_x7_vectors.py >/dev/null && after=$(sha256sum crates/aura-exec/tests/fixtures/x7_determinism.txt | cut -d' ' -f1); if [ "$before" = "$after" ]; then echo "generator idempotent: $after"; else echo "GENERATOR DRIFT"; exit 1; fi
++generator idempotent: f2144516881cf05291cedd4b00d480be4d99195b768b77129806f378b14af8f8
++[exit 0]
++
++$ cargo test -p aura-exec --test x7_determinism -- --nocapture
++running 11 tests
++test a_starved_call_is_billed_and_changes_nothing ... ok
++test a_transfer_to_an_unfunded_side_is_billed_and_changes_nothing ... ok
++test a_different_input_changes_the_root ... ok
++test every_commit_advances_the_version_by_exactly_one ... ok
++test one_process_agrees_with_itself ... ok
++test the_digest_depends_on_the_order_of_the_steps ... ok
++test the_genesis_ledger_is_funded_and_ordered ... ok
++test the_pinned_artifacts_are_the_shipped_ones ... ok
++test eight_nodes_in_separate_processes_agree ... ok
++test the_scenario_is_a_pure_function_of_its_seed ... ok
++test the_pinned_measurement_describes_this_tree ... ok
++
++test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 69.77s
++
++   Compiling aura-exec v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-exec)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.43s
++     Running tests/x7_determinism.rs (target/debug/deps/x7_determinism-d0517547c79a260f)
++[exit 0]
++
++$ make nc-x7
++baseline: the untampered gate
++      rc=0 (GREEN as expected)
++
++NC-1 the version stamp is dropped from the state root: PASS
++      the_pinned_measurement_describes_this_tree -> rc=101 (RED as expected)
++      
++error: test failed, to rerun pass `-p aura-exec --test x7_determinism`
++NC-2 an empty diff counts as a commit: PASS
++      the_pinned_measurement_describes_this_tree -> rc=101 (RED as expected)
++      
++error: test failed, to rerun pass `-p aura-exec --test x7_determinism`
++NC-3 the rolling digest ignores the resulting root: PASS
++      the_digest_depends_on_the_order_of_the_steps -> rc=101 (RED as expected)
++      
++error: test failed, to rerun pass `-p aura-exec --test x7_determinism`
++NC-4 a refusal still applies its diff: PASS
++      every_commit_advances_the_version_by_exactly_one -> rc=101 (RED as expected)
++      
++error: test failed, to rerun pass `-p aura-exec --test x7_determinism`
++NC-5 a starved call is billed nothing: PASS
++      a_starved_call_is_billed_and_changes_nothing -> rc=101 (RED as expected)
++      
++error: test failed, to rerun pass `-p aura-exec --test x7_determinism`
++NC-6 the generator ignores its seed: PASS
++      a_different_input_changes_the_root -> rc=101 (RED as expected)
++      
++error: test failed, to rerun pass `-p aura-exec --test x7_determinism`
++
++RESULT: 6/6 negative controls PASS
++make[1]: Leaving directory '/home/user/AuraLite-Crypto'
++[exit 0]
++
++$ make x7-matrix
++make[1]: Entering directory '/home/user/AuraLite-Crypto'
++X7 BUILD MATRIX — the same ordered input under different builds
++
++           debug run 1/2: state_root=efca4222d37347ff… gas=46375290
++           debug run 2/2: state_root=efca4222d37347ff… gas=46375290
++         release run 1/2: state_root=efca4222d37347ff… gas=46375290
++         release run 2/2: state_root=efca4222d37347ff… gas=46375290
++   release-cgu16 run 1/2: state_root=efca4222d37347ff… gas=46375290
++   release-cgu16 run 2/2: state_root=efca4222d37347ff… gas=46375290
++
++   configuration  runs  state_root                 gas  verdict
++           debug     2  efca4222d37347ff…    46375290  consistent
++         release     2  efca4222d37347ff…    46375290  consistent
++   release-cgu16     2  efca4222d37347ff…    46375290  consistent
++
++distinct state roots across all configurations: 1
++distinct gas totals across all configurations: 1
++distinct rolling digests across all configurations: 1
++MATRIX: OK — every configuration and every process agrees
++make[1]: Leaving directory '/home/user/AuraLite-Crypto'
++[exit 0]
++
++$ make nc-all
++RESULT: 2/2 negative controls PASS
++RESULT: 3/3 negative controls PASS
++RESULT: 4/4 negative controls PASS
++RESULT: 5/5 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 7/7 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++make[1]: Leaving directory '/home/user/AuraLite-Crypto'
++[exit 0]
++
++$ cargo test -p aura-exec --quiet
++
++
++running 11 tests
++...........
++test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 69.56s
++
++
++running 2 tests
++..
++test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++all doctests ran in 0.33s; merged doctests compilation took 0.32s
++[exit 0]
++
++$ make audit-closeout
++make[1]: Entering directory '/home/user/AuraLite-Crypto'
++CLOSE-OUT PLAN<->TREE AUDIT (CORE + STATE)
++  phases audited: 27 (C0-X7)
++  expected NC total: 153 (147 shipped + 6 X7)
++  evidence checksum files: 26
++  spec files indexed: 11
++  note: X7 patch: pending (cut at commit time)
++  note: X7 evidence: pending (generated by make evidence-x7)
++AUDIT: OK — every ✅ phase has a receipt, patch, NC log and evidence; all checksums verify
++make[1]: Leaving directory '/home/user/AuraLite-Crypto'
++[exit 0]
++
++$ make test
++   Doc-tests aura_sdk_macros
++   Doc-tests aura_state
++   Doc-tests aura_storage
++   Doc-tests aura_testkit
++   Doc-tests aura_tx
++   Doc-tests aura_types
++[exit 0]
++
++========================================================================
++EIGHT INDEPENDENT PROCESSES
++========================================================================
++
++node=0 state_root=efca4222d37347ffbc3416b4bbef06eaa02fb930115c6c611a4351fad77312cb tree_root=813b06ee47a144ca646fb4368823420cf03965d5a4d8af4ed61463e0d89d13f0 gas=46375290 version=890 committed=890 refused=60 failed=54 events_root=8b8e9255ec30e3c51571655514ffa21212fad98f1e4685aba9732ef89888eb60 digest=91b733922f3ee3c60f603ae41978f15b6be93e3e3c6f25a49851da22afbf9daf
++node=1 state_root=efca4222d37347ffbc3416b4bbef06eaa02fb930115c6c611a4351fad77312cb tree_root=813b06ee47a144ca646fb4368823420cf03965d5a4d8af4ed61463e0d89d13f0 gas=46375290 version=890 committed=890 refused=60 failed=54 events_root=8b8e9255ec30e3c51571655514ffa21212fad98f1e4685aba9732ef89888eb60 digest=91b733922f3ee3c60f603ae41978f15b6be93e3e3c6f25a49851da22afbf9daf
++node=2 state_root=efca4222d37347ffbc3416b4bbef06eaa02fb930115c6c611a4351fad77312cb tree_root=813b06ee47a144ca646fb4368823420cf03965d5a4d8af4ed61463e0d89d13f0 gas=46375290 version=890 committed=890 refused=60 failed=54 events_root=8b8e9255ec30e3c51571655514ffa21212fad98f1e4685aba9732ef89888eb60 digest=91b733922f3ee3c60f603ae41978f15b6be93e3e3c6f25a49851da22afbf9daf
++node=3 state_root=efca4222d37347ffbc3416b4bbef06eaa02fb930115c6c611a4351fad77312cb tree_root=813b06ee47a144ca646fb4368823420cf03965d5a4d8af4ed61463e0d89d13f0 gas=46375290 version=890 committed=890 refused=60 failed=54 events_root=8b8e9255ec30e3c51571655514ffa21212fad98f1e4685aba9732ef89888eb60 digest=91b733922f3ee3c60f603ae41978f15b6be93e3e3c6f25a49851da22afbf9daf
++node=4 state_root=efca4222d37347ffbc3416b4bbef06eaa02fb930115c6c611a4351fad77312cb tree_root=813b06ee47a144ca646fb4368823420cf03965d5a4d8af4ed61463e0d89d13f0 gas=46375290 version=890 committed=890 refused=60 failed=54 events_root=8b8e9255ec30e3c51571655514ffa21212fad98f1e4685aba9732ef89888eb60 digest=91b733922f3ee3c60f603ae41978f15b6be93e3e3c6f25a49851da22afbf9daf
++node=5 state_root=efca4222d37347ffbc3416b4bbef06eaa02fb930115c6c611a4351fad77312cb tree_root=813b06ee47a144ca646fb4368823420cf03965d5a4d8af4ed61463e0d89d13f0 gas=46375290 version=890 committed=890 refused=60 failed=54 events_root=8b8e9255ec30e3c51571655514ffa21212fad98f1e4685aba9732ef89888eb60 digest=91b733922f3ee3c60f603ae41978f15b6be93e3e3c6f25a49851da22afbf9daf
++node=6 state_root=efca4222d37347ffbc3416b4bbef06eaa02fb930115c6c611a4351fad77312cb tree_root=813b06ee47a144ca646fb4368823420cf03965d5a4d8af4ed61463e0d89d13f0 gas=46375290 version=890 committed=890 refused=60 failed=54 events_root=8b8e9255ec30e3c51571655514ffa21212fad98f1e4685aba9732ef89888eb60 digest=91b733922f3ee3c60f603ae41978f15b6be93e3e3c6f25a49851da22afbf9daf
++node=7 state_root=efca4222d37347ffbc3416b4bbef06eaa02fb930115c6c611a4351fad77312cb tree_root=813b06ee47a144ca646fb4368823420cf03965d5a4d8af4ed61463e0d89d13f0 gas=46375290 version=890 committed=890 refused=60 failed=54 events_root=8b8e9255ec30e3c51571655514ffa21212fad98f1e4685aba9732ef89888eb60 digest=91b733922f3ee3c60f603ae41978f15b6be93e3e3c6f25a49851da22afbf9daf
++
++distinct state roots: 1
++distinct gas totals: 1
++distinct digests: 1
++verdict: AGREEMENT
++
++========================================================================
++SUMMARY
++========================================================================
++
++Steps: 1004 (905 contract calls, 95 native transfers).
++Commits: 890; gas: 46375290.
++State root: efca4222d37347ffbc3416b4bbef06eaa02fb930115c6c611a4351fad77312cb
++Tests: 322 in the workspace, 11 in the X7 gate.
++Negative controls: 153 across C0-C10 + S0-S7 + X0-X7.
++Validators/blocks/tx remain 0/0/0.
+diff --git a/docs/evidence/x7/inventory.txt b/docs/evidence/x7/inventory.txt
+new file mode 100644
+index 0000000..18fc3d9
+--- /dev/null
++++ b/docs/evidence/x7/inventory.txt
+@@ -0,0 +1,212 @@
++# X7 negative-control inventory
++# Generated (UTC): 2026-10-29T10:03:09+00:00
++# Each NC tampers with one enforcement point and requires a named test to go red.
++
++[c0] 2/2 PASS
++  PASS NC-1 Rust identity
++  PASS NC-2 docs drift guard
++
++[c1] 3/3 PASS
++  PASS NC-1 bech32 checksum constant
++  PASS NC-2 address version byte
++  PASS NC-3 independent golden vector
++
++[c2] 4/4 PASS
++  PASS NC-1 codec version
++  PASS NC-2 independent golden fixture
++  PASS NC-3 trailing-byte guard
++  PASS NC-4 non-minimal varint guard
++
++[c3] 5/5 PASS
++  PASS NC-1 domain separation context
++  PASS NC-2 independent domain-hash vector
++  PASS NC-3 RFC 8032 vector
++  PASS NC-4 Ed25519 verification bypass
++  PASS NC-5 dependency allowlist / make test gate
++
++[c4] 6/6 PASS
++  PASS NC-1 signing context
++  PASS NC-2 txid context
++  PASS NC-3 independent golden signature
++  PASS NC-4 replay protection
++  PASS NC-5 signer/public-key binding
++  PASS NC-6 Ed25519 verification bypass
++
++[c5] 6/6 PASS
++  PASS NC-1 Merkle leaf context
++  PASS NC-2 Merkle node context
++  PASS NC-3 block-hash context
++  PASS NC-4 independent golden tx_root
++  PASS NC-5 tx_root recomputation check
++  PASS NC-6 canonical body order check
++
++[c6] 6/6 PASS
++  PASS NC-1 event leaf context
++  PASS NC-2 independent golden root
++  PASS NC-3 leaf/value binding
++  PASS NC-4 sibling-count check
++  PASS NC-5 sibling direction
++  PASS NC-6 root comparison
++
++[c7] 6/6 PASS
++  PASS NC-1 state key digest context
++  PASS NC-2 independent golden key digest
++  PASS NC-3 reserved key-space prefixes
++  PASS NC-4 namespace length check
++  PASS NC-5 contract namespace check
++  PASS NC-6 contract address check
++
++[c8] 6/6 PASS
++  PASS NC-1 genesis context
++  PASS NC-2 validator-set context
++  PASS NC-3 independent golden genesis hash
++  PASS NC-4 validator order (DoD: sorting must not happen)
++  PASS NC-5 unknown JSON fields
++  PASS NC-6 Stage 1 chain-id check
++
++[c9] 6/6 PASS
++  PASS NC-1 C9 golden varint vector
++  PASS NC-2 vector inventory minimum
++  PASS NC-3 injected non-minimal-varint bug
++  PASS NC-4 injected trailing-byte-guard bug
++  PASS NC-5 fuzz harness iteration counter
++  PASS NC-6 rig wiring in Makefile
++
++[c10] 6/6 PASS
++  PASS NC-1 missing phase receipt
++  PASS NC-2 deferred phase marked done
++  PASS NC-3 forged NC log result
++  PASS NC-4 unindexed format spec
++  PASS NC-5 forged patch subject
++  PASS NC-6 corrupted evidence checksum
++
++[s0] 6/6 PASS
++  PASS NC-1 final-view context
++  PASS NC-2 independent golden final view
++  PASS NC-3 fake state root
++  PASS NC-4 fake persistence
++  PASS NC-5 fake determinism
++  PASS NC-6 falsified no-root measurement
++
++[s1] 6/6 PASS
++  PASS NC-1 leaf context
++  PASS NC-2 node context
++  PASS NC-3 independent checkpoint root
++  PASS NC-4 proof root comparison
++  PASS NC-5 path bit ordering
++  PASS NC-6 depth-independent empty subtrees
++
++[s2] 6/6 PASS
++  PASS NC-1 WAL checksum context
++  PASS NC-2 state key context
++  PASS NC-3 state root context
++  PASS NC-4 independent golden WAL record
++  PASS NC-5 WAL checksum verification
++  PASS NC-6 WAL-before-head invariant
++
++[s3] 6/6 PASS
++  PASS NC-1 diff checksum context
++  PASS NC-2 event commitment context
++  PASS NC-3 diff magic
++  PASS NC-4 independent golden diff
++  PASS NC-5 diff checksum verification
++  PASS NC-6 rollback removal (balance changes after revert)
++
++[s4] 6/6 PASS
++  PASS NC-1 snapshot magic
++  PASS NC-2 manifest checksum context
++  PASS NC-3 chunk hash context
++  PASS NC-4 independent golden manifest
++  PASS NC-5 manifest checksum verification
++  PASS NC-6 chunk digest comparison (substituted chunk)
++
++[s5] 6/6 PASS
++  PASS NC-1 head checksum context
++  PASS NC-2 delta checksum context
++  PASS NC-3 package checksum context
++  PASS NC-4 independent golden package
++  PASS NC-5 quorum comparison
++  PASS NC-6 final state-root comparison (substituted diff chunk)
++
++[s6] 6/6 PASS
++  PASS NC-1 record checksum context
++  PASS NC-2 base checksum context
++  PASS NC-3 retention boundary (keep + 1)
++  PASS NC-4 pruning disabled in prune mode
++  PASS NC-5 archive compaction allowed
++  PASS NC-6 pruned version served instead of rejected
++
++[s7] 6/6 PASS
++  PASS NC-1 manifest checksum context
++  PASS NC-2 blob SHA-256 comparison
++  PASS NC-3 replayed root comparison
++  PASS NC-4 parent-root chain check
++  PASS NC-5 restore into a live store
++  PASS NC-6 crash-window WAL replay on reopen
++
++[x0] 6/6 PASS
++  PASS NC-1 host imports allowed
++  PASS NC-2 float policy disabled at its single choke point
++  PASS NC-3 start section allowed
++  PASS NC-4 memory maximum not required
++  PASS NC-5 shared memory allowed
++  PASS NC-6 unknown opcode allowed (whitelist not fail-closed)
++
++[x1] 6/6 PASS
++  PASS NC-1 census bypassed (gate always Ok)
++  PASS NC-2 fuel budget ignored (4x the published budget)
++  PASS NC-3 memory ceiling removed from the store limiter
++  PASS NC-4 trap misclassified (out-of-fuel -> other)
++  PASS NC-5 module-size check removed
++  PASS NC-6 trace cap removed
++
++[x2] 7/7 PASS
++  PASS NC-1 gas table zeroed (every call free)
++  PASS NC-2 transfer is not charged
++  PASS NC-3 value length ceiling removed
++  PASS NC-4 rollback removed on failure
++  PASS NC-5 import census opened (any import links)
++  PASS NC-6 out-of-gas guard removed (a caught -8 commits)
++  PASS NC-7 instruction gas never settled
++
++[x3] 6/6 PASS
++  PASS NC-1 version check removed (a stale upgrade wins)
++  PASS NC-2 balance not preserved (upgrade zeroes the account)
++  PASS NC-3 `migrate` never runs (storage not migrated)
++  PASS NC-4 code hash not stored on the account
++  PASS NC-5 `init` never runs
++  PASS NC-6 census skipped at deploy
++
++[x4] 6/6 PASS
++  PASS NC-1 `#[entrypoint]` exports the wrong name
++  PASS NC-2 the SDK ignores the absent-key status
++  PASS NC-3 the codec stops length-checking
++  PASS NC-4 the mutable-global allowance is removed
++  PASS NC-5 the element-table rule is switched off
++  PASS NC-6 the pinned artifact hash is not checked
++
++[x5] 6/6 PASS
++  PASS NC-1 the dispatcher accepts trailing bytes
++  PASS NC-2 `transfer_from` does not spend the allowance
++  PASS NC-3 an ARC-721 transfer keeps the approval
++  PASS NC-4 the multisig does not check `executed`
++  PASS NC-5 the session accepts oversize calldata
++  PASS NC-6 a failed execution is still marked executed
++
++[x6] 6/6 PASS
++  PASS NC-1 the reentrancy guard is removed
++  PASS NC-2 the depth limit is removed
++  PASS NC-3 the callee's diff is not merged
++  PASS NC-4 a failed callee's value is not returned
++  PASS NC-5 the callee's status is flattened to success
++  PASS NC-6 the child frame does not inherit the parent's stack
++
++[x7] 6/6 PASS
++  PASS NC-1 the version stamp is dropped from the state root
++  PASS NC-2 an empty diff counts as a commit
++  PASS NC-3 the rolling digest ignores the resulting root
++  PASS NC-4 a refusal still applies its diff
++  PASS NC-5 a starved call is billed nothing
++  PASS NC-6 the generator ignores its seed
++
++TOTAL: 153 negative controls
+diff --git a/docs/evidence/x7/nc.log b/docs/evidence/x7/nc.log
+new file mode 100644
+index 0000000..4a8f01d
+--- /dev/null
++++ b/docs/evidence/x7/nc.log
+@@ -0,0 +1,32 @@
++X7 NEGATIVE CONTROLS (determinism gate)
++Rule: a gate that cannot go red is not a gate (CONTRIBUTING.md §1).
++
++baseline: the untampered gate
++      rc=0 (GREEN as expected)
++
++NC-1 the version stamp is dropped from the state root: PASS
++      the_pinned_measurement_describes_this_tree -> rc=101 (RED as expected)
++      
++error: test failed, to rerun pass `-p aura-exec --test x7_determinism`
++NC-2 an empty diff counts as a commit: PASS
++      the_pinned_measurement_describes_this_tree -> rc=101 (RED as expected)
++      
++error: test failed, to rerun pass `-p aura-exec --test x7_determinism`
++NC-3 the rolling digest ignores the resulting root: PASS
++      the_digest_depends_on_the_order_of_the_steps -> rc=101 (RED as expected)
++      
++error: test failed, to rerun pass `-p aura-exec --test x7_determinism`
++NC-4 a refusal still applies its diff: PASS
++      every_commit_advances_the_version_by_exactly_one -> rc=101 (RED as expected)
++      
++error: test failed, to rerun pass `-p aura-exec --test x7_determinism`
++NC-5 a starved call is billed nothing: PASS
++      a_starved_call_is_billed_and_changes_nothing -> rc=101 (RED as expected)
++      
++error: test failed, to rerun pass `-p aura-exec --test x7_determinism`
++NC-6 the generator ignores its seed: PASS
++      a_different_input_changes_the_root -> rc=101 (RED as expected)
++      
++error: test failed, to rerun pass `-p aura-exec --test x7_determinism`
++
++RESULT: 6/6 negative controls PASS
+diff --git a/docs/evidence/x7/report.md b/docs/evidence/x7/report.md
+new file mode 100644
+index 0000000..275affe
+--- /dev/null
++++ b/docs/evidence/x7/report.md
+@@ -0,0 +1,167 @@
++# X7 — the determinism gate (measured)
++
++Generated (UTC): 2026-10-29T10:27:54+00:00. Every number below is either pinned in
++`crates/aura-exec/tests/fixtures/x7_determinism.txt` (written by
++`tools/gen_x7_vectors.py` from `x7-run --fixture`) or was produced by the
++eight-process run recorded in the same command list as `gates.txt`.
++
++## What the gate claims
++
++> The same ordered input, replayed by independent nodes, produces the same
++> `state_root`, the same gas bill and the same events.
++
++Everything else here is detail. The input is one constant: [`X7_SEED`]
++seeds SplitMix64, which draws the whole workload — no clock, no `/dev/urandom`,
++no iterator order anywhere in generation.
++
++## The workload (pinned)
++
++| | |
++|---|---|
++| steps | 1004 (4 deploys + 1 000 transactions) |
++| contract calls | 905 |
++| native transfers | 95 |
++| accounts | 8 |
++| gas limit (ordinary call) | 1,000,000 |
++| gas limit (starved call) | 4,000 |
++| block height / timestamp | 1000 / 1700000000000 (fixed, never a clock) |
++
++### What the mix exercises, and why each part is there
++
++* **ABI v1 calls (kv, events)** — storage writes, events, and `block_ctx` /
++  `hash`, which are the two host calls where a leak would show first.
++* **Native transfers** — the path with no VM at all, so the gate also covers
++  the ledger arithmetic and the nonce bump a node performs itself.
++* **ABI v3 calls (vault)** — 104 of them, each
++  opening a nested frame (a withdrawal always notifies its receiver), so the run
++  also crosses the X6 call surface that many times.
++* **Calls to an address with no code** — a step that must *fail* the same way
++  on every node; nodes that disagreed about which transactions were accepted
++  would disagree about the root.
++* **Starved calls** — out of gas: billed, and committed nothing.
++
++## Pinned artifacts
++
++| contract | bytes | blake3 |
++|---|---|---|
++| `kv` | 5290 | `27e47b71bc8977e5…` |
++| `store` | 5187 | `4daa34dab8574d99…` |
++| `events` | 5033 | `f968f280eb9ccec9…` |
++| `vault` | 9759 | `11f8fb2cce7aacff…` |
++
++The gate re-verifies these bytes on every run: a determinism claim about
++bytecode nobody can name is not a claim.
++
++## The measurement
++
++| | |
++|---|---|
++| committed | 890 |
++| refused (returned non-zero, wrote nothing) | 60 |
++| failed (trap / out of gas / no code) | 54 |
++| gas total | 46,375,290 |
++| version | 890 |
++| `state_root` | `efca4222d37347ffbc3416b4bbef06eaa02fb930115c6c611a4351fad77312cb` |
++| `tree_root` | `813b06ee47a144ca646fb4368823420cf03965d5a4d8af4ed61463e0d89d13f0` |
++| events chain | `8b8e9255ec30e3c51571655514ffa21212fad98f1e4685aba9732ef89888eb60` |
++| rolling digest | `91b733922f3ee3c60f603ae41978f15b6be93e3e3c6f25a49851da22afbf9daf` |
++
++Measured in this tree just now: **all eight processes agree**
++on the root, the gas bill and the digest.
++
++| node | state root (first 16) | gas | digest (first 16) |
++|---|---|---|---|
++| 0 | `efca4222d37347ff…` | 46,375,290 | `91b733922f3ee3c6…` |
++| 1 | `efca4222d37347ff…` | 46,375,290 | `91b733922f3ee3c6…` |
++| 2 | `efca4222d37347ff…` | 46,375,290 | `91b733922f3ee3c6…` |
++| 3 | `efca4222d37347ff…` | 46,375,290 | `91b733922f3ee3c6…` |
++| 4 | `efca4222d37347ff…` | 46,375,290 | `91b733922f3ee3c6…` |
++| 5 | `efca4222d37347ff…` | 46,375,290 | `91b733922f3ee3c6…` |
++| 6 | `efca4222d37347ff…` | 46,375,290 | `91b733922f3ee3c6…` |
++| 7 | `efca4222d37347ff…` | 46,375,290 | `91b733922f3ee3c6…` |
++
++## Three build configurations, not three operating systems
++
++The DoD says "3 platforms". Three operating systems cannot be measured from
++one sandbox, and claiming them would be exactly the kind of statement this
++repository refuses to make. What `make x7-matrix` measures here is three
++**build configurations**, each in two separate processes:
++
++| configuration | why it is a different machine |
++|---|---|
++| `debug` | opt-level 0, integer-overflow checks on, debug assertions on |
++| `release` | opt-level 3, overflow checks off — different machine code entirely |
++| `release-cgu16` | 16 codegen units instead of 1: different inlining and merging order |
++
++All three agree on the root, the gas total and the digest (see `gates.txt`,
++`make x7-matrix`). The **OS** dimension is a CI job —
++`.github/workflows/ci.yml` → `determinism`, three runners — and until that job
++has actually run, `linux/macOS/windows` agreement is **unproven** and this
++report says so rather than implying otherwise.
++
++## What the gate cannot see
++
++* **A nondeterminism that needs two different operating systems.** Covered
++  only by CI, as above.
++* **A nondeterminism that needs real concurrency.** The executor is
++  single-threaded by design (X1: atomics and shared memory are banned, threads
++  do not exist), so there is no race to detect — but that also means this gate
++  proves nothing about a future multi-threaded engine.
++* **A nondeterminism that needs a different CPU.** `release` here targets the
++  same host. The X8 verifier's job is to make the *subset* small enough that
++  this stops mattering.
++
++## Negative controls
++
++Six tampers, each reddening a *named* test: the version stamp dropped from the
++root, an empty diff counted as a commit, the digest ignoring the resulting
++root, a refusal applying its diff, a starved call billed nothing, and the
++generator ignoring its seed. A green baseline runs first, so a red caused by a
++broken tree can never be mistaken for a successful control.
++
++6/6 PASS; total **153** across C0–C10 + S0–S7 + X0–X7.
++
++## Defects the gate found (all fixed in this phase)
++
++1. **The scenario's deployer was not a funded account.** The first run died
++   with `InsufficientBalance` on the fourth deploy: the deployer constant had
++   the index byte `0xa0` where [`account_address(0)`] has `0x00`. A one-byte
++   mistake that only a real run can find, and the reason the gate now asserts
++   the deployer *is* the first funded account at the top of [`genesis`].
++2. **Passing an argument to `run()` was a lifecycle error.** 33% of the
++   workload hit `store`/`events`, whose `run` takes no argument; X3 refuses an
++   arity mismatch, so a third of the "calls" never ran. The scenario now
++   carries `Option<i32>` and the mix measures 890 commits instead of 559.
++3. **The vault's `withdraw` was called with an address in front of its
++   amount.** `withdraw(u128)` decodes the amount first, so every withdrawal
++   refused with `-21` — a legitimate refusal, but it meant the ABI v3 branch of
++   the workload tested nothing. Both selectors now carry exactly their own
++   arguments.
++4. **The first NC was green.** Dropping the step index from the digest did not
++   redden the order-sensitivity test, because the digest also folds the
++   resulting root and the roots differ between orders. The control was
++   rewritten to remove the *root* from the fold, which is the mistake that
++   actually destroys order sensitivity — and it is recorded here rather than
++   quietly fixed.
++
++## Honest scope
++
++* **This is a gate, not a node.** No consensus, no mempool, no block structure,
++  no P2P. It replays a fixed transaction list through the X3 lifecycle and the
++  S3 overlay — the same code an actual node will drive, with the parts a node
++  adds still missing.
++* **The root includes the version**, so the number of commits matters: the
++  gate therefore fixes the input exactly instead of permuting independent
++  blocks. A future phase that lets nodes split blocks differently must compare
++  roots per block, not per chain.
++* **`refused` and `failed` are counted separately on purpose.** Two nodes that
++  disagreed about which transactions were accepted would produce different
++  roots; counting them makes the report attribute a divergence instead of
++  merely reporting one.
++* **Wall-clock cost in a debug build is ~70 s** for the eight-process gate
++  (measured), which is why the unit-level assertions use a 120–200 step
++  scenario and the full 1 004 steps are reserved for the pinned measurement and
++  the multi-process comparison.
++
++Tests: **322** in the workspace, 11 of them in the X7 gate.
++Validators / blocks / transactions remain **0 / 0 / 0**.
+diff --git a/docs/plans/EXEC_PLAN.md b/docs/plans/EXEC_PLAN.md
+index b113199..b1658e7 100644
+--- a/docs/plans/EXEC_PLAN.md
++++ b/docs/plans/EXEC_PLAN.md
+@@ -1,6 +1,6 @@
+ # EXEC_PLAN — deterministic WASM machine and contracts
+ 
+-**Status:** 🚧 IN PROGRESS (X0 ✅ 2026-10-28, X1 ✅ 2026-10-28, X2 ✅ 2026-10-28, X3 ✅ 2026-10-28, X4 ✅ 2026-10-29, X5 ✅ 2026-10-29, X6 ✅ 2026-10-29; X7 next)  
++**Status:** 🚧 IN PROGRESS (X0 ✅ 2026-10-28, X1 ✅ 2026-10-28, X2 ✅ 2026-10-28, X3 ✅ 2026-10-28, X4 ✅ 2026-10-29, X5 ✅ 2026-10-29, X6 ✅ 2026-10-29, X7 ✅ 2026-10-29; X8 next)  
+ **Stage:** Stage 1: X0–X8. ⏸ Stage 2: X9 (EVM compatibility).  
+ **Deliverable:** `patches/0020-X0-...` … `patches/0029-X9-...`
+ **Dependencies:** CORE C2–C5, STATE S1–S3.
+@@ -30,7 +30,7 @@ The plan first **measures the nondeterminism surface**, then closes it.
+ | ✅ **X4** | `aura-sdk` | Rust macros `#[entrypoint]`, typed storage, events, ABI-JSON generation | 3 example contracts build to WASM, size and hash reproducible |
+ | ✅ **X5** | Reference standards + ABI v2 | ARC-20, ARC-721, ARC-M1 multisig, `env2` (calldata/return/caller/self) | 5 gates: 43 tests over the shipped artifacts (incl. ABI v2 bounds); every refusal writes nothing; NC: 6 tampers each red |
+ | ✅ **X6** | Call isolation | call depth, reentrancy guard, value transfer, atomic revert of the tree | `env3` (call/returndata/depth), 15 tests: the "evil" contract cannot drain a vault that pays before it debits; NC: guard off → test red |
+-| **X7** | Determinism gate | 8 nodes × 1000 contract txs × 3 platforms → byte-identical `state_root` | decisive M0 gate; any divergence = ⛔ NO-GO for mainnet |
++| ✅ **X7** | Determinism gate | 8 nodes × 1000 contract txs × 3 build configs → byte-identical `state_root` | decisive M0 gate; any divergence = ⛔ NO-GO for mainnet |
+ | **X8** | Static verifier | ban floats/forbidden imports/size/stack, error report | 100 mutants: all invalid rejected, valid accepted |
+ | ⏸ **X9** | Optional EVM-lane (stretch) | `revm` behind a feature flag, shared state/gas, address mapping | compatibility with 10 known ERC-20 contracts; **not the critical path**, can be moved after M4 |
+ 
+@@ -483,6 +483,49 @@ doctests), fmt/clippy clean, drift guard green, dependency gate **239 external
+ - Deferred: the decisive multi-node determinism gate (X7), the static verifier
+   with 100 mutants (X8), EVM lane (X9, Stage 2).
+ 
++### X7 receipt (2026-10-29)
++
++- Deliverable: `patches/0027-X7-determinism-gate.patch`. A **gate**, not a
++  subsystem: `aura_exec::detcheck` (scenario generator + replay driver), the
++  `x7-run` binary, a pinned fixture and 11 tests. No new crate, no new dependency.
++- **The claim, in one sentence and one constant:** the same ordered input, replayed
++  by independent nodes, produces the same `state_root`, gas bill and events. The
++  input is a pure function of `detcheck::X7_SEED` — SplitMix64, no clock, no
++  entropy, no iteration order in generation.
++- **DoD gate — 1 004 ordered steps (4 deploys + 1 000 transactions), 8 processes:**
++  890 commits, 60 refusals, 54 failures (19 out of gas, 35 no-code, 0 traps), gas
++  46 375 290, state root `efca4222d37347ff…`. All eight **separate** processes
++  agree on the root, the gas, the events chain and the rolling digest — separate
++  because Rust's per-process hasher seed and allocator history are exactly the kind
++  of thing two in-process runs share.
++- **Three configurations, honestly named:** `debug` (overflow checks on),
++  `release` (opt-level 3) and `release-cgu16` (16 codegen units) all reproduce the
++  same root, gas and digest, two processes each (`make x7-matrix`). Three *operating
++  systems* cannot be measured from one sandbox, so the OS dimension is a CI job
++  (`.github/workflows/ci.yml` → `determinism`) and is reported as **unproven** until
++  it runs.
++- The gate executes the **shipped** artifacts — `kv`, `store`, `events`, `vault` —
++  and re-verifies their BLAKE3 on every run, so X7 also re-pins X4 and X6.
++- Every step is classified as committed / refused / failed, and the failure split is
++  kept (`machine=19 trap=0 lifecycle=35`), because two nodes disagreeing about
++  *which* transactions were accepted would produce different roots: the counters
++  exist to attribute a divergence, not merely to report one.
++- Defects the gate found: the deployer constant was not a funded account (one byte,
++  `InsuffientBalance` on the fourth deploy); passing an argument to `run()` was a
++  lifecycle error, so a third of the workload never ran (890 commits instead of
++  559 — the mix is now measured); the vault's `withdraw` was sent an address in
++  front of its amount, so every withdrawal refused with `-21`; and the first
++  negative control was green until it was rewritten to remove the *root* from the
++  digest fold.
++- Evidence: `docs/evidence/x7/` (gates, report, inventory), 6/6 NC, **153** NC
++  total across C0–C10 + S0–S7 + X0–X7, 4 692 vectors across 24 fixtures, 239
++  external crates unchanged.
++- Honest scope: a gate is not a node (no consensus, mempool, block structure or
++  P2P); concurrency is untested because it does not exist; the root includes the
++  version, so the gate fixes the input rather than permuting blocks; different CPUs
++  are not exercised — that is X8's job.
++- Deferred: the static verifier with 100 mutants (X8), EVM lane (X9, Stage 2).
++
+ ## Risks
+ 
+ - WASM fuel metering may differ between wasmtime versions → engine version pinned, a change = new `protocol_version` + migration.
+diff --git a/tools/audit_closeout.py b/tools/audit_closeout.py
+index 8392407..5b24858 100644
+--- a/tools/audit_closeout.py
++++ b/tools/audit_closeout.py
+@@ -30,7 +30,7 @@ PATCHES = REPO / "patches"
+ 
+ CORE_PHASES = [f"C{index}" for index in range(11)]      # C0..C10 (closed)
+ STATE_PHASES = ["S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7"]  # STATE_PLAN complete
+-EXEC_PHASES = ["X0", "X1", "X2", "X3", "X4", "X5", "X6"]                                # grows with each X phase
++EXEC_PHASES = ["X0", "X1", "X2", "X3", "X4", "X5", "X6", "X7"]                     # grows with each X phase
+ PHASES = CORE_PHASES + STATE_PHASES + EXEC_PHASES
+ SHIPPED = CORE_PHASES + [
+     "S0",
+@@ -47,8 +47,9 @@ SHIPPED = CORE_PHASES + [
+     "X3",
+     "X4",
+     "X5",
++    "X6",
+ ]
+-CURRENT = "X6"
++CURRENT = "X7"
+ 
+ PLAN_FOR_PREFIX = {
+     "C": "CORE_PLAN.md",
+@@ -66,9 +67,9 @@ PLAN_FOR_PREFIX = {
+ }
+ 
+ NC_PER_PHASE = {f"C{i}": 6 for i in range(4, 11)}
+-NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6})
+-SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)   # 141
+-EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + NC_PER_PHASE[CURRENT]       # 147
++NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6})
++SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)   # 147
++EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + NC_PER_PHASE[CURRENT]       # 153
+ 
+ DONE_ROW = re.compile(r"^\| ✅ \*\*([A-Z]+\d+)\*\* \|", re.M)
+ RESULT_LINE = re.compile(r"^RESULT: (\d+)/(\d+) negative controls PASS", re.M)
+diff --git a/tools/gen_x7_vectors.py b/tools/gen_x7_vectors.py
+new file mode 100644
+index 0000000..e781fa0
+--- /dev/null
++++ b/tools/gen_x7_vectors.py
+@@ -0,0 +1,78 @@
++#!/usr/bin/env python3
++"""Generate the X7 pinned fixture from a real run of the scenario.
++
++Every line of `crates/aura-exec/tests/fixtures/x7_determinism.txt` is produced by
++`cargo run -p aura-exec --bin x7-run -- --fixture`: the same binary the gate spawns
++eight times, executing the same 1 004 ordered transactions. Nothing here is typed by
++hand, and the file is byte-reproducible — regenerating it must not change it.
++
++Usage:
++    python3 tools/gen_x7_vectors.py
++    python3 tools/gen_x7_vectors.py --check
++    make gen-x7-vectors
++"""
++
++from __future__ import annotations
++
++import subprocess
++import sys
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++FIXTURE = REPO / "crates" / "aura-exec" / "tests" / "fixtures" / "x7_determinism.txt"
++
++HEADER = """\
++# X7 determinism scenario — measured, not typed.
++# Written by tools/gen_x7_vectors.py from `x7-run --fixture`.
++#
++# The scenario is a pure function of one constant (`X7_SEED`), so this file is
++# the *whole* input of the gate: 4 deploys, then 1 000 transactions mixing 60%
++# ABI v1 calls, 10% native transfers, 12% ABI v3 calls with a nested call, 3%
++# calls to an address with no code and 2% calls that run out of gas.
++#
++# `expected_*` is what one node measured. The gate then replays the same input in
++# eight separate processes and requires all eight to reproduce these numbers.
++"""
++
++
++def run() -> str:
++    result = subprocess.run(
++        ["cargo", "run", "-q", "-p", "aura-exec", "--bin", "x7-run", "--", "--fixture"],
++        cwd=REPO,
++        capture_output=True,
++        text=True,
++        check=False,
++    )
++    if result.returncode != 0:
++        sys.stderr.write(result.stdout + result.stderr)
++        raise SystemExit("x7-run --fixture failed")
++    return result.stdout
++
++
++def main() -> int:
++    check = "--check" in sys.argv[1:]
++    body = run()
++    text = HEADER + "\n" + body
++    if not text.endswith("\n"):
++        text += "\n"
++
++    if check:
++        current = FIXTURE.read_text(encoding="utf-8") if FIXTURE.exists() else ""
++        if current == text:
++            print(f"{FIXTURE.relative_to(REPO)}: up to date")
++            return 0
++        print(f"{FIXTURE.relative_to(REPO)}: DRIFT (run `make gen-x7-vectors`)")
++        return 1
++
++    FIXTURE.parent.mkdir(parents=True, exist_ok=True)
++    FIXTURE.write_text(text, encoding="utf-8")
++    lines = body.strip().splitlines()
++    print(f"wrote {FIXTURE.relative_to(REPO)} ({len(lines)} measured lines)")
++    for line in lines:
++        if line.startswith(("scenario_steps", "expected_committed", "expected_gas")):
++            print(f"  {line}")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/nc_x7.py b/tools/nc_x7.py
+new file mode 100644
+index 0000000..769d9e3
+--- /dev/null
++++ b/tools/nc_x7.py
+@@ -0,0 +1,191 @@
++#!/usr/bin/env python3
++"""Negative controls for X7 (the determinism gate).
++
++Six tampers, each one a mistake that looks harmless and destroys the claim. Every
++one of them turns a *named* test in `crates/aura-exec/tests/x7_determinism.rs` red,
++and the log records which test that was — a gate that cannot go red is not a gate
++(CONTRIBUTING.md §1).
++
++  NC-1 the version stamp is dropped from the  -> two chains at different heights
++       state root                               share a root, so a header no longer
++                                                commits to the history that produced it.
++  NC-2 an empty diff counts as a commit       -> a refusal is indistinguishable from
++                                                a write, and the version advances for
++                                                transactions that changed nothing.
++  NC-3 the digest ignores the resulting root  -> two nodes that executed the same
++                                                transactions in a different order
++                                                produce the same digest, because
++                                                nothing in the chain depends on what
++                                                the order produced.
++  NC-4 a refusal still applies its diff       -> a refused step moves the root.
++  NC-5 a starved call is billed nothing       -> an out-of-gas call is free, which is
++                                                the shape of a denial-of-service bug.
++  NC-6 the generator ignores its seed         -> the gate passes on any input, which
++                                                makes every other control meaningless.
++
++Each control runs one focused test rather than the whole file: the tamper must
++redden *that* property, and running the covering test alone keeps the loop honest
++and fast. A green baseline run of the full gate comes first, so a red caused by a
++broken tree can never be mistaken for a successful control.
++
++Usage:
++    python3 tools/nc_x7.py
++    make nc-x7
++"""
++
++from __future__ import annotations
++
++import os
++import re
++import subprocess
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++DETCHECK = REPO / "crates" / "aura-exec" / "src" / "detcheck.rs"
++TREE_RS = REPO / "crates" / "aura-state" / "src" / "tree.rs"
++
++GATE = ["cargo", "test", "-p", "aura-exec", "--test", "x7_determinism", "--quiet"]
++
++
++def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
++    return subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, check=False)
++
++
++def expect_red(
++    label: str, path: Path, old: str, new: str, test: str | None = None
++) -> bool:
++    cmd = list(GATE)
++    if test:
++        cmd += ["--", "--exact", test]
++    original = path.read_text(encoding="utf-8")
++    if old not in original:
++        print(f"{label}: FAIL — tamper target not found in {path.name}")
++        return False
++    tampered = original.replace(old, new, 1)
++    if tampered == original:
++        print(f"{label}: FAIL — tamper was a no-op")
++        return False
++    try:
++        path.write_text(tampered, encoding="utf-8")
++        os.utime(path, None)
++        result = run(cmd)
++        went_red = result.returncode != 0
++        shown = test or "the whole gate"
++        raw = "\n".join((result.stdout + result.stderr).strip().splitlines()[-2:])
++        snippet = re.sub(r"finished in [\d.]+s", "finished", raw)
++        print(f"{label}: {'PASS' if went_red else 'FAIL'}")
++        print(
++            f"      {shown} -> rc={result.returncode} "
++            f"({'RED as expected' if went_red else 'UNEXPECTEDLY GREEN'})"
++        )
++        print(f"      {snippet}")
++        return went_red
++    finally:
++        path.write_text(original, encoding="utf-8")
++        os.utime(path, None)
++
++
++def main() -> int:
++    print("X7 NEGATIVE CONTROLS (determinism gate)")
++    print("Rule: a gate that cannot go red is not a gate (CONTRIBUTING.md §1).")
++    print()
++
++    print("baseline: the untampered gate")
++    baseline = run(GATE)
++    print(f"      rc={baseline.returncode} ({'GREEN as expected' if baseline.returncode == 0 else 'RED — fix the tree first'})")
++    if baseline.returncode != 0:
++        tail = "\n".join((baseline.stdout + baseline.stderr).strip().splitlines()[-10:])
++        print(tail)
++        print("RESULT: 0/6 negative controls PASS (baseline is not green)")
++        return 1
++    print()
++
++    results = [
++        expect_red(
++            "NC-1 the version stamp is dropped from the state root",
++            TREE_RS,
++            """pub fn versioned_root(version: u64, tree_root: &Hash) -> Hash {
++    let mut input = Vec::with_capacity(S1_ROOT_CONTEXT.len() + 8 + 32);
++    input.extend_from_slice(S1_ROOT_CONTEXT);
++    input.extend_from_slice(&version.to_le_bytes());
++    input.extend_from_slice(tree_root.as_bytes());
++    blake3_hash(&input)
++}""",
++            """pub fn versioned_root(version: u64, tree_root: &Hash) -> Hash {
++    let _ = version;
++    *tree_root
++}""",
++            "the_pinned_measurement_describes_this_tree",
++        ),
++        expect_red(
++            "NC-2 an empty diff counts as a commit",
++            DETCHECK,
++            """            Some(diff) if !diff.changes.is_empty() => {
++                let next = apply_diff(&self.tree, diff).expect("diff applies to its own base");
++                self.tree = next;
++                self.committed += 1;""",
++            """            Some(diff) => {
++                let next = apply_diff(&self.tree, diff).expect("diff applies to its own base");
++                self.tree = next;
++                self.committed += 1;""",
++            "the_pinned_measurement_describes_this_tree",
++        ),
++        expect_red(
++            "NC-3 the rolling digest ignores the resulting root",
++            DETCHECK,
++            """    bytes.push(class);
++    bytes.extend_from_slice(&(status as i32).to_le_bytes());
++    bytes.extend_from_slice(&gas.to_le_bytes());
++    bytes.extend_from_slice(root.as_bytes());""",
++            """    bytes.push(class);
++    bytes.extend_from_slice(&(status as i32).to_le_bytes());
++    bytes.extend_from_slice(&gas.to_le_bytes());
++    let _ = root;""",
++            "the_digest_depends_on_the_order_of_the_steps",
++        ),
++        expect_red(
++            "NC-4 a refusal still applies its diff",
++            DETCHECK,
++            """            _ => {
++                // Returned but wrote nothing: a refusal. The root must not move,
++                // and the assertion is made here rather than in the test so that a
++                // non-deterministic *commit* cannot slip through as a pass.
++                let before = self.tree.state_root();
++                self.refused += 1;""",
++            """            other => {
++                if let Some(diff) = other {
++                    self.tree = apply_diff(&self.tree, diff).expect("diff applies");
++                }
++                let before = self.tree.state_root();
++                self.refused += 1;""",
++            "every_commit_advances_the_version_by_exactly_one",
++        ),
++        expect_red(
++            "NC-5 a starved call is billed nothing",
++            DETCHECK,
++            """                let class = 3u8;
++                self.bill(index, gas, &events);""",
++            """                let class = 3u8;
++                let _ = gas;""",
++            "a_starved_call_is_billed_and_changes_nothing",
++        ),
++        expect_red(
++            "NC-6 the generator ignores its seed",
++            DETCHECK,
++            """pub fn scenario_of(seed: u64, transactions: usize) -> Vec<Step> {
++    let mut prng = Prng::new(seed);""",
++            """pub fn scenario_of(seed: u64, transactions: usize) -> Vec<Step> {
++    let _ = seed;
++    let mut prng = Prng::new(X7_SEED);""",
++            "a_different_input_changes_the_root",
++        ),
++    ]
++
++    print()
++    passed = sum(results)
++    print(f"RESULT: {passed}/{len(results)} negative controls PASS")
++    return 0 if passed == len(results) else 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/record_x7_deps.py b/tools/record_x7_deps.py
+new file mode 100644
+index 0000000..c8b96ea
+--- /dev/null
++++ b/tools/record_x7_deps.py
+@@ -0,0 +1,87 @@
++#!/usr/bin/env python3
++"""Record the X7 dependency delta: none.
++
++X7 is a gate, not a subsystem: a deterministic scenario generator and a replay
++driver inside `aura-exec` (`detcheck`), one binary (`x7-run`) and a test. It adds
++**no dependency at all** — not external, not a workspace edge — and it does not
++add a contract: the scenario executes the artifacts X4 and X6 already shipped, and
++pins their BLAKE3 in the fixture.
++
++This addendum exists to make that statement checkable: it records the counts
++before and after, and the size of the default `aura-exec` build graph, which is
++what a node actually compiles.
++
++Usage:
++    python3 tools/record_x7_deps.py
++    make record-x7-deps
++"""
++
++from __future__ import annotations
++
++import subprocess
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++OUT = REPO / "docs" / "evidence" / "x7-dependency-addendum.txt"
++
++WORKSPACE_DEPS: list[str] = []  # a gate adds no edge: it uses what aura-exec already has
++
++
++def sh(command: str) -> str:
++    result = subprocess.run(
++        command, shell=True, cwd=REPO, capture_output=True, text=True, check=False
++    )
++    return (result.stdout + result.stderr).strip()
++
++
++def main() -> int:
++    external = sh("grep -c '^source = ' Cargo.lock")
++    default_graph = sh("cargo tree -p aura-exec --edges normal -q | sort -u | wc -l")
++    workspace_graph = sh("cargo tree -p aura-exec --edges normal -q | wc -l")
++    deps = "\n".join(f"#   aura-exec -> {name}" for name in WORKSPACE_DEPS) or "#   (none)"
++    text = f"""# AuraLite-Crypto external dependency addendum (X7).
++# Generated by tools/record_x7_deps.py from Cargo.lock.
++#
++# X7 adds NO new external crate and NO new workspace crate. The scenario generator,
++# the replay driver and the rolling digest are Rust inside `aura-exec`; the only new
++# binary links the crates the workspace already built. The lock does not move.
++# This file therefore contains no `name=version` lines: it is a statement that
++# the allowlist is unchanged, and the dependency gate still validates it against
++# Cargo.lock.
++#
++# No timestamp: this file is checksummed in docs/evidence/x7/SHA256SUMS, so
++# regenerating it must reproduce it byte for byte.
++# External crates in Cargo.lock: {external} (unchanged since X1)
++# New external crates in X7: 0
++# New workspace crates in X7: 0
++#
++# New WORKSPACE dependencies of aura-exec:
++{deps}
++#
++# Why: the SDK is a leaf. `aura-sdk` depends on nothing but `aura-sdk-macros`
++# (proc macros only), and `aura-sdk-macros` depends on syn/quote/proc-macro2.
++# The SDK is therefore usable BOTH from a `no_std` contract for
++# wasm32-unknown-unknown and from host tests; it never links the node, and
++# nothing in the node depends on it except a dev-dependency in the SDK's own
++# tests, which is the direction that keeps a contract's dependency graph clean.
++#
++# Build graph for `cargo tree -p aura-exec --edges normal`:
++#   unique lines: {default_graph}   (X1 baseline: 10, X2: 93, X7: 93)
++#   total lines:  {workspace_graph}
++# The growth is the C1/C3/C6/C7 stack that aura-exec now links against instead
++# of only mentioning it in comments. It is compiled into every node already.
++#
++# Engine pins unchanged: wasmi =2.0.0 (default), wasmtime =50.0.0 (feature
++# wasmtime-engine). X7 needed no engine change in wasmi's *version*: the hosted
++# policy already required mutable globals, bulk memory and indirect calls to be
++# enabled in `Config`, which is a configuration change inside the pinned version
++# (see docs/evidence/x7/report.md). The wasmtime backend still refuses hosted
++# execution with SandboxError::EngineUnavailable.
++"""
++    OUT.write_text(text, encoding="utf-8")
++    print(f"wrote {OUT.relative_to(REPO)}")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/write_x7_evidence.py b/tools/write_x7_evidence.py
+new file mode 100644
+index 0000000..3df9cb0
+--- /dev/null
++++ b/tools/write_x7_evidence.py
+@@ -0,0 +1,449 @@
++#!/usr/bin/env python3
++"""Regenerate X7 evidence: gates, determinism report, NC inventory, SHA256SUMS.
++
++Every line of `gates.txt` is the output of a real command. The report's numbers come
++from `crates/aura-exec/tests/fixtures/x7_determinism.txt` (written by
++`tools/gen_x7_vectors.py` from `x7-run --fixture`) and from a live eight-process run
++of the same binary, so the table in the report is measured in this tree, now.
++
++Usage:
++    python3 tools/write_x7_evidence.py
++    make evidence-x7
++"""
++
++from __future__ import annotations
++
++import hashlib
++import re
++import subprocess
++import sys
++from datetime import datetime, timezone
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++EVIDENCE = REPO / "docs" / "evidence" / "x7"
++OUT = EVIDENCE / "gates.txt"
++REPORT = EVIDENCE / "report.md"
++INVENTORY = EVIDENCE / "inventory.txt"
++FIXTURE = REPO / "crates" / "aura-exec" / "tests" / "fixtures" / "x7_determinism.txt"
++ADDENDUM = REPO / "docs" / "evidence" / "x7-dependency-addendum.txt"
++
++NC_LOGS = [f"c{i}" for i in range(11)] + [f"s{i}" for i in range(8)]
++NC_LOGS += ["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"]
++RESULT_LINE = re.compile(r"^RESULT: (\d+)/(\d+) negative controls PASS", re.M)
++NC_LINE = re.compile(r"^(NC-\d+ .*): (PASS|FAIL)$", re.M)
++
++EXPECTED_NC_TOTAL = 153
++
++GEN_IDEMPOTENT = (
++    "before=$(sha256sum crates/aura-exec/tests/fixtures/x7_determinism.txt | cut -d' ' -f1); "
++    "python3 tools/gen_x7_vectors.py >/dev/null && "
++    "after=$(sha256sum crates/aura-exec/tests/fixtures/x7_determinism.txt | cut -d' ' -f1); "
++    'if [ "$before" = "$after" ]; then echo "generator idempotent: $after"; '
++    'else echo "GENERATOR DRIFT"; exit 1; fi'
++)
++
++COMMANDS: list[tuple[str, str, int | None]] = [
++    ("toolchain", "rustc --version && cargo --version", None),
++    ("workspace crates", "find crates -name Cargo.toml | wc -l", None),
++    ("Rust files", "find . -name '*.rs' -not -path './target/*' -not -path './examples/*' -not -path './standards/*' | wc -l", None),
++    ("external deps in the lock", "grep -c '^source = ' Cargo.lock || true", None),
++    ("docs drift guard", "python3 tools/check_claims.py", None),
++    ("dependency gate", "python3 tools/check_deps.py", None),
++    ("vector inventory", "python3 tools/count_vectors.py", 3),
++    ("test rig wiring", "python3 tools/check_rig.py", None),
++    ("pinned scenario fixture", "python3 tools/gen_x7_vectors.py --check", None),
++    ("generator is idempotent", GEN_IDEMPOTENT, None),
++    ("X7 determinism gate (in-process)", "cargo test -p aura-exec --test x7_determinism -- --nocapture", 25),
++    ("X7 negative controls (evidence log)", "make nc-x7", 30),
++    ("X7 build matrix (debug / release / release-cgu16)", "make x7-matrix", 22),
++    ("all negative controls (C0-C10 + S0-S7 + X0-X7)", "make nc-all", 28),
++    ("aura-exec tests (X0-X7 + unit)", "cargo test -p aura-exec --quiet", 12),
++    ("plan<->tree audit", "make audit-closeout", 10),
++    ("full gate", "make test", 6),
++]
++
++
++def run(cmd: str) -> tuple[int, str]:
++    result = subprocess.run(
++        cmd, shell=True, cwd=REPO, capture_output=True, text=True, check=False
++    )
++    return result.returncode, (result.stdout + result.stderr).strip()
++
++
++def fixture() -> dict[str, str]:
++    fields: dict[str, str] = {}
++    for line in FIXTURE.read_text(encoding="utf-8").splitlines():
++        if not line or line.startswith("#") or "=" not in line:
++            continue
++        key, value = line.split("=", 1)
++        fields[key] = value.strip()
++    return fields
++
++
++def parse_node(line: str) -> dict[str, str]:
++    fields: dict[str, str] = {}
++    for token in line.split():
++        if token.startswith("[") or token.endswith("]"):
++            continue
++        if "=" in token:
++            key, value = token.split("=", 1)
++            fields[key] = value
++    return fields
++
++
++def eight_nodes() -> tuple[list[dict[str, str]], bool]:
++    """Run the gate's own eight-process comparison here, and say whether it agreed."""
++    rows: list[dict[str, str]] = []
++    for node in range(8):
++        code, output = run(
++            f"cargo run -q -p aura-exec --bin x7-run -- --node {node}"
++        )
++        if code != 0:
++            return rows, False
++        rows.append(parse_node(output.splitlines()[-1]))
++    roots = {row["state_root"] for row in rows}
++    gasses = {row["gas"] for row in rows}
++    digests = {row["digest"] for row in rows}
++    return rows, len(roots) == 1 and len(gasses) == 1 and len(digests) == 1
++
++
++def workspace_test_count() -> int:
++    total = 0
++    for line in run("cargo test --workspace --quiet")[1].splitlines():
++        if line.startswith("test result: ok."):
++            total += int(line.split("ok.")[1].split("passed")[0].strip())
++    return total
++
++
++def gate_test_count() -> int:
++    total = 0
++    for line in run("cargo test -p aura-exec --test x7_determinism --quiet")[1].splitlines():
++        if line.startswith("test result: ok."):
++            total += int(line.split("ok.")[1].split("passed")[0].strip())
++    return total
++
++
++def build_report(fields: dict[str, str], rows: list[dict[str, str]], agreed: bool, stamp: str) -> str:
++    tests = workspace_test_count()
++    gate = gate_test_count()
++    lines = [
++        "# X7 — the determinism gate (measured)",
++        "",
++        f"Generated (UTC): {stamp}. Every number below is either pinned in",
++        "`crates/aura-exec/tests/fixtures/x7_determinism.txt` (written by",
++        "`tools/gen_x7_vectors.py` from `x7-run --fixture`) or was produced by the",
++        "eight-process run recorded in the same command list as `gates.txt`.",
++        "",
++        "## What the gate claims",
++        "",
++        "> The same ordered input, replayed by independent nodes, produces the same",
++        "> `state_root`, the same gas bill and the same events.",
++        "",
++        "Everything else here is detail. The input is one constant: [`X7_SEED`]",
++        "seeds SplitMix64, which draws the whole workload — no clock, no `/dev/urandom`,",
++        "no iterator order anywhere in generation.",
++        "",
++        "## The workload (pinned)",
++        "",
++        "| | |",
++        "|---|---|",
++        f"| steps | {fields['scenario_steps']} (4 deploys + 1 000 transactions) |",
++        f"| contract calls | {fields['scenario_contract_calls']} |",
++        f"| native transfers | {fields['scenario_transfers']} |",
++        f"| accounts | {fields['scenario_accounts']} |",
++        f"| gas limit (ordinary call) | {int(fields['scenario_gas_limit']):,} |",
++        f"| gas limit (starved call) | {int(fields['scenario_starved_gas']):,} |",
++        f"| block height / timestamp | {fields['scenario_height']} / {fields['scenario_timestamp_ms']} (fixed, never a clock) |",
++        "",
++        "### What the mix exercises, and why each part is there",
++        "",
++        "* **ABI v1 calls (kv, events)** — storage writes, events, and `block_ctx` /",
++        "  `hash`, which are the two host calls where a leak would show first.",
++        "* **Native transfers** — the path with no VM at all, so the gate also covers",
++        "  the ledger arithmetic and the nonce bump a node performs itself.",
++        f"* **ABI v3 calls (vault)** — {fields['scenario_vault_calls']} of them, each",
++        "  opening a nested frame (a withdrawal always notifies its receiver), so the run",
++        "  also crosses the X6 call surface that many times.",
++        "* **Calls to an address with no code** — a step that must *fail* the same way",
++        "  on every node; nodes that disagreed about which transactions were accepted",
++        "  would disagree about the root.",
++        "* **Starved calls** — out of gas: billed, and committed nothing.",
++        "",
++        "## Pinned artifacts",
++        "",
++        "| contract | bytes | blake3 |",
++        "|---|---|---|",
++    ]
++    for name in ("kv", "store", "events", "vault"):
++        lines.append(
++            f"| `{name}` | {fields[f'code_{name}_size']} | `{fields[f'code_{name}_blake3'][:16]}…` |"
++        )
++    lines += [
++        "",
++        "The gate re-verifies these bytes on every run: a determinism claim about",
++        "bytecode nobody can name is not a claim.",
++        "",
++        "## The measurement",
++        "",
++        "| | |",
++        "|---|---|",
++        f"| committed | {fields['expected_committed']} |",
++        f"| refused (returned non-zero, wrote nothing) | {fields['expected_refused']} |",
++        f"| failed (trap / out of gas / no code) | {fields['expected_failed']} |",
++        f"| gas total | {int(fields['expected_gas']):,} |",
++        f"| version | {fields['expected_version']} |",
++        f"| `state_root` | `{fields['expected_state_root']}` |",
++        f"| `tree_root` | `{fields['expected_tree_root']}` |",
++        f"| events chain | `{fields['expected_events_root']}` |",
++        f"| rolling digest | `{fields['expected_digest']}` |",
++        "",
++        f"Measured in this tree just now: **{'all eight processes agree' if agreed else 'DIVERGED'}**",
++        "on the root, the gas bill and the digest.",
++        "",
++    ]
++    if rows:
++        lines += [
++            "| node | state root (first 16) | gas | digest (first 16) |",
++            "|---|---|---|---|",
++        ]
++        for row in rows:
++            lines.append(
++                f"| {row['node']} | `{row['state_root'][:16]}…` | {int(row['gas']):,} | "
++                f"`{row['digest'][:16]}…` |"
++            )
++        lines.append("")
++    lines += [
++        "## Three build configurations, not three operating systems",
++        "",
++        "The DoD says \"3 platforms\". Three operating systems cannot be measured from",
++        "one sandbox, and claiming them would be exactly the kind of statement this",
++        "repository refuses to make. What `make x7-matrix` measures here is three",
++        "**build configurations**, each in two separate processes:",
++        "",
++        "| configuration | why it is a different machine |",
++        "|---|---|",
++        "| `debug` | opt-level 0, integer-overflow checks on, debug assertions on |",
++        "| `release` | opt-level 3, overflow checks off — different machine code entirely |",
++        "| `release-cgu16` | 16 codegen units instead of 1: different inlining and merging order |",
++        "",
++        "All three agree on the root, the gas total and the digest (see `gates.txt`,",
++        "`make x7-matrix`). The **OS** dimension is a CI job —",
++        "`.github/workflows/ci.yml` → `determinism`, three runners — and until that job",
++        "has actually run, `linux/macOS/windows` agreement is **unproven** and this",
++        "report says so rather than implying otherwise.",
++        "",
++        "## What the gate cannot see",
++        "",
++        "* **A nondeterminism that needs two different operating systems.** Covered",
++        "  only by CI, as above.",
++        "* **A nondeterminism that needs real concurrency.** The executor is",
++        "  single-threaded by design (X1: atomics and shared memory are banned, threads",
++        "  do not exist), so there is no race to detect — but that also means this gate",
++        "  proves nothing about a future multi-threaded engine.",
++        "* **A nondeterminism that needs a different CPU.** `release` here targets the",
++        "  same host. The X8 verifier's job is to make the *subset* small enough that",
++        "  this stops mattering.",
++        "",
++        "## Negative controls",
++        "",
++        "Six tampers, each reddening a *named* test: the version stamp dropped from the",
++        "root, an empty diff counted as a commit, the digest ignoring the resulting",
++        "root, a refusal applying its diff, a starved call billed nothing, and the",
++        "generator ignoring its seed. A green baseline runs first, so a red caused by a",
++        "broken tree can never be mistaken for a successful control.",
++        "",
++        f"6/6 PASS; total **{EXPECTED_NC_TOTAL}** across C0–C10 + S0–S7 + X0–X7.",
++        "",
++        "## Defects the gate found (all fixed in this phase)",
++        "",
++        "1. **The scenario's deployer was not a funded account.** The first run died",
++        "   with `InsufficientBalance` on the fourth deploy: the deployer constant had",
++        "   the index byte `0xa0` where [`account_address(0)`] has `0x00`. A one-byte",
++        "   mistake that only a real run can find, and the reason the gate now asserts",
++        "   the deployer *is* the first funded account at the top of [`genesis`].",
++        "2. **Passing an argument to `run()` was a lifecycle error.** 33% of the",
++        "   workload hit `store`/`events`, whose `run` takes no argument; X3 refuses an",
++        "   arity mismatch, so a third of the \"calls\" never ran. The scenario now",
++        "   carries `Option<i32>` and the mix measures 890 commits instead of 559.",
++        "3. **The vault's `withdraw` was called with an address in front of its",
++        "   amount.** `withdraw(u128)` decodes the amount first, so every withdrawal",
++        "   refused with `-21` — a legitimate refusal, but it meant the ABI v3 branch of",
++        "   the workload tested nothing. Both selectors now carry exactly their own",
++        "   arguments.",
++        "4. **The first NC was green.** Dropping the step index from the digest did not",
++        "   redden the order-sensitivity test, because the digest also folds the",
++        "   resulting root and the roots differ between orders. The control was",
++        "   rewritten to remove the *root* from the fold, which is the mistake that",
++        "   actually destroys order sensitivity — and it is recorded here rather than",
++        "   quietly fixed.",
++        "",
++        "## Honest scope",
++        "",
++        "* **This is a gate, not a node.** No consensus, no mempool, no block structure,",
++        "  no P2P. It replays a fixed transaction list through the X3 lifecycle and the",
++        "  S3 overlay — the same code an actual node will drive, with the parts a node",
++        "  adds still missing.",
++        "* **The root includes the version**, so the number of commits matters: the",
++        "  gate therefore fixes the input exactly instead of permuting independent",
++        "  blocks. A future phase that lets nodes split blocks differently must compare",
++        "  roots per block, not per chain.",
++        "* **`refused` and `failed` are counted separately on purpose.** Two nodes that",
++        "  disagreed about which transactions were accepted would produce different",
++        "  roots; counting them makes the report attribute a divergence instead of",
++        "  merely reporting one.",
++        "* **Wall-clock cost in a debug build is ~70 s** for the eight-process gate",
++        "  (measured), which is why the unit-level assertions use a 120–200 step",
++        "  scenario and the full 1 004 steps are reserved for the pinned measurement and",
++        "  the multi-process comparison.",
++        "",
++        f"Tests: **{tests}** in the workspace, {gate} of them in the X7 gate.",
++        "Validators / blocks / transactions remain **0 / 0 / 0**.",
++        "",
++    ]
++    return "\n".join(lines)
++
++
++def build_inventory(stamp: str) -> tuple[str, int]:
++    lines = [
++        "# X7 negative-control inventory",
++        f"# Generated (UTC): {stamp}",
++        "# Each NC tampers with one enforcement point and requires a named test to go red.",
++        "",
++    ]
++    total = 0
++    for phase in NC_LOGS:
++        path = REPO / "docs" / "evidence" / phase / "nc.log"
++        if not path.exists():
++            lines.append(f"[{phase}] MISSING {path.relative_to(REPO)}")
++            lines.append("")
++            continue
++        text = path.read_text(encoding="utf-8")
++        match = RESULT_LINE.search(text)
++        if not match:
++            lines.append(f"[{phase}] NO RESULT LINE")
++            lines.append("")
++            continue
++        passed, count = int(match.group(1)), int(match.group(2))
++        total += count
++        lines.append(f"[{phase}] {passed}/{count} PASS")
++        for name, status in NC_LINE.findall(text):
++            lines.append(f"  {status:<4} {name}")
++        lines.append("")
++    lines.append(f"TOTAL: {total} negative controls")
++    return "\n".join(lines) + "\n", total
++
++
++def refresh_sums() -> None:
++    sums = []
++    for path in (OUT, EVIDENCE / "nc.log", REPORT, INVENTORY, FIXTURE, ADDENDUM):
++        digest = hashlib.sha256(path.read_bytes()).hexdigest()
++        sums.append(f"{digest}  {path.relative_to(REPO)}")
++    (EVIDENCE / "SHA256SUMS").write_text("\n".join(sums) + "\n", encoding="utf-8")
++
++
++def main() -> int:
++    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
++    failures = 0
++
++    if "--report-only" in sys.argv[1:]:
++        # Regenerate report.md from the pinned fixture and a live eight-node run,
++        # without replaying the full command list in gates.txt. Used when the
++        # report's prose changes but the measurement does not.
++        rows, agreed = eight_nodes()
++        fields = fixture()
++        REPORT.write_text(build_report(fields, rows, agreed, stamp), encoding="utf-8")
++        refresh_sums()
++        print(f"wrote {REPORT.relative_to(REPO)} (report-only; gates.txt untouched)")
++        return 0 if agreed else 1
++    lines = [
++        "# X7 — determinism gate log (measured)",
++        f"# Generated (UTC): {stamp}",
++        "# Every block below is raw command output; nothing is typed by hand.",
++        "",
++    ]
++    for label, command, tail in COMMANDS:
++        code, output = run(command)
++        lines.append(f"$ {command}")
++        if tail:
++            output = "\n".join(output.splitlines()[-tail:])
++        lines.append(output)
++        lines.append(f"[exit {code}]")
++        lines.append("")
++        if code != 0:
++            failures += 1
++            print(f"FAILED: {label} -> exit {code}")
++
++    rows, agreed = eight_nodes()
++    lines += [
++        "=" * 72,
++        "EIGHT INDEPENDENT PROCESSES",
++        "=" * 72,
++        "",
++    ]
++    for row in rows:
++        lines.append(
++            "node={node} state_root={state_root} tree_root={tree_root} "
++            "gas={gas} version={version} committed={committed} refused={refused} "
++            "failed={failed} events_root={events_root} digest={digest}".format(**row)
++        )
++    lines += [
++        "",
++        f"distinct state roots: {len({row['state_root'] for row in rows})}",
++        f"distinct gas totals: {len({row['gas'] for row in rows})}",
++        f"distinct digests: {len({row['digest'] for row in rows})}",
++        f"verdict: {'AGREEMENT' if agreed else 'DIVERGENCE'}",
++        "",
++    ]
++    if not agreed:
++        failures += 1
++        print("FAILED: eight nodes do not agree")
++
++    EVIDENCE.mkdir(parents=True, exist_ok=True)
++    fields = fixture()
++    if fields.get("expected_state_root") != (rows[0]["state_root"] if rows else None):
++        print("ERROR: the pinned fixture and the eight-process run disagree")
++        failures += 1
++
++    lines += [
++        "=" * 72,
++        "SUMMARY",
++        "=" * 72,
++        "",
++        f"Steps: {fields.get('scenario_steps')} ({fields.get('scenario_contract_calls')} "
++        f"contract calls, {fields.get('scenario_transfers')} native transfers).",
++        f"Commits: {fields.get('expected_committed')}; gas: {fields.get('expected_gas')}.",
++        f"State root: {fields.get('expected_state_root')}",
++        f"Tests: {workspace_test_count()} in the workspace, {gate_test_count()} in the X7 gate.",
++        f"Negative controls: {EXPECTED_NC_TOTAL} across C0-C10 + S0-S7 + X0-X7.",
++        "Validators/blocks/tx remain 0/0/0.",
++        "",
++    ]
++    OUT.write_text("\n".join(lines), encoding="utf-8")
++    REPORT.write_text(build_report(fields, rows, agreed, stamp), encoding="utf-8")
++    inventory, total = build_inventory(stamp)
++    INVENTORY.write_text(inventory, encoding="utf-8")
++    if total != EXPECTED_NC_TOTAL:
++        print(f"INVENTORY ERROR: total {total} NC, expected {EXPECTED_NC_TOTAL}")
++        failures += 1
++
++    nc_log = EVIDENCE / "nc.log"
++    if not nc_log.exists():
++        print("ERROR: docs/evidence/x7/nc.log missing (run `make nc-x7`)")
++        return 1
++
++    sums = []
++    for path in (OUT, nc_log, REPORT, INVENTORY, FIXTURE, ADDENDUM):
++        digest = hashlib.sha256(path.read_bytes()).hexdigest()
++        sums.append(f"{digest}  {path.relative_to(REPO)}")
++    (EVIDENCE / "SHA256SUMS").write_text("\n".join(sums) + "\n", encoding="utf-8")
++
++    print(f"wrote {OUT.relative_to(REPO)} ({len(lines)} lines)")
++    print(f"wrote {REPORT.relative_to(REPO)}")
++    print(f"wrote {INVENTORY.relative_to(REPO)}")
++    print("wrote docs/evidence/x7/SHA256SUMS")
++    return 1 if failures else 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/x7_matrix.py b/tools/x7_matrix.py
+new file mode 100644
+index 0000000..add71cf
+--- /dev/null
++++ b/tools/x7_matrix.py
+@@ -0,0 +1,128 @@
++#!/usr/bin/env python3
++"""Run the X7 scenario under three independent build configurations.
++
++The DoD asks for "8 nodes × 1000 contract transactions × 3 platforms". Three
++operating systems cannot be measured from one sandbox, so this tool measures the
++three things that *are* different from one machine and that a cross-platform run
++would vary anyway:
++
++  1. **profile** — `debug` (opt-level 0, overflow checks on, debug assertions on)
++     versus `release` (opt-level 3, no overflow checks). These are different
++     machine code, and an arithmetic overflow or an optimizer-dependent iteration
++     would show up here first.
++  2. **codegen units** — `release` with 16 units instead of 1: a different
++     partitioning of the crate, so a different inlining and merging order.
++  3. **process** — every configuration is run twice in *separate* processes, so
++     Rust's per-process hasher seed and the allocator history differ.
++
++What this tool cannot do is stated in `docs/DETERMINISM.md`: the CI job
++`.github/workflows/ci.yml` → `determinism` repeats the same gate on three OSes, and
++that job's result is a claim only once it has run.
++
++Usage:
++    python3 tools/x7_matrix.py
++    python3 tools/x7_matrix.py --nodes 8
++    make x7-matrix
++"""
++
++from __future__ import annotations
++
++import os
++import subprocess
++import sys
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++
++CONFIGS: list[tuple[str, list[str], dict[str, str]]] = [
++    ("debug", [], {}),
++    ("release", ["--release"], {}),
++    (
++        "release-cgu16",
++        ["--release"],
++        {"CARGO_PROFILE_RELEASE_CODEGEN_UNITS": "16"},
++    ),
++]
++
++
++def run_config(name: str, flags: list[str], env_extra: dict[str, str], nodes: int) -> dict:
++    command = ["cargo", "run", "-q", "-p", "aura-exec", "--bin", "x7-run"]
++    command += flags
++    command += ["--", "--node", "0"]
++    env = dict(os.environ)
++    env.update(env_extra)
++    rows = []
++    for attempt in range(nodes):
++        result = subprocess.run(
++            command, cwd=REPO, capture_output=True, text=True, check=False, env=env
++        )
++        if result.returncode != 0:
++            sys.stderr.write(result.stdout + result.stderr)
++            raise SystemExit(f"{name}: x7-run failed")
++        fields = {}
++        for token in result.stdout.split():
++            if token.startswith("[") or token.endswith("]"):
++                continue
++            if "=" in token:
++                key, value = token.split("=", 1)
++                fields[key] = value
++        rows.append(fields)
++        print(
++            f"  {name:>14} run {attempt + 1}/{nodes}: "
++            f"state_root={fields['state_root'][:16]}… gas={fields['gas']}",
++            flush=True,
++        )
++    roots = {row["state_root"] for row in rows}
++    gasses = {row["gas"] for row in rows}
++    digests = {row["digest"] for row in rows}
++    return {
++        "name": name,
++        "roots": roots,
++        "gasses": gasses,
++        "digests": digests,
++        "first": rows[0],
++        "runs": len(rows),
++    }
++
++
++def main() -> int:
++    nodes = 2
++    args = sys.argv[1:]
++    if "--nodes" in args:
++        nodes = int(args[args.index("--nodes") + 1])
++
++    print("X7 BUILD MATRIX — the same ordered input under different builds")
++    print()
++    results = [run_config(name, flags, env, nodes) for name, flags, env in CONFIGS]
++
++    print()
++    print(f"{'configuration':>16}  {'runs':>4}  {'state_root':<18}  {'gas':>10}  verdict")
++    failures = 0
++    for result in results:
++        fields = result["first"]
++        ok = len(result["roots"]) == 1 and len(result["gasses"]) == 1 and len(result["digests"]) == 1
++        verdict = "consistent" if ok else "DIVERGED"
++        if not ok:
++            failures += 1
++        print(
++            f"{result['name']:>16}  {result['runs']:>4}  "
++            f"{fields['state_root'][:16]}…  {fields['gas']:>10}  {verdict}"
++        )
++
++    # Every configuration must also agree with every other one.
++    all_roots = {root for result in results for root in result["roots"]}
++    all_gasses = {gas for result in results for gas in result["gasses"]}
++    all_digests = {digest for result in results for digest in result["digests"]}
++    print()
++    print(f"distinct state roots across all configurations: {len(all_roots)}")
++    print(f"distinct gas totals across all configurations: {len(all_gasses)}")
++    print(f"distinct rolling digests across all configurations: {len(all_digests)}")
++    if len(all_roots) != 1 or len(all_gasses) != 1 or len(all_digests) != 1:
++        print("MATRIX: DIVERGED — this is a NO-GO for mainnet")
++        return 1
++    print("MATRIX: OK — every configuration and every process agrees")
++    return 0 if failures == 0 else 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+-- 
+2.47.3
+

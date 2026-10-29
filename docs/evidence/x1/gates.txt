@@ -1,0 +1,221 @@
+# X1 — sandbox gate log (measured)
+# Generated (UTC): 2026-10-28T18:55:50+00:00
+# Every block below is raw command output; nothing is typed by hand.
+
+$ rustc --version && cargo --version
+rustc 1.99.1 (58cf8f9c3 2026-10-13)
+cargo 1.99.1 (5f94df478 2026-08-27)
+[exit 0]
+
+$ find crates -name Cargo.toml | wc -l
+15
+[exit 0]
+
+$ find . -name '*.rs' -not -path './target/*' | wc -l
+95
+[exit 0]
+
+$ grep -c '^source = ' Cargo.lock || true
+239
+[exit 0]
+
+$ cargo tree -p aura-exec --edges normal -q | sort -u | wc -l
+10
+[exit 0]
+
+$ cargo tree -p aura-exec --features wasmtime-engine --edges normal -q | sort -u | wc -l
+307
+[exit 0]
+
+$ python3 tools/check_claims.py
+DOCS DRIFT GUARD: OK — 37 markdown files, 12 plans, 112 phase rows, all local links resolve
+[exit 0]
+
+$ python3 tools/check_deps.py
+DEPENDENCY GATE: OK — 254 lock packages (15 local, 239 external, all checksummed + allowlisted)
+[exit 0]
+
+$ python3 tools/count_vectors.py
+  crates/aura-codec/tests/fixtures/c2_golden.txt:   15 vectors (17 data lines)
+  crates/aura-crypto/tests/fixtures/c3_golden.txt:   60 vectors (61 data lines)
+  crates/aura-exec/tests/fixtures/x0_census.txt:   66 vectors (69 data lines)
+  crates/aura-exec/tests/fixtures/x1_golden.txt:  117 vectors (121 data lines)
+  crates/aura-genesis/tests/fixtures/c8_golden.txt:   27 vectors (40 data lines)
+  crates/aura-state/tests/fixtures/c7_golden.txt:   91 vectors (103 data lines)
+  crates/aura-state/tests/fixtures/s0_golden.txt:   50 vectors (51 data lines)
+  crates/aura-state/tests/fixtures/s1_golden.txt: 3055 vectors (3062 data lines)
+  crates/aura-state/tests/fixtures/s3_golden.txt:   41 vectors (48 data lines)
+  crates/aura-state/tests/fixtures/s4_golden.txt:   49 vectors (54 data lines)
+  crates/aura-state/tests/fixtures/s5_golden.txt:   39 vectors (44 data lines)
+  crates/aura-storage/tests/fixtures/s2_golden.txt:  103 vectors (107 data lines)
+  crates/aura-storage/tests/fixtures/s6_golden.txt:   33 vectors (33 data lines)
+  crates/aura-storage/tests/fixtures/s7_golden.txt:   23 vectors (26 data lines)
+  crates/aura-testkit/tests/fixtures/c9_vectors.txt:  512 vectors (514 data lines)
+  crates/aura-tx/tests/fixtures/c4_golden.txt:   94 vectors (100 data lines)
+  crates/aura-types/tests/fixtures/c1_golden.txt:   18 vectors (18 data lines)
+
+  TOTAL: 4532 vectors across 19 fixtures
+VECTOR INVENTORY: OK — 4532 >= 200
+[exit 0]
+
+$ python3 tools/check_rig.py
+TEST RIG WIRING: OK — test-core + fuzz-smoke + vector inventory + proptest + 4 libFuzzer targets are wired into CI
+[exit 0]
+
+$ before=$(sha256sum crates/aura-exec/tests/fixtures/x1_golden.txt | cut -d' ' -f1); python3 tools/gen_x1_vectors.py >/dev/null && cargo run -q -p aura-exec --bin x1-record >/dev/null; after=$(sha256sum crates/aura-exec/tests/fixtures/x1_golden.txt | cut -d' ' -f1); if [ "$before" = "$after" ]; then echo "generator+recorder idempotent: $after"; else echo "GENERATOR DRIFT"; exit 1; fi
+generator+recorder idempotent: 04bd446616468959c51a534eacee71f6470ff48cb8f5ec58cf5f87c7845efa5d
+[exit 0]
+
+$ cargo test -p aura-exec --quiet
+....
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 9 tests
+.........
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+[exit 0]
+
+$ cargo test -p aura-exec --test x1_sandbox -- --nocapture
+running 9 tests
+test engine_identity_is_pinned ... ok
+test census_runs_before_the_engine ... ok
+test limits_are_validated_and_tightenable ... ok
+X1 gate: 6 executed, 5 trapped, 8 rejected
+test every_fixture_program_meets_its_expectation ... ok
+test memory_ceiling_is_enforced_at_runtime ... ok
+test module_size_cap_is_checked_before_parsing ... ok
+test measured_fuel_and_trace_are_pinned ... ok
+test trace_is_capped ... ok
+test repeated_runs_are_bit_identical ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.40s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running tests/x1_sandbox.rs (target/debug/deps/x1_sandbox-169fcb6ee42ba23e)
+[exit 0]
+
+$ make nc-x1
+
+NC-1 census bypassed (gate always Ok): PASS
+      cargo test -p aura-exec --test x1_sandbox -> rc=101 (RED as expected)
+      test result: FAILED. 6 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+error: test failed, to rerun pass `-p aura-exec --test x1_sandbox`
+NC-2 fuel budget ignored (4x the published budget): PASS
+      cargo test -p aura-exec --test x1_sandbox -> rc=101 (RED as expected)
+      test result: FAILED. 7 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.68s
+
+error: test failed, to rerun pass `-p aura-exec --test x1_sandbox`
+NC-3 memory ceiling removed from the store limiter: PASS
+      cargo test -p aura-exec --test x1_sandbox -> rc=101 (RED as expected)
+      test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s
+
+error: test failed, to rerun pass `-p aura-exec --test x1_sandbox`
+NC-4 trap misclassified (out-of-fuel -> other): PASS
+      cargo test -p aura-exec --test x1_sandbox -> rc=101 (RED as expected)
+      test result: FAILED. 6 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s
+
+error: test failed, to rerun pass `-p aura-exec --test x1_sandbox`
+NC-5 module-size check removed: PASS
+      cargo test -p aura-exec --test x1_sandbox -> rc=101 (RED as expected)
+      test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s
+
+error: test failed, to rerun pass `-p aura-exec --test x1_sandbox`
+NC-6 trace cap removed: PASS
+      cargo test -p aura-exec --test x1_sandbox -> rc=101 (RED as expected)
+         = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+error: test failed, to rerun pass `-p aura-exec --test x1_sandbox`
+
+RESULT: 6/6 negative controls PASS
+make[1]: Leaving directory '/home/user/AuraLite-Crypto'
+[exit 0]
+
+$ make nc-all
+make[1]: Entering directory '/home/user/AuraLite-Crypto'
+RESULT: 2/2 negative controls PASS
+RESULT: 3/3 negative controls PASS
+RESULT: 4/4 negative controls PASS
+RESULT: 5/5 negative controls PASS
+RESULT: 6/6 negative controls PASS
+RESULT: 6/6 negative controls PASS
+RESULT: 6/6 negative controls PASS
+RESULT: 6/6 negative controls PASS
+RESULT: 6/6 negative controls PASS
+RESULT: 6/6 negative controls PASS
+RESULT: 6/6 negative controls PASS
+RESULT: 6/6 negative controls PASS
+RESULT: 6/6 negative controls PASS
+RESULT: 6/6 negative controls PASS
+RESULT: 6/6 negative controls PASS
+RESULT: 6/6 negative controls PASS
+RESULT: 6/6 negative controls PASS
+RESULT: 6/6 negative controls PASS
+RESULT: 6/6 negative controls PASS
+RESULT: 6/6 negative controls PASS
+RESULT: 6/6 negative controls PASS
+make[1]: Leaving directory '/home/user/AuraLite-Crypto'
+[exit 0]
+
+$ make test-core
+     Running unittests src/lib.rs (target/debug/deps/aura_types-308b229bcbc15c92)
+     Running tests/c1_types.rs (target/debug/deps/c1_types-30318a674a00d8c5)
+     Running tests/identity.rs (target/debug/deps/identity-22b5be58a3e6ffbb)
+   Doc-tests aura_block
+   Doc-tests aura_codec
+   Doc-tests aura_crypto
+   Doc-tests aura_genesis
+   Doc-tests aura_state
+   Doc-tests aura_storage
+   Doc-tests aura_testkit
+   Doc-tests aura_tx
+   Doc-tests aura_types
+[exit 0]
+
+$ make audit-closeout
+make[1]: Entering directory '/home/user/AuraLite-Crypto'
+CLOSE-OUT PLAN<->TREE AUDIT (CORE + STATE)
+  phases audited: 21 (C0-X1)
+  expected NC total: 116 (110 shipped + 6 X1)
+  evidence checksum files: 20
+  spec files indexed: 11
+  note: X1 patch: pending (cut at commit time)
+  note: X1 evidence: pending (generated by make evidence-x1)
+AUDIT: OK — every ✅ phase has a receipt, patch, NC log and evidence; all checksums verify
+make[1]: Leaving directory '/home/user/AuraLite-Crypto'
+[exit 0]
+
+$ make test
+   Doc-tests aura_genesis
+   Doc-tests aura_mempool
+   Doc-tests aura_node
+   Doc-tests aura_p2p
+   Doc-tests aura_rpc
+   Doc-tests aura_state
+   Doc-tests aura_storage
+   Doc-tests aura_testkit
+   Doc-tests aura_tx
+   Doc-tests aura_types
+[exit 0]
+
+========================================================================
+SUMMARY
+========================================================================
+
+Pre-X1 (X0): 15 crates, 184 Rust tests, 4,415 golden vectors,
+110 negative controls, 95 external crates, no engine linked.
+Post-X1: 15 crates, 193 Rust tests (+9 sandbox gate), 4,532 vectors
+across 19 fixtures, 116 negative controls (6 new in X1),
+239 external crates in the lock (95 + 144: wasmi 10, wasmtime 134 —
+wasmtime is optional and not compiled by the default build),
+1 workspace crate with a dependency: aura-exec.
+Sandbox: 19 programs — 6 executed, 5 trapped,
+8 refused; fuel pinned per program; zero host imports.
+Engine: wasmi 2.0.0 (default, portable dispatch), wasmtime 50.0.0 (feature).
+Validators/blocks/tx remain 0/0/0.

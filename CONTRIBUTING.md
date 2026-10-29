@@ -68,6 +68,11 @@ that does not run its main test is a dead gate — that is a separate defect
   vectors come from `tools/gen_c2_vectors.py`.
 - Changing the `aura-codec` wire format without bumping `CODEC_VERSION` and
   adding a migration test. One value must have exactly one byte encoding.
+- Bumping an engine pin (`wasmi`, `wasmtime`) as part of a routine update.
+  Since X1 the engine decides how much fuel an instruction costs, so a version
+  bump is a protocol change: it needs its own phase patch, a re-recorded
+  `tests/fixtures/x1_golden.txt` (`make gen-x1-vectors`) and a green
+  `make nc-x1`. The fuel numbers in that fixture are the gate.
 - Unpinned dependencies. Since C3 every external crate uses an exact `=x.y.z`
   pin in `[workspace.dependencies]`, is checksummed in `Cargo.lock`, and is
   recorded in `docs/spec/c3-dependency-allowlist.txt`. Adding one requires a
@@ -124,6 +129,10 @@ that does not run its main test is a dead gate — that is a separate defect
       `state_root`; a substituted diff chunk must be rejected.
 - [ ] Snapshot manifests verify every chunk SHA-256 before import; a
       substituted chunk must be rejected.
+- [ ] The WASM census stays fail-closed: a new opcode needs a column in
+      `CENSUS`, a vector in `tools/gen_x0_vectors.py` and a green NC. Floats,
+      imports, shared memory, the start section, mutable globals and indirect
+      calls stay banned until a phase explicitly relaxes them with a gate.
 - [ ] Backup verification stays layered (manifest checksum, blob SHA-256,
       per-record BLAKE3, parent chain, replayed roots) and restore keeps
       refusing a non-empty target; the chaos gate must stay at 50 cycles.

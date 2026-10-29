@@ -11,19 +11,61 @@
 Name and ticker were locked by the owner on 2026-10-25. The ticker was checked
 for collisions — see [`docs/TICKER_AUDIT.md`](docs/TICKER_AUDIT.md).
 
-> **Status: STATE_PLAN COMPLETE (2026-10-28).** `CORE_PLAN` C0–C10 and
-> `STATE_PLAN` S0–S7 are closed. S0
+> **Status: X2 LANDED (2026-10-28).** `CORE_PLAN` C0–C10 and `STATE_PLAN`
+> S0–S7 are closed; `EXEC_PLAN` has started. S0
 > measured the naive baseline, S1 delivered a versioned sparse Merkle tree,
 > S2 made state **durable**, S3 added a copy-on-write execution overlay,
 > S4 deterministic snapshots, S5 state sync, S6 pruning + archive (100 000
 > blocks: **322x** smaller in prune mode than the retained history), and S7
 > **recovery and backup**: a self-verifying bundle whose restore replays
 > every record instead of trusting the manifest — **50 `kill -9` + restore
-> cycles, 0 root mismatches**. **104 negative controls**, 177 tests,
-> 4 349 vectors. See [`docs/CLOSEOUT_AUDIT.md`](docs/CLOSEOUT_AUDIT.md) and
-> `docs/evidence/s7/report.md`. State is now durable, provable, syncable,
-> prunable and restorable; there is still **no consensus, VM, P2P, node,
-> wallet or network** — M0 needs X0–X2. Everything else below is a plan, not a report
+> cycles, 0 root mismatches** — and X0 opens contract execution with a
+> **determinism census**: 21 WASM programs, each either *banned* or proven
+> deterministic, on a fail-closed opcode whitelist (floats, imports, shared
+> memory, atomics, SIMD, indirect calls: all rejected) — and X1 adds the
+> **sandbox**: a real engine (`wasmi`, with `wasmtime` as an optional second
+> backend), a 1,000,000 fuel budget, a 4096-page memory ceiling, a 512 KiB
+> stack, **zero host imports** and a closed trap set. 19 programs: 6 executed,
+> 5 trapped, 8 refused, with the fuel of every one pinned — and X2 makes a
+> contract actually *do* something: **ABI v1** (seven `env` host functions:
+> storage read/write, balance, transfer, emit, hash, block context), **gas with
+> one counter** (1 fuel = 1 gas, settled at every host-call boundary), and the
+> rule that a succeeded call commits a `StateDiff` while every other outcome
+> leaves the state root byte-identical. A contract is a **record in state**
+> (deploy, call by address, upgrade with an explicit version, `migrate`), and it
+> is written **in Rust**: `aura-sdk` is a `no_std` guest library (typed ABI,
+> length-exact codec, typed storage, events), three reference contracts are built,
+> pinned by hash and deployed by the gate, and **three standards** — ARC-20,
+> ARC-721 and a 3-signer multisig — run on **ABI v2** (`env2`: calldata, return
+> data, `caller`, `self_address`) — and X6 makes contracts **compose**: **ABI v3**
+> in the module `env3` (`call`, `returndata_len`, `returndata_read`, `depth`) with two
+> rules the host enforces rather than the SDK — no call to an address already on the
+> stack (`-14`) and no stack deeper than 8 frames (`-15`) — and X7 makes determinism
+> **measured rather than asserted**: a 1 004-transaction workload, generated from one
+> constant, replayed by **eight separate processes** and **three build
+> configurations** to one `state_root`, one gas bill and one events chain — the
+> decisive M0 gate — and X8 makes the subset **enforced rather than documented**:
+> `aura_exec::verify` refuses a module with one of **22 stable codes** before any
+> engine sees it, **measured on 100 golden mutants** (15 kinds of damage, zero
+> mismatches) with all six shipped artifacts accepted. **Stage 1 (X0–X8) is
+> complete.** — and **D0** opens `NODE_PLAN` with the measurement the other plans
+> started with: the libraries exist, the node does not, and `aurad` **refuses**
+> (exit 2) naming all nine missing capabilities and the phase that owes each, while
+> `aurad report` measures what this tree contains (9 layers implemented, 4 still
+> placeholders). 165 negative controls, 374 tests, 4 857 vectors, 239 external
+> crates. See
+> [`docs/CLOSEOUT_AUDIT.md`](docs/CLOSEOUT_AUDIT.md),
+> [`docs/SDK.md`](docs/SDK.md), [`docs/STANDARDS.md`](docs/STANDARDS.md),
+> [`docs/ABI_V2.md`](docs/ABI_V2.md), [`docs/ABI_V3.md`](docs/ABI_V3.md),
+> [`docs/CALLS.md`](docs/CALLS.md), [`docs/DETERMINISM.md`](docs/DETERMINISM.md) and
+> `docs/evidence/x7/report.md`, `docs/evidence/x8/report.md`,
+> [`docs/NODE.md`](docs/NODE.md) and `docs/evidence/d0/report.md`. State is
+> durable, provable, syncable, prunable and restorable; contracts are deployed,
+> upgraded, written in Rust, obey published standards and **call each other without
+> being able to re-enter a live frame**; there is still **no consensus, P2P, node,
+> wallet or network**, the verifier is not yet on the deploy path (the D-phase node
+> calls it), and the three-OS determinism matrix is still a CI job that has never
+> run — M0 needs consensus (B), networking (N) and the rest of the node (D1–D7). Everything else below is a plan, not a report
 > about an implementation. Every claim of readiness appears only after a
 > measurable test gate, as in
 > [AuraLite-Emulator](https://github.com/AlexanderNyr/AuraLite-Emulator) and
@@ -82,21 +124,22 @@ wallet, explorer and contract standards — in Rust.
      indexer -> Postgres -> explorer / analytics
 ```
 
-Details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+Details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Writing a contract:
+[`docs/SDK.md`](docs/SDK.md); calling a standard: [`docs/STANDARDS.md`](docs/STANDARDS.md).
 
 ## Quickstart
 
-**Now (S7)** a fresh node can catch up, an operator can choose retention and
-a store can be backed up and restored:
+**Now (X0)** a store can be backed up and restored, and a WASM module can be
+classified before anyone runs it:
 
 ```sh
 make deps-check          # rustc / cargo / rustfmt / clippy
 make test                # full gate including the plan<->tree audit
 make audit-closeout      # no ✅ row without a patch/receipt/NC log/evidence
-make nc-all              # all 104 negative controls (C0-C10 + S0-S7)
-make gen-s6-vectors      # independent retention/pruning golden vectors (~52 s)
+make nc-all              # all 123 negative controls (C0-C10 + S0-S7 + X0-X2)
 make gen-s7-vectors      # independent backup/restore golden vectors
-make vector-inventory    # 4,349 golden vectors
+make gen-x0-vectors      # independent determinism-census WASM vectors
+make vector-inventory    # 4,555 golden vectors
 ```
 
 **The devnet does not exist yet — and that is honest.** After phase D7 (devnet)
@@ -131,10 +174,13 @@ AuraLite-Crypto/
     ARCHITECTURE.md      <- invariants and data flow
     TICKER_AUDIT.md      <- measured ticker collision audit
     plans/*_PLAN.md      <- 12 plans, dependency-ordered, DoD + gate per phase
-    evidence/            <- gate logs / receipts (C0-C10)
+    evidence/            <- gate logs / receipts (C0-C10, S0-S7, X0-X2)
     spec/                <- C4-C9 specs + FORMAT_INDEX.md, config, allowlists
-  patches/               <- one .patch per phase (0001-C0 ... 0011-C10)
-  crates/*               <- 15 crates: 8 real APIs (C9) + 7 empty placeholders
+  patches/               <- one .patch per phase (0001-C0 ... 0022-X2)
+  crates/*               <- 15 crates: 10 real APIs + 5 empty placeholders
+                            (consensus, mempool, node, p2p, rpc)
+                            aura-exec is the only crate with an external dep
+                            (wasmi default; wasmtime behind a feature)
   contracts/*            <- reference contracts (ARC-20, ARC-721, AMM, ...)
   tests/                 <- unit/property/integration/consensus/soak
   fuzz/                  <- 4 libFuzzer source targets (C9; H3 runs 24 h)

@@ -44,8 +44,12 @@ def check() -> list[str]:
 
     if "proptest" not in manifest:
         errors.append("aura-testkit/Cargo.toml: proptest dev-dependency missing")
-    if "crates/aura-testkit" not in root_manifest or "exclude = [\"fuzz\"]" not in root_manifest:
+    if "crates/aura-testkit" not in root_manifest or 'exclude = ["fuzz"' not in root_manifest:
         errors.append("Cargo.toml: aura-testkit member or fuzz exclusion missing")
+    # X4: the reference contracts are separate workspaces (a contract must not
+    # pull the node's dependency graph), so `examples/` has to stay excluded.
+    if "examples" not in root_manifest:
+        errors.append("Cargo.toml: examples/ must stay excluded from the node workspace")
 
     fuzz_targets = sorted((REPO / "fuzz" / "fuzz_targets").glob("fuzz_*.rs"))
     if len(fuzz_targets) < 2:

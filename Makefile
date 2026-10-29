@@ -23,7 +23,18 @@ PYTHON ?= python3
         record-s4-deps gen-s4-vectors nc-s4 evidence-s4 \
         record-s5-deps gen-s5-vectors nc-s5 evidence-s5 \
         record-s6-deps gen-s6-vectors nc-s6 evidence-s6 \
-        record-s7-deps gen-s7-vectors nc-s7 evidence-s7 devnet clean
+        record-s7-deps gen-s7-vectors nc-s7 evidence-s7 \
+        record-x0-deps gen-x0-vectors nc-x0 evidence-x0 \
+        record-x1-deps gen-x1-vectors nc-x1 evidence-x1 \
+        record-x2-deps gen-x2-vectors nc-x2 evidence-x2 \
+        record-x3-deps gen-x3-vectors nc-x3 evidence-x3 \
+        record-x4-deps build-contracts nc-x4 evidence-x4 \
+        record-x5-deps build-standards check-standards nc-x5 evidence-x5 \
+        record-x6-deps build-x6-contracts check-x6-contracts nc-x6 evidence-x6 \
+        record-x7-deps gen-x7-vectors nc-x7 x7-matrix evidence-x7 test-x7 \
+        gen-x8-mutants nc-x8 evidence-x8 test-x8 \
+        gen-d0-vectors nc-d0 evidence-d0 test-d0 \
+        devnet clean
 
 help:
 	@echo "AuraLite-Crypto (Stage 1, C0)"
@@ -95,6 +106,43 @@ help:
 	@echo "  make gen-s7-vectors    regenerate independent backup/restore vectors"
 	@echo "  make nc-s7             S7 negative controls -> docs/evidence/s7/nc.log"
 	@echo "  make evidence-s7       regenerate S7 report + receipts"
+	@echo "  make record-x0-deps    re-record X0 dependency decision"
+	@echo "  make gen-x0-vectors    regenerate independent determinism-census vectors"
+	@echo "  make nc-x0             X0 negative controls -> docs/evidence/x0/nc.log"
+	@echo "  make evidence-x0       regenerate X0 census report + receipts"
+	@echo "  make record-x1-deps    re-record the X1 engine dependency decision"
+	@echo "  make gen-x1-vectors    regenerate X1 vectors + measured fuel (needs cargo)"
+	@echo "  make nc-x1             X1 negative controls -> docs/evidence/x1/nc.log"
+	@echo "  make evidence-x1       regenerate X1 sandbox report + receipts"
+	@echo "  make gen-x2-vectors    regenerate X2 ABI/gas vectors + measured gas (needs cargo)"
+	@echo "  make nc-x2             X2 negative controls -> docs/evidence/x2/nc.log"
+	@echo "  make evidence-x2       regenerate X2 ABI/gas report + receipts"
+	@echo "  make gen-x3-vectors    regenerate X3 lifecycle vectors + measured gas (needs cargo)"
+	@echo "  make nc-x3             X3 negative controls -> docs/evidence/x3/nc.log"
+	@echo "  make evidence-x3       regenerate X3 lifecycle report + receipts"
+	@echo "  make build-contracts   build examples/ to wasm32 and pin size+hash (needs the target)"
+	@echo "  make nc-x4             X4 SDK negative controls -> docs/evidence/x4/nc.log"
+	@echo "  make evidence-x4       regenerate X4 SDK/contracts report + receipts"
+	@echo "  make build-standards   build ARC-20/ARC-721/multisig and pin their artifacts"
+	@echo "  make check-standards   rebuild the standards and compare with the pins"
+	@echo "  make nc-x5             X5 standards negative controls -> docs/evidence/x5/nc.log"
+	@echo "  make evidence-x5       regenerate X5 standards/ABI v2 report + receipts"
+	@echo "  make build-x6-contracts build the X6 call contracts + record their gas"
+	@echo "  make check-x6-contracts verify the pinned X6 artifacts match the source"
+	@echo "  make nc-x6             X6 call-isolation negative controls -> docs/evidence/x6/nc.log"
+	@echo "  make evidence-x6       regenerate X6 call-isolation report + receipts"
+	@echo "  make gen-x7-vectors    regenerate the pinned X7 determinsm scenario"
+	@echo "  make nc-x7             X7 determinism negative controls -> docs/evidence/x7/nc.log"
+	@echo "  make x7-matrix         run the X7 scenario under 3 build configurations"
+	@echo "  make evidence-x7       regenerate X7 determinism report + receipts"
+	@echo "  make gen-x8-mutants    regenerate the 100 golden X8 mutants + manifest"
+	@echo "  make test-x8           X8 static-verifier gate (mutants + unit tests)"
+	@echo "  make nc-x8             X8 verifier negative controls -> docs/evidence/x8/nc.log"
+	@echo "  make evidence-x8       regenerate X8 verifier report + receipts"
+	@echo "  make gen-d0-vectors    regenerate the pinned D0 node baseline fixture"
+	@echo "  make test-d0           D0 baseline gate (stub refusal + measured survey)"
+	@echo "  make nc-d0             D0 node-baseline negative controls -> docs/evidence/d0/nc.log"
+	@echo "  make evidence-d0       regenerate D0 baseline report + receipts"
 	@echo "  make record-c9-deps    re-record the C9 dependency addendum"
 	@echo "  make gen-c9-vectors    regenerate 512 independent test-rig vectors"
 	@echo "  make nc-c9             C9 negative controls -> docs/evidence/c9/nc.log"
@@ -212,7 +260,7 @@ evidence-c3:
 # Runs every NC script WITHOUT rewriting the historical C0-C3 evidence logs,
 # so their committed SHA256SUMS stay valid. CI uses this instead of nc-cX.
 nc-all:
-	@for phase in c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 s0 s1 s2 s3 s4 s5 s6 s7; do \
+	@for phase in c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 s0 s1 s2 s3 s4 s5 s6 s7 x0 x1 x2 x3 x4 x5 x6 x7 x8 d0; do \
 	    $(PYTHON) tools/nc_$$phase.py > /tmp/aura-nc-$$phase.log 2>&1 || \
 	      { echo "$$phase NEGATIVE CONTROLS FAILED"; tail -30 /tmp/aura-nc-$$phase.log; exit 1; }; \
 	    grep '^RESULT:' /tmp/aura-nc-$$phase.log; \
@@ -413,6 +461,182 @@ nc-s7:
 
 evidence-s7: record-s7-deps
 	@$(PYTHON) tools/write_s7_evidence.py
+
+record-x0-deps:
+	@$(PYTHON) tools/record_x0_deps.py
+
+gen-x0-vectors:
+	@$(PYTHON) tools/gen_x0_vectors.py
+
+nc-x0:
+	@mkdir -p docs/evidence/x0
+	@$(PYTHON) tools/nc_x0.py > docs/evidence/x0/nc.log 2>&1 || { cat docs/evidence/x0/nc.log; exit 1; }
+	@cat docs/evidence/x0/nc.log
+
+evidence-x0: record-x0-deps
+	@$(PYTHON) tools/write_x0_evidence.py
+
+record-x1-deps:
+	@$(PYTHON) tools/record_x1_deps.py
+
+gen-x1-vectors:
+	@$(PYTHON) tools/gen_x1_vectors.py
+	@$(CARGO) run -q -p aura-exec --bin x1-record
+
+nc-x1:
+	@mkdir -p docs/evidence/x1
+	@$(PYTHON) tools/nc_x1.py > docs/evidence/x1/nc.log 2>&1 || { cat docs/evidence/x1/nc.log; exit 1; }
+	@cat docs/evidence/x1/nc.log
+
+evidence-x1: record-x1-deps
+	@$(PYTHON) tools/write_x1_evidence.py
+
+record-x2-deps:
+	@$(PYTHON) tools/record_x2_deps.py
+
+gen-x2-vectors:
+	@$(PYTHON) tools/gen_x2_vectors.py
+	@$(CARGO) run -q -p aura-exec --bin x2-record
+
+nc-x2:
+	@mkdir -p docs/evidence/x2
+	@$(PYTHON) tools/nc_x2.py > docs/evidence/x2/nc.log 2>&1 || { cat docs/evidence/x2/nc.log; exit 1; }
+	@cat docs/evidence/x2/nc.log
+
+evidence-x2: record-x2-deps
+	@$(PYTHON) tools/write_x2_evidence.py
+
+record-x3-deps:
+	@$(PYTHON) tools/record_x3_deps.py
+
+gen-x3-vectors:
+	@$(PYTHON) tools/gen_x3_vectors.py
+	@$(CARGO) run -q -p aura-exec --bin x3-record
+
+nc-x3:
+	@mkdir -p docs/evidence/x3
+	@$(PYTHON) tools/nc_x3.py > docs/evidence/x3/nc.log 2>&1 || { cat docs/evidence/x3/nc.log; exit 1; }
+	@cat docs/evidence/x3/nc.log
+
+evidence-x3: record-x3-deps
+	@$(PYTHON) tools/write_x3_evidence.py
+
+record-x4-deps:
+	@$(PYTHON) tools/record_x4_deps.py
+
+# X4: build the reference contracts, pin their size+hash, and measure their gas.
+# `examples/` is a separate workspace, so this is a real cross-build, not a
+# cargo feature of the node.
+build-contracts:
+	@$(PYTHON) tools/build_contracts.py
+	@$(CARGO) run -q -p aura-exec --bin x4-record
+
+check-contracts:
+	@$(PYTHON) tools/build_contracts.py --check
+
+nc-x4:
+	@mkdir -p docs/evidence/x4
+	@$(PYTHON) tools/nc_x4.py > docs/evidence/x4/nc.log 2>&1 || { cat docs/evidence/x4/nc.log; exit 1; }
+	@cat docs/evidence/x4/nc.log
+
+evidence-x4: record-x4-deps
+	@$(PYTHON) tools/write_x4_evidence.py
+
+record-x5-deps:
+	@$(PYTHON) tools/record_x5_deps.py
+
+# X5: build the reference *standards*, pin their size+hash, measure their gas.
+# `standards/` is a separate workspace per contract, and the pinned fixture also
+# carries the ABI v2 surface the census enforces.
+build-standards:
+	@$(PYTHON) tools/build_standards.py
+
+check-standards:
+	@$(PYTHON) tools/build_standards.py --check
+
+nc-x5:
+	@mkdir -p docs/evidence/x5
+	@$(PYTHON) tools/nc_x5.py > docs/evidence/x5/nc.log 2>&1 || { cat docs/evidence/x5/nc.log; exit 1; }
+	@cat docs/evidence/x5/nc.log
+
+evidence-x5: record-x5-deps
+	@$(PYTHON) tools/write_x5_evidence.py
+
+record-x6-deps:
+	@$(PYTHON) tools/record_x6_deps.py
+
+# X6: build the *call* contracts (a vault, an attacker, a chain), pin their
+# size+sha256, then let them run against each other through the real Lifecycle
+# so the gas block is measured rather than assumed.
+build-x6-contracts:
+	@$(PYTHON) tools/build_x6_contracts.py
+
+check-x6-contracts:
+	@$(PYTHON) tools/build_x6_contracts.py --check
+
+nc-x6:
+	@mkdir -p docs/evidence/x6
+	@$(PYTHON) tools/nc_x6.py > docs/evidence/x6/nc.log 2>&1 || { cat docs/evidence/x6/nc.log; exit 1; }
+	@cat docs/evidence/x6/nc.log
+
+evidence-x6: record-x6-deps
+	@$(PYTHON) tools/write_x6_evidence.py
+
+record-x7-deps:
+	@$(PYTHON) tools/record_x7_deps.py
+
+# X7: the determinism gate. `gen-x7-vectors` re-runs the scenario and rewrites the
+# pinned fixture; `x7-matrix` replays it under three build configurations.
+gen-x7-vectors:
+	@$(PYTHON) tools/gen_x7_vectors.py
+
+test-x7:
+	@$(CARGO) test -p aura-exec --test x7_determinism
+
+nc-x7:
+	@mkdir -p docs/evidence/x7
+	@$(PYTHON) tools/nc_x7.py > docs/evidence/x7/nc.log 2>&1 || { cat docs/evidence/x7/nc.log; exit 1; }
+	@cat docs/evidence/x7/nc.log
+
+x7-matrix:
+	@$(PYTHON) tools/x7_matrix.py
+
+evidence-x7: record-x7-deps
+	@$(PYTHON) tools/write_x7_evidence.py
+
+# X8: the static verifier. `gen-x8-mutants` rewrites the golden mutants from the
+# shipped artifacts; the gate replays them and the 23 unit tests that witness every
+# refusal code.
+gen-x8-mutants:
+	@$(PYTHON) tools/gen_x8_mutants.py
+
+test-x8:
+	@$(CARGO) test -p aura-exec --test x8_verify
+
+nc-x8:
+	@mkdir -p docs/evidence/x8
+	@$(PYTHON) tools/nc_x8.py > docs/evidence/x8/nc.log 2>&1 || { cat docs/evidence/x8/nc.log; exit 1; }
+	@cat docs/evidence/x8/nc.log
+
+evidence-x8:
+	@$(PYTHON) tools/write_x8_evidence.py
+
+# D0: the node baseline. `gen-d0-vectors` rewrites the pinned survey from the
+# binary's own measurement; the gate proves the binary refuses and the survey
+# matches the tree.
+gen-d0-vectors:
+	@$(PYTHON) tools/gen_d0_vectors.py
+
+test-d0:
+	@$(CARGO) test -p aura-node
+
+nc-d0:
+	@mkdir -p docs/evidence/d0
+	@$(PYTHON) tools/nc_d0.py > docs/evidence/d0/nc.log 2>&1 || { cat docs/evidence/d0/nc.log; exit 1; }
+	@cat docs/evidence/d0/nc.log
+
+evidence-d0:
+	@$(PYTHON) tools/write_d0_evidence.py
 
 devnet:
 	@echo "ERROR: devnet is D7 (NODE_PLAN). It is not implemented at C0." >&2

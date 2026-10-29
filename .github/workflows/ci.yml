@@ -10,7 +10,7 @@ on:
 # perf) are added by O0 as the crates that need them actually appear.
 jobs:
   core:
-    name: core (C0-C10 + S0-S7 gate)
+    name: core (C0-C10 + S0-S7 + X0-X8 + D0 gate)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,8 +29,8 @@ jobs:
       - name: make test
         run: make test
 
-      - name: golden vectors are reproducible (C1-C9 + S0-S7)
-        run: make gen-c1-vectors && make gen-c2-vectors && make gen-c3-vectors && make gen-c4-vectors && make gen-c5-vectors && make gen-c6-vectors && make gen-c7-vectors && make gen-c8-vectors && make gen-c9-vectors && make gen-s0-vectors && make gen-s1-vectors && make gen-s2-vectors && make gen-s3-vectors && make gen-s4-vectors && make gen-s5-vectors && make gen-s6-vectors && make gen-s7-vectors
+      - name: golden vectors are reproducible (C1-C9 + S0-S7 + X0-X1)
+        run: make gen-c1-vectors && make gen-c2-vectors && make gen-c3-vectors && make gen-c4-vectors && make gen-c5-vectors && make gen-c6-vectors && make gen-c7-vectors && make gen-c8-vectors && make gen-c9-vectors && make gen-s0-vectors && make gen-s1-vectors && make gen-s2-vectors && make gen-s3-vectors && make gen-s4-vectors && make gen-s5-vectors && make gen-s6-vectors && make gen-s7-vectors && make gen-x0-vectors && make gen-x1-vectors
 
       - name: vector inventory (>= 200)
         run: make vector-inventory
@@ -47,22 +47,22 @@ jobs:
       - name: close-out audit
         run: make audit-closeout
 
-      # nc-all runs all 92 NCs without rewriting the historical logs,
+      # nc-all runs every NC without rewriting the historical logs,
       # so those committed SHA256SUMS remain valid in the uploaded artifact.
-      - name: negative controls (C0-C10 + S0-S7, 104 total)
+      - name: negative controls (C0-C10 + S0-S7 + X0-X8 + D0, 165 total)
         run: make nc-all
 
       # Only the CURRENT phase's evidence is regenerated. C0-S4 evidence is a
       # HISTORICAL committed record measured at its own commit; regenerating
       # it later would relabel the wrong tree.
-      - name: current phase evidence (S7)
-        run: make evidence-s7
+      - name: current phase evidence (D0)
+        run: make evidence-d0
 
       - name: Upload evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: c0-s7-evidence
+          name: c0-d0-evidence
           path: |
             docs/evidence/c0/
             docs/evidence/c1/
@@ -85,6 +85,19 @@ jobs:
             docs/evidence/s6-dependency-addendum.txt
             docs/evidence/s7/
             docs/evidence/s7-dependency-addendum.txt
+            docs/evidence/x0/
+            docs/evidence/x0-dependency-addendum.txt
+            docs/evidence/x1/
+            docs/evidence/x1-dependency-addendum.txt
+            docs/evidence/x2/
+            docs/evidence/x3/
+            docs/evidence/x4/
+            docs/evidence/x5/
+            docs/evidence/x6/
+            docs/evidence/x7/
+            docs/evidence/x7-dependency-addendum.txt
+            docs/evidence/x8/
+            docs/evidence/d0/
           if-no-files-found: ignore
 
   # S2's native RocksDB backend needs librocksdb >= 9.9 headers (Ubuntu 24.04
@@ -116,3 +129,67 @@ jobs:
         run: |
           . "$HOME/.cargo/env"
           make test-s2-native
+
+  # X1 keeps two engine backends. The default one (wasmi) is gated by the
+  # `core` job; the optional JIT backend behind `wasmtime-engine` needs
+  # Cranelift, which does not build on the 2 GB development machine (measured:
+  # rustc killed by the OOM killer). A bigger runner does build it, so the
+  # second backend is compiled, tested and NC'd here. Until this job is green,
+  # `wasmtime` is pinned but unproven — say so, never the opposite.
+  exec-wasmtime:
+    name: X1 wasmtime backend (feature wasmtime-engine)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install pinned toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+          components: rustfmt, clippy
+
+      - name: deps-check
+        run: make deps-check
+
+      - name: engine backend compiles
+        run: cargo check -p aura-exec --features wasmtime-engine --all-targets
+
+      - name: X1 gate on the wasmtime backend
+        run: cargo test -p aura-exec --features wasmtime-engine
+
+      - name: clippy (feature on)
+        run: cargo clippy -p aura-exec --features wasmtime-engine --all-targets -- -D warnings
+
+  # X7's honest gap: the determinism gate proves agreement across processes and
+  # build configurations on ONE machine. Three operating systems cannot be measured
+  # from a single sandbox, so the third dimension lives here. Until this job is green
+  # on all three runners, "Linux, macOS and Windows agree" is UNPROVEN — the X7
+  # report says exactly that, and nothing in the docs claims otherwise.
+  determinism:
+    name: X7 determinism (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install pinned toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+
+      # `shell: bash` is available on all three runners, so the same command runs
+      # everywhere and the comparison stays apples to apples.
+      - name: X7 gate (8 processes, pinned root)
+        shell: bash
+        run: make test-x7
+
+      - name: X7 build matrix (debug / release / release-cgu16)
+        shell: bash
+        run: make x7-matrix

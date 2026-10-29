@@ -29,10 +29,30 @@ EVIDENCE = REPO / "docs" / "evidence"
 PATCHES = REPO / "patches"
 
 CORE_PHASES = [f"C{index}" for index in range(11)]      # C0..C10 (closed)
-STATE_PHASES = ["S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7"]  # STATE_PLAN now complete
-PHASES = CORE_PHASES + STATE_PHASES
-SHIPPED = CORE_PHASES + ["S0", "S1", "S2", "S3", "S4", "S5", "S6"]
-CURRENT = "S7"
+STATE_PHASES = ["S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7"]  # STATE_PLAN complete
+EXEC_PHASES = ["X0", "X1", "X2", "X3", "X4", "X5", "X6", "X7", "X8"]                # grows with each X phase
+NODE_PHASES = ["D0"]                                              # grows with each D phase
+PHASES = CORE_PHASES + STATE_PHASES + EXEC_PHASES + NODE_PHASES
+SHIPPED = CORE_PHASES + [
+    "S0",
+    "S1",
+    "S2",
+    "S3",
+    "S4",
+    "S5",
+    "S6",
+    "S7",
+    "X0",
+    "X1",
+    "X2",
+    "X3",
+    "X4",
+    "X5",
+    "X6",
+    "X7",
+    "X8",
+]
+CURRENT = "D0"
 
 PLAN_FOR_PREFIX = {
     "C": "CORE_PLAN.md",
@@ -50,22 +70,27 @@ PLAN_FOR_PREFIX = {
 }
 
 NC_PER_PHASE = {f"C{i}": 6 for i in range(4, 11)}
-NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6})
-SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)   # 98
-EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + NC_PER_PHASE[CURRENT]       # 104
+NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6})
+SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)   # 159
+EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + NC_PER_PHASE[CURRENT]       # 165
 
 DONE_ROW = re.compile(r"^\| ✅ \*\*([A-Z]+\d+)\*\* \|", re.M)
 RESULT_LINE = re.compile(r"^RESULT: (\d+)/(\d+) negative controls PASS", re.M)
 
 
+# Where each plan's patch numbering starts. Patches are numbered in landing order,
+# so a plan that has not landed a phase yet has no base: closing one of its phases
+# is an error until the base is added here, which is the property we want.
+PATCH_BASE = {"C": 1, "S": 12, "X": 20, "D": 29}
+
+
 def patch_prefix(phase: str) -> str:
-    if phase.startswith("C"):
-        number = int(phase[1:]) + 1
-    elif phase.startswith("S"):
-        number = 12 + int(phase[1:])
-    else:
-        number = 20 + int(phase[1:])
-    return f"{number:04d}-{phase}-"
+    base = PATCH_BASE.get(phase[0])
+    if base is None:
+        # A plan whose phases have never been cut: match nothing, so the caller
+        # reports "patch: pending" instead of silently accepting another plan's file.
+        return f"----{phase}-"
+    return f"{base + int(phase[1:]):04d}-{phase}-"
 
 
 def patch_path(phase: str) -> Path | None:
@@ -258,9 +283,17 @@ def check(strict: bool) -> tuple[list[str], list[str]]:
             errors.append("closeout.txt does not report the CORE total 56 NC")
     # Per-phase inventories are historical snapshots: each reports the NC
     # total AS OF that phase, not the current project-wide total.
-    for phase, expected in (("s0", 62), ("s1", 68), ("s2", 74), ("s3", 80), ("s4", 86), ("s5", 92), ("s6", 98), ("s7", EXPECTED_TOTAL_NC)):
+    cumulative: list[tuple[str, int]] = []
+    running = 56  # CORE closed with 56 NCs; S0 is the first phase after it
+    for phase in ("S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7") + tuple(EXEC_PHASES) + tuple(
+        NODE_PHASES
+    ):
+        running += NC_PER_PHASE[phase]
+        cumulative.append((phase.lower(), running))
+    for phase, expected in cumulative:
         path = EVIDENCE / phase / "inventory.txt"
-        if path.exists() and f"TOTAL: {expected} NC" not in path.read_text(encoding="utf-8"):
+        text = path.read_text(encoding="utf-8") if path.exists() else ""
+        if path.exists() and f"TOTAL: {expected} " not in text:
             errors.append(f"{phase}/inventory.txt does not report TOTAL: {expected} NC")
 
     return errors, notes

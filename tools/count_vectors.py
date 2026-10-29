@@ -52,6 +52,10 @@ CONSTANT_PREFIXES = (
 )
 
 CONSTANT_SUFFIXES = ("_context",)
+# Fixtures may either use one key per vector (`program_x_hex=...`, the C-phase
+# format) or one `vector=<label>` block header per vector (the X2 format). The
+# file decides for itself: the presence of a `vector=` line switches the parser.
+BLOCK_HEADER = "vector"
 
 
 def is_vector(key: str) -> bool:
@@ -65,14 +69,23 @@ def is_vector(key: str) -> bool:
 
 
 def count_file(path: Path) -> tuple[int, int]:
+    text = path.read_text(encoding="utf-8")
+    block_format = any(
+        line.strip().startswith(f"{BLOCK_HEADER}=") for line in text.splitlines()
+    )
     raw = 0
     vectors = 0
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         raw += 1
-        if is_vector(line.split("=", 1)[0]):
+        key = line.split("=", 1)[0]
+        if block_format:
+            # One `vector=` header per vector; the rest of the block is its data.
+            if key == BLOCK_HEADER:
+                vectors += 1
+        elif is_vector(key):
             vectors += 1
     return raw, vectors
 
