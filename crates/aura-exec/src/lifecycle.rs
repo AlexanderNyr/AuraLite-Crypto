@@ -267,8 +267,6 @@ pub struct LifecycleReceipt {
     pub diff: Option<StateDiff>,
     /// Root after the operation (unchanged when nothing was committed).
     pub result_root: Hash,
-    /// ABI v2 return data of the entry point, empty when nothing committed.
-    pub ret: Vec<u8>,
 }
 
 impl LifecycleReceipt {
@@ -536,33 +534,6 @@ impl<E: Engine> Lifecycle<E> {
         Ok(receipt_of(receipt, status, code_gas))
     }
 
-    /// Call the code stored at `call.contract`, with ABI v2 calldata.
-    ///
-    /// This is what a standard needs: one stored contract, many methods, each
-    /// addressed by a selector inside the calldata. The return data is the
-    /// contract's answer and is empty whenever the call did not commit.
-    pub fn call_data(
-        &self,
-        base: &MerkleTree,
-        call: ContractCall,
-        calldata: Vec<u8>,
-    ) -> Result<ContractReceipt, LifecycleError> {
-        if calldata.len() > crate::abi_v2::MAX_CALLDATA_LEN {
-            return Err(LifecycleError::Engine(SandboxError::Limit("calldata")));
-        }
-        let view = StateView::new(base.clone(), call.gas_limit);
-        let record =
-            code_of(&view, &call.contract)?.ok_or(LifecycleError::NotDeployed(call.contract))?;
-        let mut session = self.executor.open(base, call);
-        session
-            .set_calldata(calldata)
-            .map_err(|_| LifecycleError::Engine(SandboxError::Limit("calldata")))?;
-        session
-            .run(&record.code, RUN_ENTRY, &[])
-            .map_err(LifecycleError::Engine)?;
-        Ok(session.finish())
-    }
-
     /// Call the code stored at `call.contract`.
     ///
     /// This is the entry point a node uses: the bytecode comes from state, so a
@@ -604,7 +575,6 @@ fn receipt_of(
         writes: receipt.writes,
         diff: receipt.diff,
         result_root: receipt.result_root,
-        ret: receipt.return_data,
     }
 }
 

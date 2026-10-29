@@ -34,6 +34,7 @@ PYTHON ?= python3
         record-x7-deps gen-x7-vectors nc-x7 x7-matrix evidence-x7 test-x7 \
         gen-x8-mutants nc-x8 evidence-x8 test-x8 \
         gen-d0-vectors nc-d0 evidence-d0 test-d0 \
+        gen-d1-vectors nc-d1 evidence-d1 test-d1 \
         devnet clean
 
 help:
@@ -143,6 +144,26 @@ help:
 	@echo "  make test-d0           D0 baseline gate (stub refusal + measured survey)"
 	@echo "  make nc-d0             D0 node-baseline negative controls -> docs/evidence/d0/nc.log"
 	@echo "  make evidence-d0       regenerate D0 baseline report + receipts"
+	@echo "  make gen-d1-vectors    regenerate the pinned D1 skeleton fixture"
+	@echo "  make test-d1           D1 skeleton gate (config, tracing, PID, health)"
+	@echo "  make nc-d1             D1 skeleton negative controls -> docs/evidence/d1/nc.log"
+	@echo "  make evidence-d1       regenerate D1 skeleton report + receipts"
+	@echo "  make gen-b0-vectors    regenerate the pinned B0 consensus baseline fixture"
+	@echo "  make test-b0           B0 baseline gate (no consensus, measured)"
+	@echo "  make nc-b0             B0 consensus-baseline negative controls -> docs/evidence/b0/nc.log"
+	@echo "  make evidence-b0       regenerate B0 consensus baseline report + receipts"
+	@echo "  make gen-b1-vectors    regenerate the pinned B1 PoA baseline fixture"
+	@echo "  make test-b1           B1 PoA baseline gate (proposer + block signature)"
+	@echo "  make nc-b1             B1 PoA baseline negative controls -> docs/evidence/b1/nc.log"
+	@echo "  make evidence-b1       regenerate B1 PoA baseline report + receipts"
+	@echo "  make gen-b2-vectors    regenerate the pinned B2 QC baseline fixture"
+	@echo "  make test-b2           B2 QC baseline gate (BLS12-381 + quorum cert)"
+	@echo "  make nc-b2             B2 QC baseline negative controls -> docs/evidence/b2/nc.log"
+	@echo "  make evidence-b2       regenerate B2 QC baseline report + receipts"
+	@echo "  make gen-b3-vectors    regenerate the pinned B3 finality fixture"
+	@echo "  make test-b3           B3 finality baseline gate (3-chain commit + view change)"
+	@echo "  make nc-b3             B3 finality baseline negative controls -> docs/evidence/b3/nc.log"
+	@echo "  make evidence-b3       regenerate B3 finality baseline report + receipts"
 	@echo "  make record-c9-deps    re-record the C9 dependency addendum"
 	@echo "  make gen-c9-vectors    regenerate 512 independent test-rig vectors"
 	@echo "  make nc-c9             C9 negative controls -> docs/evidence/c9/nc.log"
@@ -260,7 +281,7 @@ evidence-c3:
 # Runs every NC script WITHOUT rewriting the historical C0-C3 evidence logs,
 # so their committed SHA256SUMS stay valid. CI uses this instead of nc-cX.
 nc-all:
-	@for phase in c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 s0 s1 s2 s3 s4 s5 s6 s7 x0 x1 x2 x3 x4 x5 x6 x7 x8 d0; do \
+	@for phase in c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 s0 s1 s2 s3 s4 s5 s6 s7 x0 x1 x2 x3 x4 x5 x6 x7 x8 d0 d1 b0 b1 b2 b3; do \
 	    $(PYTHON) tools/nc_$$phase.py > /tmp/aura-nc-$$phase.log 2>&1 || \
 	      { echo "$$phase NEGATIVE CONTROLS FAILED"; tail -30 /tmp/aura-nc-$$phase.log; exit 1; }; \
 	    grep '^RESULT:' /tmp/aura-nc-$$phase.log; \
@@ -637,6 +658,76 @@ nc-d0:
 
 evidence-d0:
 	@$(PYTHON) tools/write_d0_evidence.py
+
+gen-d1-vectors:
+	@$(PYTHON) tools/gen_d1_vectors.py
+
+test-d1:
+	@$(CARGO) test -p aura-node --test d1_skeleton
+
+nc-d1:
+	@mkdir -p docs/evidence/d1
+	@$(PYTHON) tools/nc_d1.py > docs/evidence/d1/nc.log 2>&1 || { cat docs/evidence/d1/nc.log; exit 1; }
+	@cat docs/evidence/d1/nc.log
+
+evidence-d1:
+	@$(PYTHON) tools/write_d1_evidence.py
+
+gen-b0-vectors:
+	@$(PYTHON) tools/gen_b0_vectors.py
+
+test-b0:
+	@$(CARGO) test -p aura-consensus
+
+nc-b0:
+	@mkdir -p docs/evidence/b0
+	@$(PYTHON) tools/nc_b0.py > docs/evidence/b0/nc.log 2>&1 || { cat docs/evidence/b0/nc.log; exit 1; }
+	@cat docs/evidence/b0/nc.log
+
+evidence-b0:
+	@$(PYTHON) tools/write_b0_evidence.py
+
+gen-b1-vectors:
+	@$(PYTHON) tools/gen_b1_vectors.py
+
+test-b1:
+	cargo test -p aura-consensus
+
+nc-b1:
+	@mkdir -p docs/evidence/b1
+	@$(PYTHON) tools/nc_b1.py > docs/evidence/b1/nc.log 2>&1 || { cat docs/evidence/b1/nc.log; exit 1; }
+	@cat docs/evidence/b1/nc.log
+
+evidence-b1:
+	@$(PYTHON) tools/write_b1_evidence.py
+
+gen-b2-vectors:
+	@$(PYTHON) tools/gen_b2_vectors.py
+
+test-b2:
+	@$(CARGO) test -p aura-consensus
+
+nc-b2:
+	@mkdir -p docs/evidence/b2
+	@$(PYTHON) tools/nc_b2.py > docs/evidence/b2/nc.log 2>&1 || { cat docs/evidence/b2/nc.log; exit 1; }
+	@cat docs/evidence/b2/nc.log
+
+evidence-b2:
+	@$(PYTHON) tools/write_b2_evidence.py
+
+gen-b3-vectors:
+	@$(PYTHON) tools/gen_b3_vectors.py
+
+test-b3:
+	@$(CARGO) test -p aura-consensus
+
+nc-b3:
+	@mkdir -p docs/evidence/b3
+	@$(PYTHON) tools/nc_b3.py > docs/evidence/b3/nc.log 2>&1 || { cat docs/evidence/b3/nc.log; exit 1; }
+	@cat docs/evidence/b3/nc.log
+
+evidence-b3:
+	@$(PYTHON) tools/write_b3_evidence.py
 
 devnet:
 	@echo "ERROR: devnet is D7 (NODE_PLAN). It is not implemented at C0." >&2

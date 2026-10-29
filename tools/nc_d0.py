@@ -121,7 +121,7 @@ def main() -> int:
     };""",
             """    let presence = Presence::Implemented;
     let _ = (files, public_items);""",
-            "the_four_unlanded_layers_are_still_placeholders",
+            "the_unlanded_layers_are_still_placeholders",
         ),
         expect_red(
             "NC-3 `report` measures a tree that is not a workspace",

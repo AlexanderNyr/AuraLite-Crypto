@@ -144,14 +144,6 @@ impl Engine for WasmtimeEngine {
         let engine = WasmtimeCore::new(&engine_config(limits)).map_err(SandboxError::compile)?;
         let module = Module::new(&engine, wasm).map_err(SandboxError::compile)?;
 
-        // This backend links no host functions at all, so *every* import is
-        // refused — including the ABI surfaces `env` (v1), `env2` (v2) and
-        // `env3` (v3). That is a stated X1 decision, not an oversight: wasmi is
-        // the default and the only backend that implements the host ABI, while
-        // wasmtime exists to prove that the *deterministic subset* of a module
-        // executes the same way twice on a second engine. The message therefore
-        // names the offending `module.name` (for an X6 contract, `env3.call`), so
-        // a reader sees which surface is unsupported rather than a bare count.
         let imports = module.imports().count();
         if imports > 0 {
             let first = module

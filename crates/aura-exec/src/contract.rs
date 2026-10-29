@@ -82,20 +82,6 @@ pub struct HostState {
     pub host_gas: u64,
     /// Set when the budget ran out; the adapter turns it into a trap.
     pub out_of_gas: bool,
-    /// ABI v2 calldata: fixed before execution, immutable during it.
-    pub calldata: Vec<u8>,
-    /// ABI v2 return buffer, written by `env2.return_write`.
-    pub return_data: Vec<u8>,
-    /// X6: the frame stack, innermost last.
-    ///
-    /// The top-level frame is the contract being called; a nested call pushes
-    /// the callee. Two guards read this: the depth limit and the reentrancy
-    /// rule (`abi_v3::admit`).
-    pub frames: Vec<Address>,
-    /// X6: the answer of the last nested call, empty when there was none.
-    pub returndata: Vec<u8>,
-    /// X6: how many nested calls this frame made.
-    pub calls: u32,
     /// Storage writes the call performed.
     ///
     /// Counted even when the call is later rolled back: the receipt is an audit
@@ -112,11 +98,6 @@ impl HostState {
             call,
             host_gas: 0,
             out_of_gas: false,
-            calldata: Vec::new(),
-            return_data: Vec::new(),
-            frames: vec![call.contract],
-            returndata: Vec::new(),
-            calls: 0,
             writes: 0,
         }
     }
@@ -196,72 +177,6 @@ impl HostState {
         Ok(())
     }
 
-    /// Stage the value of a nested call, returning what is needed to undo it.
-    ///
-    /// The callee must see a funded account while it runs, so the transfer is
-    /// written to the *caller's* view before the callee is instantiated. The two
-    /// previous account encodings are returned so the caller can put them back if
-    /// the callee fails: a frame commits wholly or not at all, and value is part
-    /// of the frame.
-    pub fn stage_value(
-        &mut self,
-        target: &Address,
-        amount: Amount,
-    ) -> Result<Option<ValueUndo>, AbiError> {
-        if amount == Amount::ZERO || target == &self.call.contract {
-            return Ok(None);
-        }
-        let undo = ValueUndo {
-            from: self.call.contract,
-            to: *target,
-            from_before: self
-                .view
-                .get(&StateKey::account(&self.call.contract))
-                .map(<[u8]>::to_vec),
-            to_before: self
-                .view
-                .get(&StateKey::account(target))
-                .map(<[u8]>::to_vec),
-        };
-        self.transfer_to(target, amount)?;
-        Ok(Some(undo))
-    }
-
-    /// Put a staged value transfer back exactly as it was.
-    pub fn undo_value(&mut self, undo: ValueUndo) {
-        match undo.from_before {
-            Some(bytes) => self.view.set(&StateKey::account(&undo.from), bytes),
-            None => self.view.delete(&StateKey::account(&undo.from)),
-        }
-        match undo.to_before {
-            Some(bytes) => self.view.set(&StateKey::account(&undo.to), bytes),
-            None => self.view.delete(&StateKey::account(&undo.to)),
-        }
-    }
-
-    /// Fold a committed child diff into this frame's overlay.
-    ///
-    /// Paths are hashes of keys, so they identify the same slot in the child's
-    /// overlay and in ours; only the *version* differs, and this frame's version
-    /// is the one that commits. That is what makes a nested call atomic: if the
-    /// child fails there is no diff to merge, and nothing it wrote ever existed.
-    pub fn merge_child(&mut self, diff: &aura_state::StateDiff) {
-        for (path, value) in &diff.changes {
-            match value {
-                Some(bytes) => self.view.set_path(*path, bytes.clone()),
-                None => self.view.delete_path(*path),
-            }
-        }
-        self.writes += diff.changes.len();
-    }
-
-    /// Append the events a committed child emitted, in order.
-    pub fn merge_events(&mut self, events: &[Vec<u8>]) {
-        for event in events {
-            self.view.emit(event.clone());
-        }
-    }
-
     /// Append one event in canonical form: `u32le(topic_len) || topic || data`.
     pub fn push_event(&mut self, topic: &[u8], data: &[u8]) -> Result<(), AbiError> {
         if self.view.events().len() >= aura_state::MAX_EVENTS {
@@ -274,19 +189,6 @@ impl HostState {
         self.view.emit(event);
         Ok(())
     }
-}
-
-/// The state a value transfer overwrote, so a failed frame can restore it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ValueUndo {
-    /// Address the value was taken from (the calling contract).
-    pub from: Address,
-    /// Address the value was sent to (the callee).
-    pub to: Address,
-    /// Encoding of `from`'s account before the transfer, if it existed.
-    pub from_before: Option<Vec<u8>>,
-    /// Encoding of `to`'s account before the transfer, if it existed.
-    pub to_before: Option<Vec<u8>>,
 }
 
 /// How a call ended.
@@ -336,12 +238,6 @@ pub struct ContractReceipt {
     pub diff: Option<StateDiff>,
     /// Root the state has after this call (unchanged on failure).
     pub result_root: Hash,
-    /// ABI v2 return data, empty unless the call succeeded.
-    ///
-    /// A reverted call returns nothing: the contract's answer is part of what
-    /// was rolled back, and a caller that reads a return value must also know
-    /// the call committed.
-    pub return_data: Vec<u8>,
 }
 
 /// A node-side executor: one sandbox configuration, used for many calls.
@@ -442,26 +338,6 @@ impl<E: Engine> Executor<E> {
         Ok(session.finish())
     }
 
-    /// Call `run` with ABI v2 calldata.
-    ///
-    /// The calldata is part of the invocation, not of the state: it is fixed
-    /// before execution and reaches the contract only through
-    /// `env2.calldata_read`, priced per byte.
-    pub fn call_data(
-        &self,
-        wasm: &[u8],
-        base: MerkleTree,
-        call: ContractCall,
-        calldata: &[u8],
-    ) -> Result<ContractReceipt, SandboxError> {
-        let mut session = self.open(&base, call);
-        session
-            .set_calldata(calldata.to_vec())
-            .map_err(|_| SandboxError::Limit("calldata"))?;
-        session.run(wasm, RUN_ENTRY, &[])?;
-        Ok(session.finish())
-    }
-
     /// Convenience wrapper for a call that is expected to be rejected before
     /// execution (census, size, imports): returns `ExecStatus::Rejected`.
     pub fn rejected(&self, base_root: Hash) -> ContractReceipt {
@@ -473,7 +349,6 @@ impl<E: Engine> Executor<E> {
             writes: 0,
             diff: None,
             result_root: base_root,
-            return_data: Vec::new(),
         }
     }
 }
@@ -544,26 +419,6 @@ impl<E: Engine> Session<'_, E> {
         self.host.out_of_gas = matches!(status, ExecStatus::OutOfGas);
     }
 
-    /// Hand the invocation its ABI v3 frame stack.
-    ///
-    /// A nested frame inherits its parent's stack and appends itself, so the
-    /// reentrancy rule and the depth limit see exactly what the executor sees.
-    pub fn set_frames(&mut self, frames: Vec<Address>) {
-        self.host.frames = frames;
-    }
-
-    /// Hand the invocation its ABI v2 calldata.
-    ///
-    /// Refused (not truncated) above [`crate::abi_v2::MAX_CALLDATA_LEN`]: a host
-    /// that quietly dropped the tail of a `transfer` would be a fund-loss bug.
-    pub fn set_calldata(&mut self, calldata: Vec<u8>) -> Result<(), AbiError> {
-        if calldata.len() > crate::abi_v2::MAX_CALLDATA_LEN {
-            return Err(AbiError::ValueTooLong);
-        }
-        self.host.calldata = calldata;
-        Ok(())
-    }
-
     /// Run `entry` of `wasm` inside this session.
     pub fn run(&mut self, wasm: &[u8], entry: &str, args: &[i32]) -> Result<(), SandboxError> {
         let call = self.host.call;
@@ -597,8 +452,7 @@ impl<E: Engine> Session<'_, E> {
         let instruction_gas = execution.as_ref().map_or(0, |e| e.fuel_used);
         let gas_used = instruction_gas.max(host_gas).max(pre_gas);
         let writes = host.writes + extra_writes;
-        let (status, diff, events, kept_return) = match execution.map(|execution| execution.outcome)
-        {
+        let (status, diff, events) = match execution.map(|execution| execution.outcome) {
             // No entry point ran (a deploy of a module without `init`): the
             // lifecycle writes are the whole operation, and there is nothing to
             // fail.
@@ -606,22 +460,15 @@ impl<E: Engine> Session<'_, E> {
                 ExecStatus::Returned(0),
                 Some(host.view.diff(version)),
                 host.view.events().to_vec(),
-                host.return_data.clone(),
             ),
             Some(Outcome::Returned(value)) if !host.out_of_gas => (
                 ExecStatus::Returned(value),
                 Some(host.view.diff(version)),
                 host.view.events().to_vec(),
-                host.return_data.clone(),
             ),
             Some(Outcome::Returned(_)) => {
                 host.rollback();
-                (
-                    ExecStatus::OutOfGas,
-                    None,
-                    host.view.events().to_vec(),
-                    Vec::new(),
-                )
+                (ExecStatus::OutOfGas, None, host.view.events().to_vec())
             }
             Some(Outcome::Trap(kind)) => {
                 let status = if host.out_of_gas
@@ -632,7 +479,7 @@ impl<E: Engine> Session<'_, E> {
                     ExecStatus::Trap(kind)
                 };
                 host.rollback();
-                (status, None, host.view.events().to_vec(), Vec::new())
+                (status, None, host.view.events().to_vec())
             }
         };
         let result_root = diff
@@ -647,7 +494,6 @@ impl<E: Engine> Session<'_, E> {
             writes,
             diff,
             result_root,
-            return_data: kept_return,
         }
     }
 }

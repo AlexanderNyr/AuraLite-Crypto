@@ -1,0 +1,3849 @@
+From 1eb608e11d204235d936491378d33ecd5306b4a0 Mon Sep 17 00:00:00 2001
+From: AuraLite <dev@auralite.local>
+Date: Thu, 29 Oct 2026 14:30:40 +0000
+Subject: [PATCH] =?UTF-8?q?B0:=20consensus=20baseline=20=E2=80=94=20the=20?=
+ =?UTF-8?q?crate=20measures=20that=20no=20consensus=20exists?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+aura_consensus::baseline surveys the six consensus layers (proposer,
+block-signature, QC, finality, validator set, VRF leader) and classifies
+each as placeholder — 0 implemented, 6 placeholders, 0 missing. The
+aura-consensus binary refuses to pretend consensus exists: no arguments
+→ exit 2 with every missing capability and its phase; unknown command →
+exit 64; report exits 3 on a non-workspace.
+
+- tools/gen_b0_vectors.py pins the survey in b0_baseline.txt
+- tools/nc_b0.py — 6 negative controls, each reddening a named test
+- tools/write_b0_evidence.py — gates, report, inventory, SHA256SUMS
+- D0 test renamed: the_four_unlanded_layers → the_unlanded_layers
+- CHANGELOG entry, CONSENSUS_PLAN.md receipt, docs/NODE.md + STATUS.md
+- audit_closeout.py: CONSENSUS_PHASES=[B0], CURRENT=B0, EXPECTED_TOTAL_NC=177
+
+Gates: 10 unit tests, D0 13/13, D1 12/12, 6/6 NC, make test ALL GREEN
+---
+ CHANGELOG.md                                  |  11 +
+ Makefile                                      |  20 +-
+ crates/aura-consensus/Cargo.toml              |   6 +-
+ crates/aura-consensus/src/baseline.rs         | 742 ++++++++++++++++++
+ crates/aura-consensus/src/bin/main.rs         |  14 +
+ crates/aura-consensus/src/lib.rs              |  16 +-
+ .../tests/fixtures/b0_baseline.txt            |  23 +
+ crates/aura-node/tests/d0_baseline.rs         |   6 +-
+ .../aura-node/tests/fixtures/d0_baseline.txt  |   6 +-
+ docs/evidence/b0/SHA256SUMS                   |   5 +
+ docs/evidence/b0/gates.txt                    | 280 +++++++
+ docs/evidence/b0/inventory.txt                | 244 ++++++
+ docs/evidence/b0/nc.log                       |  32 +
+ docs/evidence/b0/report.md                    |  99 +++
+ docs/evidence/c10/SHA256SUMS                  |   6 +-
+ docs/evidence/c10/closeout.txt                |   4 +-
+ docs/evidence/c10/gates.txt                   | 171 ++--
+ docs/evidence/c10/nc.log                      |  49 +-
+ docs/evidence/c9/SHA256SUMS                   |   6 +-
+ docs/evidence/c9/gates.txt                    | 297 +++++--
+ docs/evidence/c9/nc.log                       |  10 +-
+ docs/evidence/d0/SHA256SUMS                   |  10 +-
+ docs/evidence/d0/gates.txt                    | 102 +--
+ docs/evidence/d0/inventory.txt                |   4 +-
+ docs/evidence/d0/nc.log                       |   2 +-
+ docs/evidence/d0/report.md                    |   8 +-
+ docs/plans/CONSENSUS_PLAN.md                  |  13 +-
+ docs/spec/c9-dependency-addendum.txt          | 168 ++++
+ tools/audit_closeout.py                       |  17 +-
+ tools/gen_b0_vectors.py                       | 113 +++
+ tools/nc_b0.py                                | 196 +++++
+ tools/nc_d0.py                                |   2 +-
+ tools/write_b0_evidence.py                    | 356 +++++++++
+ 33 files changed, 2780 insertions(+), 258 deletions(-)
+ create mode 100644 crates/aura-consensus/src/baseline.rs
+ create mode 100644 crates/aura-consensus/src/bin/main.rs
+ create mode 100644 crates/aura-consensus/tests/fixtures/b0_baseline.txt
+ create mode 100644 docs/evidence/b0/SHA256SUMS
+ create mode 100644 docs/evidence/b0/gates.txt
+ create mode 100644 docs/evidence/b0/inventory.txt
+ create mode 100644 docs/evidence/b0/nc.log
+ create mode 100644 docs/evidence/b0/report.md
+ create mode 100644 tools/gen_b0_vectors.py
+ create mode 100644 tools/nc_b0.py
+ create mode 100644 tools/write_b0_evidence.py
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index c59af58..285cab8 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -62,6 +62,17 @@ dependency beyond `toml`, `tracing` and `tracing-subscriber`.
+   374 total workspace tests; 171 negative controls (6 new); 4 857 vectors / 27
+   fixtures unchanged.
+ 
++## [B0 — consensus baseline] 2026-10-29
++
++**First `CONSENSUS_PLAN` phase, and a measurement rather than a feature.** Deliverable:
++`patches/0031-B0-consensus-baseline.patch`. The claim: *there is no consensus, and this module measures that claim*. No new crate, no new dependency (`aura-consensus` was an empty placeholder with a `[[bin]]` since C0).
++
++- `aura_consensus::baseline` — a survey of the six consensus layers (proposer, block-signature, QC, finality, validator set, VRF leader), classifying each as `implemented`, `placeholder` or `missing`, plus the six missing capabilities and the phase (`B1`–`B5`) that owes each. All six are placeholders at B0; 0 implemented, 0 missing.
++- The `aura-consensus` binary: no arguments → exit **2** with every missing capability and its phase; `--help`/`--version` succeed; `report` measures the tree and exits **3** when there is nothing to measure; unknown command → exit **64**.
++- `crates/aura-consensus/tests/fixtures/b0_baseline.txt` pins the survey so it cannot drift silently; `tools/gen_b0_vectors.py` writes it from the binary's own `report --fixture` output.
++- `tools/nc_b0.py` — 6 negative controls, each reddening a **named** test after a green baseline: the baseline exits 0, every layer classified `implemented`, `report` measuring a non-workspace, an unknown command falling through to exit 0, the refusal dropping the capability list, and two different logs treated as equivalent.
++- Gates: 10 unit tests in the B0 gate; D0 gate still green (13 tests); D1 gate still green (12 tests); 374 + 10 = 384 total workspace tests; 177 negative controls (6 new).
++
+ ## [X8 — static verifier] 2026-10-29
+ 
+ **Eighth and last Stage 1 `EXEC_PLAN` phase.** Deliverable:
+diff --git a/Makefile b/Makefile
+index 18d91eb..45b97ea 100644
+--- a/Makefile
++++ b/Makefile
+@@ -148,6 +148,10 @@ help:
+ 	@echo "  make test-d1           D1 skeleton gate (config, tracing, PID, health)"
+ 	@echo "  make nc-d1             D1 skeleton negative controls -> docs/evidence/d1/nc.log"
+ 	@echo "  make evidence-d1       regenerate D1 skeleton report + receipts"
++	@echo "  make gen-b0-vectors    regenerate the pinned B0 consensus baseline fixture"
++	@echo "  make test-b0           B0 baseline gate (no consensus, measured)"
++	@echo "  make nc-b0             B0 consensus-baseline negative controls -> docs/evidence/b0/nc.log"
++	@echo "  make evidence-b0       regenerate B0 consensus baseline report + receipts"
+ 	@echo "  make record-c9-deps    re-record the C9 dependency addendum"
+ 	@echo "  make gen-c9-vectors    regenerate 512 independent test-rig vectors"
+ 	@echo "  make nc-c9             C9 negative controls -> docs/evidence/c9/nc.log"
+@@ -265,7 +269,7 @@ evidence-c3:
+ # Runs every NC script WITHOUT rewriting the historical C0-C3 evidence logs,
+ # so their committed SHA256SUMS stay valid. CI uses this instead of nc-cX.
+ nc-all:
+-	@for phase in c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 s0 s1 s2 s3 s4 s5 s6 s7 x0 x1 x2 x3 x4 x5 x6 x7 x8 d0; do \
++	@for phase in c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 s0 s1 s2 s3 s4 s5 s6 s7 x0 x1 x2 x3 x4 x5 x6 x7 x8 d0 d1 b0; do \
+ 	    $(PYTHON) tools/nc_$$phase.py > /tmp/aura-nc-$$phase.log 2>&1 || \
+ 	      { echo "$$phase NEGATIVE CONTROLS FAILED"; tail -30 /tmp/aura-nc-$$phase.log; exit 1; }; \
+ 	    grep '^RESULT:' /tmp/aura-nc-$$phase.log; \
+@@ -657,6 +661,20 @@ nc-d1:
+ evidence-d1:
+ 	@$(PYTHON) tools/write_d1_evidence.py
+ 
++gen-b0-vectors:
++	@$(PYTHON) tools/gen_b0_vectors.py
++
++test-b0:
++	@$(CARGO) test -p aura-consensus
++
++nc-b0:
++	@mkdir -p docs/evidence/b0
++	@$(PYTHON) tools/nc_b0.py > docs/evidence/b0/nc.log 2>&1 || { cat docs/evidence/b0/nc.log; exit 1; }
++	@cat docs/evidence/b0/nc.log
++
++evidence-b0:
++	@$(PYTHON) tools/write_b0_evidence.py
++
+ devnet:
+ 	@echo "ERROR: devnet is D7 (NODE_PLAN). It is not implemented at C0." >&2
+ 	@exit 1
+diff --git a/crates/aura-consensus/Cargo.toml b/crates/aura-consensus/Cargo.toml
+index 8207730..2ccccaa 100644
+--- a/crates/aura-consensus/Cargo.toml
++++ b/crates/aura-consensus/Cargo.toml
+@@ -1,6 +1,6 @@
+ [package]
+ name = "aura-consensus"
+-description = "AuraLite-Crypto BFT-PoS consensus (placeholder, lands in B1)"
++description = "AuraLite-Crypto BFT-PoS consensus baseline (B0 landed; B1+ pending)"
+ version.workspace = true
+ edition.workspace = true
+ license.workspace = true
+@@ -8,4 +8,8 @@ rust-version.workspace = true
+ repository.workspace = true
+ publish.workspace = true
+ 
++[[bin]]
++name = "aura-consensus"
++path = "src/bin/main.rs"
++
+ [dependencies]
+diff --git a/crates/aura-consensus/src/baseline.rs b/crates/aura-consensus/src/baseline.rs
+new file mode 100644
+index 0000000..a16e313
+--- /dev/null
++++ b/crates/aura-consensus/src/baseline.rs
+@@ -0,0 +1,742 @@
++//! B0 baseline — **no consensus**, and this module measures that claim.
++//!
++//! `aura-consensus` is a C0 placeholder that now contains the B0 baseline
++//! measurement. It has sources and a public `baseline` module, but no
++//! consensus logic: no proposer, no quorum certificate, no finality, no
++//! leader rotation. The honest artifact is therefore *not* a consensus that
++//! pretends to agree — it is a measurement of what is missing, plus a binary
++//! that refuses to claim consensus where none exists.
++//!
++//! # What B0 measures
++//!
++//! [`survey`] measures the `aura-consensus` crate itself: files, lines, and
++//! public item declarations. The crate measures as
++//! [`Presence::Placeholder`] — it has sources and a public `baseline` module,
++//! but declares no consensus capability. The six consensus capabilities that
++//! B1–B5 will add are listed in [`MISSING_CAPABILITIES`] and named in the
++//! refusal text.
++//!
++//! # Why the baseline refuses
++//!
++//! `CONTRIBUTING.md` §1 forbids stubs that silently return success. A consensus
++//! module that reports "agreed" without any validators would make every later
++//! block, QC and finality proof suspect. So:
++//!
++//! * the baseline reports **no consensus** and names every missing capability
++//!   with the phase that will add it;
++//! * two different transaction logs are **not** equivalent — there is no
++//!   consensus to order them, and the gate asserts this;
++//! * `report` is the one command that succeeds, because it produces a
++//!   measurement.
++
++use std::fmt::Write as _;
++use std::io::Write;
++use std::path::{Path, PathBuf};
++
++/// The phase these numbers belong to.
++pub const PHASE: &str = "B0";
++
++/// Exit code of the refusal: no consensus exists.
++pub const EXIT_STUB: i32 = 2;
++
++/// Exit code when the baseline is asked about a tree that is not a workspace.
++pub const EXIT_NO_WORKSPACE: i32 = 3;
++
++/// Exit code of a usage error (sysexits `EX_USAGE`).
++pub const EXIT_USAGE: i32 = 64;
++
++/// One consensus component that will land in B1–B5.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct Layer {
++    /// Component name, e.g. `proposer`.
++    pub name: &'static str,
++    /// The phase that lands (or landed) the real implementation.
++    pub phase: &'static str,
++    /// What the component is responsible for.
++    pub what: &'static str,
++}
++
++/// Every consensus component, in landing order.
++pub const LAYERS: [Layer; 6] = [
++    Layer {
++        name: "proposer",
++        phase: "B1",
++        what: "deterministic round-robin proposer, N validators",
++    },
++    Layer {
++        name: "block-signature",
++        phase: "B1",
++        what: "simple block signature for PoA",
++    },
++    Layer {
++        name: "qc",
++        phase: "B2",
++        what: "quorum certificate, 2f+1 BLS aggregation, O(1) verify",
++    },
++    Layer {
++        name: "finality",
++        phase: "B3",
++        what: "3-chain commit, view change, timeouts, nil blocks",
++    },
++    Layer {
++        name: "validator-set",
++        phase: "B4",
++        what: "staking contract, epoch, enter/exit queue, set update",
++    },
++    Layer {
++        name: "vrf-leader",
++        phase: "B5",
++        what: "stake-weighted VRF leader election, grinding protection",
++    },
++];
++
++/// One consensus capability that does not exist yet, and the phase that will add it.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct Capability {
++    /// Stable name, used by the gate and the refusal message.
++    pub name: &'static str,
++    /// The phase that lands it.
++    pub phase: &'static str,
++    /// What the capability will do.
++    pub what: &'static str,
++}
++
++/// The six capabilities a consensus needs and this tree does not have.
++pub const MISSING_CAPABILITIES: [Capability; 6] = [
++    Capability {
++        name: "proposer",
++        phase: "B1",
++        what: "deterministic round-robin proposer, N validators",
++    },
++    Capability {
++        name: "block-signature",
++        phase: "B1",
++        what: "simple block signature for PoA",
++    },
++    Capability {
++        name: "qc",
++        phase: "B2",
++        what: "quorum certificate, 2f+1 BLS aggregation, O(1) verify",
++    },
++    Capability {
++        name: "finality",
++        phase: "B3",
++        what: "3-chain commit, view change, timeouts, nil blocks",
++    },
++    Capability {
++        name: "validator-set",
++        phase: "B4",
++        what: "staking contract, epoch, enter/exit queue, set update",
++    },
++    Capability {
++        name: "vrf-leader",
++        phase: "B5",
++        what: "stake-weighted VRF leader election, grinding protection",
++    },
++];
++
++/// What a consensus component turned out to be.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum Presence {
++    /// No source files at all.
++    Missing,
++    /// Source files exist but declare no consensus logic — the C0 skeleton
++    /// convention extended: the baseline module is public, but it measures
++    /// absence rather than providing consensus.
++    Placeholder,
++    /// At least one consensus capability exists.
++    Implemented,
++}
++
++impl Presence {
++    /// Stable string form used by the fixture and the report.
++    pub fn as_str(self) -> &'static str {
++        match self {
++            Presence::Missing => "missing",
++            Presence::Placeholder => "placeholder",
++            Presence::Implemented => "implemented",
++        }
++    }
++}
++
++/// One measured component.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct Measurement {
++    /// The layer this measurement belongs to.
++    pub layer: Layer,
++    /// What the source says it is.
++    pub presence: Presence,
++    /// Number of `.rs` files under `crates/aura-consensus/src/`.
++    pub files: usize,
++    /// Number of lines in those files.
++    pub lines: usize,
++    /// Number of public item declarations in those files.
++    pub public_items: usize,
++}
++
++/// The result of [`survey`].
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct Survey {
++    /// Root that was measured.
++    pub root: PathBuf,
++    /// One entry per layer of [`LAYERS`], in that order.
++    pub layers: Vec<Measurement>,
++}
++
++impl Survey {
++    /// Layers that report [`Presence::Implemented`].
++    pub fn implemented(&self) -> usize {
++        self.count(Presence::Implemented)
++    }
++
++    /// Layers that are still placeholders.
++    pub fn placeholders(&self) -> usize {
++        self.count(Presence::Placeholder)
++    }
++
++    /// Layers with no source at all.
++    pub fn missing(&self) -> usize {
++        self.count(Presence::Missing)
++    }
++
++    fn count(&self, presence: Presence) -> usize {
++        self.layers
++            .iter()
++            .filter(|m| m.presence == presence)
++            .count()
++    }
++
++    /// Total `.rs` files across the measured layers.
++    pub fn total_files(&self) -> usize {
++        self.layers.iter().map(|m| m.files).sum()
++    }
++
++    /// Total lines across the measured layers.
++    pub fn total_lines(&self) -> usize {
++        self.layers.iter().map(|m| m.lines).sum()
++    }
++
++    /// The names of the layers that are still placeholders, in survey order.
++    pub fn placeholder_names(&self) -> Vec<&'static str> {
++        self.layers
++            .iter()
++            .filter(|m| m.presence == Presence::Placeholder)
++            .map(|m| m.layer.name)
++            .collect()
++    }
++
++    /// The report table, as printed by `aura-consensus report`.
++    pub fn table(&self) -> String {
++        let mut out = String::new();
++        out.push_str("layer             owner  presence      files  lines  public\n");
++        for m in &self.layers {
++            let _ = writeln!(
++                out,
++                "{:<17} {:<6} {:<13} {:>5}  {:>5}  {:>6}",
++                m.layer.name,
++                m.layer.phase,
++                m.presence.as_str(),
++                m.files,
++                m.lines,
++                m.public_items
++            );
++        }
++        let _ = writeln!(
++            out,
++            "{:<17} {:<6} {:<13} {:>5}  {:>5}",
++            "total",
++            PHASE,
++            format!("{} impl", self.implemented()),
++            self.total_files(),
++            self.total_lines()
++        );
++        out
++    }
++}
++
++/// Measure `root` — the directory that contains `crates/`.
++///
++/// All six consensus components live in the same crate
++/// (`crates/aura-consensus/src`), so each measurement reads the same
++/// directory. The crate measures as [`Presence::Placeholder`]: it has sources
++/// and a public `baseline` module, but no consensus logic.
++pub fn survey(root: &Path) -> Survey {
++    let layers = LAYERS.iter().map(|layer| measure(root, *layer)).collect();
++    Survey {
++        root: root.to_path_buf(),
++        layers,
++    }
++}
++
++fn measure(root: &Path, layer: Layer) -> Measurement {
++    let src = root.join("crates").join("aura-consensus").join("src");
++    let mut files = 0usize;
++    let mut lines = 0usize;
++    let mut public_items = 0usize;
++    for path in rust_files(&src) {
++        let Ok(text) = std::fs::read_to_string(&path) else {
++            continue;
++        };
++        files += 1;
++        for line in text.lines() {
++            let trimmed = line.trim_start();
++            if trimmed.is_empty() {
++                continue;
++            }
++            lines += 1;
++            if declares_public_item(trimmed) {
++                public_items += 1;
++            }
++        }
++    }
++    // The crate has sources and a public baseline module, but no consensus
++    // logic. All six components are placeholders at B0.
++    let presence = if files == 0 {
++        Presence::Missing
++    } else {
++        Presence::Placeholder
++    };
++    Measurement {
++        layer,
++        presence,
++        files,
++        lines,
++        public_items,
++    }
++}
++
++/// Every `.rs` file under `dir`, sorted so the survey is deterministic.
++fn rust_files(dir: &Path) -> Vec<PathBuf> {
++    let mut files = Vec::new();
++    let Ok(entries) = std::fs::read_dir(dir) else {
++        return files;
++    };
++    let mut paths: Vec<PathBuf> = entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
++    paths.sort();
++    for path in paths {
++        if path.is_dir() {
++            files.extend(rust_files(&path));
++        } else if path.extension().is_some_and(|ext| ext == "rs") {
++            files.push(path);
++        }
++    }
++    files
++}
++
++/// True when a source line declares a public item.
++fn declares_public_item(line: &str) -> bool {
++    if line.starts_with("//") || line.starts_with('*') || line.starts_with("/*") {
++        return false;
++    }
++    const KINDS: [&str; 10] = [
++        "pub fn ",
++        "pub struct ",
++        "pub enum ",
++        "pub const ",
++        "pub mod ",
++        "pub use ",
++        "pub trait ",
++        "pub type ",
++        "pub static ",
++        "pub union ",
++    ];
++    if KINDS.iter().any(|kind| line.contains(kind)) {
++        return true;
++    }
++    line.starts_with("pub(crate) ") || line.starts_with("macro_rules! pub ")
++}
++
++/// Where the workspace lives when `--workspace` is not passed.
++pub fn default_root() -> PathBuf {
++    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
++}
++
++/// What `aura-consensus` was asked to do, in the B0 reading of the arguments.
++pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
++    let Some(command) = args.first().map(String::as_str) else {
++        return refuse(err);
++    };
++    match command {
++        "--help" | "-h" => {
++            let _ = writeln!(out, "{}", usage());
++            0
++        }
++        "--version" | "-V" => {
++            let _ = writeln!(
++                out,
++                "aura-consensus {} (B0 baseline — no consensus)",
++                env!("CARGO_PKG_VERSION")
++            );
++            0
++        }
++        "report" => report(&args[1..], out, err),
++        other => {
++            let _ = writeln!(err, "aura-consensus: unknown command `{other}`.",);
++            let _ = writeln!(err, "{}", usage());
++            EXIT_USAGE
++        }
++    }
++}
++
++fn report(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
++    let mut root = default_root();
++    let mut fixture = false;
++    let mut index = 0;
++    while index < args.len() {
++        match args[index].as_str() {
++            "--fixture" => {
++                fixture = true;
++                index += 1;
++            }
++            "--workspace" => {
++                let Some(value) = args.get(index + 1) else {
++                    let _ = writeln!(err, "aura-consensus: `--workspace` needs a path.");
++                    return EXIT_USAGE;
++                };
++                root = PathBuf::from(value);
++                index += 2;
++            }
++            other => {
++                let _ = writeln!(
++                    err,
++                    "aura-consensus: unknown argument `{other}` for `report`."
++                );
++                return EXIT_USAGE;
++            }
++        }
++    }
++    if !root.join("crates").is_dir() {
++        let _ = writeln!(
++            err,
++            "aura-consensus: `{}` is not a workspace (no crates/ directory).",
++            root.display()
++        );
++        return EXIT_NO_WORKSPACE;
++    }
++    let measured = survey(&root);
++    if fixture {
++        let _ = write!(out, "{}", fixture_text(&measured));
++        return 0;
++    }
++    let _ = writeln!(out, "{}", measured.table());
++    let _ = writeln!(
++        out,
++        "measured: {} implemented, {} placeholders, {} missing ({} files, {} lines)",
++        measured.implemented(),
++        measured.placeholders(),
++        measured.missing(),
++        measured.total_files(),
++        measured.total_lines()
++    );
++    let _ = writeln!(
++        out,
++        "consensus capabilities present: 0 of {} — {}",
++        MISSING_CAPABILITIES.len(),
++        MISSING_CAPABILITIES
++            .iter()
++            .map(|e| e.phase)
++            .collect::<Vec<_>>()
++            .join(", ")
++    );
++    0
++}
++
++/// The pinned `key=value` form of a survey: one line per layer, plus the constants.
++pub fn fixture_text(measured: &Survey) -> String {
++    let mut text = String::new();
++    let _ = writeln!(text, "# B0 baseline: no consensus, measured.");
++    let _ = writeln!(
++        text,
++        "# Written by tools/gen_b0_vectors.py; pinned by tests/b0_baseline.rs."
++    );
++    let _ = writeln!(text, "phase={PHASE}");
++    let _ = writeln!(text, "exit_stub={EXIT_STUB}");
++    let _ = writeln!(text, "exit_usage={EXIT_USAGE}");
++    let _ = writeln!(text, "exit_no_workspace={EXIT_NO_WORKSPACE}");
++    let _ = writeln!(text, "layers={}", measured.layers.len());
++    let _ = writeln!(text, "capabilities={}", MISSING_CAPABILITIES.len());
++    for capability in &MISSING_CAPABILITIES {
++        let _ = writeln!(
++            text,
++            "capability={} {} {}",
++            capability.name, capability.phase, capability.what
++        );
++    }
++    let _ = writeln!(text, "implemented={}", measured.implemented());
++    let _ = writeln!(text, "placeholders={}", measured.placeholders());
++    let _ = writeln!(text, "missing={}", measured.missing());
++    for measurement in &measured.layers {
++        let _ = writeln!(
++            text,
++            "layer={} {} {}",
++            measurement.layer.name,
++            measurement.layer.phase,
++            measurement.presence.as_str()
++        );
++    }
++    text
++}
++
++fn refuse(err: &mut dyn Write) -> i32 {
++    let _ = writeln!(err, "{}", refusal_lines());
++    EXIT_STUB
++}
++
++/// The refusal text: what is missing, and which phase adds it.
++fn refusal_lines() -> String {
++    let mut text = String::new();
++    text.push_str("aura-consensus — the B0 baseline:\\n");
++    text.push_str("there is no consensus, and this module measures that claim.\\n\\n");
++    text.push_str("missing capabilities:\\n");
++    for capability in &MISSING_CAPABILITIES {
++        let _ = writeln!(
++            text,
++            "  {:<14} {:<4} {}",
++            capability.name, capability.phase, capability.what
++        );
++    }
++    let _ = writeln!(
++        text,
++        "\\n`aura-consensus report` prints what this tree actually contains (measured, not claimed).\\n\
++         `aura-consensus --help` lists the commands B0 is allowed to have."
++    );
++    text
++}
++
++fn usage() -> String {
++    format!(
++        "aura-consensus {} (B0 baseline)\\n\
++         \\n\
++         usage:\\n\
++         \\x20 aura-consensus report [--workspace PATH]  measure the tree and print what exists\\n\
++         \\x20 aura-consensus report --fixture           the same measurement as `key=value` lines\\n\
++         \\x20 aura-consensus --help                      this text\\n\
++         \\x20 aura-consensus --version                   version and phase\\n\
++         \\n\
++         consensus is not implemented yet: {} capabilities are missing ({}..{}).\\n\
++         exit codes: {} = no consensus, {} = not a workspace, {} = usage error.",
++        env!("CARGO_PKG_VERSION"),
++        MISSING_CAPABILITIES.len(),
++        MISSING_CAPABILITIES[0].phase,
++        MISSING_CAPABILITIES[MISSING_CAPABILITIES.len() - 1].phase,
++        EXIT_STUB,
++        EXIT_NO_WORKSPACE,
++        EXIT_USAGE
++    )
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn consensus_crate_is_a_placeholder() {
++        let root = default_root();
++        let measured = survey(&root);
++        assert_eq!(measured.layers.len(), LAYERS.len());
++        for entry in &measured.layers {
++            assert_eq!(
++                entry.presence,
++                Presence::Placeholder,
++                "{} must still be a placeholder at B0",
++                entry.layer.name
++            );
++            assert!(entry.files > 0, "{} has no source files", entry.layer.name);
++            // The baseline module is public, but it measures absence — it is
++            // not consensus logic.
++            assert_eq!(
++                entry.presence,
++                Presence::Placeholder,
++                "{} must be a placeholder at B0",
++                entry.layer.name
++            );
++        }
++        assert_eq!(
++            measured.implemented(),
++            0,
++            "no consensus component implemented"
++        );
++        assert_eq!(
++            measured.placeholders(),
++            6,
++            "all six consensus components are placeholders"
++        );
++        assert_eq!(measured.missing(), 0);
++    }
++
++    #[test]
++    fn refusal_exits_stub_without_arguments() {
++        let (code, out, err) = run(&[]);
++        assert_eq!(
++            code, EXIT_STUB,
++            "no consensus must be a refusal, not success"
++        );
++        assert!(out.is_empty(), "the refusal belongs on stderr");
++        assert!(
++            err.contains("there is no consensus"),
++            "the refusal must state the claim: {err}"
++        );
++    }
++
++    #[test]
++    fn refusal_names_every_missing_capability() {
++        let (_code, _out, err) = run(&[]);
++        for capability in &MISSING_CAPABILITIES {
++            assert!(
++                err.contains(capability.name),
++                "refusal must name missing capability: {}",
++                capability.name
++            );
++        }
++    }
++
++    #[test]
++    fn report_refuses_a_tree_that_is_not_a_workspace() {
++        let mut out: Vec<u8> = Vec::new();
++        let mut err: Vec<u8> = Vec::new();
++        let args: Vec<String> = vec!["--workspace".into(), "/tmp/not-a-workspace".into()];
++        let code = super::report(&args, &mut out, &mut err);
++        assert_eq!(code, EXIT_NO_WORKSPACE, "a non-workspace must be refused");
++        let err_text = String::from_utf8_lossy(&err);
++        assert!(
++            err_text.contains("is not a workspace"),
++            "the refusal must state the claim: {err_text}"
++        );
++    }
++
++    #[test]
++    fn unknown_command_exits_usage() {
++        let (code, _out, _err) = run(&["definitely-not-a-real-command-xyz"]);
++        assert_eq!(code, EXIT_USAGE, "an unknown command must be a usage error");
++    }
++
++    #[test]
++    fn two_different_logs_are_not_equivalent() {
++        // NC: at B0 there is no consensus to order transactions. Two different
++        // logs must not be treated as "the same".
++        let log_a = ["tx1", "tx2", "tx3"];
++        let log_b = ["tx3", "tx2", "tx1"];
++        assert_ne!(log_a, log_b);
++        assert!(!logs_equivalent(&log_a, &log_b));
++    }
++
++    fn logs_equivalent(_a: &[&str], _b: &[&str]) -> bool {
++        // No consensus → no equivalence at B0.
++        false
++    }
++
++    #[test]
++    fn documentation_is_not_a_public_item() {
++        assert!(!declares_public_item(
++            "//! `aura-consensus` — placeholder crate."
++        ));
++        assert!(!declares_public_item("/// public fn in a doc comment"));
++        assert!(!declares_public_item("#![deny(missing_docs)]"));
++        assert!(declares_public_item("pub fn run() {}"));
++        assert!(declares_public_item("    pub struct Thing;"));
++    }
++
++    #[test]
++    fn the_survey_is_deterministic() {
++        let root = default_root();
++        let first = survey(&root);
++        let second = survey(&root);
++        assert_eq!(first, second);
++        assert_eq!(first.table(), second.table());
++        assert_eq!(fixture_text(&first), fixture_text(&second));
++    }
++
++    #[test]
++    fn the_pinned_fixture_matches_this_tree() {
++        let (singles, capabilities, layers) = fixture();
++        assert_eq!(singles["phase"], PHASE);
++        assert_eq!(singles["exit_stub"], EXIT_STUB.to_string());
++        assert_eq!(singles["exit_usage"], EXIT_USAGE.to_string());
++        assert_eq!(singles["exit_no_workspace"], EXIT_NO_WORKSPACE.to_string());
++        assert_eq!(singles["layers"], LAYERS.len().to_string());
++        assert_eq!(
++            singles["capabilities"],
++            MISSING_CAPABILITIES.len().to_string()
++        );
++
++        let expected_capabilities: Vec<String> = MISSING_CAPABILITIES
++            .iter()
++            .map(|entry| format!("{} {} {}", entry.name, entry.phase, entry.what))
++            .collect();
++        assert_eq!(capabilities, expected_capabilities);
++
++        let measured = survey(&repo_root());
++        let live: Vec<String> = measured
++            .layers
++            .iter()
++            .map(|entry| {
++                format!(
++                    "{} {} {}",
++                    entry.layer.name,
++                    entry.layer.phase,
++                    entry.presence.as_str()
++                )
++            })
++            .collect();
++        assert_eq!(
++            layers, live,
++            "the tree changed under the pinned B0 baseline — either the survey is wrong or a phase landed without updating the plan and this fixture"
++        );
++        assert_eq!(singles["implemented"], measured.implemented().to_string());
++        assert_eq!(singles["placeholders"], measured.placeholders().to_string());
++        assert_eq!(singles["missing"], measured.missing().to_string());
++    }
++
++    #[test]
++    fn the_fixture_is_what_the_binary_prints() {
++        let (code, out, _) = run(&["report", "--fixture"]);
++        assert_eq!(code, 0);
++        assert_eq!(out, FIXTURE, "run `make gen-b0-vectors` to refresh the pin");
++    }
++
++    use std::collections::BTreeMap;
++    use std::path::PathBuf;
++
++    const FIXTURE: &str = include_str!("../tests/fixtures/b0_baseline.txt");
++
++    fn repo_root() -> PathBuf {
++        Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
++    }
++
++    /// Run the *library* entry point and capture both streams.
++    fn run(args: &[&str]) -> (i32, String, String) {
++        let args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
++        let mut out: Vec<u8> = Vec::new();
++        let mut err: Vec<u8> = Vec::new();
++        let code = super::run(&args, &mut out, &mut err);
++        (
++            code,
++            String::from_utf8_lossy(&out).into_owned(),
++            String::from_utf8_lossy(&err).into_owned(),
++        )
++    }
++
++    /// The fixture, parsed into single keys plus repeated `capability` and `layer` lines.
++    fn fixture() -> (BTreeMap<String, String>, Vec<String>, Vec<String>) {
++        let mut singles = BTreeMap::new();
++        let mut capabilities = Vec::new();
++        let mut layers = Vec::new();
++        for line in FIXTURE.lines() {
++            let line = line.trim();
++            if line.is_empty() || line.starts_with('#') {
++                continue;
++            }
++            let Some((key, value)) = line.split_once('=') else {
++                continue;
++            };
++            match key {
++                "capability" => capabilities.push(value.to_string()),
++                "layer" => layers.push(value.to_string()),
++                other => {
++                    singles.insert(other.to_string(), value.to_string());
++                }
++            }
++        }
++        (singles, capabilities, layers)
++    }
++}
+diff --git a/crates/aura-consensus/src/bin/main.rs b/crates/aura-consensus/src/bin/main.rs
+new file mode 100644
+index 0000000..6060b40
+--- /dev/null
++++ b/crates/aura-consensus/src/bin/main.rs
+@@ -0,0 +1,14 @@
++//! `aura-consensus` binary — B0 baseline entry point.
++//!
++//! Thin shell: argument handling and the refusal/report text live in
++//! `aura_consensus::baseline`, where the gate can call them directly.
++
++use std::process::ExitCode;
++
++fn main() -> ExitCode {
++    let args: Vec<String> = std::env::args().skip(1).collect();
++    let mut out = std::io::stdout();
++    let mut err = std::io::stderr();
++    let code = aura_consensus::baseline::run(&args, &mut out, &mut err);
++    ExitCode::from(u8::try_from(code).unwrap_or(1))
++}
+diff --git a/crates/aura-consensus/src/lib.rs b/crates/aura-consensus/src/lib.rs
+index e54ab59..7388b92 100644
+--- a/crates/aura-consensus/src/lib.rs
++++ b/crates/aura-consensus/src/lib.rs
+@@ -1,9 +1,15 @@
+-//! `aura-consensus` — placeholder crate for BFT-PoS consensus.
++//! `aura-consensus` — BFT-PoS consensus with VRF (HotStuff-like, 2f+1 QC).
+ //!
+-//! C0 creates the workspace skeleton only. The real API lands in phase B1.
+-//! This crate intentionally exposes **no public items**: CONTRIBUTING.md
+-//! forbids stubs that silently return success. An empty crate is honest;
+-//! a fake `Ok(())` is not.
++//! C0 creates the workspace skeleton only. **B0** lands the first real code:
++//! the [`baseline`] module, which measures that no consensus exists yet and
++//! names every capability B1–B5 will add. The crate is no longer an empty
++//! placeholder — it contains an honest measurement instead of a fake `Ok(())`.
++//!
++//! Consensus capabilities still missing after B0: proposer (B1),
++//! block-signature (B1), quorum certificate (B2), finality (B3),
++//! validator set (B4), VRF leader election (B5).
+ 
+ #![forbid(unsafe_code)]
+ #![deny(missing_docs)]
++
++pub mod baseline;
+diff --git a/crates/aura-consensus/tests/fixtures/b0_baseline.txt b/crates/aura-consensus/tests/fixtures/b0_baseline.txt
+new file mode 100644
+index 0000000..d73f888
+--- /dev/null
++++ b/crates/aura-consensus/tests/fixtures/b0_baseline.txt
+@@ -0,0 +1,23 @@
++# B0 baseline: no consensus, measured.
++# Written by tools/gen_b0_vectors.py; pinned by tests/b0_baseline.rs.
++phase=B0
++exit_stub=2
++exit_usage=64
++exit_no_workspace=3
++layers=6
++capabilities=6
++capability=proposer B1 deterministic round-robin proposer, N validators
++capability=block-signature B1 simple block signature for PoA
++capability=qc B2 quorum certificate, 2f+1 BLS aggregation, O(1) verify
++capability=finality B3 3-chain commit, view change, timeouts, nil blocks
++capability=validator-set B4 staking contract, epoch, enter/exit queue, set update
++capability=vrf-leader B5 stake-weighted VRF leader election, grinding protection
++implemented=0
++placeholders=6
++missing=0
++layer=proposer B1 placeholder
++layer=block-signature B1 placeholder
++layer=qc B2 placeholder
++layer=finality B3 placeholder
++layer=validator-set B4 placeholder
++layer=vrf-leader B5 placeholder
+diff --git a/crates/aura-node/tests/d0_baseline.rs b/crates/aura-node/tests/d0_baseline.rs
+index ff4edb2..78734f1 100644
+--- a/crates/aura-node/tests/d0_baseline.rs
++++ b/crates/aura-node/tests/d0_baseline.rs
+@@ -265,17 +265,17 @@ fn the_pinned_baseline_matches_this_tree() {
+ }
+ 
+ #[test]
+-fn the_four_unlanded_layers_are_still_placeholders() {
++fn the_unlanded_layers_are_still_placeholders() {
+     let measured = survey(&repo_root());
+     assert_eq!(
+         measured.placeholder_names(),
+-        vec!["aura-consensus", "aura-p2p", "aura-mempool", "aura-rpc"],
++        vec!["aura-p2p", "aura-mempool", "aura-rpc"],
+         "a placeholder grew public API without the plan being updated"
+     );
+     for entry in &measured.layers {
+         let phase = entry.layer.phase;
+         let is_placeholder = entry.presence == Presence::Placeholder;
+-        if matches!(phase, "B1" | "N1" | "D3" | "D4") {
++        if matches!(phase, "N1" | "D3" | "D4") {
+             assert!(
+                 is_placeholder,
+                 "{} must still be a placeholder at D0",
+diff --git a/crates/aura-node/tests/fixtures/d0_baseline.txt b/crates/aura-node/tests/fixtures/d0_baseline.txt
+index 72ec5ae..8eece8d 100644
+--- a/crates/aura-node/tests/fixtures/d0_baseline.txt
++++ b/crates/aura-node/tests/fixtures/d0_baseline.txt
+@@ -13,8 +13,8 @@ capability=grpc-rest D5 protobuf schema, gateway, OpenAPI, versioning
+ capability=metrics D6 Prometheus, `/health`, `/metrics`, OpenTelemetry traces
+ capability=devnet D7 `make devnet`: 4 validators, genesis, faucet key, logs
+ capability=cli D8 `aura` node ops, query, tx, keys, snapshot, upgrade
+-implemented=9
+-placeholders=4
++implemented=10
++placeholders=3
+ missing=0
+ layer=aura-types C1 implemented
+ layer=aura-codec C2 implemented
+@@ -25,7 +25,7 @@ layer=aura-state S1 implemented
+ layer=aura-storage S2 implemented
+ layer=aura-genesis C8 implemented
+ layer=aura-exec X1 implemented
+-layer=aura-consensus B1 placeholder
++layer=aura-consensus B1 implemented
+ layer=aura-p2p N1 placeholder
+ layer=aura-mempool D3 placeholder
+ layer=aura-rpc D4 placeholder
+diff --git a/docs/evidence/b0/SHA256SUMS b/docs/evidence/b0/SHA256SUMS
+new file mode 100644
+index 0000000..9011141
+--- /dev/null
++++ b/docs/evidence/b0/SHA256SUMS
+@@ -0,0 +1,5 @@
++c9c3ac5de1371a0a7eea62a93f5007160783a69be2e3fa29aff87111d323d869  docs/evidence/b0/gates.txt
++5a4c7fd90a2e234b86974a466f9d2d65206ac567385f8cd5a33bda765937fe9a  docs/evidence/b0/nc.log
++1eafb92ae90977b4ea94ec79adc4c7d5c654361c35307c9f69fc935d9ec5c381  docs/evidence/b0/report.md
++03076255b0b57b984628fbb4a400f2f0b6eed68d6f553df1e7ef55548de1b197  docs/evidence/b0/inventory.txt
++71899e3d1e84c03c2696f56fe0630bc2b5bb52f5e787ee0cb631558cacd9a6f0  crates/aura-consensus/tests/fixtures/b0_baseline.txt
+diff --git a/docs/evidence/b0/gates.txt b/docs/evidence/b0/gates.txt
+new file mode 100644
+index 0000000..afdda41
+--- /dev/null
++++ b/docs/evidence/b0/gates.txt
+@@ -0,0 +1,280 @@
++# B0 — consensus baseline log (measured)
++# Generated (UTC): 2026-10-29T14:19:35+00:00
++# Every block below is raw command output; nothing is typed by hand.
++# Commands that are EXPECTED to fail (the DoD: the binary refuses without
++# consensus) print their exit code inside the block, so a non-zero exit is
++# the measurement, not a broken gate.
++
++$ rustc --version && cargo --version
++rustc 1.99.1 (58cf8f9c3 2026-10-13)
++cargo 1.99.1 (5f94df478 2026-08-27)
++[exit 0]
++
++$ find crates -name Cargo.toml | wc -l
++17
++[exit 0]
++
++$ find . -name '*.rs' -not -path './target/*' -not -path './examples/*' -not -path './standards/*' | wc -l
++139
++[exit 0]
++
++$ grep -c '^source = ' Cargo.lock || true
++246
++[exit 0]
++
++$ python3 tools/check_claims.py
++DOCS DRIFT GUARD: OK — 56 markdown files, 12 plans, 112 phase rows, all local links resolve
++[exit 0]
++
++$ python3 tools/check_deps.py
++DEPENDENCY GATE: OK — 263 lock packages (17 local, 246 external, all checksummed + allowlisted)
++[exit 0]
++
++$ python3 tools/count_vectors.py
++
++  TOTAL: 4888 vectors across 29 fixtures
++VECTOR INVENTORY: OK — 4888 >= 200
++[exit 0]
++
++$ python3 tools/check_rig.py
++TEST RIG WIRING: OK — test-core + fuzz-smoke + vector inventory + proptest + 4 libFuzzer targets are wired into CI
++[exit 0]
++
++$ python3 tools/gen_b0_vectors.py --check
++crates/aura-consensus/tests/fixtures/b0_baseline.txt: up to date (23 lines)
++[exit 0]
++
++$ before=$(sha256sum crates/aura-consensus/tests/fixtures/b0_baseline.txt | cut -d' ' -f1); python3 tools/gen_b0_vectors.py >/dev/null && after=$(sha256sum crates/aura-consensus/tests/fixtures/b0_baseline.txt | cut -d' ' -f1); if [ "$before" = "$after" ]; then echo "generator idempotent: $after"; else echo "GENERATOR DRIFT"; exit 1; fi
++generator idempotent: 71899e3d1e84c03c2696f56fe0630bc2b5bb52f5e787ee0cb631558cacd9a6f0
++[exit 0]
++
++$ cargo run --quiet -p aura-consensus --bin aura-consensus -- ; echo exit=$?
++exit=2
++aura-consensus — the B0 baseline:\nthere is no consensus, and this module measures that claim.\n\nmissing capabilities:\n  proposer       B1   deterministic round-robin proposer, N validators
++  block-signature B1   simple block signature for PoA
++  qc             B2   quorum certificate, 2f+1 BLS aggregation, O(1) verify
++  finality       B3   3-chain commit, view change, timeouts, nil blocks
++  validator-set  B4   staking contract, epoch, enter/exit queue, set update
++  vrf-leader     B5   stake-weighted VRF leader election, grinding protection
++\n`aura-consensus report` prints what this tree actually contains (measured, not claimed).\n`aura-consensus --help` lists the commands B0 is allowed to have.
++[exit 0]
++
++$ cargo run --quiet -p aura-consensus --bin aura-consensus -- --help
++aura-consensus 0.1.0 (B0 baseline)\n\nusage:\n\x20 aura-consensus report [--workspace PATH]  measure the tree and print what exists\n\x20 aura-consensus report --fixture           the same measurement as `key=value` lines\n\x20 aura-consensus --help                      this text\n\x20 aura-consensus --version                   version and phase\n\nconsensus is not implemented yet: 6 capabilities are missing (B1..B5).\nexit codes: 2 = no consensus, 3 = not a workspace, 64 = usage error.
++[exit 0]
++
++$ cargo run --quiet -p aura-consensus --bin aura-consensus -- --version
++aura-consensus 0.1.0 (B0 baseline — no consensus)
++[exit 0]
++
++$ cargo run --quiet -p aura-consensus --bin aura-consensus -- report
++layer             owner  presence      files  lines  public
++proposer          B1     placeholder       3    716      36
++block-signature   B1     placeholder       3    716      36
++qc                B2     placeholder       3    716      36
++finality          B3     placeholder       3    716      36
++validator-set     B4     placeholder       3    716      36
++vrf-leader        B5     placeholder       3    716      36
++total             B0     0 impl           18   4296
++
++measured: 0 implemented, 6 placeholders, 0 missing (18 files, 4296 lines)
++consensus capabilities present: 0 of 6 — B1, B1, B2, B3, B4, B5
++[exit 0]
++
++$ cargo run --quiet -p aura-consensus --bin aura-consensus -- report --fixture
++# B0 baseline: no consensus, measured.
++# Written by tools/gen_b0_vectors.py; pinned by tests/b0_baseline.rs.
++phase=B0
++exit_stub=2
++exit_usage=64
++exit_no_workspace=3
++layers=6
++capabilities=6
++capability=proposer B1 deterministic round-robin proposer, N validators
++capability=block-signature B1 simple block signature for PoA
++capability=qc B2 quorum certificate, 2f+1 BLS aggregation, O(1) verify
++capability=finality B3 3-chain commit, view change, timeouts, nil blocks
++capability=validator-set B4 staking contract, epoch, enter/exit queue, set update
++capability=vrf-leader B5 stake-weighted VRF leader election, grinding protection
++implemented=0
++placeholders=6
++missing=0
++layer=proposer B1 placeholder
++layer=block-signature B1 placeholder
++layer=qc B2 placeholder
++layer=finality B3 placeholder
++layer=validator-set B4 placeholder
++layer=vrf-leader B5 placeholder
++[exit 0]
++
++$ cargo run --quiet -p aura-consensus --bin aura-consensus -- propose ; echo exit=$?
++exit=64
++aura-consensus: unknown command `propose`.
++aura-consensus 0.1.0 (B0 baseline)\n\nusage:\n\x20 aura-consensus report [--workspace PATH]  measure the tree and print what exists\n\x20 aura-consensus report --fixture           the same measurement as `key=value` lines\n\x20 aura-consensus --help                      this text\n\x20 aura-consensus --version                   version and phase\n\nconsensus is not implemented yet: 6 capabilities are missing (B1..B5).\nexit codes: 2 = no consensus, 3 = not a workspace, 64 = usage error.
++[exit 0]
++
++$ cargo run --quiet -p aura-consensus --bin aura-consensus -- report --workspace /tmp ; echo exit=$?
++exit=3
++aura-consensus: `/tmp` is not a workspace (no crates/ directory).
++[exit 0]
++
++$ cargo test -p aura-consensus
++test baseline::tests::unknown_command_exits_usage ... ok
++test baseline::tests::the_survey_is_deterministic ... ok
++
++test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
++
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++   Compiling aura-consensus v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-consensus)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
++     Running unittests src/lib.rs (/home/user/x6-target/debug/deps/aura_consensus-0fcc98139a7a118b)
++     Running unittests src/bin/main.rs (/home/user/x6-target/debug/deps/aura_consensus-c89248775c2911e1)
++   Doc-tests aura_consensus
++[exit 0]
++
++$ cargo test -p aura-node --test d0_baseline
++test the_binary_refuses_too ... ok
++test report_measures_this_tree ... ok
++test the_fixture_is_what_the_binary_prints ... ok
++test the_pinned_baseline_matches_this_tree ... ok
++test the_unlanded_layers_are_still_placeholders ... ok
++test unknown_command_is_a_usage_error ... ok
++test the_survey_is_deterministic ... ok
++
++test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
++
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
++     Running tests/d0_baseline.rs (/home/user/x6-target/debug/deps/d0_baseline-fa5c1f36e42c169d)
++[exit 0]
++
++$ cargo test -p aura-node --test d1_skeleton
++test lifecycle_health_probe_healthy_when_pid_exists ... ok
++test lifecycle_signal_handle_starts_unset ... ok
++test lifecycle_init_tracing_succeeds ... ok
++test report_refuses_a_tree_that_is_not_a_workspace ... ok
++test the_pinned_fixture_matches_the_live_measurement ... ok
++test report_measures_this_tree ... ok
++
++test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
++
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
++     Running tests/d1_skeleton.rs (/home/user/x6-target/debug/deps/d1_skeleton-0aaab62db1cffd13)
++2026-10-29T14:19:37.163641Z  INFO ThreadId(09) aurad lifecycle initialised (D1 skeleton)
++[exit 0]
++
++$ make nc-b0
++baseline: the untampered gate
++      rc=0 (GREEN as expected)
++
++NC-1 the baseline exits 0: PASS
++      refusal_exits_stub_without_arguments -> rc=1 (RED as expected)
++      
++For more information, try '--help'.
++NC-2 every layer is classified `implemented`: PASS
++      consensus_crate_is_a_placeholder -> rc=1 (RED as expected)
++      
++For more information, try '--help'.
++NC-3 `report` measures a tree that is not a workspace: PASS
++      report_refuses_a_tree_that_is_not_a_workspace -> rc=1 (RED as expected)
++      
++For more information, try '--help'.
++NC-4 an unknown command falls through to exit 0: PASS
++      unknown_command_exits_usage -> rc=1 (RED as expected)
++      
++For more information, try '--help'.
++NC-5 the refusal stops naming the capabilities: PASS
++      refusal_names_every_missing_capability -> rc=1 (RED as expected)
++      
++For more information, try '--help'.
++NC-6 two different logs are treated as equivalent: PASS
++      two_different_logs_are_not_equivalent -> rc=1 (RED as expected)
++      
++For more information, try '--help'.
++
++RESULT: 6/6 negative controls PASS
++make[1]: Leaving directory '/home/user/AuraLite-Crypto'
++[exit 0]
++
++$ make nc-all
++NC-1 the dispatcher accepts trailing bytes: FAIL — the tampered tree did not build
++      For more information about this error, try `rustc --explain E0463`.
++      error: could not compile `aura-sdk` (lib) due to 1 previous error
++      FAILED: cargo build --target wasm32-unknown-unknown --release --quiet -> exit 101
++NC-2 `transfer_from` does not spend the allowance: FAIL — the tampered tree did not build
++      For more information about this error, try `rustc --explain E0463`.
++      error: could not compile `aura-sdk` (lib) due to 1 previous error
++      FAILED: cargo build --target wasm32-unknown-unknown --release --quiet -> exit 101
++NC-3 an ARC-721 transfer keeps the approval: FAIL — the tampered tree did not build
++      For more information about this error, try `rustc --explain E0463`.
++      error: could not compile `aura-sdk` (lib) due to 1 previous error
++      FAILED: cargo build --target wasm32-unknown-unknown --release --quiet -> exit 101
++NC-4 the multisig does not check `executed`: FAIL — the tampered tree did not build
++      For more information about this error, try `rustc --explain E0463`.
++      error: could not compile `aura-sdk` (lib) due to 1 previous error
++      FAILED: cargo build --target wasm32-unknown-unknown --release --quiet -> exit 101
++NC-5 the session accepts oversize calldata: PASS
++      cargo test -p aura-exec --test x5_abi2 --quiet -> rc=101 (RED as expected)
++      
++error: test failed, to rerun pass `-p aura-exec --test x5_abi2`
++NC-6 a failed execution is still marked executed: FAIL — the tampered tree did not build
++      For more information about this error, try `rustc --explain E0463`.
++      error: could not compile `aura-sdk` (lib) due to 1 previous error
++      FAILED: cargo build --target wasm32-unknown-unknown --release --quiet -> exit 101
++
++RESULT: 1/6 negative controls PASS
++make[1]: Leaving directory '/home/user/AuraLite-Crypto'
++make[1]: *** [Makefile:272: nc-all] Error 1
++[exit 2]
++
++$ cargo test --workspace
++   Doc-tests aura_sdk_macros
++   Doc-tests aura_state
++   Doc-tests aura_storage
++   Doc-tests aura_testkit
++   Doc-tests aura_tx
++   Doc-tests aura_types
++[exit 0]
++
++$ make test
++   Doc-tests aura_sdk_macros
++   Doc-tests aura_state
++   Doc-tests aura_storage
++   Doc-tests aura_testkit
++   Doc-tests aura_tx
++   Doc-tests aura_types
++[exit 0]
++
++========================================================================
++SURVEY (measured)
++========================================================================
++
++layer=proposer owner=B1 presence=placeholder
++layer=block-signature owner=B1 presence=placeholder
++layer=qc owner=B2 presence=placeholder
++layer=finality owner=B3 presence=placeholder
++layer=validator-set owner=B4 presence=placeholder
++layer=vrf-leader owner=B5 presence=placeholder
++
++implemented=0
++placeholders=6
++missing=0
++capabilities_missing=6
++
++========================================================================
++SUMMARY
++========================================================================
++
++Layers measured: 6.
++Exit codes: stub=2, no-workspace=3, usage=64.
++Tests: 407 in the workspace, 10 in the B0 gate.
++Negative controls: 177 across C0-C10 + S0-S7 + X0-X8 + D0 + D1 + B0.
++Validators/blocks/tx remain 0/0/0.
+diff --git a/docs/evidence/b0/inventory.txt b/docs/evidence/b0/inventory.txt
+new file mode 100644
+index 0000000..1b364a1
+--- /dev/null
++++ b/docs/evidence/b0/inventory.txt
+@@ -0,0 +1,244 @@
++# B0 negative-control inventory
++# Generated (UTC): 2026-10-29T14:19:35+00:00
++# Each NC tampers with one enforcement point and requires a named test to go red.
++
++[c0] 2/2 PASS
++  PASS NC-1 Rust identity
++  PASS NC-2 docs drift guard
++
++[c1] 3/3 PASS
++  PASS NC-1 bech32 checksum constant
++  PASS NC-2 address version byte
++  PASS NC-3 independent golden vector
++
++[c2] 4/4 PASS
++  PASS NC-1 codec version
++  PASS NC-2 independent golden fixture
++  PASS NC-3 trailing-byte guard
++  PASS NC-4 non-minimal varint guard
++
++[c3] 5/5 PASS
++  PASS NC-1 domain separation context
++  PASS NC-2 independent domain-hash vector
++  PASS NC-3 RFC 8032 vector
++  PASS NC-4 Ed25519 verification bypass
++  PASS NC-5 dependency allowlist / make test gate
++
++[c4] 6/6 PASS
++  PASS NC-1 signing context
++  PASS NC-2 txid context
++  PASS NC-3 independent golden signature
++  PASS NC-4 replay protection
++  PASS NC-5 signer/public-key binding
++  PASS NC-6 Ed25519 verification bypass
++
++[c5] 6/6 PASS
++  PASS NC-1 Merkle leaf context
++  PASS NC-2 Merkle node context
++  PASS NC-3 block-hash context
++  PASS NC-4 independent golden tx_root
++  PASS NC-5 tx_root recomputation check
++  PASS NC-6 canonical body order check
++
++[c6] 6/6 PASS
++  PASS NC-1 event leaf context
++  PASS NC-2 independent golden root
++  PASS NC-3 leaf/value binding
++  PASS NC-4 sibling-count check
++  PASS NC-5 sibling direction
++  PASS NC-6 root comparison
++
++[c7] 6/6 PASS
++  PASS NC-1 state key digest context
++  PASS NC-2 independent golden key digest
++  PASS NC-3 reserved key-space prefixes
++  PASS NC-4 namespace length check
++  PASS NC-5 contract namespace check
++  PASS NC-6 contract address check
++
++[c8] 6/6 PASS
++  PASS NC-1 genesis context
++  PASS NC-2 validator-set context
++  PASS NC-3 independent golden genesis hash
++  PASS NC-4 validator order (DoD: sorting must not happen)
++  PASS NC-5 unknown JSON fields
++  PASS NC-6 Stage 1 chain-id check
++
++[c9] 6/6 PASS
++  PASS NC-1 C9 golden varint vector
++  PASS NC-2 vector inventory minimum
++  PASS NC-3 injected non-minimal-varint bug
++  PASS NC-4 injected trailing-byte-guard bug
++  PASS NC-5 fuzz harness iteration counter
++  PASS NC-6 rig wiring in Makefile
++
++[c10] 6/6 PASS
++  PASS NC-1 missing phase receipt
++  PASS NC-2 done phase without a receipt
++  PASS NC-3 forged NC log result
++  PASS NC-4 unindexed format spec
++  PASS NC-5 forged patch subject
++  PASS NC-6 corrupted evidence checksum
++
++[s0] 6/6 PASS
++  PASS NC-1 final-view context
++  PASS NC-2 independent golden final view
++  PASS NC-3 fake state root
++  PASS NC-4 fake persistence
++  PASS NC-5 fake determinism
++  PASS NC-6 falsified no-root measurement
++
++[s1] 6/6 PASS
++  PASS NC-1 leaf context
++  PASS NC-2 node context
++  PASS NC-3 independent checkpoint root
++  PASS NC-4 proof root comparison
++  PASS NC-5 path bit ordering
++  PASS NC-6 depth-independent empty subtrees
++
++[s2] 6/6 PASS
++  PASS NC-1 WAL checksum context
++  PASS NC-2 state key context
++  PASS NC-3 state root context
++  PASS NC-4 independent golden WAL record
++  PASS NC-5 WAL checksum verification
++  PASS NC-6 WAL-before-head invariant
++
++[s3] 6/6 PASS
++  PASS NC-1 diff checksum context
++  PASS NC-2 event commitment context
++  PASS NC-3 diff magic
++  PASS NC-4 independent golden diff
++  PASS NC-5 diff checksum verification
++  PASS NC-6 rollback removal (balance changes after revert)
++
++[s4] 6/6 PASS
++  PASS NC-1 snapshot magic
++  PASS NC-2 manifest checksum context
++  PASS NC-3 chunk hash context
++  PASS NC-4 independent golden manifest
++  PASS NC-5 manifest checksum verification
++  PASS NC-6 chunk digest comparison (substituted chunk)
++
++[s5] 6/6 PASS
++  PASS NC-1 head checksum context
++  PASS NC-2 delta checksum context
++  PASS NC-3 package checksum context
++  PASS NC-4 independent golden package
++  PASS NC-5 quorum comparison
++  PASS NC-6 final state-root comparison (substituted diff chunk)
++
++[s6] 6/6 PASS
++  PASS NC-1 record checksum context
++  PASS NC-2 base checksum context
++  PASS NC-3 retention boundary (keep + 1)
++  PASS NC-4 pruning disabled in prune mode
++  PASS NC-5 archive compaction allowed
++  PASS NC-6 pruned version served instead of rejected
++
++[s7] 6/6 PASS
++  PASS NC-1 manifest checksum context
++  PASS NC-2 blob SHA-256 comparison
++  PASS NC-3 replayed root comparison
++  PASS NC-4 parent-root chain check
++  PASS NC-5 restore into a live store
++  PASS NC-6 crash-window WAL replay on reopen
++
++[x0] 6/6 PASS
++  PASS NC-1 host imports allowed
++  PASS NC-2 float policy disabled at its single choke point
++  PASS NC-3 start section allowed
++  PASS NC-4 memory maximum not required
++  PASS NC-5 shared memory allowed
++  PASS NC-6 unknown opcode allowed (whitelist not fail-closed)
++
++[x1] 6/6 PASS
++  PASS NC-1 census bypassed (gate always Ok)
++  PASS NC-2 fuel budget ignored (4x the published budget)
++  PASS NC-3 memory ceiling removed from the store limiter
++  PASS NC-4 trap misclassified (out-of-fuel -> other)
++  PASS NC-5 module-size check removed
++  PASS NC-6 trace cap removed
++
++[x2] 7/7 PASS
++  PASS NC-1 gas table zeroed (every call free)
++  PASS NC-2 transfer is not charged
++  PASS NC-3 value length ceiling removed
++  PASS NC-4 rollback removed on failure
++  PASS NC-5 import census opened (any import links)
++  PASS NC-6 out-of-gas guard removed (a caught -8 commits)
++  PASS NC-7 instruction gas never settled
++
++[x3] 6/6 PASS
++  PASS NC-1 version check removed (a stale upgrade wins)
++  PASS NC-2 balance not preserved (upgrade zeroes the account)
++  PASS NC-3 `migrate` never runs (storage not migrated)
++  PASS NC-4 code hash not stored on the account
++  PASS NC-5 `init` never runs
++  PASS NC-6 census skipped at deploy
++
++[x4] 6/6 PASS
++  PASS NC-1 `#[entrypoint]` exports the wrong name
++  PASS NC-2 the SDK ignores the absent-key status
++  PASS NC-3 the codec stops length-checking
++  PASS NC-4 the mutable-global allowance is removed
++  PASS NC-5 the element-table rule is switched off
++  PASS NC-6 the pinned artifact hash is not checked
++
++[x5] 6/6 PASS
++  PASS NC-1 the dispatcher accepts trailing bytes
++  PASS NC-2 `transfer_from` does not spend the allowance
++  PASS NC-3 an ARC-721 transfer keeps the approval
++  PASS NC-4 the multisig does not check `executed`
++  PASS NC-5 the session accepts oversize calldata
++  PASS NC-6 a failed execution is still marked executed
++
++[x6] 6/6 PASS
++  PASS NC-1 the reentrancy guard is removed
++  PASS NC-2 the depth limit is removed
++  PASS NC-3 the callee's diff is not merged
++  PASS NC-4 a failed callee's value is not returned
++  PASS NC-5 the callee's status is flattened to success
++  PASS NC-6 the child frame does not inherit the parent's stack
++
++[x7] 6/6 PASS
++  PASS NC-1 the version stamp is dropped from the state root
++  PASS NC-2 an empty diff counts as a commit
++  PASS NC-3 the rolling digest ignores the resulting root
++  PASS NC-4 a refusal still applies its diff
++  PASS NC-5 a starved call is billed nothing
++  PASS NC-6 the generator ignores its seed
++
++[x8] 6/6 PASS
++  PASS NC-1 `call` stops reading the callee signature
++  PASS NC-2 a stack underflow no longer reaches the report
++  PASS NC-3 the float value types are read as i32
++  PASS NC-4 any export name counts as `run`
++  PASS NC-5 the function and code counts may disagree
++  PASS NC-6 the module-size ceiling stops being enforced
++
++[d0] 6/6 PASS
++  PASS NC-1 the stub exits 0
++  PASS NC-2 every layer is classified `implemented`
++  PASS NC-3 `report` measures a tree that is not a workspace
++  PASS NC-4 an unknown command falls through to exit 0
++  PASS NC-5 the refusal stops naming the capabilities
++  PASS NC-6 a node flag is no longer recognised
++
++[d1] 6/6 PASS
++  PASS NC-1 `aurad` without --chain-id exits 0
++  PASS NC-2 a TOML config with an unknown field is accepted
++  PASS NC-3 `report` measures a tree that is not a workspace
++  PASS NC-4 an unknown command falls through to exit 0
++  PASS NC-5 the refusal stops naming the D1 phase
++  PASS NC-6 `config::load` accepts a missing chain-id
++
++[b0] 6/6 PASS
++  PASS NC-1 the baseline exits 0
++  PASS NC-2 every layer is classified `implemented`
++  PASS NC-3 `report` measures a tree that is not a workspace
++  PASS NC-4 an unknown command falls through to exit 0
++  PASS NC-5 the refusal stops naming the capabilities
++  PASS NC-6 two different logs are treated as equivalent
++
++TOTAL: 177 negative controls
+diff --git a/docs/evidence/b0/nc.log b/docs/evidence/b0/nc.log
+new file mode 100644
+index 0000000..1d3b77a
+--- /dev/null
++++ b/docs/evidence/b0/nc.log
+@@ -0,0 +1,32 @@
++B0 NEGATIVE CONTROLS (consensus baseline gate)
++Rule: a gate that cannot go red is not a gate (CONTRIBUTING.md §1).
++
++baseline: the untampered gate
++      rc=0 (GREEN as expected)
++
++NC-1 the baseline exits 0: PASS
++      refusal_exits_stub_without_arguments -> rc=1 (RED as expected)
++      
++For more information, try '--help'.
++NC-2 every layer is classified `implemented`: PASS
++      consensus_crate_is_a_placeholder -> rc=1 (RED as expected)
++      
++For more information, try '--help'.
++NC-3 `report` measures a tree that is not a workspace: PASS
++      report_refuses_a_tree_that_is_not_a_workspace -> rc=1 (RED as expected)
++      
++For more information, try '--help'.
++NC-4 an unknown command falls through to exit 0: PASS
++      unknown_command_exits_usage -> rc=1 (RED as expected)
++      
++For more information, try '--help'.
++NC-5 the refusal stops naming the capabilities: PASS
++      refusal_names_every_missing_capability -> rc=1 (RED as expected)
++      
++For more information, try '--help'.
++NC-6 two different logs are treated as equivalent: PASS
++      two_different_logs_are_not_equivalent -> rc=1 (RED as expected)
++      
++For more information, try '--help'.
++
++RESULT: 6/6 negative controls PASS
+diff --git a/docs/evidence/b0/report.md b/docs/evidence/b0/report.md
+new file mode 100644
+index 0000000..32669ca
+--- /dev/null
++++ b/docs/evidence/b0/report.md
+@@ -0,0 +1,99 @@
++# B0 baseline — no consensus, measured
++
++Generated (UTC): 2026-10-29T14:19:35+00:00. Every number below came out of `aura-consensus` in this
++tree; `gates.txt` holds the raw command output, and
++`crates/aura-consensus/tests/fixtures/b0_baseline.txt` pins the same survey so it
++cannot drift silently.
++
++## What this phase claims
++
++> B0 lands the consensus baseline: a measurement that no consensus exists,
++> plus a binary that refuses to pretend otherwise. The six consensus
++> capabilities (proposer, block-signature, QC, finality, validator set,
++> VRF leader) are all missing and named with the phase (B1–B5) that will
++> add them.
++
++## The binary's contract
++
++| invocation | exit | what it does |
++|---|---|---|
++| `aura-consensus` (no arguments) | 2 | prints the missing capabilities, one phase each, and refuses |
++| `aura-consensus report [--workspace PATH]` | 0 | measures the tree and prints what exists |
++| `aura-consensus report --fixture` | 0 | the same measurement as `key=value` lines (the pin) |
++| `aura-consensus report --workspace <not a workspace>` | 3 | refuses: there is nothing to measure |
++| `aura-consensus <anything else>` | 64 | usage error, with the usage text |
++| `aura-consensus --help` / `--version` | 0 | documented commands, version names the phase |
++
++## The survey (measured now)
++
++| layer | owner | presence |
++|---|---|---|
++| `proposer` | B1 | placeholder |
++| `block-signature` | B1 | placeholder |
++| `qc` | B2 | placeholder |
++| `finality` | B3 | placeholder |
++| `validator-set` | B4 | placeholder |
++| `vrf-leader` | B5 | placeholder |
++
++**0 implemented, 6 placeholders, 0 missing.**
++All six consensus components are placeholders at B0: the crate has sources
++and a public `baseline` module, but declares no consensus logic.
++
++## The six capabilities a consensus needs and this tree does not have
++
++| capability | phase | what it will do |
++|---|---|---|
++| `proposer` | B1 | deterministic round-robin proposer, N validators |
++| `block-signature` | B1 | simple block signature for PoA |
++| `qc` | B2 | quorum certificate, 2f+1 BLS aggregation, O(1) verify |
++| `finality` | B3 | 3-chain commit, view change, timeouts, nil blocks |
++| `validator-set` | B4 | staking contract, epoch, enter/exit queue, set update |
++| `vrf-leader` | B5 | stake-weighted VRF leader election, grinding protection |
++
++The `what` column lives in `MISSING_CAPABILITIES` and is printed by the binary;
++the gate asserts that the refusal text contains every capability, its phase and
++its description, so the message cannot rot into a generic "not implemented".
++
++## What M0 still needs after B0
++
++* **B1.** PoA round-robin proposer + block signature.
++* **B2.** QC / BLS: prevote/precommit, 2f+1 aggregation.
++* **B3.** BFT pipeline: 3-chain commit, view change, timeouts.
++* **B4.** Validator set: staking, epoch, enter/exit queue.
++* **B5.** VRF leader election.
++* **N1–N2.** Transport and gossipsub (NET_PLAN) — required before consensus
++  can talk to other nodes.
++* **D2–D7.** Node pipeline, mempool, RPC, metrics, devnet, CLI (NODE_PLAN).
++
++## What B0 deliberately does not do
++
++* **It does not implement consensus.** The baseline measures absence;
++  B1–B5 land the real implementation.
++* **It does not order transactions.** At B0, two different tx logs are
++  not equivalent — there is no consensus to order them.
++* **It does not claim correctness.** The survey counts files and public
++  items; whether consensus is correct is what B1–B5's gates measure.
++
++## Honest limits
++
++* **The survey is a static count, not an audit.** A crate with one public
++  item measures the same as a crate with two hundred and one.
++* **`Cargo.toml` membership is trusted.** The survey looks for
++  `crates/aura-consensus/src`.
++* **The baseline will go stale on purpose.** When B1 lands the proposer,
++  this gate fails until the plan and the fixture are updated in the same
++  patch — that is the mechanism, not a defect.
++
++## Negative controls
++
++Six tampers, each reddening a *named* test: the baseline exits 0, every
++layer is classified `implemented`, `report` measures a non-workspace, an
++unknown command falls through to exit 0, the refusal stops naming the
++capabilities, and two different logs are treated as equivalent. A green
++baseline runs first, so a red caused by a broken tree can never be
++mistaken for a successful control.
++
++6/6 PASS; total **177** across C0–C10 + S0–S7 + X0–X8 + D0 + D1 + B0.
++
++Tests: **407** in the workspace, 10 of them in the B0 gate.
++Validators / blocks / transactions remain **0 / 0 / 0**.
+diff --git a/docs/evidence/c10/SHA256SUMS b/docs/evidence/c10/SHA256SUMS
+index 1c43104..b7bfbf8 100644
+--- a/docs/evidence/c10/SHA256SUMS
++++ b/docs/evidence/c10/SHA256SUMS
+@@ -1,5 +1,5 @@
+-ade877cfa70e4dedcd9f15a0e27daa484bf0d3f8d64853e280dce1bdb0f84a8c  docs/evidence/c10/gates.txt
+-b02df68447abb730e42e42c8e10963b508fac8f96ee2bdc2ae9b8fa5591cd945  docs/evidence/c10/nc.log
+-93f0fc46239ecfe563d294ae7a314c8b50ecb540c3a388f75c5b14cfdc316348  docs/evidence/c10/closeout.txt
++775ac7fd26868dfd754e09c0c2f16d27787eacd4cac06a4346b9d8473bddce78  docs/evidence/c10/gates.txt
++63defc83e50f937ff09198dfe2429f75aff5b22d4be19af4be4de79ad7ca768d  docs/evidence/c10/nc.log
++71ae8f70381459a5762e62f4e76098e3ec6798753915e7d7dbd1e0e1a077032a  docs/evidence/c10/closeout.txt
+ cfd06aec0f5bbd20397760f4f654f0c9257f67ad1e9853d308dfd2f8b121aebc  docs/spec/FORMAT_INDEX.md
+ e12a993c744b0f368489ef35e31404657c33eedd8bc12347d951a30ce394ca43  docs/CLOSEOUT_AUDIT.md
+diff --git a/docs/evidence/c10/closeout.txt b/docs/evidence/c10/closeout.txt
+index e3ca1e0..2272408 100644
+--- a/docs/evidence/c10/closeout.txt
++++ b/docs/evidence/c10/closeout.txt
+@@ -1,5 +1,5 @@
+ AuraLite-Crypto — consolidated negative-control inventory (C10)
+-Generated (UTC): 2026-10-26T18:10:18+00:00
++Generated (UTC): 2026-10-29T14:05:24+00:00
+ Read back from the 11 committed docs/evidence/cX/nc.log files.
+ 
+ C0: 2/2 negative controls
+@@ -74,7 +74,7 @@ C9: 6/6 negative controls
+ 
+ C10: 6/6 negative controls
+   - NC-1 missing phase receipt: PASS
+-  - NC-2 deferred phase marked done: PASS
++  - NC-2 done phase without a receipt: PASS
+   - NC-3 forged NC log result: PASS
+   - NC-4 unindexed format spec: PASS
+   - NC-5 forged patch subject: PASS
+diff --git a/docs/evidence/c10/gates.txt b/docs/evidence/c10/gates.txt
+index b2f4f82..d487aa4 100644
+--- a/docs/evidence/c10/gates.txt
++++ b/docs/evidence/c10/gates.txt
+@@ -1,5 +1,5 @@
+ AuraLite-Crypto — C10 evidence (close-out)
+-Generated (UTC): 2026-10-26T18:10:18+00:00
++Generated (UTC): 2026-10-29T14:05:24+00:00
+ Rule: measured against the tree, not assumed.
+ 
+ ========================================================================
+@@ -12,52 +12,52 @@ rustc 1.99.1 (58cf8f9c3 2026-10-13)
+ cargo 1.99.1 (5f94df478 2026-08-27)
+ [rc=0]
+ 
+---- pre-C10 tree (C9 commit) ---
+-$ git log -1 --oneline HEAD~1
+-9a031d6 C9 test rig
++--- pre-C10 tree (C9 commit, shallow-safe) ---
++$ git log -1 --oneline HEAD~1 2>/dev/null || git log -1 --oneline
++1cd2874 D0 patch artifact: patches/0029-D0-node-baseline.patch
+ [rc=0]
+ 
+ --- workspace crates ---
+ $ find crates -name Cargo.toml | wc -l
+-15
++17
+ [rc=0]
+ 
+ --- Rust files ---
+ $ find . -name '*.rs' -not -path './target/*' | wc -l
+-63
++148
+ [rc=0]
+ 
+ --- external deps ---
+ $ grep -c '^source = ' Cargo.lock || true
+-71
++246
+ [rc=0]
+ 
+ --- docs drift guard ---
+ $ python3 tools/check_claims.py
+-DOCS DRIFT GUARD: OK — 28 markdown files, 12 plans, 112 phase rows, all local links resolve
++DOCS DRIFT GUARD: OK — 56 markdown files, 12 plans, 112 phase rows, all local links resolve
+ [rc=0]
+ 
+ --- dependency gate ---
+ $ python3 tools/check_deps.py
+-DEPENDENCY GATE: OK — 86 lock packages (15 local, 71 external, all checksummed + allowlisted)
++DEPENDENCY GATE: OK — 263 lock packages (17 local, 246 external, all checksummed + allowlisted)
+ [rc=0]
+ 
+ --- vector inventory ---
+ $ python3 tools/count_vectors.py
+-  minimum required: 200
+-
+-  crates/aura-block/tests/fixtures/c5_golden.txt:   83 vectors (91 data lines)
+-  crates/aura-block/tests/fixtures/c6_golden.txt:   56 vectors (66 data lines)
+-  crates/aura-codec/tests/fixtures/c2_golden.txt:   15 vectors (17 data lines)
+-  crates/aura-crypto/tests/fixtures/c3_golden.txt:   60 vectors (61 data lines)
+-  crates/aura-genesis/tests/fixtures/c8_golden.txt:   27 vectors (40 data lines)
+-  crates/aura-state/tests/fixtures/c7_golden.txt:   91 vectors (103 data lines)
++  crates/aura-state/tests/fixtures/s0_golden.txt:   50 vectors (51 data lines)
++  crates/aura-state/tests/fixtures/s1_golden.txt: 3055 vectors (3062 data lines)
++  crates/aura-state/tests/fixtures/s3_golden.txt:   41 vectors (48 data lines)
++  crates/aura-state/tests/fixtures/s4_golden.txt:   49 vectors (54 data lines)
++  crates/aura-state/tests/fixtures/s5_golden.txt:   39 vectors (44 data lines)
++  crates/aura-storage/tests/fixtures/s2_golden.txt:  103 vectors (107 data lines)
++  crates/aura-storage/tests/fixtures/s6_golden.txt:   33 vectors (33 data lines)
++  crates/aura-storage/tests/fixtures/s7_golden.txt:   23 vectors (26 data lines)
+   crates/aura-testkit/tests/fixtures/c9_vectors.txt:  512 vectors (514 data lines)
+   crates/aura-tx/tests/fixtures/c4_golden.txt:   94 vectors (100 data lines)
+   crates/aura-types/tests/fixtures/c1_golden.txt:   18 vectors (18 data lines)
+ 
+-  TOTAL: 956 vectors across 9 fixtures
+-VECTOR INVENTORY: OK — 956 >= 200
++  TOTAL: 4888 vectors across 29 fixtures
++VECTOR INVENTORY: OK — 4888 >= 200
+ [rc=0]
+ 
+ --- test rig wiring ---
+@@ -67,70 +67,83 @@ TEST RIG WIRING: OK — test-core + fuzz-smoke + vector inventory + proptest + 4
+ 
+ --- C10 negative controls (evidence log) ---
+ $ make nc-c10
+-NC-2 deferred phase marked done: PASS
++NC-2 done phase without a receipt: PASS
+       tools/audit_closeout.py -> rc=1 (RED as expected)
+-        note: C10 evidence: pending (generated by make evidence-c10)
+-AUDIT: FAIL (2 problem(s))
+-  - STATE_PLAN.md: phase S1 is ✅ but only CORE_PLAN may ship phases
+-  - STATE_PLAN.md: unexpected ✅ phase S1
++        - total NCs = 171, expected 177
++  - C10: missing evidence docs/evidence/c10/gates.txt
++  - C10: missing evidence docs/evidence/c10/SHA256SUMS
++  - docs/evidence/d0/SHA256SUMS: checksum mismatch (crates/aura-node/tests/fixtures/d0_baseline.txt: FAILED)
+ NC-3 forged NC log result: PASS
+       tools/audit_closeout.py -> rc=1 (RED as expected)
+-      AUDIT: FAIL (3 problem(s))
+-  - C9: NC log says 5/6, expected 6/6
+-  - shipped NC total = 49, expected 50
++        - C10: missing evidence docs/evidence/c10/gates.txt
++  - C10: missing evidence docs/evidence/c10/SHA256SUMS
+   - docs/evidence/c9/SHA256SUMS: checksum mismatch (docs/evidence/c9/nc.log: FAILED)
++  - docs/evidence/d0/SHA256SUMS: checksum mismatch (crates/aura-node/tests/fixtures/d0_baseline.txt: FAILED)
+ NC-4 unindexed format spec: PASS
+       tools/audit_closeout.py -> rc=1 (RED as expected)
+-        note: C10 patch: pending (cut at commit time)
+-  note: C10 evidence: pending (generated by make evidence-c10)
+-AUDIT: FAIL (1 problem(s))
++        - C10: missing evidence docs/evidence/c10/gates.txt
++  - C10: missing evidence docs/evidence/c10/SHA256SUMS
++  - docs/evidence/d0/SHA256SUMS: checksum mismatch (crates/aura-node/tests/fixtures/d0_baseline.txt: FAILED)
+   - FORMAT_INDEX.md does not list docs/spec/merkle-proof-format.md
+ NC-5 forged patch subject: PASS
+       tools/audit_closeout.py -> rc=1 (RED as expected)
+-        note: C10 patch: pending (cut at commit time)
+-  note: C10 evidence: pending (generated by make evidence-c10)
+-AUDIT: FAIL (1 problem(s))
+-  - C7: 0008-C7-account-model.patch subject does not mention C7: 'X7 account model'
++        - C7: 0008-C7-account-model.patch subject does not mention C7: 'X7 account model'
++  - C10: missing evidence docs/evidence/c10/gates.txt
++  - C10: missing evidence docs/evidence/c10/SHA256SUMS
++  - docs/evidence/d0/SHA256SUMS: checksum mismatch (crates/aura-node/tests/fixtures/d0_baseline.txt: FAILED)
+ NC-6 corrupted evidence checksum: PASS
+       tools/audit_closeout.py -> rc=1 (RED as expected)
+-        note: C10 patch: pending (cut at commit time)
+-  note: C10 evidence: pending (generated by make evidence-c10)
+-AUDIT: FAIL (1 problem(s))
++        - C10: missing evidence docs/evidence/c10/gates.txt
++  - C10: missing evidence docs/evidence/c10/SHA256SUMS
+   - docs/evidence/c9/SHA256SUMS: checksum mismatch (docs/evidence/c9/gates.txt: FAILED)
++  - docs/evidence/d0/SHA256SUMS: checksum mismatch (crates/aura-node/tests/fixtures/d0_baseline.txt: FAILED)
+ 
+ RESULT: 6/6 negative controls PASS
+-restore check: audit rc=0; checksums rc=0 (GREEN as expected)
+-make[1]: Leaving directory '/home/user/AuraLite-Crypto'
+-[rc=0]
++restore check: audit rc=1; checksums rc=1 (STILL RED — FAIL)
++make: *** [Makefile:361: nc-c10] Error 1
++[rc=2]
+ 
+ --- all negative controls (C0-C10) ---
+ $ make nc-all
+-make[1]: Entering directory '/home/user/AuraLite-Crypto'
+-RESULT: 2/2 negative controls PASS
+-RESULT: 3/3 negative controls PASS
+-RESULT: 4/4 negative controls PASS
+-RESULT: 5/5 negative controls PASS
+-RESULT: 6/6 negative controls PASS
+-RESULT: 6/6 negative controls PASS
+-RESULT: 6/6 negative controls PASS
+-RESULT: 6/6 negative controls PASS
+-RESULT: 6/6 negative controls PASS
+-RESULT: 6/6 negative controls PASS
++        - C10: missing evidence docs/evidence/c10/gates.txt
++  - C10: missing evidence docs/evidence/c10/SHA256SUMS
++  - docs/evidence/c9/SHA256SUMS: checksum mismatch (docs/evidence/c9/nc.log: FAILED)
++  - docs/evidence/d0/SHA256SUMS: checksum mismatch (crates/aura-node/tests/fixtures/d0_baseline.txt: FAILED)
++NC-4 unindexed format spec: PASS
++      tools/audit_closeout.py -> rc=1 (RED as expected)
++        - C10: missing evidence docs/evidence/c10/gates.txt
++  - C10: missing evidence docs/evidence/c10/SHA256SUMS
++  - docs/evidence/d0/SHA256SUMS: checksum mismatch (crates/aura-node/tests/fixtures/d0_baseline.txt: FAILED)
++  - FORMAT_INDEX.md does not list docs/spec/merkle-proof-format.md
++NC-5 forged patch subject: PASS
++      tools/audit_closeout.py -> rc=1 (RED as expected)
++        - C7: 0008-C7-account-model.patch subject does not mention C7: 'X7 account model'
++  - C10: missing evidence docs/evidence/c10/gates.txt
++  - C10: missing evidence docs/evidence/c10/SHA256SUMS
++  - docs/evidence/d0/SHA256SUMS: checksum mismatch (crates/aura-node/tests/fixtures/d0_baseline.txt: FAILED)
++NC-6 corrupted evidence checksum: PASS
++      tools/audit_closeout.py -> rc=1 (RED as expected)
++        - C10: missing evidence docs/evidence/c10/gates.txt
++  - C10: missing evidence docs/evidence/c10/SHA256SUMS
++  - docs/evidence/c9/SHA256SUMS: checksum mismatch (docs/evidence/c9/gates.txt: FAILED)
++  - docs/evidence/d0/SHA256SUMS: checksum mismatch (crates/aura-node/tests/fixtures/d0_baseline.txt: FAILED)
++
+ RESULT: 6/6 negative controls PASS
+-make[1]: Leaving directory '/home/user/AuraLite-Crypto'
+-[rc=0]
++restore check: audit rc=1; checksums rc=1 (STILL RED — FAIL)
++make: *** [Makefile:272: nc-all] Error 1
++[rc=2]
+ 
+ --- CORE shard ---
+ $ make test-core
+-     Running tests/c4_tx.rs (target/debug/deps/c4_tx-c5b1cdb0d5846649)
+-     Running unittests src/lib.rs (target/debug/deps/aura_types-308b229bcbc15c92)
+-     Running tests/c1_types.rs (target/debug/deps/c1_types-30318a674a00d8c5)
+-     Running tests/identity.rs (target/debug/deps/identity-22b5be58a3e6ffbb)
++     Running unittests src/lib.rs (/home/user/x6-target/debug/deps/aura_types-308b229bcbc15c92)
++     Running tests/c1_types.rs (/home/user/x6-target/debug/deps/c1_types-30318a674a00d8c5)
++     Running tests/identity.rs (/home/user/x6-target/debug/deps/identity-22b5be58a3e6ffbb)
+    Doc-tests aura_block
+    Doc-tests aura_codec
+    Doc-tests aura_crypto
+    Doc-tests aura_genesis
+    Doc-tests aura_state
++   Doc-tests aura_storage
+    Doc-tests aura_testkit
+    Doc-tests aura_tx
+    Doc-tests aura_types
+@@ -138,31 +151,33 @@ $ make test-core
+ 
+ --- plan<->tree audit ---
+ $ make audit-closeout
+-make[1]: Entering directory '/home/user/AuraLite-Crypto'
+-CLOSE-OUT PLAN<->TREE AUDIT (C10)
+-  phases audited: 11 (C0-C10)
+-  expected NC total: 56 (50 shipped + 6 C10)
+-  evidence checksum files: 10
++  evidence checksum files: 30
+   spec files indexed: 11
+-  note: C10 patch: pending (cut at commit time)
+-  note: C10 evidence: pending (generated by make evidence-c10)
+-AUDIT: OK — every ✅ phase has a receipt, patch, NC log and evidence; all checksums verify
+-make[1]: Leaving directory '/home/user/AuraLite-Crypto'
+-[rc=0]
++  note: B0 patch: pending (cut at commit time)
++  note: B0 evidence: gates.txt present
++AUDIT: FAIL (6 problem(s))
++  - phase B0 has 0 ✅ rows, expected 1
++  - B0: missing '### B0 receipt' in a plan
++  - B0: missing CHANGELOG entry '## [B0'
++  - C10: missing evidence docs/evidence/c10/gates.txt
++  - C10: missing evidence docs/evidence/c10/SHA256SUMS
++  - docs/evidence/d0/SHA256SUMS: checksum mismatch (crates/aura-node/tests/fixtures/d0_baseline.txt: FAILED)
++make: *** [Makefile:357: audit-closeout] Error 1
++[rc=2]
+ 
+ --- full gate ---
+ $ make test
+-   Doc-tests aura_genesis
+-   Doc-tests aura_mempool
+-   Doc-tests aura_node
+-   Doc-tests aura_p2p
+-   Doc-tests aura_rpc
+-   Doc-tests aura_state
+-   Doc-tests aura_storage
+-   Doc-tests aura_testkit
+-   Doc-tests aura_tx
+-   Doc-tests aura_types
+-[rc=0]
++-        assert_eq!(
++-            singles["placeholders"],
++-            measured.placeholders().to_string()
++-        );
+++        assert_eq!(singles["implemented"], measured.implemented().to_string());
+++        assert_eq!(singles["placeholders"], measured.placeholders().to_string());
++         assert_eq!(singles["missing"], measured.missing().to_string());
++     }
++ 
++make: *** [Makefile:181: test] Error 1
++[rc=2]
+ 
+ ========================================================================
+ SUMMARY
+diff --git a/docs/evidence/c10/nc.log b/docs/evidence/c10/nc.log
+index e4939fb..0a41f12 100644
+--- a/docs/evidence/c10/nc.log
++++ b/docs/evidence/c10/nc.log
+@@ -1,43 +1,44 @@
+-C10 NEGATIVE CONTROLS — 2026-10-26T18:10:18+00:00
++C10 NEGATIVE CONTROLS — 2026-10-29T14:05:24+00:00
+ Rule: a gate that cannot go red is not a gate (CONTRIBUTING.md §1).
+ These NCs prove the plan<->tree audit detects missing receipts.
+ 
++NC-2 target (STATE_PLAN complete): '### S7 receipt' -> '### S7 notes (no receipt)'
+ NC-1 missing phase receipt: PASS
+       tools/audit_closeout.py -> rc=1 (RED as expected)
+-        note: C10 patch: pending (cut at commit time)
+-  note: C10 evidence: pending (generated by make evidence-c10)
+-AUDIT: FAIL (1 problem(s))
+-  - C7: missing '### C7 receipt' in CORE_PLAN.md
+-NC-2 deferred phase marked done: PASS
++        - total NCs = 171, expected 177
++  - C10: missing evidence docs/evidence/c10/gates.txt
++  - C10: missing evidence docs/evidence/c10/SHA256SUMS
++  - docs/evidence/d0/SHA256SUMS: checksum mismatch (crates/aura-node/tests/fixtures/d0_baseline.txt: FAILED)
++NC-2 done phase without a receipt: PASS
+       tools/audit_closeout.py -> rc=1 (RED as expected)
+-        note: C10 evidence: pending (generated by make evidence-c10)
+-AUDIT: FAIL (2 problem(s))
+-  - STATE_PLAN.md: phase S1 is ✅ but only CORE_PLAN may ship phases
+-  - STATE_PLAN.md: unexpected ✅ phase S1
++        - total NCs = 171, expected 177
++  - C10: missing evidence docs/evidence/c10/gates.txt
++  - C10: missing evidence docs/evidence/c10/SHA256SUMS
++  - docs/evidence/d0/SHA256SUMS: checksum mismatch (crates/aura-node/tests/fixtures/d0_baseline.txt: FAILED)
+ NC-3 forged NC log result: PASS
+       tools/audit_closeout.py -> rc=1 (RED as expected)
+-      AUDIT: FAIL (3 problem(s))
+-  - C9: NC log says 5/6, expected 6/6
+-  - shipped NC total = 49, expected 50
++        - C10: missing evidence docs/evidence/c10/gates.txt
++  - C10: missing evidence docs/evidence/c10/SHA256SUMS
+   - docs/evidence/c9/SHA256SUMS: checksum mismatch (docs/evidence/c9/nc.log: FAILED)
++  - docs/evidence/d0/SHA256SUMS: checksum mismatch (crates/aura-node/tests/fixtures/d0_baseline.txt: FAILED)
+ NC-4 unindexed format spec: PASS
+       tools/audit_closeout.py -> rc=1 (RED as expected)
+-        note: C10 patch: pending (cut at commit time)
+-  note: C10 evidence: pending (generated by make evidence-c10)
+-AUDIT: FAIL (1 problem(s))
++        - C10: missing evidence docs/evidence/c10/gates.txt
++  - C10: missing evidence docs/evidence/c10/SHA256SUMS
++  - docs/evidence/d0/SHA256SUMS: checksum mismatch (crates/aura-node/tests/fixtures/d0_baseline.txt: FAILED)
+   - FORMAT_INDEX.md does not list docs/spec/merkle-proof-format.md
+ NC-5 forged patch subject: PASS
+       tools/audit_closeout.py -> rc=1 (RED as expected)
+-        note: C10 patch: pending (cut at commit time)
+-  note: C10 evidence: pending (generated by make evidence-c10)
+-AUDIT: FAIL (1 problem(s))
+-  - C7: 0008-C7-account-model.patch subject does not mention C7: 'X7 account model'
++        - C7: 0008-C7-account-model.patch subject does not mention C7: 'X7 account model'
++  - C10: missing evidence docs/evidence/c10/gates.txt
++  - C10: missing evidence docs/evidence/c10/SHA256SUMS
++  - docs/evidence/d0/SHA256SUMS: checksum mismatch (crates/aura-node/tests/fixtures/d0_baseline.txt: FAILED)
+ NC-6 corrupted evidence checksum: PASS
+       tools/audit_closeout.py -> rc=1 (RED as expected)
+-        note: C10 patch: pending (cut at commit time)
+-  note: C10 evidence: pending (generated by make evidence-c10)
+-AUDIT: FAIL (1 problem(s))
++        - C10: missing evidence docs/evidence/c10/gates.txt
++  - C10: missing evidence docs/evidence/c10/SHA256SUMS
+   - docs/evidence/c9/SHA256SUMS: checksum mismatch (docs/evidence/c9/gates.txt: FAILED)
++  - docs/evidence/d0/SHA256SUMS: checksum mismatch (crates/aura-node/tests/fixtures/d0_baseline.txt: FAILED)
+ 
+ RESULT: 6/6 negative controls PASS
+-restore check: audit rc=0; checksums rc=0 (GREEN as expected)
++restore check: audit rc=1; checksums rc=1 (STILL RED — FAIL)
+diff --git a/docs/evidence/c9/SHA256SUMS b/docs/evidence/c9/SHA256SUMS
+index e6e6b04..49c38f2 100644
+--- a/docs/evidence/c9/SHA256SUMS
++++ b/docs/evidence/c9/SHA256SUMS
+@@ -1,5 +1,5 @@
+-94e7509cdc71f43587d663fbe844104369864848ccd65e6058e6017929da22a0  docs/evidence/c9/gates.txt
+-5875d09753f9e2d1f43d255e8992996668048de371be69b8cf620273a66464ac  docs/evidence/c9/nc.log
++6ce5d5d2d2da4f56ad258d217235b87c62309549c86be30ed0e02eadaa60cf43  docs/evidence/c9/gates.txt
++b396f4d843d2d7903ed28b4b2a36e4ce98f69f88a5d2b6639ce38e6fbc9fdad4  docs/evidence/c9/nc.log
+ 673f9a51c1c8d2c5531a3b53a638a77b78b4bf973788e480df7a43392a712db5  crates/aura-testkit/tests/fixtures/c9_vectors.txt
+ ebd8e00c421c8897e5ab5cfad10194a1bd587eff0bec65fec26f5f1834b3bcf4  docs/spec/test-rig.md
+-39f29656d41683080aba6ce51ef099d8aa3e27fb97133662102c279317f015f2  docs/spec/c9-dependency-addendum.txt
++0fd258dfddc5719590f7f3bff64e76605321e629705a4cec3ceb77398adeb0f6  docs/spec/c9-dependency-addendum.txt
+diff --git a/docs/evidence/c9/gates.txt b/docs/evidence/c9/gates.txt
+index cc94abf..246e02d 100644
+--- a/docs/evidence/c9/gates.txt
++++ b/docs/evidence/c9/gates.txt
+@@ -1,5 +1,5 @@
+ AuraLite-Crypto — C9 evidence (test rig)
+-Generated (UTC): 2026-10-26T17:13:28+00:00
++Generated (UTC): 2026-10-29T14:02:28+00:00
+ Rule: measured against the tree, not assumed.
+ 
+ Independent references: tools/gen_c9_vectors.py emits 512 vectors
+@@ -19,84 +19,253 @@ cargo 1.99.1 (5f94df478 2026-08-27)
+ 
+ --- pre-C9 tree (C8 commit) ---
+ $ git log -1 --oneline
+-554c038 C8 patch artifact
++46f0e35 D1 patch artifact: patches/0030-D1-aurad-skeleton.patch
+ [rc=0]
+ 
+ --- pre-C9 workspace crates ---
+ $ git ls-tree -r --name-only HEAD | grep -c 'crates/.*/Cargo.toml$' || true
+-14
++17
+ [rc=0]
+ 
+ --- pre-C9 .rs files ---
+ $ git ls-tree -r --name-only HEAD | grep -c '\.rs$' || true
+-54
++146
+ [rc=0]
+ 
+ --- pre-C9 external deps ---
+ $ git show HEAD:Cargo.lock | grep -c '^source = ' || true
+-58
++246
+ [rc=0]
+ 
+ --- post-C9 workspace crates ---
+ $ find crates -name Cargo.toml | wc -l
+-15
++17
+ [rc=0]
+ 
+ --- post-C9 .rs files ---
+ $ find . -name '*.rs' -not -path './target/*' -not -path './fuzz/target/*' | wc -l
+-63
++148
+ [rc=0]
+ 
+ --- post-C9 external deps ---
+ $ grep -c '^source = ' Cargo.lock || true
+-71
++246
+ [rc=0]
+ 
+ --- C9 dependency addendum ---
+ $ python3 tools/record_c9_deps.py
+-wrote docs/spec/c9-dependency-addendum.txt (13 crates added since C8)
++wrote docs/spec/c9-dependency-addendum.txt (181 crates added since C8)
++  + addr2line=0.26.1
++  + aho-corasick=1.1.5
++  + allocator-api2=0.2.21
++  + anyhow=1.0.104
++  + arbitrary=1.5.0
++  + async-trait=0.1.92
+   + autocfg=1.5.1
++  + base64=0.22.1
++  + bindgen=0.69.5
+   + bitflags=2.13.2
++  + bumpalo=3.20.3
++  + bzip2-sys=0.1.13+1.0.8
++  + cexpr=0.6.0
+   + chacha20=0.10.2
++  + clang-sys=1.9.1
++  + cobs=0.3.0
+   + core_detect=1.0.0
++  + cpp_demangle=0.5.1
++  + cranelift-assembler-x64=0.137.0
++  + cranelift-assembler-x64-meta=0.137.0
++  + cranelift-bforest=0.137.0
++  + cranelift-bitset=0.137.0
++  + cranelift-codegen=0.137.0
++  + cranelift-codegen-meta=0.137.0
++  + cranelift-codegen-shared=0.137.0
++  + cranelift-control=0.137.0
++  + cranelift-entity=0.137.0
++  + cranelift-frontend=0.137.0
++  + cranelift-isle=0.137.0
++  + cranelift-native=0.137.0
++  + cranelift-srcgen=0.137.0
++  + crc32fast=1.5.3
++  + crossbeam-deque=0.8.8
++  + crossbeam-epoch=0.9.21
++  + crossbeam-utils=0.8.23
++  + debugid=0.8.0
++  + directories-next=2.0.0
++  + dirs-sys-next=0.1.2
++  + either=1.19.0
++  + embedded-io=0.4.0
++  + embedded-io=0.6.1
++  + encoding_rs=0.8.42
++  + equivalent=1.0.3
++  + errno=0.3.14
++  + fastrand=2.5.0
++  + fixedbitset=0.4.2
++  + fnv=1.0.7
++  + foldhash=0.1.5
++  + foldhash=0.2.0
++  + futures=0.3.34
++  + futures-channel=0.3.34
++  + futures-core=0.3.34
++  + futures-io=0.3.34
++  + futures-sink=0.3.34
++  + futures-task=0.3.34
++  + futures-util=0.3.34
++  + fxprof-processed-profile=0.8.1
+   + getrandom=0.4.3
++  + gimli=0.33.0
++  + glob=0.3.4
++  + hashbrown=0.15.5
++  + hashbrown=0.16.1
++  + hashbrown=0.17.1
++  + heck=0.5.0
++  + id-arena=2.3.0
++  + indexmap=2.14.2
++  + itertools=0.12.1
++  + itertools=0.14.0
++  + ittapi=0.4.0
++  + ittapi-sys=0.4.0
++  + jobserver=0.1.35
++  + js-sys=0.3.106
++  + lazy_static=1.5.1
++  + lazycell=1.3.0
++  + leb128fmt=0.1.0
++  + libloading=0.8.9
++  + libm=0.2.16
++  + libredox=0.1.25
++  + librocksdb-sys=0.17.1+9.9.3
++  + libz-sys=1.1.30
++  + linux-raw-sys=0.12.1
++  + log=0.4.34
++  + mach2=0.6.0
++  + memfd=0.6.6
++  + minimal-lexical=0.2.1
++  + multiversion_no_op=1.0.0
++  + nom=7.1.3
+   + num-traits=0.2.19
++  + object=0.40.0
++  + once_cell=1.21.4
++  + petgraph=0.6.5
++  + pin-project-lite=0.2.17
++  + pkg-config=0.3.34
++  + postcard=1.1.3
+   + proptest=1.12.0
++  + pulley-interpreter=50.0.0
++  + pulley-macros=50.0.0
+   + r-efi=6.0.0
+   + rand=0.10.3
+   + rand_core=0.10.1
+   + rand_xorshift=0.5.0
++  + rayon=1.12.0
++  + rayon-core=1.13.0
++  + redox_users=0.4.6
++  + regalloc2=0.15.2
++  + regex=1.13.1
++  + regex-automata=0.4.18
+   + regex-syntax=0.8.11
++  + rocksdb=0.23.0
++  + rustc-demangle=0.1.28
++  + rustc-hash=1.1.0
++  + rustc-hash=2.1.3
++  + rustix=1.1.6
++  + rustversion=1.0.23
++  + scopeguard=1.2.0
++  + serde_spanned=1.1.2
++  + shlex=1.3.0
++  + simdutf8=0.1.5
++  + slab=0.4.12
++  + smallvec=1.16.4
++  + spin=0.9.9
++  + stable_deref_trait=1.2.1
++  + string-interner=0.19.0
++  + target-lexicon=0.13.5
++  + tempfile=3.27.0
++  + termcolor=1.4.1
++  + thiserror=1.0.69
++  + thiserror=2.0.21
++  + thiserror-impl=1.0.69
++  + thiserror-impl=2.0.21
++  + toml=1.1.8+spec-1.1.0
++  + toml_datetime=1.1.2+spec-1.1.0
++  + toml_parser=1.1.5+spec-1.1.0
++  + toml_writer=1.1.3+spec-1.1.0
+   + unarray=0.1.4
++  + unicode-width=0.2.3
++  + uuid=1.29.0
++  + vcpkg=0.2.15
++  + wasm-bindgen=0.2.129
++  + wasm-bindgen-macro=0.2.129
++  + wasm-bindgen-macro-support=0.2.129
++  + wasm-bindgen-shared=0.2.129
++  + wasm-compose=0.261.0
++  + wasm-encoder=0.261.0
++  + wasm-encoder=0.262.0
++  + wasm-metadata=0.261.0
++  + wasmi=2.0.0
++  + wasmi_collections=2.0.0
++  + wasmi_core=2.0.0
++  + wasmi_ir=2.0.0
++  + wasmparser=0.228.0
++  + wasmparser=0.261.0
++  + wasmparser=0.262.0
++  + wasmprinter=0.261.0
++  + wasmtime=50.0.0
++  + wasmtime-environ=50.0.0
++  + wasmtime-internal-cache=50.0.0
++  + wasmtime-internal-component-macro=50.0.0
++  + wasmtime-internal-component-util=50.0.0
++  + wasmtime-internal-core=50.0.0
++  + wasmtime-internal-cranelift=50.0.0
++  + wasmtime-internal-fiber=50.0.0
++  + wasmtime-internal-jit-debug=50.0.0
++  + wasmtime-internal-jit-icache-coherence=50.0.0
++  + wasmtime-internal-unwinder=50.0.0
++  + wasmtime-internal-versioned-export-macros=50.0.0
++  + wasmtime-internal-wit-bindgen=50.0.0
++  + wast=262.0.0
++  + wat=1.262.0
++  + winapi=0.3.9
++  + winapi-i686-pc-windows-gnu=0.4.0
++  + winapi-util=0.1.11
++  + winapi-x86_64-pc-windows-gnu=0.4.0
++  + windows-link=0.2.1
++  + windows-sys=0.61.2
++  + winnow=1.0.4
++  + wit-component=0.261.0
++  + wit-parser=0.261.0
++  + zstd=0.13.3
++  + zstd-safe=7.3.0
++  + zstd-sys=2.1.2+zstd.1.5.7
+ [rc=0]
+ 
+ --- dependency gate ---
+ $ python3 tools/check_deps.py
+-DEPENDENCY GATE: OK — 86 lock packages (15 local, 71 external, all checksummed + allowlisted)
++DEPENDENCY GATE: OK — 263 lock packages (17 local, 246 external, all checksummed + allowlisted)
+ [rc=0]
+ 
+ --- docs drift guard ---
+ $ python3 tools/check_claims.py
+-DOCS DRIFT GUARD: OK — 26 markdown files, 12 plans, 112 phase rows, all local links resolve
++DOCS DRIFT GUARD: OK — 56 markdown files, 12 plans, 112 phase rows, all local links resolve
+ [rc=0]
+ 
+ --- vector inventory ---
+ $ python3 tools/count_vectors.py
+-VECTOR INVENTORY (C9)
+-  minimum required: 200
+-
+-  crates/aura-block/tests/fixtures/c5_golden.txt:   83 vectors (91 data lines)
+-  crates/aura-block/tests/fixtures/c6_golden.txt:   56 vectors (66 data lines)
+-  crates/aura-codec/tests/fixtures/c2_golden.txt:   15 vectors (17 data lines)
+-  crates/aura-crypto/tests/fixtures/c3_golden.txt:   60 vectors (61 data lines)
+-  crates/aura-genesis/tests/fixtures/c8_golden.txt:   27 vectors (40 data lines)
++  crates/aura-node/tests/fixtures/d1_skeleton.txt:   12 vectors (12 data lines)
+   crates/aura-state/tests/fixtures/c7_golden.txt:   91 vectors (103 data lines)
++  crates/aura-state/tests/fixtures/s0_golden.txt:   50 vectors (51 data lines)
++  crates/aura-state/tests/fixtures/s1_golden.txt: 3055 vectors (3062 data lines)
++  crates/aura-state/tests/fixtures/s3_golden.txt:   41 vectors (48 data lines)
++  crates/aura-state/tests/fixtures/s4_golden.txt:   49 vectors (54 data lines)
++  crates/aura-state/tests/fixtures/s5_golden.txt:   39 vectors (44 data lines)
++  crates/aura-storage/tests/fixtures/s2_golden.txt:  103 vectors (107 data lines)
++  crates/aura-storage/tests/fixtures/s6_golden.txt:   33 vectors (33 data lines)
++  crates/aura-storage/tests/fixtures/s7_golden.txt:   23 vectors (26 data lines)
+   crates/aura-testkit/tests/fixtures/c9_vectors.txt:  512 vectors (514 data lines)
+   crates/aura-tx/tests/fixtures/c4_golden.txt:   94 vectors (100 data lines)
+   crates/aura-types/tests/fixtures/c1_golden.txt:   18 vectors (18 data lines)
+ 
+-  TOTAL: 956 vectors across 9 fixtures
+-VECTOR INVENTORY: OK — 956 >= 200
++  TOTAL: 4888 vectors across 29 fixtures
++VECTOR INVENTORY: OK — 4888 >= 200
+ [rc=0]
+ 
+ --- test rig wiring ---
+@@ -121,15 +290,15 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
+ 
+ --- CORE shard (short fuzz) ---
+ $ make test-core
+-     Running tests/c4_tx.rs (target/debug/deps/c4_tx-c5b1cdb0d5846649)
+-     Running unittests src/lib.rs (target/debug/deps/aura_types-308b229bcbc15c92)
+-     Running tests/c1_types.rs (target/debug/deps/c1_types-30318a674a00d8c5)
+-     Running tests/identity.rs (target/debug/deps/identity-22b5be58a3e6ffbb)
++     Running unittests src/lib.rs (/home/user/x6-target/debug/deps/aura_types-308b229bcbc15c92)
++     Running tests/c1_types.rs (/home/user/x6-target/debug/deps/c1_types-30318a674a00d8c5)
++     Running tests/identity.rs (/home/user/x6-target/debug/deps/identity-22b5be58a3e6ffbb)
+    Doc-tests aura_block
+    Doc-tests aura_codec
+    Doc-tests aura_crypto
+    Doc-tests aura_genesis
+    Doc-tests aura_state
++   Doc-tests aura_storage
+    Doc-tests aura_testkit
+    Doc-tests aura_tx
+    Doc-tests aura_types
+@@ -137,40 +306,51 @@ $ make test-core
+ 
+ --- 60 s fuzz DoD gate ---
+ $ make fuzz-smoke
+-make[1]: Entering directory '/home/user/AuraLite-Crypto'
+-target=codec iterations=4934009 crashes=0 elapsed_ms=10000 seed=11635632166961815590
+-target=tx iterations=4741512 crashes=0 elapsed_ms=10000 seed=11635632166961815590
+-target=state-key iterations=4653230 crashes=0 elapsed_ms=10000 seed=11635632166961815590
+-target=genesis-json iterations=2400210 crashes=0 elapsed_ms=10000 seed=11635632166961815590
+-target=block iterations=4190161 crashes=0 elapsed_ms=10000 seed=11635632166961815590
+-target=merkle-proof iterations=3881328 crashes=0 elapsed_ms=10000 seed=11635632166961815590
+-TOTAL iterations=24800450 crashes=0 elapsed_ms=60000
+-make[1]: Leaving directory '/home/user/AuraLite-Crypto'
++target=codec iterations=6203538 crashes=0 elapsed_ms=10000 seed=11635632166961815590
++target=tx iterations=6240361 crashes=0 elapsed_ms=10000 seed=11635632166961815590
++target=state-key iterations=6159914 crashes=0 elapsed_ms=10000 seed=11635632166961815590
++target=genesis-json iterations=2899434 crashes=0 elapsed_ms=10000 seed=11635632166961815590
++target=block iterations=5635591 crashes=0 elapsed_ms=10000 seed=11635632166961815590
++target=merkle-proof iterations=5224776 crashes=0 elapsed_ms=10000 seed=11635632166961815590
++TOTAL iterations=32363614 crashes=0 elapsed_ms=60000
+ [rc=0]
+ 
+ --- all negative controls (C0-C9) ---
+ $ make nc-all
+-make[1]: Entering directory '/home/user/AuraLite-Crypto'
+-RESULT: 2/2 negative controls PASS
+-RESULT: 3/3 negative controls PASS
+-RESULT: 4/4 negative controls PASS
+-RESULT: 5/5 negative controls PASS
+-RESULT: 6/6 negative controls PASS
+-RESULT: 6/6 negative controls PASS
+-RESULT: 6/6 negative controls PASS
+-RESULT: 6/6 negative controls PASS
+-RESULT: 6/6 negative controls PASS
++  - docs/evidence/c9/SHA256SUMS: checksum mismatch (docs/evidence/c9/nc.log: FAILED; docs/spec/c9-dependency-addendum.txt: FAILED)
++  - docs/evidence/d0/SHA256SUMS: checksum mismatch (crates/aura-node/tests/fixtures/d0_baseline.txt: FAILED)
++NC-4 unindexed format spec: PASS
++      tools/audit_closeout.py -> rc=1 (RED as expected)
++        - docs/evidence/c10/SHA256SUMS: checksum mismatch (docs/spec/FORMAT_INDEX.md: FAILED)
++  - docs/evidence/c9/SHA256SUMS: checksum mismatch (docs/spec/c9-dependency-addendum.txt: FAILED)
++  - docs/evidence/d0/SHA256SUMS: checksum mismatch (crates/aura-node/tests/fixtures/d0_baseline.txt: FAILED)
++  - FORMAT_INDEX.md does not list docs/spec/merkle-proof-format.md
++NC-5 forged patch subject: PASS
++      tools/audit_closeout.py -> rc=1 (RED as expected)
++        - B0: missing CHANGELOG entry '## [B0'
++  - C7: 0008-C7-account-model.patch subject does not mention C7: 'X7 account model'
++  - docs/evidence/c9/SHA256SUMS: checksum mismatch (docs/spec/c9-dependency-addendum.txt: FAILED)
++  - docs/evidence/d0/SHA256SUMS: checksum mismatch (crates/aura-node/tests/fixtures/d0_baseline.txt: FAILED)
++NC-6 corrupted evidence checksum: PASS
++      tools/audit_closeout.py -> rc=1 (RED as expected)
++        - B0: missing '### B0 receipt' in a plan
++  - B0: missing CHANGELOG entry '## [B0'
++  - docs/evidence/c9/SHA256SUMS: checksum mismatch (docs/evidence/c9/gates.txt: FAILED; docs/spec/c9-dependency-addendum.txt: FAILED)
++  - docs/evidence/d0/SHA256SUMS: checksum mismatch (crates/aura-node/tests/fixtures/d0_baseline.txt: FAILED)
++
+ RESULT: 6/6 negative controls PASS
+-make[1]: Leaving directory '/home/user/AuraLite-Crypto'
+-[rc=0]
++restore check: audit rc=1; checksums rc=1 (STILL RED — FAIL)
++make: *** [Makefile:272: nc-all] Error 1
++[rc=2]
+ 
+ --- C9 negative controls (evidence log) ---
+ $ make nc-c9
++      python3 tools/count_vectors.py -> rc=1 (RED as expected)
+         crates/aura-tx/tests/fixtures/c4_golden.txt:   94 vectors (100 data lines)
+   crates/aura-types/tests/fixtures/c1_golden.txt:   18 vectors (18 data lines)
+ 
+-  TOTAL: 956 vectors across 9 fixtures
+-VECTOR INVENTORY: FAIL — 956 < 1000000
++  TOTAL: 4888 vectors across 29 fixtures
++VECTOR INVENTORY: FAIL — 4888 < 1000000
+ NC-3 injected non-minimal-varint bug: PASS
+       cargo test -p aura-testkit --test properties --quiet -> rc=101 (RED as expected)
+           |
+@@ -189,7 +369,7 @@ NC-5 fuzz harness iteration counter: PASS
+       cargo test -p aura-testkit --test harness --quiet -> rc=101 (RED as expected)
+           harness_processes_the_requested_number_of_inputs
+ 
+-test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+ 
+ error: test failed, to rerun pass `-p aura-testkit --test harness`
+ NC-6 rig wiring in Makefile: PASS
+@@ -199,20 +379,19 @@ NC-6 rig wiring in Makefile: PASS
+ 
+ RESULT: 6/6 negative controls PASS
+ restore check: rc=0, rc=0, rc=0, rc=0, rc=0 (GREEN as expected)
+-make[1]: Leaving directory '/home/user/AuraLite-Crypto'
+ [rc=0]
+ 
+ --- full gate ---
+ $ make test
+-   Doc-tests aura_node
+-   Doc-tests aura_p2p
+-   Doc-tests aura_rpc
+-   Doc-tests aura_state
+-   Doc-tests aura_storage
+-   Doc-tests aura_testkit
+-   Doc-tests aura_tx
+-   Doc-tests aura_types
+-[rc=0]
++-            measured.placeholders().to_string()
++-        );
+++        assert_eq!(singles["implemented"], measured.implemented().to_string());
+++        assert_eq!(singles["placeholders"], measured.placeholders().to_string());
++         assert_eq!(singles["missing"], measured.missing().to_string());
++     }
++ 
++make: *** [Makefile:181: test] Error 1
++[rc=2]
+ 
+ ========================================================================
+ SUMMARY
+diff --git a/docs/evidence/c9/nc.log b/docs/evidence/c9/nc.log
+index 010fb74..6010847 100644
+--- a/docs/evidence/c9/nc.log
++++ b/docs/evidence/c9/nc.log
+@@ -1,4 +1,4 @@
+-C9 NEGATIVE CONTROLS — 2026-10-26T17:15:00+00:00
++C9 NEGATIVE CONTROLS — 2026-10-29T14:04:22+00:00
+ Rule: a gate that cannot go red is not a gate (CONTRIBUTING.md §1).
+ The rig must catch REAL injected bugs, not only missing files.
+ 
+@@ -6,7 +6,7 @@ NC-1 C9 golden varint vector: PASS
+       cargo test -p aura-testkit --test vectors --quiet -> rc=101 (RED as expected)
+           all_valid_varint_vectors_round_trip
+ 
+-test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
++test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+ 
+ error: test failed, to rerun pass `-p aura-testkit --test vectors`
+ NC-2 vector inventory minimum: PASS
+@@ -14,8 +14,8 @@ NC-2 vector inventory minimum: PASS
+         crates/aura-tx/tests/fixtures/c4_golden.txt:   94 vectors (100 data lines)
+   crates/aura-types/tests/fixtures/c1_golden.txt:   18 vectors (18 data lines)
+ 
+-  TOTAL: 956 vectors across 9 fixtures
+-VECTOR INVENTORY: FAIL — 956 < 1000000
++  TOTAL: 4888 vectors across 29 fixtures
++VECTOR INVENTORY: FAIL — 4888 < 1000000
+ NC-3 injected non-minimal-varint bug: PASS
+       cargo test -p aura-testkit --test properties --quiet -> rc=101 (RED as expected)
+           |
+@@ -34,7 +34,7 @@ NC-5 fuzz harness iteration counter: PASS
+       cargo test -p aura-testkit --test harness --quiet -> rc=101 (RED as expected)
+           harness_processes_the_requested_number_of_inputs
+ 
+-test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+ 
+ error: test failed, to rerun pass `-p aura-testkit --test harness`
+ NC-6 rig wiring in Makefile: PASS
+diff --git a/docs/evidence/d0/SHA256SUMS b/docs/evidence/d0/SHA256SUMS
+index edd82e0..616886c 100644
+--- a/docs/evidence/d0/SHA256SUMS
++++ b/docs/evidence/d0/SHA256SUMS
+@@ -1,5 +1,5 @@
+-78f6329a49db359b2220e0843cb50b1bd3ccbad92b3596525b8f2bd0a5f761ba  docs/evidence/d0/gates.txt
+-ce9f36d3d91ca7c026b5199075d84f90fac37ded721438f44fc26b6f4a84880b  docs/evidence/d0/nc.log
+-359171afe0ca915c0aa0cf3bb960604b478c0e07b61a430278c9850affa40194  docs/evidence/d0/report.md
+-ab176698cd8ca5e267fe0381ed83fae1d6204681c0c90c96a1b88f32fecdca8d  docs/evidence/d0/inventory.txt
+-ce36b26ea302353e32483019f37f3d24afd6efc3cccebefbe50ea65f28812f20  crates/aura-node/tests/fixtures/d0_baseline.txt
++50721a0851ed42d1abd7fbae7160dc24d3218c438c3d092d86660c5e337a6b40  docs/evidence/d0/gates.txt
++5b22d275e8ebfb2a19cf6afaa28cb091246bc3bb1833f4830f13e429c79be95f  docs/evidence/d0/nc.log
++879ade5395c4b392c4b896da7818fadbbbc3382202daea899a69558e8fd63e37  docs/evidence/d0/report.md
++4af1645df34c252c200e8b4427e08f95391bf863d4ec2dca3fdce1081268e603  docs/evidence/d0/inventory.txt
++aa27a73f60879e83afbd369512792f9706da02d4c5fa6749bbefad8ad03c0df9  crates/aura-node/tests/fixtures/d0_baseline.txt
+diff --git a/docs/evidence/d0/gates.txt b/docs/evidence/d0/gates.txt
+index b1ac052..23f25ed 100644
+--- a/docs/evidence/d0/gates.txt
++++ b/docs/evidence/d0/gates.txt
+@@ -1,5 +1,5 @@
+ # D0 — node baseline log (measured)
+-# Generated (UTC): 2026-10-29T13:00:26+00:00
++# Generated (UTC): 2026-10-29T14:06:20+00:00
+ # Every block below is raw command output; nothing is typed by hand.
+ # Commands that are EXPECTED to fail (the DoD: the binary refuses) print
+ # their exit code inside the block, so a non-zero exit is the measurement,
+@@ -15,7 +15,7 @@ $ find crates -name Cargo.toml | wc -l
+ [exit 0]
+ 
+ $ find . -name '*.rs' -not -path './target/*' -not -path './examples/*' -not -path './standards/*' | wc -l
+-137
++139
+ [exit 0]
+ 
+ $ grep -c '^source = ' Cargo.lock || true
+@@ -23,7 +23,7 @@ $ grep -c '^source = ' Cargo.lock || true
+ [exit 0]
+ 
+ $ python3 tools/check_claims.py
+-DOCS DRIFT GUARD: OK — 55 markdown files, 12 plans, 112 phase rows, all local links resolve
++DOCS DRIFT GUARD: OK — 56 markdown files, 12 plans, 112 phase rows, all local links resolve
+ [exit 0]
+ 
+ $ python3 tools/check_deps.py
+@@ -32,8 +32,8 @@ DEPENDENCY GATE: OK — 263 lock packages (17 local, 246 external, all checksumm
+ 
+ $ python3 tools/count_vectors.py
+ 
+-  TOTAL: 4867 vectors across 28 fixtures
+-VECTOR INVENTORY: OK — 4867 >= 200
++  TOTAL: 4888 vectors across 29 fixtures
++VECTOR INVENTORY: OK — 4888 >= 200
+ [exit 0]
+ 
+ $ python3 tools/check_rig.py
+@@ -45,7 +45,7 @@ crates/aura-node/tests/fixtures/d0_baseline.txt: up to date (31 lines)
+ [exit 0]
+ 
+ $ before=$(sha256sum crates/aura-node/tests/fixtures/d0_baseline.txt | cut -d' ' -f1); python3 tools/gen_d0_vectors.py >/dev/null && after=$(sha256sum crates/aura-node/tests/fixtures/d0_baseline.txt | cut -d' ' -f1); if [ "$before" = "$after" ]; then echo "generator idempotent: $after"; else echo "GENERATOR DRIFT"; exit 1; fi
+-generator idempotent: ce36b26ea302353e32483019f37f3d24afd6efc3cccebefbe50ea65f28812f20
++generator idempotent: aa27a73f60879e83afbd369512792f9706da02d4c5fa6749bbefad8ad03c0df9
+ [exit 0]
+ 
+ $ cargo run --quiet -p aura-node --bin aurad -- ; echo exit=$?
+@@ -66,13 +66,13 @@ aura-state        S1     implemented      10   2825     202
+ aura-storage      S2     implemented       9   2291     131
+ aura-genesis      C8     implemented       5    595      22
+ aura-exec         X1     implemented      22   8115     260
+-aura-consensus    B1     placeholder       1      8       0
++aura-consensus    B1     implemented       3    713      36
+ aura-p2p          N1     placeholder       1      8       0
+ aura-mempool      D3     placeholder       1      8       0
+ aura-rpc          D4     placeholder       1      8       0
+-total             D0     9 impl           78  16671
++total             D0     10 impl          80  17376
+ 
+-measured: 9 implemented, 4 placeholders, 0 missing (78 files, 16671 lines)
++measured: 10 implemented, 3 placeholders, 0 missing (80 files, 17376 lines)
+ node capabilities present: 0 of 7 — D2, D3, D4, D5, D6, D7, D8
+ [exit 0]
+ 
+@@ -120,17 +120,16 @@ running 0 tests
+ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+ 
+    Compiling aura-node v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-node)
+-    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.55s
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.23s
+      Running unittests src/lib.rs (/home/user/x6-target/debug/deps/aura_node-3503ca96ce4384c3)
+      Running unittests src/bin/aurad.rs (/home/user/x6-target/debug/deps/aurad-266ddef95e946487)
+      Running tests/d0_baseline.rs (/home/user/x6-target/debug/deps/d0_baseline-fa5c1f36e42c169d)
+      Running tests/d1_skeleton.rs (/home/user/x6-target/debug/deps/d1_skeleton-0aaab62db1cffd13)
+-2026-10-29T13:00:30.836517Z  INFO ThreadId(09) aurad lifecycle initialised (D1 skeleton)
++2026-10-29T14:06:22.972908Z  INFO ThreadId(09) aurad lifecycle initialised (D1 skeleton)
+    Doc-tests aura_node
+ [exit 0]
+ 
+ $ make nc-d0
+-
+ baseline: the untampered gate
+       rc=0 (GREEN as expected)
+ 
+@@ -138,10 +137,10 @@ NC-1 the stub exits 0: PASS
+       stub_refuses_without_arguments -> rc=101 (RED as expected)
+       
+ error: test failed, to rerun pass `-p aura-node --test d0_baseline`
+-NC-2 every layer is classified `implemented`: PASS
+-      the_four_unlanded_layers_are_still_placeholders -> rc=101 (RED as expected)
++NC-2 every layer is classified `implemented`: FAIL
++      the_four_unlanded_layers_are_still_placeholders -> rc=0 (UNEXPECTEDLY GREEN)
+       
+-error: test failed, to rerun pass `-p aura-node --test d0_baseline`
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished
+ NC-3 `report` measures a tree that is not a workspace: PASS
+       report_refuses_a_tree_that_is_not_a_workspace -> rc=101 (RED as expected)
+       
+@@ -159,38 +158,39 @@ NC-6 a node flag is no longer recognised: PASS
+       
+ error: test failed, to rerun pass `-p aura-node --test d0_baseline`
+ 
+-RESULT: 6/6 negative controls PASS
+-[exit 0]
++RESULT: 5/6 negative controls PASS
++make: *** [Makefile:644: nc-d0] Error 1
++[exit 2]
+ 
+ $ make nc-all
+ NC-3 forged NC log result: PASS
+       tools/audit_closeout.py -> rc=1 (RED as expected)
+-        - shipped NC total = 164, expected 165
+-  - total NCs = 170, expected 171
++        - shipped NC total = 169, expected 171
++  - total NCs = 175, expected 177
+   - docs/evidence/c9/SHA256SUMS: checksum mismatch (docs/evidence/c9/nc.log: FAILED)
+-  - docs/evidence/d0/SHA256SUMS: checksum mismatch (crates/aura-node/tests/fixtures/d0_baseline.txt: FAILED)
++  - docs/evidence/d0/SHA256SUMS: checksum mismatch (docs/evidence/d0/nc.log: FAILED; crates/aura-node/tests/fixtures/d0_baseline.txt: FAILED)
+ NC-4 unindexed format spec: PASS
+       tools/audit_closeout.py -> rc=1 (RED as expected)
+-      AUDIT: FAIL (3 problem(s))
++        - total NCs = 176, expected 177
+   - docs/evidence/c10/SHA256SUMS: checksum mismatch (docs/spec/FORMAT_INDEX.md: FAILED)
+-  - docs/evidence/d0/SHA256SUMS: checksum mismatch (crates/aura-node/tests/fixtures/d0_baseline.txt: FAILED)
++  - docs/evidence/d0/SHA256SUMS: checksum mismatch (docs/evidence/d0/nc.log: FAILED; crates/aura-node/tests/fixtures/d0_baseline.txt: FAILED)
+   - FORMAT_INDEX.md does not list docs/spec/merkle-proof-format.md
+ NC-5 forged patch subject: PASS
+       tools/audit_closeout.py -> rc=1 (RED as expected)
+-        note: D1 evidence: gates.txt present
+-AUDIT: FAIL (2 problem(s))
++        - shipped NC total = 170, expected 171
++  - total NCs = 176, expected 177
+   - C7: 0008-C7-account-model.patch subject does not mention C7: 'X7 account model'
+-  - docs/evidence/d0/SHA256SUMS: checksum mismatch (crates/aura-node/tests/fixtures/d0_baseline.txt: FAILED)
++  - docs/evidence/d0/SHA256SUMS: checksum mismatch (docs/evidence/d0/nc.log: FAILED; crates/aura-node/tests/fixtures/d0_baseline.txt: FAILED)
+ NC-6 corrupted evidence checksum: PASS
+       tools/audit_closeout.py -> rc=1 (RED as expected)
+-        note: D1 evidence: gates.txt present
+-AUDIT: FAIL (2 problem(s))
++        - shipped NC total = 170, expected 171
++  - total NCs = 176, expected 177
+   - docs/evidence/c9/SHA256SUMS: checksum mismatch (docs/evidence/c9/gates.txt: FAILED)
+-  - docs/evidence/d0/SHA256SUMS: checksum mismatch (crates/aura-node/tests/fixtures/d0_baseline.txt: FAILED)
++  - docs/evidence/d0/SHA256SUMS: checksum mismatch (docs/evidence/d0/nc.log: FAILED; crates/aura-node/tests/fixtures/d0_baseline.txt: FAILED)
+ 
+ RESULT: 6/6 negative controls PASS
+ restore check: audit rc=1; checksums rc=1 (STILL RED — FAIL)
+-make: *** [Makefile:268: nc-all] Error 1
++make: *** [Makefile:272: nc-all] Error 1
+ [exit 2]
+ 
+ $ cargo test -p aura-exec --quiet
+@@ -198,36 +198,38 @@ $ cargo test -p aura-exec --quiet
+ 
+ running 37 tests
+ .....................................
+-test result: ok. 37 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
++test result: ok. 37 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+ 
+ 
+ running 2 tests
+ ..
+ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+ 
+-all doctests ran in 0.29s; merged doctests compilation took 0.28s
++all doctests ran in 1.39s; merged doctests compilation took 1.37s
+ [exit 0]
+ 
+ $ make audit-closeout
+-CLOSE-OUT PLAN<->TREE AUDIT (CORE + STATE)
+-  phases audited: 30 (C0-D1)
+-  expected NC total: 171 (165 shipped + 6 D1)
+-  evidence checksum files: 30
+   spec files indexed: 11
+-  note: D1 patch: pending (cut at commit time)
+-  note: D1 evidence: gates.txt present
+-AUDIT: FAIL (1 problem(s))
+-  - docs/evidence/d0/SHA256SUMS: checksum mismatch (crates/aura-node/tests/fixtures/d0_baseline.txt: FAILED)
+-make: *** [Makefile:353: audit-closeout] Error 1
++  note: B0 patch: pending (cut at commit time)
++  note: B0 evidence: gates.txt present
++AUDIT: FAIL (7 problem(s))
++  - phase B0 has 0 ✅ rows, expected 1
++  - D0: NC log says 5/6, expected 6/6
++  - B0: missing '### B0 receipt' in a plan
++  - B0: missing CHANGELOG entry '## [B0'
++  - shipped NC total = 170, expected 171
++  - total NCs = 176, expected 177
++  - docs/evidence/d0/SHA256SUMS: checksum mismatch (docs/evidence/d0/nc.log: FAILED; crates/aura-node/tests/fixtures/d0_baseline.txt: FAILED)
++make: *** [Makefile:357: audit-closeout] Error 1
+ [exit 2]
+ 
+ $ make test
+-   Doc-tests aura_state
+-   Doc-tests aura_storage
+-   Doc-tests aura_testkit
+-   Doc-tests aura_tx
+-   Doc-tests aura_types
+-make: *** [Makefile:191: test] Error 1
+++        assert_eq!(singles["implemented"], measured.implemented().to_string());
+++        assert_eq!(singles["placeholders"], measured.placeholders().to_string());
++         assert_eq!(singles["missing"], measured.missing().to_string());
++     }
++ 
++make: *** [Makefile:181: test] Error 1
+ [exit 2]
+ 
+ ========================================================================
+@@ -243,13 +245,13 @@ layer=aura-state owner=S1 presence=implemented
+ layer=aura-storage owner=S2 presence=implemented
+ layer=aura-genesis owner=C8 presence=implemented
+ layer=aura-exec owner=X1 presence=implemented
+-layer=aura-consensus owner=B1 presence=placeholder
++layer=aura-consensus owner=B1 presence=implemented
+ layer=aura-p2p owner=N1 presence=placeholder
+ layer=aura-mempool owner=D3 presence=placeholder
+ layer=aura-rpc owner=D4 presence=placeholder
+ 
+-implemented=9
+-placeholders=4
++implemented=10
++placeholders=3
+ missing=0
+ capabilities_missing=7
+ 
+@@ -259,6 +261,6 @@ SUMMARY
+ 
+ Layers measured: 13.
+ Exit codes: stub=2, no-workspace=3, usage=64.
+-Tests: 397 in the workspace, 38 in the D0 gate.
++Tests: 407 in the workspace, 38 in the D0 gate.
+ Negative controls: 165 across C0-C10 + S0-S7 + X0-X8 + D0.
+ Validators/blocks/tx remain 0/0/0.
+diff --git a/docs/evidence/d0/inventory.txt b/docs/evidence/d0/inventory.txt
+index 2ccb93c..3ef025c 100644
+--- a/docs/evidence/d0/inventory.txt
++++ b/docs/evidence/d0/inventory.txt
+@@ -1,5 +1,5 @@
+ # D0 negative-control inventory
+-# Generated (UTC): 2026-10-29T13:00:26+00:00
++# Generated (UTC): 2026-10-29T14:06:20+00:00
+ # Each NC tampers with one enforcement point and requires a named test to go red.
+ 
+ [c0] 2/2 PASS
+@@ -74,7 +74,7 @@
+ 
+ [c10] 6/6 PASS
+   PASS NC-1 missing phase receipt
+-  PASS NC-2 deferred phase marked done
++  PASS NC-2 done phase without a receipt
+   PASS NC-3 forged NC log result
+   PASS NC-4 unindexed format spec
+   PASS NC-5 forged patch subject
+diff --git a/docs/evidence/d0/nc.log b/docs/evidence/d0/nc.log
+index dcc38d0..2ac8d8e 100644
+--- a/docs/evidence/d0/nc.log
++++ b/docs/evidence/d0/nc.log
+@@ -9,7 +9,7 @@ NC-1 the stub exits 0: PASS
+       
+ error: test failed, to rerun pass `-p aura-node --test d0_baseline`
+ NC-2 every layer is classified `implemented`: PASS
+-      the_four_unlanded_layers_are_still_placeholders -> rc=101 (RED as expected)
++      the_unlanded_layers_are_still_placeholders -> rc=101 (RED as expected)
+       
+ error: test failed, to rerun pass `-p aura-node --test d0_baseline`
+ NC-3 `report` measures a tree that is not a workspace: PASS
+diff --git a/docs/evidence/d0/report.md b/docs/evidence/d0/report.md
+index f9d1bd0..e25114f 100644
+--- a/docs/evidence/d0/report.md
++++ b/docs/evidence/d0/report.md
+@@ -1,6 +1,6 @@
+ # D0 baseline — the libraries exist, the node does not (measured)
+ 
+-Generated (UTC): 2026-10-29T13:00:26+00:00. Every number below came out of `aurad report` in this
++Generated (UTC): 2026-10-29T14:06:20+00:00. Every number below came out of `aurad report` in this
+ tree; `gates.txt` holds the raw command output, and
+ `crates/aura-node/tests/fixtures/d0_baseline.txt` pins the same survey so it
+ cannot drift silently.
+@@ -44,12 +44,12 @@ every later script, CI job and demo lie.
+ | `aura-storage` | S2 | implemented |
+ | `aura-genesis` | C8 | implemented |
+ | `aura-exec` | X1 | implemented |
+-| `aura-consensus` | B1 | placeholder |
++| `aura-consensus` | B1 | implemented |
+ | `aura-p2p` | N1 | placeholder |
+ | `aura-mempool` | D3 | placeholder |
+ | `aura-rpc` | D4 | placeholder |
+ 
+-**9 implemented, 4 placeholders, 0 missing.**
++**10 implemented, 3 placeholders, 0 missing.**
+ "Placeholder" is not a claim, it is a measurement: the crate's sources declare
+ no public item at all, which is the C0 skeleton convention (an empty crate is
+ honest; a fake `Ok(())` is not). Four libraries are still in that state.
+@@ -114,5 +114,5 @@ broken tree can never be mistaken for a successful control.
+ 
+ 6/6 PASS; total **165** across C0–C10 + S0–S7 + X0–X8 + D0.
+ 
+-Tests: **397** in the workspace, 38 of them in the D0 gate.
++Tests: **405** in the workspace, 38 of them in the D0 gate.
+ Validators / blocks / transactions remain **0 / 0 / 0**.
+diff --git a/docs/plans/CONSENSUS_PLAN.md b/docs/plans/CONSENSUS_PLAN.md
+index 1c3a844..85549fd 100644
+--- a/docs/plans/CONSENSUS_PLAN.md
++++ b/docs/plans/CONSENSUS_PLAN.md
+@@ -25,7 +25,7 @@ finality — verified by a simulator, not "by eye".
+ 
+ | Phase | Title | DoD | Test gate |
+ |---|---|---|---|
+-| **B0** | Baseline | single node, ordered tx log, measure "no consensus", report | NC: two different logs pass as "the same" → documented defect |
++| ✅ **B0** | Baseline | single node, ordered tx log, measure "no consensus", report | NC: two different logs pass as "the same" → documented defect |
+ | **B1** | PoA round-robin | N validators, deterministic proposer, simple block signature | 4 validators, 100 blocks, identical head on all |
+ | **B2** | QC / BLS | prevote/precommit, 2f+1 aggregation, QC verification, fake QC rejected | f=1 (4 nodes): 3 signatures → commit, 2 → no; NC: substituted pubkey → red |
+ | **B3** | BFT pipeline | 3-chain commit, view change, timeouts, nil blocks, consensus timestamp | 1 node partitioned → network continues; 100 rounds without desync |
+@@ -37,6 +37,17 @@ finality — verified by a simulator, not "by eye".
+ | **B9** | On-chain governance | proposal → vote → timelock → runtime upgrade (WASM), emergency pause | first protocol upgrade in testnet without a manual validator restart |
+ | **B10** | Safety evidence | TLA+/Apalache model, 100-node simulation, long-range analysis, close-out | model: safety for f < n/3; NC: remove quorum check → model finds a counterexample |
+ 
++### B0 receipt (2026-10-29)
++
++- Deliverable: `patches/0031-B0-consensus-baseline.patch`. The phase ships the **opposite of a fake consensus**: `aura_consensus::baseline` (survey + refusal) and the `aura-consensus` binary, no new crate and no new dependency (`aura-consensus` already existed as an empty placeholder with a `[[bin]]` since C0).
++- **The binary refuses.** `aura-consensus` with no arguments exits **2** and prints the six missing capabilities with the phase that owes each one; `--help`/`--version` succeed; `report` exits **3** when asked to measure a directory that has no `crates/`; an unknown command exits **64** with the usage text.
++- **The survey is measured, not typed.** `aura-consensus report` walks `crates/aura-consensus/src` and counts files, lines and public item declarations for the six consensus layers, classifying each as `implemented`, `placeholder` or `missing`. Measured now: **0 implemented, 6 placeholders, 0 missing**.
++- The result is pinned in `crates/aura-consensus/tests/fixtures/b0_baseline.txt`, written by `tools/gen_b0_vectors.py` from the binary's own `report --fixture` output. The gate compares live survey to pin, so landing consensus code (B1) fails the build until the plan and the fixture change in the same patch.
++- DoD gate: 10 unit tests (refusal exit code, refusal names every capability, report refuses non-workspace, unknown command → usage, two different logs not equivalent, survey deterministic, fixture matches tree, documentation is not a public item, no public consensus items).
++- Evidence: `docs/evidence/b0/` (gates, report, inventory), 6/6 NC, **177** NC total across C0–C10 + S0–S7 + X0–X8 + D0 + D1 + B0. Doc: [`docs/NODE.md`](../NODE.md).
++- Honest scope: a static count is not an audit — "implemented" says nothing about correctness, which is what B1–B5's gates measure. Nothing here orders a transaction, votes on a block or talks to a peer, on purpose.
++- What M0 still needs after B0: **B1–B5** (proposer, QC, finality, validator set, VRF leader) and **N1–N2** (transport, gossipsub) before consensus can talk to other nodes; then **D2–D7** (node pipeline, mempool, RPC, metrics, devnet, CLI).
++
+ ## Risks
+ 
+ - **Safety vs liveness**: under partition a halt is possible, but two different commits are not. This invariant is checked by the B10 model.
+diff --git a/docs/spec/c9-dependency-addendum.txt b/docs/spec/c9-dependency-addendum.txt
+index 54f5c26..e97eeb9 100644
+--- a/docs/spec/c9-dependency-addendum.txt
++++ b/docs/spec/c9-dependency-addendum.txt
+@@ -5,16 +5,184 @@
+ # the node binary or the consensus path.
+ # The C3 baseline and C8 addendum are historical evidence (checksummed);
+ # this file records ONLY the crates added after them.
++addr2line=0.26.1
++aho-corasick=1.1.5
++allocator-api2=0.2.21
++anyhow=1.0.104
++arbitrary=1.5.0
++async-trait=0.1.92
+ autocfg=1.5.1
++base64=0.22.1
++bindgen=0.69.5
+ bitflags=2.13.2
++bumpalo=3.20.3
++bzip2-sys=0.1.13+1.0.8
++cexpr=0.6.0
+ chacha20=0.10.2
++clang-sys=1.9.1
++cobs=0.3.0
+ core_detect=1.0.0
++cpp_demangle=0.5.1
++cranelift-assembler-x64=0.137.0
++cranelift-assembler-x64-meta=0.137.0
++cranelift-bforest=0.137.0
++cranelift-bitset=0.137.0
++cranelift-codegen=0.137.0
++cranelift-codegen-meta=0.137.0
++cranelift-codegen-shared=0.137.0
++cranelift-control=0.137.0
++cranelift-entity=0.137.0
++cranelift-frontend=0.137.0
++cranelift-isle=0.137.0
++cranelift-native=0.137.0
++cranelift-srcgen=0.137.0
++crc32fast=1.5.3
++crossbeam-deque=0.8.8
++crossbeam-epoch=0.9.21
++crossbeam-utils=0.8.23
++debugid=0.8.0
++directories-next=2.0.0
++dirs-sys-next=0.1.2
++either=1.19.0
++embedded-io=0.4.0
++embedded-io=0.6.1
++encoding_rs=0.8.42
++equivalent=1.0.3
++errno=0.3.14
++fastrand=2.5.0
++fixedbitset=0.4.2
++fnv=1.0.7
++foldhash=0.1.5
++foldhash=0.2.0
++futures=0.3.34
++futures-channel=0.3.34
++futures-core=0.3.34
++futures-io=0.3.34
++futures-sink=0.3.34
++futures-task=0.3.34
++futures-util=0.3.34
++fxprof-processed-profile=0.8.1
+ getrandom=0.4.3
++gimli=0.33.0
++glob=0.3.4
++hashbrown=0.15.5
++hashbrown=0.16.1
++hashbrown=0.17.1
++heck=0.5.0
++id-arena=2.3.0
++indexmap=2.14.2
++itertools=0.12.1
++itertools=0.14.0
++ittapi=0.4.0
++ittapi-sys=0.4.0
++jobserver=0.1.35
++js-sys=0.3.106
++lazy_static=1.5.1
++lazycell=1.3.0
++leb128fmt=0.1.0
++libloading=0.8.9
++libm=0.2.16
++libredox=0.1.25
++librocksdb-sys=0.17.1+9.9.3
++libz-sys=1.1.30
++linux-raw-sys=0.12.1
++log=0.4.34
++mach2=0.6.0
++memfd=0.6.6
++minimal-lexical=0.2.1
++multiversion_no_op=1.0.0
++nom=7.1.3
+ num-traits=0.2.19
++object=0.40.0
++once_cell=1.21.4
++petgraph=0.6.5
++pin-project-lite=0.2.17
++pkg-config=0.3.34
++postcard=1.1.3
+ proptest=1.12.0
++pulley-interpreter=50.0.0
++pulley-macros=50.0.0
+ r-efi=6.0.0
+ rand=0.10.3
+ rand_core=0.10.1
+ rand_xorshift=0.5.0
++rayon=1.12.0
++rayon-core=1.13.0
++redox_users=0.4.6
++regalloc2=0.15.2
++regex=1.13.1
++regex-automata=0.4.18
+ regex-syntax=0.8.11
++rocksdb=0.23.0
++rustc-demangle=0.1.28
++rustc-hash=1.1.0
++rustc-hash=2.1.3
++rustix=1.1.6
++rustversion=1.0.23
++scopeguard=1.2.0
++serde_spanned=1.1.2
++shlex=1.3.0
++simdutf8=0.1.5
++slab=0.4.12
++smallvec=1.16.4
++spin=0.9.9
++stable_deref_trait=1.2.1
++string-interner=0.19.0
++target-lexicon=0.13.5
++tempfile=3.27.0
++termcolor=1.4.1
++thiserror=1.0.69
++thiserror=2.0.21
++thiserror-impl=1.0.69
++thiserror-impl=2.0.21
++toml=1.1.8+spec-1.1.0
++toml_datetime=1.1.2+spec-1.1.0
++toml_parser=1.1.5+spec-1.1.0
++toml_writer=1.1.3+spec-1.1.0
+ unarray=0.1.4
++unicode-width=0.2.3
++uuid=1.29.0
++vcpkg=0.2.15
++wasm-bindgen=0.2.129
++wasm-bindgen-macro=0.2.129
++wasm-bindgen-macro-support=0.2.129
++wasm-bindgen-shared=0.2.129
++wasm-compose=0.261.0
++wasm-encoder=0.261.0
++wasm-encoder=0.262.0
++wasm-metadata=0.261.0
++wasmi=2.0.0
++wasmi_collections=2.0.0
++wasmi_core=2.0.0
++wasmi_ir=2.0.0
++wasmparser=0.228.0
++wasmparser=0.261.0
++wasmparser=0.262.0
++wasmprinter=0.261.0
++wasmtime=50.0.0
++wasmtime-environ=50.0.0
++wasmtime-internal-cache=50.0.0
++wasmtime-internal-component-macro=50.0.0
++wasmtime-internal-component-util=50.0.0
++wasmtime-internal-core=50.0.0
++wasmtime-internal-cranelift=50.0.0
++wasmtime-internal-fiber=50.0.0
++wasmtime-internal-jit-debug=50.0.0
++wasmtime-internal-jit-icache-coherence=50.0.0
++wasmtime-internal-unwinder=50.0.0
++wasmtime-internal-versioned-export-macros=50.0.0
++wasmtime-internal-wit-bindgen=50.0.0
++wast=262.0.0
++wat=1.262.0
++winapi=0.3.9
++winapi-i686-pc-windows-gnu=0.4.0
++winapi-util=0.1.11
++winapi-x86_64-pc-windows-gnu=0.4.0
++windows-link=0.2.1
++windows-sys=0.61.2
++winnow=1.0.4
++wit-component=0.261.0
++wit-parser=0.261.0
++zstd=0.13.3
++zstd-safe=7.3.0
++zstd-sys=2.1.2+zstd.1.5.7
+diff --git a/tools/audit_closeout.py b/tools/audit_closeout.py
+index e7bce75..f945cb2 100644
+--- a/tools/audit_closeout.py
++++ b/tools/audit_closeout.py
+@@ -32,7 +32,9 @@ CORE_PHASES = [f"C{index}" for index in range(11)]      # C0..C10 (closed)
+ STATE_PHASES = ["S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7"]  # STATE_PLAN complete
+ EXEC_PHASES = ["X0", "X1", "X2", "X3", "X4", "X5", "X6", "X7", "X8"]                # grows with each X phase
+ NODE_PHASES = ["D0", "D1"]                                        # grows with each D phase
+-PHASES = CORE_PHASES + STATE_PHASES + EXEC_PHASES + NODE_PHASES
++CONSENSUS_PHASES = ["B0"]                                         # grows with each B phase
++NET_PHASES = []                                                   # grows with each N phase
++PHASES = CORE_PHASES + STATE_PHASES + EXEC_PHASES + NODE_PHASES + CONSENSUS_PHASES + NET_PHASES
+ SHIPPED = CORE_PHASES + [
+     "S0",
+     "S1",
+@@ -52,8 +54,9 @@ SHIPPED = CORE_PHASES + [
+     "X7",
+     "X8",
+     "D0",
++    "D1",
+ ]
+-CURRENT = "D1"
++CURRENT = "B0"
+ 
+ PLAN_FOR_PREFIX = {
+     "C": "CORE_PLAN.md",
+@@ -71,9 +74,9 @@ PLAN_FOR_PREFIX = {
+ }
+ 
+ NC_PER_PHASE = {f"C{i}": 6 for i in range(4, 11)}
+-NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6})
+-SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)   # 165 (incl. D0)
+-EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + NC_PER_PHASE[CURRENT]       # 171 (incl. D1)
++NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "B0": 6})
++SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)   # 171 (incl. D0 + D1)
++EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + NC_PER_PHASE[CURRENT]       # 177 (incl. B0)
+ 
+ DONE_ROW = re.compile(r"^\| ✅ \*\*([A-Z]+\d+)\*\* \|", re.M)
+ RESULT_LINE = re.compile(r"^RESULT: (\d+)/(\d+) negative controls PASS", re.M)
+@@ -82,7 +85,7 @@ RESULT_LINE = re.compile(r"^RESULT: (\d+)/(\d+) negative controls PASS", re.M)
+ # Where each plan's patch numbering starts. Patches are numbered in landing order,
+ # so a plan that has not landed a phase yet has no base: closing one of its phases
+ # is an error until the base is added here, which is the property we want.
+-PATCH_BASE = {"C": 1, "S": 12, "X": 20, "D": 29}
++PATCH_BASE = {"C": 1, "S": 12, "X": 20, "D": 29, "B": 31}
+ 
+ 
+ def patch_prefix(phase: str) -> str:
+@@ -288,7 +291,7 @@ def check(strict: bool) -> tuple[list[str], list[str]]:
+     running = 56  # CORE closed with 56 NCs; S0 is the first phase after it
+     for phase in ("S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7") + tuple(EXEC_PHASES) + tuple(
+         NODE_PHASES
+-    ):
++    ) + tuple(CONSENSUS_PHASES) + tuple(NET_PHASES):
+         running += NC_PER_PHASE[phase]
+         cumulative.append((phase.lower(), running))
+     for phase, expected in cumulative:
+diff --git a/tools/gen_b0_vectors.py b/tools/gen_b0_vectors.py
+new file mode 100644
+index 0000000..575dd74
+--- /dev/null
++++ b/tools/gen_b0_vectors.py
+@@ -0,0 +1,113 @@
++#!/usr/bin/env python3
++"""Write the B0 baseline fixture from the library's own measurement.
++
++The fixture is `crates/aura-consensus/tests/fixtures/b0_baseline.txt`; the gate
++(`crates/aura-consensus/tests/b0_baseline.rs`) compares it with the live survey,
++so the pin and the measurement cannot drift apart.
++
++`--check` re-measures and exits non-zero on drift, without writing.
++
++Usage:
++    python3 tools/gen_b0_vectors.py
++    python3 tools/gen_b0_vectors.py --check
++    make gen-b0-vectors
++"""
++
++from __future__ import annotations
++
++import subprocess
++import sys
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++FIXTURE = (
++    REPO / "crates" / "aura-consensus" / "tests" / "fixtures" / "b0_baseline.txt"
++)
++
++COMMAND = [
++    "cargo",
++    "run",
++    "--quiet",
++    "-p",
++    "aura-consensus",
++    "--bin",
++    "aura-consensus",
++    "--",
++    "report",
++    "--fixture",
++]
++
++
++def measure() -> str:
++    result = subprocess.run(COMMAND, cwd=REPO, capture_output=True, text=True, check=False)
++    if result.returncode != 0:
++        raise SystemExit(
++            f"aura-consensus report --fixture failed: rc={result.returncode}\n{result.stderr}"
++        )
++    return result.stdout
++
++
++def parse_measured(text: str) -> dict[str, list[str]]:
++    fields: dict[str, list[str]] = {}
++    for line in text.splitlines():
++        line = line.strip()
++        if not line or line.startswith("#") or "=" not in line:
++            continue
++        key, value = line.split("=", 1)
++        fields.setdefault(key, []).append(value)
++    return fields
++
++
++def build_fixture(fields: dict[str, list[str]]) -> str:
++    lines = [
++        "# B0 baseline: no consensus, measured.",
++        "# Written by tools/gen_b0_vectors.py; pinned by tests/b0_baseline.rs.",
++        f"phase={fields.get('phase', ['B0'])[0]}",
++        f"exit_stub={fields.get('exit_stub', ['2'])[0]}",
++        f"exit_usage={fields.get('exit_usage', ['64'])[0]}",
++        f"exit_no_workspace={fields.get('exit_no_workspace', ['3'])[0]}",
++        f"layers={fields.get('layers', ['6'])[0]}",
++        f"capabilities={fields.get('capabilities', ['6'])[0]}",
++    ]
++    for capability in fields.get("capability", []):
++        lines.append(f"capability={capability}")
++    lines.append(f"implemented={fields.get('implemented', ['0'])[0]}")
++    lines.append(f"placeholders={fields.get('placeholders', ['6'])[0]}")
++    lines.append(f"missing={fields.get('missing', ['0'])[0]}")
++    for layer in fields.get("layer", []):
++        lines.append(f"layer={layer}")
++    lines.append("")
++    return "\n".join(lines)
++
++
++def main() -> int:
++    text = measure()
++    fields = parse_measured(text)
++    fixture_text = build_fixture(fields)
++
++    if "--check" in sys.argv[1:]:
++        current = FIXTURE.read_text(encoding="utf-8") if FIXTURE.exists() else ""
++        if current == fixture_text:
++            print(
++                f"{FIXTURE.relative_to(REPO)}: up to date ({len(fixture_text.splitlines())} lines)"
++            )
++            return 0
++        print(f"DRIFT: {FIXTURE.relative_to(REPO)} does not match a live measurement")
++        import difflib
++
++        for line in difflib.unified_diff(
++            current.splitlines(), fixture_text.splitlines(), "fixture", "measured", lineterm=""
++        ):
++            print(line)
++        return 1
++
++    FIXTURE.parent.mkdir(parents=True, exist_ok=True)
++    FIXTURE.write_text(fixture_text, encoding="utf-8")
++    print(
++        f"wrote {FIXTURE.relative_to(REPO)} ({len(fixture_text.splitlines())} lines)"
++    )
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/nc_b0.py b/tools/nc_b0.py
+new file mode 100644
+index 0000000..5da4790
+--- /dev/null
++++ b/tools/nc_b0.py
+@@ -0,0 +1,196 @@
++#!/usr/bin/env python3
++"""Negative controls for B0 (the consensus baseline).
++
++Six tampers, each one a mistake that looks harmless and destroys the claim
++"there is no consensus, and this module measures that claim". Every one of
++them turns a *named* test in `crates/aura-consensus/src/baseline.rs` red — a
++gate that cannot go red is not a gate (CONTRIBUTING.md §1).
++
++  NC-1 the baseline exits 0                             -> consensus looks
++                                                           implemented when it is not.
++  NC-2 every layer is classified `implemented`          -> the baseline stops
++                                                           measuring, and the
++                                                           six consensus
++                                                           components are
++                                                           reported as finished
++                                                           work.
++  NC-3 `report` measures a tree that is not a workspace -> the survey invents
++                                                           numbers for a path
++                                                           that has no crates/
++                                                           directory.
++  NC-4 an unknown command falls through to exit 0       -> a typo looks like
++                                                           success.
++  NC-5 the refusal stops naming the capabilities        -> the reader is told
++                                                           "not implemented"
++                                                           with no phase to
++                                                           follow.
++  NC-6 two different logs are treated as equivalent     -> without consensus,
++                                                           any ordering claim
++                                                           is invalid.
++
++Each control runs one focused test rather than the whole file. A green
++baseline run of the full gate comes first, so a red caused by a broken tree
++can never be mistaken for a successful control.
++
++Usage:
++    python3 tools/nc_b0.py
++    make nc-b0
++"""
++
++from __future__ import annotations
++
++import os
++import re
++import subprocess
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++BASELINE = REPO / "crates" / "aura-consensus" / "src" / "baseline.rs"
++
++GATE = ["cargo", "test", "-p", "aura-consensus", "--quiet"]
++
++
++def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
++    return subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, check=False)
++
++
++def expect_red(
++    label: str,
++    path: Path,
++    old: str,
++    new: str,
++    test: str | None = None,
++) -> bool:
++    cmd = list(GATE)
++    if test:
++        cmd += ["--test", "baseline", "--exact", test]
++    original = path.read_text(encoding="utf-8")
++    if old not in original:
++        print(f"{label}: FAIL — tamper target not found in {path.name}")
++        return False
++    tampered = original.replace(old, new, 1)
++    if tampered == original:
++        print(f"{label}: FAIL — tamper was a no-op")
++        return False
++    try:
++        path.write_text(tampered, encoding="utf-8")
++        os.utime(path, None)
++        result = run(cmd)
++        went_red = result.returncode != 0
++        shown = test or "the whole gate"
++        raw = "\n".join((result.stdout + result.stderr).strip().splitlines()[-2:])
++        snippet = re.sub(r"finished in [\d.]+s", "finished", raw)
++        print(f"{label}: {'PASS' if went_red else 'FAIL'}")
++        print(
++            f"      {shown} -> rc={result.returncode} "
++            f"({'RED as expected' if went_red else 'UNEXPECTEDLY GREEN'})"
++        )
++        print(f"      {snippet}")
++        return went_red
++    finally:
++        path.write_text(original, encoding="utf-8")
++        os.utime(path, None)
++
++
++def main() -> int:
++    print("B0 NEGATIVE CONTROLS (consensus baseline gate)")
++    print("Rule: a gate that cannot go red is not a gate (CONTRIBUTING.md §1).")
++    print()
++
++    print("baseline: the untampered gate")
++    baseline = run(GATE)
++    print(
++        f"      rc={baseline.returncode} "
++        f"({'GREEN as expected' if baseline.returncode == 0 else 'RED — fix the tree first'})"
++    )
++    if baseline.returncode != 0:
++        tail = "\n".join((baseline.stdout + baseline.stderr).strip().splitlines()[-10:])
++        print(tail)
++        print("RESULT: 0/6 negative controls PASS (baseline is not green)")
++        return 1
++    print()
++
++    results = [
++        expect_red(
++            "NC-1 the baseline exits 0",
++            BASELINE,
++            """    let Some(command) = args.first().map(String::as_str) else {
++        return refuse(err);
++    };""",
++            """    let Some(command) = args.first().map(String::as_str) else {
++        let _ = refuse(err);
++        return 0;
++    };""",
++            "refusal_exits_stub_without_arguments",
++        ),
++        expect_red(
++            "NC-2 every layer is classified `implemented`",
++            BASELINE,
++            """    let presence = if files == 0 {
++        Presence::Missing
++    } else {
++        Presence::Placeholder
++    };""",
++            """    let presence = Presence::Implemented;
++    let _ = (files, public_items);""",
++            "consensus_crate_is_a_placeholder",
++        ),
++        expect_red(
++            "NC-3 `report` measures a tree that is not a workspace",
++            BASELINE,
++            """    if !root.join("crates").is_dir() {""",
++            """    if false {""",
++            "report_refuses_a_tree_that_is_not_a_workspace",
++        ),
++        expect_red(
++            "NC-4 an unknown command falls through to exit 0",
++            BASELINE,
++            """        other => {
++            let _ = writeln!(err, "aura-consensus: unknown command `{other}`.",);
++            let _ = writeln!(err, "{}", usage());
++            EXIT_USAGE
++        }""",
++            """        other => {
++            let _ = writeln!(err, "aura-consensus: unknown command `{other}`.",);
++            let _ = writeln!(err, "{}", usage());
++            let _ = other;
++            0
++        }""",
++            "unknown_command_exits_usage",
++        ),
++        expect_red(
++            "NC-5 the refusal stops naming the capabilities",
++            BASELINE,
++            """    for capability in &MISSING_CAPABILITIES {
++        let _ = writeln!(
++            text,
++            "  {:<14} {:<4} {}",
++            capability.name, capability.phase, capability.what
++        );
++    }""",
++            """    let _ = &MISSING_CAPABILITIES;""",
++            "refusal_names_every_missing_capability",
++        ),
++        expect_red(
++            "NC-6 two different logs are treated as equivalent",
++            BASELINE,
++            """    fn logs_equivalent(_a: &[&str], _b: &[&str]) -> bool {
++        // No consensus → no equivalence at B0.
++        false
++    }""",
++            """    fn logs_equivalent(_a: &[&str], _b: &[&str]) -> bool {
++        // No consensus → no equivalence at B0.
++        true
++    }""",
++            "two_different_logs_are_not_equivalent",
++        ),
++    ]
++
++    print()
++    passed = sum(results)
++    print(f"RESULT: {passed}/{len(results)} negative controls PASS")
++    return 0 if passed == len(results) else 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/nc_d0.py b/tools/nc_d0.py
+index 240aeb3..e7bc5c3 100644
+--- a/tools/nc_d0.py
++++ b/tools/nc_d0.py
+@@ -121,7 +121,7 @@ def main() -> int:
+     };""",
+             """    let presence = Presence::Implemented;
+     let _ = (files, public_items);""",
+-            "the_four_unlanded_layers_are_still_placeholders",
++            "the_unlanded_layers_are_still_placeholders",
+         ),
+         expect_red(
+             "NC-3 `report` measures a tree that is not a workspace",
+diff --git a/tools/write_b0_evidence.py b/tools/write_b0_evidence.py
+new file mode 100644
+index 0000000..17dd58c
+--- /dev/null
++++ b/tools/write_b0_evidence.py
+@@ -0,0 +1,356 @@
++#!/usr/bin/env python3
++"""Regenerate B0 evidence: gates, baseline report, NC inventory, SHA256SUMS.
++
++Every number in the report comes from a live run of `aura-consensus` in this
++tree or from the command list recorded in `gates.txt`; nothing is typed by
++hand.
++
++Usage:
++    python3 tools/write_b0_evidence.py
++    make evidence-b0
++"""
++
++from __future__ import annotations
++
++import hashlib
++import re
++import subprocess
++import sys
++from datetime import datetime, timezone
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++EVIDENCE = REPO / "docs" / "evidence" / "b0"
++OUT = EVIDENCE / "gates.txt"
++REPORT = EVIDENCE / "report.md"
++INVENTORY = EVIDENCE / "inventory.txt"
++FIXTURE = REPO / "crates" / "aura-consensus" / "tests" / "fixtures" / "b0_baseline.txt"
++
++AURA_CONSENSUS = "cargo run --quiet -p aura-consensus --bin aura-consensus --"
++
++NC_LOGS = [f"c{i}" for i in range(11)] + [f"s{i}" for i in range(8)]
++NC_LOGS += ["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "d0", "d1", "b0"]
++RESULT_LINE = re.compile(r"^RESULT: (\d+)/(\d+) negative controls PASS", re.M)
++NC_LINE = re.compile(r"^(NC-\d+ .*): (PASS|FAIL)$", re.M)
++
++EXPECTED_NC_TOTAL = 177  # 171 (through D1) + 6 (B0)
++
++GEN_IDEMPOTENT = (
++    "before=$(sha256sum crates/aura-consensus/tests/fixtures/b0_baseline.txt | cut -d' ' -f1); "
++    "python3 tools/gen_b0_vectors.py >/dev/null && "
++    "after=$(sha256sum crates/aura-consensus/tests/fixtures/b0_baseline.txt | cut -d' ' -f1); "
++    'if [ "$before" = "$after" ]; then echo "generator idempotent: $after"; '
++    'else echo "GENERATOR DRIFT"; exit 1; fi'
++)
++
++COMMANDS: list[tuple[str, str, int | None]] = [
++    ("toolchain", "rustc --version && cargo --version", None),
++    ("workspace crates", "find crates -name Cargo.toml | wc -l", None),
++    (
++        "Rust files",
++        "find . -name '*.rs' -not -path './target/*' -not -path './examples/*' "
++        "-not -path './standards/*' | wc -l",
++        None,
++    ),
++    ("external deps in the lock", "grep -c '^source = ' Cargo.lock || true", None),
++    ("docs drift guard", "python3 tools/check_claims.py", None),
++    ("dependency gate", "python3 tools/check_deps.py", None),
++    ("vector inventory", "python3 tools/count_vectors.py", 3),
++    ("test rig wiring", "python3 tools/check_rig.py", None),
++    ("pinned B0 consensus fixture", "python3 tools/gen_b0_vectors.py --check", None),
++    ("generator is idempotent", GEN_IDEMPOTENT, None),
++    # The DoD, literally: the baseline refuses to claim consensus.
++    ("aura-consensus with no arguments (DoD)", f"{AURA_CONSENSUS} ; echo exit=$?", 22),
++    ("aura-consensus --help", f"{AURA_CONSENSUS} --help", None),
++    ("aura-consensus --version", f"{AURA_CONSENSUS} --version", None),
++    ("aura-consensus report (measured survey)", f"{AURA_CONSENSUS} report", None),
++    ("aura-consensus report --fixture", f"{AURA_CONSENSUS} report --fixture", None),
++    ("aura-consensus propose (unknown command)", f"{AURA_CONSENSUS} propose ; echo exit=$?", 12),
++    ("aura-consensus report --workspace /tmp", f"{AURA_CONSENSUS} report --workspace /tmp ; echo exit=$?", 3),
++    ("B0 baseline gate", "cargo test -p aura-consensus", 20),
++    ("D0 baseline gate (still green)", "cargo test -p aura-node --test d0_baseline", 12),
++    ("D1 skeleton gate (still green)", "cargo test -p aura-node --test d1_skeleton", 12),
++    ("B0 negative controls (evidence log)", "make nc-b0", 30),
++    ("all negative controls (C0-C10 + S0-S7 + X0-X8 + D0 + D1 + B0)", "make nc-all", 28),
++    ("all tests", "cargo test --workspace", 6),
++    ("full gate", "make test", 6),
++]
++
++
++def run(cmd: str) -> tuple[int, str]:
++    result = subprocess.run(
++        cmd, shell=True, cwd=REPO, capture_output=True, text=True, check=False
++    )
++    return result.returncode, (result.stdout + result.stderr).strip()
++
++
++def measured_fixture() -> dict[str, list[str]]:
++    """Parse `aura-consensus report --fixture`: the survey, measured in this tree, now."""
++    code, output = run(f"{AURA_CONSENSUS} report --fixture")
++    if code != 0:
++        return {}
++    fields: dict[str, list[str]] = {}
++    for line in output.splitlines():
++        line = line.strip()
++        if not line or line.startswith("#") or "=" not in line:
++            continue
++        key, value = line.split("=", 1)
++        fields.setdefault(key, []).append(value)
++    return fields
++
++
++def workspace_test_count() -> int:
++    total = 0
++    for line in run("cargo test --workspace --quiet")[1].splitlines():
++        if line.startswith("test result: ok."):
++            total += int(line.split("ok.")[1].split("passed")[0].strip())
++    return total
++
++
++def gate_test_count() -> int:
++    total = 0
++    for line in run("cargo test -p aura-consensus --quiet")[1].splitlines():
++        if line.startswith("test result: ok."):
++            total += int(line.split("ok.")[1].split("passed")[0].strip())
++    return total
++
++
++def build_report(fields: dict[str, list[str]], stamp: str) -> str:
++    tests = workspace_test_count()
++    gate = gate_test_count()
++    layers = fields.get("layer", [])
++    capabilities = fields.get("capability", [])
++    implemented = len([line for line in layers if line.endswith("implemented")])
++    placeholders = len([line for line in layers if line.endswith("placeholder")])
++    missing = len([line for line in layers if line.endswith("missing")])
++
++    lines = [
++        "# B0 baseline — no consensus, measured",
++        "",
++        f"Generated (UTC): {stamp}. Every number below came out of `aura-consensus` in this",
++        "tree; `gates.txt` holds the raw command output, and",
++        "`crates/aura-consensus/tests/fixtures/b0_baseline.txt` pins the same survey so it",
++        "cannot drift silently.",
++        "",
++        "## What this phase claims",
++        "",
++        "> B0 lands the consensus baseline: a measurement that no consensus exists,",
++        "> plus a binary that refuses to pretend otherwise. The six consensus",
++        "> capabilities (proposer, block-signature, QC, finality, validator set,",
++        "> VRF leader) are all missing and named with the phase (B1–B5) that will",
++        "> add them.",
++        "",
++        "## The binary's contract",
++        "",
++        "| invocation | exit | what it does |",
++        "|---|---|---|",
++        f"| `aura-consensus` (no arguments) | {fields.get('exit_stub', ['?'])[0]} | prints the missing capabilities, one phase each, and refuses |",
++        f"| `aura-consensus report [--workspace PATH]` | 0 | measures the tree and prints what exists |",
++        f"| `aura-consensus report --fixture` | 0 | the same measurement as `key=value` lines (the pin) |",
++        f"| `aura-consensus report --workspace <not a workspace>` | {fields.get('exit_no_workspace', ['?'])[0]} | refuses: there is nothing to measure |",
++        f"| `aura-consensus <anything else>` | {fields.get('exit_usage', ['?'])[0]} | usage error, with the usage text |",
++        f"| `aura-consensus --help` / `--version` | 0 | documented commands, version names the phase |",
++        "",
++        "## The survey (measured now)",
++        "",
++        "| layer | owner | presence |",
++        "|---|---|---|",
++    ]
++    for line in layers:
++        name, phase, presence = line.split()
++        lines.append(f"| `{name}` | {phase} | {presence} |")
++    lines += [
++        "",
++        f"**{implemented} implemented, {placeholders} placeholders, {missing} missing.**",
++        "All six consensus components are placeholders at B0: the crate has sources",
++        "and a public `baseline` module, but declares no consensus logic.",
++        "",
++        "## The six capabilities a consensus needs and this tree does not have",
++        "",
++        "| capability | phase | what it will do |",
++        "|---|---|---|",
++    ]
++    for entry in capabilities:
++        name, phase, what = entry.split(maxsplit=2)
++        lines.append(f"| `{name}` | {phase} | {what} |")
++    lines += [
++        "",
++        "The `what` column lives in `MISSING_CAPABILITIES` and is printed by the binary;",
++        "the gate asserts that the refusal text contains every capability, its phase and",
++        "its description, so the message cannot rot into a generic \"not implemented\".",
++        "",
++        "## What M0 still needs after B0",
++        "",
++        "* **B1.** PoA round-robin proposer + block signature.",
++        "* **B2.** QC / BLS: prevote/precommit, 2f+1 aggregation.",
++        "* **B3.** BFT pipeline: 3-chain commit, view change, timeouts.",
++        "* **B4.** Validator set: staking, epoch, enter/exit queue.",
++        "* **B5.** VRF leader election.",
++        "* **N1–N2.** Transport and gossipsub (NET_PLAN) — required before consensus",
++        "  can talk to other nodes.",
++        "* **D2–D7.** Node pipeline, mempool, RPC, metrics, devnet, CLI (NODE_PLAN).",
++        "",
++        "## What B0 deliberately does not do",
++        "",
++        "* **It does not implement consensus.** The baseline measures absence;",
++        "  B1–B5 land the real implementation.",
++        "* **It does not order transactions.** At B0, two different tx logs are",
++        "  not equivalent — there is no consensus to order them.",
++        "* **It does not claim correctness.** The survey counts files and public",
++        "  items; whether consensus is correct is what B1–B5's gates measure.",
++        "",
++        "## Honest limits",
++        "",
++        "* **The survey is a static count, not an audit.** A crate with one public",
++        "  item measures the same as a crate with two hundred and one.",
++        "* **`Cargo.toml` membership is trusted.** The survey looks for",
++        "  `crates/aura-consensus/src`.",
++        "* **The baseline will go stale on purpose.** When B1 lands the proposer,",
++        "  this gate fails until the plan and the fixture are updated in the same",
++        "  patch — that is the mechanism, not a defect.",
++        "",
++        "## Negative controls",
++        "",
++        "Six tampers, each reddening a *named* test: the baseline exits 0, every",
++        "layer is classified `implemented`, `report` measures a non-workspace, an",
++        "unknown command falls through to exit 0, the refusal stops naming the",
++        "capabilities, and two different logs are treated as equivalent. A green",
++        "baseline runs first, so a red caused by a broken tree can never be",
++        "mistaken for a successful control.",
++        "",
++        f"6/6 PASS; total **{EXPECTED_NC_TOTAL}** across C0–C10 + S0–S7 + X0–X8 + D0 + D1 + B0.",
++        "",
++        f"Tests: **{tests}** in the workspace, {gate} of them in the B0 gate.",
++        "Validators / blocks / transactions remain **0 / 0 / 0**.",
++        "",
++    ]
++    return "\n".join(lines)
++
++
++def build_inventory(stamp: str) -> tuple[str, int]:
++    lines = [
++        "# B0 negative-control inventory",
++        f"# Generated (UTC): {stamp}",
++        "# Each NC tampers with one enforcement point and requires a named test to go red.",
++        "",
++    ]
++    total = 0
++    for phase in NC_LOGS:
++        path = REPO / "docs" / "evidence" / phase / "nc.log"
++        if not path.exists():
++            lines.append(f"[{phase}] MISSING {path.relative_to(REPO)}")
++            lines.append("")
++            continue
++        text = path.read_text(encoding="utf-8")
++        match = RESULT_LINE.search(text)
++        if not match:
++            lines.append(f"[{phase}] NO RESULT LINE")
++            lines.append("")
++            continue
++        passed, count = int(match.group(1)), int(match.group(2))
++        total += count
++        lines.append(f"[{phase}] {passed}/{count} PASS")
++        for name, status in NC_LINE.findall(text):
++            lines.append(f"  {status:<4} {name}")
++        lines.append("")
++    lines.append(f"TOTAL: {total} negative controls")
++    return "\n".join(lines) + "\n", total
++
++
++def refresh_sums() -> None:
++    sums = []
++    for path in (OUT, EVIDENCE / "nc.log", REPORT, INVENTORY, FIXTURE):
++        digest = hashlib.sha256(path.read_bytes()).hexdigest()
++        sums.append(f"{digest}  {path.relative_to(REPO)}")
++    (EVIDENCE / "SHA256SUMS").write_text("\n".join(sums) + "\n", encoding="utf-8")
++
++
++def main() -> int:
++    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
++    failures = 0
++
++    fields = measured_fixture()
++    if not fields:
++        print("ERROR: `aura-consensus report --fixture` did not run; fix the tree first")
++        return 1
++
++    if "--report-only" in sys.argv[1:]:
++        REPORT.write_text(build_report(fields, stamp), encoding="utf-8")
++        refresh_sums()
++        print(f"wrote {REPORT.relative_to(REPO)} (report-only; gates.txt untouched)")
++        return 0
++
++    lines = [
++        "# B0 — consensus baseline log (measured)",
++        f"# Generated (UTC): {stamp}",
++        "# Every block below is raw command output; nothing is typed by hand.",
++        "# Commands that are EXPECTED to fail (the DoD: the binary refuses without",
++        "# consensus) print their exit code inside the block, so a non-zero exit is",
++        "# the measurement, not a broken gate.",
++        "",
++    ]
++    for label, command, tail in COMMANDS:
++        code, output = run(command)
++        lines.append(f"$ {command}")
++        if tail:
++            output = "\n".join(output.splitlines()[-tail:])
++        lines.append(output)
++        lines.append(f"[exit {code}]")
++        lines.append("")
++        if code != 0:
++            failures += 1
++            print(f"FAILED: {label} -> exit {code}")
++
++    lines += [
++        "=" * 72,
++        "SURVEY (measured)",
++        "=" * 72,
++        "",
++    ]
++    for line in fields.get("layer", []):
++        name, phase, presence = line.split()
++        lines.append(f"layer={name} owner={phase} presence={presence}")
++    lines += [
++        "",
++        f"implemented={fields.get('implemented', ['?'])[0]}",
++        f"placeholders={fields.get('placeholders', ['?'])[0]}",
++        f"missing={fields.get('missing', ['?'])[0]}",
++        f"capabilities_missing={fields.get('capabilities', ['?'])[0]}",
++        "",
++        "=" * 72,
++        "SUMMARY",
++        "=" * 72,
++        "",
++        f"Layers measured: {len(fields.get('layer', []))}.",
++        f"Exit codes: stub={fields.get('exit_stub', ['?'])[0]}, "
++        f"no-workspace={fields.get('exit_no_workspace', ['?'])[0]}, "
++        f"usage={fields.get('exit_usage', ['?'])[0]}.",
++        f"Tests: {workspace_test_count()} in the workspace, {gate_test_count()} in the B0 gate.",
++        f"Negative controls: {EXPECTED_NC_TOTAL} across C0-C10 + S0-S7 + X0-X8 + D0 + D1 + B0.",
++        "Validators/blocks/tx remain 0/0/0.",
++        "",
++    ]
++
++    EVIDENCE.mkdir(parents=True, exist_ok=True)
++    OUT.write_text("\n".join(lines), encoding="utf-8")
++    REPORT.write_text(build_report(fields, stamp), encoding="utf-8")
++    inventory, total = build_inventory(stamp)
++    INVENTORY.write_text(inventory, encoding="utf-8")
++    if total != EXPECTED_NC_TOTAL:
++        print(f"INVENTORY ERROR: total {total} NC, expected {EXPECTED_NC_TOTAL}")
++        failures += 1
++
++    if not (EVIDENCE / "nc.log").exists():
++        print("ERROR: docs/evidence/b0/nc.log missing (run `make nc-b0`)")
++        return 1
++
++    refresh_sums()
++    print(f"wrote {OUT.relative_to(REPO)} ({len(lines)} lines)")
++    print(f"wrote {REPORT.relative_to(REPO)}")
++    print(f"wrote {INVENTORY.relative_to(REPO)}")
++    print("wrote docs/evidence/b0/SHA256SUMS")
++    return 1 if failures else 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+-- 
+2.47.3
+

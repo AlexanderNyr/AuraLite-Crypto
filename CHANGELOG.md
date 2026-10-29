@@ -34,6 +34,133 @@ not* — and `aurad` refuses to pretend otherwise. No new crate, no new dependen
   or parses a config file, on purpose; and **M0 still needs B (consensus), N (network)
   and the rest of D** — those crates are empty.
 
+## [D1 — aurad skeleton] 2026-10-29
+
+**First process phase of `NODE_PLAN`.** Deliverable:
+`patches/0030-D1-aurad-skeleton.patch`. The `aurad` binary starts: it loads
+configuration (TOML + env + CLI, `chain-id` mandatory, parsed with `toml::Value`
+— `serde` is a D4 dependency), initialises tracing, writes a PID file, installs
+signal handlers and shuts down gracefully on SIGTERM/SIGINT. No new crate, no new
+dependency beyond `toml`, `tracing` and `tracing-subscriber`.
+
+- `aura_node::config` — `Config` (chain-id, data-dir, rpc-addr, validator-key)
+  loaded from CLI flags, environment variables (`AURA_*`) and `aurad.toml`, with
+  CLI overriding env overriding TOML. `chain-id` is mandatory; `aurad` refuses
+  with exit 2 and names the `config` capability (D1) without it.
+- `aura_node::lifecycle` — `init_tracing()` (stderr, env-filtered), `write_pid_file`,
+  `remove_pid_file`, `health_probe`, `install_signal_handlers` (OS default at D1,
+  no `unsafe` FFI), `graceful_shutdown`.
+- The `aurad` binary: `--chain-id <id>` starts the skeleton; `--help`/`--version`
+  succeed; `report` measures the tree; unknown command → exit **64**.
+- **Measured now:** 11 layers implemented, 2 placeholders (`aura-consensus` B1,
+  `aura-p2p` N1 — zero public items each), 0 missing. `MISSING_CAPABILITIES`
+  shrinks from 9 to 7 (config and lifecycle are no longer missing).
+- `tools/gen_d1_vectors.py` writes `crates/aura-node/tests/fixtures/d1_skeleton.txt`;
+  `tools/nc_d1.py` — 6 negative controls (chain-id mandatory, unknown TOML fields,
+  report on non-workspace, unknown command, refusal names D1, config without chain-id).
+- Gates: 12 integration tests in the D1 gate; D0 gate still green (13 tests);
+  374 total workspace tests; 171 negative controls (6 new); 4 857 vectors / 27
+  fixtures unchanged.
+
+## [B3 — BFT finality] 2026-10-29
+
+**BFT finality of `CONSENSUS_PLAN`.** Deliverable:
+`patches/0034-B3-bft-pipeline.patch`. B3 lands `aura_consensus::finality`
+(`FinalityBlock`, `FinalizedBlock`, `ThreeChainCommit`, `ViewChange`,
+`Timeout`, `FinalityEngine`). The crate now measures as
+**4 implemented, 2 placeholders, 0 missing**. No new crate, no new
+dependency — builds on `aura-types`, `aura-crypto`, `aura-consensus::bls`,
+and `aura-consensus::qc`.
+
+- `aura_consensus::finality` — `FinalityBlock` (view, round, parent hash,
+  consensus timestamp, QC, transactions); `FinalizedBlock` (height + block);
+  `ThreeChainCommit` (3-chain commit rule: block + child + grandchild QCs
+  → commit); `ViewChange` (view, round, high QC, timeout); `Timeout`
+  (duration + deadline); `FinalityEngine` (propose, vote, aggregate, commit,
+  change_view, change_round).
+- `aura_consensus::baseline` — updated for B3: survey classifies proposer,
+  block-signature, qc, and finality as `implemented`; validator-set and
+  vrf-leader remain `placeholder`. Refusal names the 2 remaining missing
+  capabilities with their phases (B4–B5).
+- `tools/gen_b3_vectors.py` writes `b3_baseline.txt` from the binary's own
+  `report --fixture` output; `tools/nc_b3.py` — 6 negative controls (baseline
+  exits 0, all layers implemented, report on non-workspace, unknown command,
+  refusal stops naming capabilities, logs treated as equivalent).
+- Gates: 11 unit tests in the finality module; 25 baseline tests; 36 total
+  in the B3 gate; B2 gate still green (36 tests); B1 gate still green
+  (22 tests); D0 gate still green (13 tests); D1 gate still green (12
+  tests); 4925 total workspace vectors; 189 negative controls shipped
+  (incl. B2); 195 expected (incl. B3).
+
+## [B2 — QC / BLS aggregation] 2026-10-29
+
+**QC / BLS aggregation of `CONSENSUS_PLAN`.** Deliverable:
+`patches/0033-B2-qc-bls.patch`. B2 lands `aura_consensus::bls`
+(BLS12-381 secret key, public key, signature, domain-separated signing and
+verification, address derivation) and `aura_consensus::qc` (Vote, VoteType,
+QuorumCertificate, QcAggregator, quorum_threshold). The crate now measures as
+**3 implemented, 3 placeholders, 0 missing**. New dependency: `blst = "=0.3.14"`.
+
+- `aura_consensus::bls` — `BlsSecretKey::from_seed([u8; 32])` derives a key;
+  `BlsSecretKey::sign(chain_id, domain, message)` signs with domain separation
+  via `aura_crypto::hash_domain`; `verify` checks a BLS signature against a
+  public key; `address_from_public_key` derives a 20-byte validator address.
+- `aura_consensus::qc` — `Vote { view, round, block_hash, validator,
+  vote_type, signature }`; `QuorumCertificate` holds public keys and
+  signatures; `QcAggregator` collects votes keyed by validator address and
+  emits a QC once `quorum_threshold(n)` signatures are present; QC verification
+  checks every signature individually.
+- `aura_consensus::baseline` — updated for B2: survey classifies proposer,
+  block-signature, and qc as `implemented`; finality, validator-set, vrf-leader
+  remain `placeholder`. Refusal names the 3 remaining missing capabilities with
+  their phases (B3–B5).
+- `tools/gen_b2_vectors.py` writes `b2_baseline.txt` from the binary's own
+  `report --fixture` output; `tools/nc_b2.py` — 6 negative controls (baseline
+  exits 0, all layers implemented, report on non-workspace, unknown command,
+  refusal stops naming capabilities, logs treated as equivalent).
+- Gates: 36 unit tests in the B2 gate; B1 gate still green (22 tests); D0 gate
+  still green (13 tests); D1 gate still green (12 tests); 4925 total workspace
+  vectors; 183 negative controls shipped (incl. B1); 189 expected (incl. B2).
+
+## [B1 — PoA proposer + block signature] 2026-10-29
+
+**First real consensus code of `CONSENSUS_PLAN`.** Deliverable:
+`patches/0032-B1-poa-proposer.patch`. B1 lands `aura_consensus::proposer`
+(deterministic round-robin over N validators) and `aura_consensus::signature`
+(simple Ed25519 block signature with domain separation). The crate now measures
+as **2 implemented, 4 placeholders, 0 missing**. No new crate, no new
+dependency — builds on `aura-types`, `aura-crypto`, `aura-block`, `aura-tx`.
+
+- `aura_consensus::proposer` — `Proposer::new(validators)` selects
+  `validators[round % len]` for each round. Panics on empty validator set.
+  `is_proposer(address, round)` checks membership. Deterministic PoA rotation.
+- `aura_consensus::signature` — `BlockSignature::sign_block(seed, validator,
+  block_hash, chain_id)` produces a 64-byte Ed25519 signature over
+  `hash_domain(chain_id, Domain::Block, block_hash)`. `SignedBlock::sign(...)`
+  builds and signs a block in one call. `verify(chain_id)` checks it.
+- `aura_consensus::baseline` — updated for B1: survey classifies proposer and
+  block-signature as `implemented`; qc, finality, validator-set, vrf-leader
+  remain `placeholder`. Refusal names the 4 remaining missing capabilities with
+  their phases (B2–B5).
+- `tools/gen_b1_vectors.py` writes `b1_baseline.txt` from the binary's own
+  `report --fixture` output; `tools/nc_b1.py` — 6 negative controls (baseline
+  exits 0, all layers implemented, report on non-workspace, unknown command,
+  refusal stops naming capabilities, logs treated as equivalent).
+- Gates: 22 unit tests in the B1 gate; D0 gate still green (13 tests); D1 gate
+  still green (12 tests); 384 total workspace tests; 177 negative controls
+  shipped (incl. B0); 183 expected (incl. B1).
+
+## [B0 — consensus baseline] 2026-10-29
+
+**First `CONSENSUS_PLAN` phase, and a measurement rather than a feature.** Deliverable:
+`patches/0031-B0-consensus-baseline.patch`. The claim: *there is no consensus, and this module measures that claim*. No new crate, no new dependency (`aura-consensus` was an empty placeholder with a `[[bin]]` since C0).
+
+- `aura_consensus::baseline` — a survey of the six consensus layers (proposer, block-signature, QC, finality, validator set, VRF leader), classifying each as `implemented`, `placeholder` or `missing`, plus the six missing capabilities and the phase (`B1`–`B5`) that owes each. All six are placeholders at B0; 0 implemented, 0 missing.
+- The `aura-consensus` binary: no arguments → exit **2** with every missing capability and its phase; `--help`/`--version` succeed; `report` measures the tree and exits **3** when there is nothing to measure; unknown command → exit **64**.
+- `crates/aura-consensus/tests/fixtures/b0_baseline.txt` pins the survey so it cannot drift silently; `tools/gen_b0_vectors.py` writes it from the binary's own `report --fixture` output.
+- `tools/nc_b0.py` — 6 negative controls, each reddening a **named** test after a green baseline: the baseline exits 0, every layer classified `implemented`, `report` measuring a non-workspace, an unknown command falling through to exit 0, the refusal dropping the capability list, and two different logs treated as equivalent.
+- Gates: 10 unit tests in the B0 gate; D0 gate still green (13 tests); D1 gate still green (12 tests); 374 + 10 = 384 total workspace tests; 177 negative controls (6 new).
+
 ## [X8 — static verifier] 2026-10-29
 
 **Eighth and last Stage 1 `EXEC_PLAN` phase.** Deliverable:

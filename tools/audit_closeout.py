@@ -31,8 +31,10 @@ PATCHES = REPO / "patches"
 CORE_PHASES = [f"C{index}" for index in range(11)]      # C0..C10 (closed)
 STATE_PHASES = ["S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7"]  # STATE_PLAN complete
 EXEC_PHASES = ["X0", "X1", "X2", "X3", "X4", "X5", "X6", "X7", "X8"]                # grows with each X phase
-NODE_PHASES = ["D0"]                                              # grows with each D phase
-PHASES = CORE_PHASES + STATE_PHASES + EXEC_PHASES + NODE_PHASES
+NODE_PHASES = ["D0", "D1"]                                        # grows with each D phase
+CONSENSUS_PHASES = ["B0", "B1", "B2", "B3"]                        # grows with each B phase
+NET_PHASES = []                                                   # grows with each N phase
+PHASES = CORE_PHASES + STATE_PHASES + EXEC_PHASES + NODE_PHASES + CONSENSUS_PHASES + NET_PHASES
 SHIPPED = CORE_PHASES + [
     "S0",
     "S1",
@@ -51,8 +53,13 @@ SHIPPED = CORE_PHASES + [
     "X6",
     "X7",
     "X8",
+    "D0",
+    "D1",
+    "B0",
+    "B1",
+    "B2",
 ]
-CURRENT = "D0"
+CURRENT = "B3"
 
 PLAN_FOR_PREFIX = {
     "C": "CORE_PLAN.md",
@@ -70,9 +77,9 @@ PLAN_FOR_PREFIX = {
 }
 
 NC_PER_PHASE = {f"C{i}": 6 for i in range(4, 11)}
-NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6})
-SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)   # 159
-EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + NC_PER_PHASE[CURRENT]       # 165
+NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6})
+SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)   # 189 (incl. D0 + D1 + B2)
+EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + NC_PER_PHASE[CURRENT]       # 195 (incl. B3)
 
 DONE_ROW = re.compile(r"^\| ✅ \*\*([A-Z]+\d+)\*\* \|", re.M)
 RESULT_LINE = re.compile(r"^RESULT: (\d+)/(\d+) negative controls PASS", re.M)
@@ -81,7 +88,7 @@ RESULT_LINE = re.compile(r"^RESULT: (\d+)/(\d+) negative controls PASS", re.M)
 # Where each plan's patch numbering starts. Patches are numbered in landing order,
 # so a plan that has not landed a phase yet has no base: closing one of its phases
 # is an error until the base is added here, which is the property we want.
-PATCH_BASE = {"C": 1, "S": 12, "X": 20, "D": 29}
+PATCH_BASE = {"C": 1, "S": 12, "X": 20, "D": 29, "B": 31}
 
 
 def patch_prefix(phase: str) -> str:
@@ -287,7 +294,7 @@ def check(strict: bool) -> tuple[list[str], list[str]]:
     running = 56  # CORE closed with 56 NCs; S0 is the first phase after it
     for phase in ("S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7") + tuple(EXEC_PHASES) + tuple(
         NODE_PHASES
-    ):
+    ) + tuple(CONSENSUS_PHASES) + tuple(NET_PHASES):
         running += NC_PER_PHASE[phase]
         cumulative.append((phase.lower(), running))
     for phase, expected in cumulative:

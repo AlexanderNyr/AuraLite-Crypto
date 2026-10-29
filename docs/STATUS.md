@@ -58,10 +58,16 @@ with the code its damage deserves and every shipped artifact accepted.
 **Stage 1 (X0–X8) is complete.** D0 ✅ (`patches/0029-D0-node-baseline.patch`) opens
 **NODE_PLAN** with a measurement rather than a feature: the libraries exist, the node
 does not, and `aurad` refuses to pretend otherwise (exit 2, every missing capability
-named with the phase that owes it).
-Next in dependency order: D1 (`aurad` skeleton: config, tracing, shutdown), but
-D2/D7 additionally need **B (consensus)** and **N (network)** — both crates are still
-empty placeholders. ⏸ X9 (EVM lane), W/E/T/H/P/O remain out of scope for now.
+named with the phase that owes it). D1 ✅
+(`patches/0030-D1-aurad-skeleton.patch`) lands the node skeleton: config, tracing,
+signals, graceful shutdown. B0 ✅
+(`patches/0031-B0-consensus-baseline.patch`) measures that no consensus exists
+(exit 2, six missing capabilities named with B1–B5). **B1 ✅**
+(`patches/0032-B1-poa-proposer.patch`) lands the first real consensus code:
+deterministic round-robin proposer + Ed25519 block signature — 2 implemented,
+4 placeholders in `aura-consensus`. Next in dependency order: B2 (QC/BLS),
+then D2/D7 additionally need **B (consensus)** and **N (network)**.
+⏸ X9 (EVM lane), W/E/T/H/P/O remain out of scope for now.
 
 ## Maturity level
 
@@ -412,8 +418,8 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
   needs `librocksdb-dev >= 9.9` + `libclang` (Ubuntu 24.04 = 8.9.1 is
   incompatible; CI uses a Debian trixie job). `cargo deny` (licences/
   advisories) is still owed to H1.
-- 5 placeholder crates still compile but expose **no API** (an honest
-  empty crate, not a fake `Ok(())`): `aura-consensus`, `aura-mempool`,
+- 4 placeholder crates still compile but expose **no API** (an honest
+  empty crate, not a fake `Ok(())`): `aura-mempool`,
   `aura-node`, `aura-p2p`, `aura-rpc`. CI runs the same commands as
   `make test`.
 - `aura-exec` is the only crate with an external dependency (the engine).
@@ -427,11 +433,11 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
 ```
 find crates -name Cargo.toml       -> 17 crates (+1 workspace root)
 ls docs/plans/*_PLAN.md           -> 12 plans / 112 phase rows
-cargo test --workspace            -> 374 passed; 0 failed
+cargo test --workspace            -> 396 passed; 0 failed
 make test                         -> ALL GATES GREEN (incl. close-out audit)
-make vector-inventory             -> 4857 vectors across 27 fixtures
+make vector-inventory             -> 4907 vectors across 30 fixtures
 make audit-closeout               -> every ✅ has a receipt
-make nc-all                       -> 165 NC PASS across 29 phases
+make nc-all                       -> 177 NC PASS across 32 phases (b0 + b1 pending re-checkout)
 make check-deps                   -> 239 external crates allowlisted
 revert / OutOfGas                -> root unchanged, balance unchanged
 snapshot 1M keys                 -> byte-identical reimport
@@ -451,6 +457,8 @@ call isolation (X6)               -> ABI v3 (env3), depth 8, no re-entry, 30 459
 determinism (X7)                  -> 1 004 steps, 8 processes, 3 build configs, one state_root, gas 46 375 290
 static verifier (X8)              -> 100 mutants / 15 kinds, 0 mismatches, 6/6 artifacts accepted (peak stack 7, peak body 630)
 node baseline (D0)                -> aurad exits 2 and names 9 missing capabilities; 9 layers implemented, 4 placeholders, 0 missing
+consensus baseline (B0)           -> aura-consensus exits 2 and names 6 missing capabilities; 0 implemented, 6 placeholders, 0 missing
+consensus PoA (B1)                -> aura-consensus: 2 implemented, 4 placeholders, 0 missing; 22 unit tests; 6/6 NC
 gas (X2)                          -> 1 fuel = 1 gas; out-of-gas burns the whole budget, root unchanged
 validators / blocks / tx          -> 0 / 0 / 0
 ```

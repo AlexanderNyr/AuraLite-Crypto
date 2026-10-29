@@ -90,10 +90,9 @@ pub const CENSUS: &[CensusRow] = &[
         feature: "import section (any module, any name, including WASI)",
         policy: Policy::Ban,
         enforcement: "X0 (this module) + X1 (engine) + X2 (ABI allowlist)",
-        note: "an import is the only way to reach a clock, an RNG or the OS. The only permitted \
-               imports are the closed ABI surfaces — seven functions of `env` (v1), six of \
-               `env2` (v2) and four of `env3` (v3) — and only when the caller asks for \
-               `ModuleLimits::hosted()`; everything else is refused.",
+        note: "an import is the only way to reach a clock, an RNG or the OS. Since X2 the only \
+               permitted imports are the seven ABI v1 functions of module `env`, and only when \
+               the caller asks for `ModuleLimits::hosted()`; everything else is refused.",
     },
     CensusRow {
         source: "start_section",
@@ -131,28 +130,17 @@ pub const CENSUS: &[CensusRow] = &[
         source: "bulk_memory",
         feature: "0xFC-prefixed bulk memory/table ops and saturating truncation",
         policy: Policy::Ban,
-        enforcement: "X0 (this module); the hosted policy (X4) also accepts `memory.copy` and \
-                      `memory.fill`",
-        note: "trunc_sat is a float conversion in disguise, `memory.init`/`data.drop` and \
-               `table.*` are banned with the table and indirect-call rules. `memory.copy` and \
-               `memory.fill` are exactly specified byte moves with no float and no host state, \
-               so they are deterministic; they are allowed under the hosted policy because \
-               `rustc` lowers every slice copy to `memory.copy` and a blanket `0xFC` ban makes \
-               Rust contracts undeployable (found by the X4 gate).",
+        enforcement: "X0 (this module)",
+        note: "trunc_sat is a float conversion in disguise, and bulk ops copy memory without \
+               per-byte metering in some engines.",
     },
     CensusRow {
         source: "call_indirect",
         feature: "typed indirect call through a table",
         policy: Policy::Ban,
-        enforcement: "X0 (this module) + X6 (call isolation); the hosted policy (X4) accepts it \
-                      if and only if every element-table entry is a function defined in this \
-                      module",
-        note: "dynamic dispatch makes the call graph unverifiable statically, and gas/depth \
-               limits then have to be enforced at runtime (they are: X2 meters every \
-               instruction, X1 bounds the stack). What the census still refuses is the sharp \
-               edge: a function pointer that can reach an **import**, i.e. host code. rustc \
-               emits `call_indirect` for `core::fmt`, so a blanket ban means no panicking \
-               Rust contract is deployable.",
+        enforcement: "X0 (this module) + X6 (call isolation)",
+        note: "dynamic dispatch makes the call graph — and therefore gas and depth limits — \
+               unverifiable statically; X6 may relax this with an explicit depth budget.",
     },
     CensusRow {
         source: "unbounded_memory",
@@ -181,14 +169,10 @@ pub const CENSUS: &[CensusRow] = &[
         source: "mutable_global",
         feature: "mutable global (module-level state outside linear memory)",
         policy: Policy::Ban,
-        enforcement: "X0 (this module): 0 under the restrictive policy, at most 1 under \
-                      the hosted policy (X4: the toolchain's `__stack_pointer`)",
-        note: "state outside the account's storage namespace. A global is private to one \
-               instantiation and reset on every call, so it cannot carry state between \
-               calls; contract state still belongs in storage, where it is versioned and \
-               metered. The allowance exists because every rustc-produced contract has \
-               exactly one (`__stack_pointer`) and a blanket ban makes Rust contracts \
-               undeployable (found by the X4 gate).",
+        enforcement: "X0 (this module)",
+        note: "state outside the account's storage namespace survives between calls in some \
+               engines and not others; contract state belongs in storage, where it is \
+               versioned and metered.",
     },
     CensusRow {
         source: "unknown_opcode",
@@ -232,7 +216,7 @@ pub struct ModuleLimits {
     pub max_memory_pages: u32,
     /// Largest accepted table, in entries.
     pub max_table_entries: u32,
-    /// Whether the ABI functions (`env.*`, `env2.*`, `env3.*`) may be imported.
+    /// Whether the seven ABI v1 functions (`env.*`) may be imported.
     ///
     /// X0/X1 refused **every** import, because the sandbox resolved none. X2
     /// introduced the host ABI, so a contract that uses it must be able to say
@@ -241,57 +225,6 @@ pub struct ModuleLimits {
     /// is still judged with the strictest policy, and the X0 vectors keep their
     /// verdicts.
     pub allow_abi_imports: bool,
-    /// How many **mutable** globals the module may declare.
-    ///
-    /// # Why this is a number and not a boolean
-    ///
-    /// Every module `rustc` produces for `wasm32-unknown-unknown` declares
-    /// exactly one mutable global: `__stack_pointer`, initialised to the top of
-    /// linear memory. A blanket ban (X0's `restrictive` policy) therefore
-    /// rejects **every Rust contract**, which is what the X4 gate discovered the
-    /// first time it deployed one. The ban is kept where it was measured (X0
-    /// vectors, `restrictive`) and relaxed by exactly one global under `hosted`.
-    ///
-    /// This is not a determinism concession: a global is private to one
-    /// instantiation, reset on every call, and not reachable through storage —
-    /// it cannot outlive a call, so it cannot carry state between calls.
-    pub max_mutable_globals: u32,
-    /// Whether `memory.copy` / `memory.fill` are accepted.
-    ///
-    /// # Why this is not "bulk memory"
-    ///
-    /// The `0xFC` prefix covers four unrelated families: `trunc_sat` (a float
-    /// conversion), `memory.copy`/`memory.fill` (pure, exactly specified byte
-    /// moves with no float and no host state), and `memory.init`/`data.drop` +
-    /// `table.*` (which the census bans anyway, because tables and indirect calls
-    /// are banned). Banning all of `0xFC` also bans `memcpy`/`memset`, which is
-    /// what `rustc` lowers every slice copy to — so **every Rust contract** would
-    /// be rejected (found by the X4 gate). The hosted policy therefore accepts
-    /// exactly the two deterministic byte ops and nothing else from the prefix.
-    pub allow_bulk_memory: bool,
-    /// Whether `call_indirect` is accepted (with the element-table rule below).
-    ///
-    /// # Why this is not "dynamic dispatch is fine"
-    ///
-    /// Every `rustc` contract that can panic carries `core::fmt`'s integer
-    /// formatting (`Formatter::pad_integral`), and on wasm that vtable-shaped
-    /// code compiles to `call_indirect` — so a blanket ban rejects real Rust
-    /// contracts (found by the X4 gate; same class of finding as the mutable
-    /// global and `memory.copy`).
-    ///
-    /// Accepting it is bounded by a rule the census **enforces**, not by trust:
-    /// every function in the element table must be a function *defined in this
-    /// module* (never an import), the table index must be 0, and only the
-    /// MVP active-segment encoding is accepted. So an indirect call can reach
-    /// any of this module's own functions and nothing else — no host function is
-    /// reachable through a function pointer.
-    ///
-    /// The X0 objection ("gas and depth become unverifiable") is answered by
-    /// where it is enforced rather than by the census: gas is charged per
-    /// instruction whatever the call mechanism (X2), and stack/recursion is
-    /// bounded at runtime (X1 `SandboxLimits`). Cross-contract calls stay
-    /// X6's problem.
-    pub allow_indirect_calls: bool,
 }
 
 impl ModuleLimits {
@@ -302,20 +235,13 @@ impl ModuleLimits {
             max_memory_pages: MAX_MEMORY_PAGES,
             max_table_entries: MAX_TABLE_ENTRIES,
             allow_abi_imports: false,
-            max_mutable_globals: 0,
-            allow_bulk_memory: false,
-            allow_indirect_calls: false,
         }
     }
 
-    /// X2/X3 policy: the same bounds, plus the closed ABI v1 import list and the
-    /// toolchain's single mutable global.
+    /// X2/X3 policy: the same bounds, plus the closed ABI v1 import list.
     pub const fn hosted() -> Self {
         ModuleLimits {
             allow_abi_imports: true,
-            max_mutable_globals: 1,
-            allow_bulk_memory: true,
-            allow_indirect_calls: true,
             ..ModuleLimits::restrictive()
         }
     }
@@ -369,9 +295,6 @@ pub enum Ban {
     BulkMemory,
     /// Indirect call through a table.
     CallIndirect,
-    /// The element table lists an imported function, so an indirect call could
-    /// reach host code.
-    IndirectIntoImport(u32),
     /// An opcode outside the whitelist.
     UnknownOpcode(u8),
     /// The binary ends early.
@@ -401,7 +324,6 @@ impl Ban {
             Ban::Atomics => "atomics".to_string(),
             Ban::BulkMemory => "bulk_memory".to_string(),
             Ban::CallIndirect => "call_indirect".to_string(),
-            Ban::IndirectIntoImport(_) => "indirect_into_import".to_string(),
             Ban::UnknownOpcode(_) => "unknown_opcode".to_string(),
             Ban::Truncated => "truncated".to_string(),
             Ban::BadSection(_) => "bad_section".to_string(),
@@ -435,10 +357,6 @@ impl fmt::Display for Ban {
             Ban::Atomics => f.write_str("atomic instruction"),
             Ban::BulkMemory => f.write_str("bulk memory / saturating truncation instruction"),
             Ban::CallIndirect => f.write_str("indirect call through a table"),
-            Ban::IndirectIntoImport(function) => write!(
-                f,
-                "the element table exposes imported function #{function} to call_indirect"
-            ),
             Ban::UnknownOpcode(opcode) => write!(f, "opcode 0x{opcode:02x} is not whitelisted"),
             Ban::Truncated => f.write_str("binary ends early"),
             Ban::BadSection(name) => write!(f, "malformed {name} section"),
@@ -489,14 +407,6 @@ pub struct CensusReport {
     pub instructions: u32,
     /// Imports found `(module, name)`.
     pub imports: Vec<(String, String)>,
-    /// Number of mutable globals declared (the toolchain's stack pointer is 1).
-    pub mutable_globals: u32,
-    /// Imported functions, in import order (indices `0..imported_functions`).
-    pub imported_functions: u32,
-    /// `call_indirect` instructions found.
-    pub indirect_calls: u32,
-    /// Functions reachable through the element table.
-    pub table_functions: Vec<u32>,
     /// Declared memory maximum, if a memory was declared.
     pub memory_pages: Option<u32>,
     /// Declared table maximum, if a table was declared.
@@ -602,10 +512,6 @@ pub fn census(bytes: &[u8], limits: &ModuleLimits) -> CensusReport {
         functions: 0,
         instructions: 0,
         imports: Vec::new(),
-        mutable_globals: 0,
-        imported_functions: 0,
-        indirect_calls: 0,
-        table_functions: Vec::new(),
         memory_pages: None,
         table_entries: None,
     };
@@ -665,18 +571,13 @@ fn classify(bytes: &[u8], limits: &ModuleLimits, report: &mut CensusReport) -> R
             }
             4 => scan_tables(&mut section, limits, report)?,
             5 => scan_memories(&mut section, limits, report)?,
-            6 => scan_globals(&mut section, limits, report)?,
+            6 => scan_globals(&mut section)?,
             7 => skip_section(&mut section)?,
             8 => return Err(Ban::StartSection),
-            9 => scan_elements(&mut section, report)?,
-            10 => scan_code(&mut section, limits, report)?,
+            9 => skip_section(&mut section)?,
+            10 => scan_code(&mut section, report)?,
             11 => skip_section(&mut section)?,
-            12 => {
-                if !limits.allow_bulk_memory {
-                    return Err(Ban::BulkMemory);
-                }
-                skip_section(&mut section)?;
-            }
+            12 => return Err(Ban::BulkMemory),
             _ => return Err(Ban::BadSectionOrder(id)),
         }
     }
@@ -734,7 +635,6 @@ fn scan_imports(
         match kind {
             0x00 => {
                 let _ = section.u32()?;
-                report.imported_functions += 1;
             }
             0x01 => {
                 let _ = section.u8()?;
@@ -759,11 +659,8 @@ fn scan_imports(
         }
         report.imports.push((module.clone(), name.clone()));
         // A function import from the closed ABI v1 list is the only allowed one.
-        let allowed = limits.allow_abi_imports
-            && kind == 0x00
-            && (crate::abi::is_abi_import(&module, &name)
-                || crate::abi_v2::is_abi2_import(&module, &name)
-                || crate::abi_v3::is_abi3_import(&module, &name));
+        let allowed =
+            limits.allow_abi_imports && kind == 0x00 && crate::abi::is_abi_import(&module, &name);
         if !allowed && refused.is_none() {
             refused = Some(Ban::HostImport { module, name });
         }
@@ -829,21 +726,14 @@ fn scan_memories(
     Ok(())
 }
 
-fn scan_globals(
-    section: &mut Cursor<'_>,
-    limits: &ModuleLimits,
-    report: &mut CensusReport,
-) -> Result<(), Ban> {
+fn scan_globals(section: &mut Cursor<'_>) -> Result<(), Ban> {
     let count = section.u32()?;
     for _ in 0..count {
         let kind = section.u8()?;
         valtype(kind)?;
         let mutable = section.u8()?;
         if mutable == 0x01 {
-            report.mutable_globals += 1;
-            if report.mutable_globals > limits.max_mutable_globals {
-                return Err(Ban::MutableGlobal);
-            }
+            return Err(Ban::MutableGlobal);
         }
         // init expression: one const instruction plus `end`
         loop {
@@ -869,50 +759,7 @@ fn skip_section(section: &mut Cursor<'_>) -> Result<(), Ban> {
     Ok(())
 }
 
-/// The element section is what makes `call_indirect` a *bounded* operation: it
-/// lists the functions a table holds. The census records those indices and
-/// refuses any that names an import, so an indirect call can never leave the
-/// module.
-///
-/// Only the MVP active-segment encoding (`flag == 0`) is accepted. The other
-/// seven encodings exist for reference types, declarative segments and explicit
-/// table indices — all of which belong to features this census bans anyway, so
-/// accepting them would be accepting something nobody here has reasoned about.
-fn scan_elements(section: &mut Cursor<'_>, report: &mut CensusReport) -> Result<(), Ban> {
-    let count = section.u32()?;
-    for _ in 0..count {
-        let flag = section.u32()?;
-        if flag != 0 {
-            return Err(Ban::BadSection("element kind"));
-        }
-        // Offset expression: `i32.const n; end`.
-        let opcode = section.u8()?;
-        if opcode != 0x41 {
-            return Err(Ban::BadSection("element offset"));
-        }
-        let _ = section.signed(32)?;
-        if section.u8()? != 0x0b {
-            return Err(Ban::BadSection("element offset end"));
-        }
-        let entries = section.u32()?;
-        for _ in 0..entries {
-            let function = section.u32()?;
-            if function < report.imported_functions {
-                // A pointer that can reach host code is exactly what X0 exists
-                // to prevent.
-                return Err(Ban::IndirectIntoImport(function));
-            }
-            report.table_functions.push(function);
-        }
-    }
-    Ok(())
-}
-
-fn scan_code(
-    section: &mut Cursor<'_>,
-    limits: &ModuleLimits,
-    report: &mut CensusReport,
-) -> Result<(), Ban> {
+fn scan_code(section: &mut Cursor<'_>, report: &mut CensusReport) -> Result<(), Ban> {
     let count = section.u32()?;
     for _ in 0..count {
         let size = section.u32()? as usize;
@@ -927,17 +774,13 @@ fn scan_code(
             }
             valtype(cursor.u8()?)?;
         }
-        scan_instructions(&mut cursor, limits, report)?;
+        scan_instructions(&mut cursor, report)?;
     }
     Ok(())
 }
 
 /// The whitelist. Anything not listed here is `UnknownOpcode` (fail-closed).
-fn scan_instructions(
-    cursor: &mut Cursor<'_>,
-    limits: &ModuleLimits,
-    report: &mut CensusReport,
-) -> Result<(), Ban> {
+fn scan_instructions(cursor: &mut Cursor<'_>, report: &mut CensusReport) -> Result<(), Ban> {
     let mut depth = 0i64;
     while cursor.remaining() > 0 {
         let opcode = cursor.u8()?;
@@ -969,17 +812,7 @@ fn scan_instructions(
                 }
                 let _ = cursor.u32()?;
             }
-            0x11 => {
-                if !limits.allow_indirect_calls {
-                    return Err(Ban::CallIndirect);
-                }
-                let _type_index = cursor.u32()?;
-                // One table (X0 policy): the index must be 0.
-                if cursor.u32()? != 0 {
-                    return Err(Ban::BadSection("call_indirect table index"));
-                }
-                report.indirect_calls += 1;
-            }
+            0x11 => return Err(Ban::CallIndirect),
             0x28..=0x3e => {
                 let _ = cursor.u32()?;
                 let _ = cursor.u32()?;
@@ -1011,21 +844,7 @@ fn scan_instructions(
             0xa8..=0xab | 0xae..=0xbb => return float_ban(opcode),
             // sign extension proposal (integer)
             0xc0..=0xc4 => {}
-            0xfc => {
-                let sub = cursor.u32()?;
-                let allowed = limits.allow_bulk_memory && matches!(sub, 10 | 11);
-                if !allowed {
-                    return Err(Ban::BulkMemory);
-                }
-                // `memory.copy` carries two memory indices, `memory.fill` one;
-                // both must be 0 (one memory by X0 policy).
-                let indices = if sub == 10 { 2 } else { 1 };
-                for _ in 0..indices {
-                    if cursor.u32()? != 0 {
-                        return Err(Ban::BadSection("bulk memory index"));
-                    }
-                }
-            }
+            0xfc => return Err(Ban::BulkMemory),
             0xfd => return Err(Ban::Simd),
             0xfe => return Err(Ban::Atomics),
             other => return Err(Ban::UnknownOpcode(other)),
