@@ -11,7 +11,6 @@
 //! validator set. No slashing or rewards yet — those arrive at B6–B7.
 
 use crate::qc::QuorumCertificate;
-use crate::qc::VoteType;
 use aura_types::{Address, Hash};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -180,7 +179,14 @@ impl ValidatorSet {
 
     /// Quorum stake threshold: 2/3 of total stake (rounded up).
     pub fn quorum_stake(&self) -> u64 {
-        (self.total_stake * 2 + 2) / 3
+        let thirds = self.total_stake / 3;
+        let remainder = self.total_stake % 3;
+        thirds * 2
+            + match remainder {
+                0 => 0,
+                1 => 1,
+                _ => 2,
+            }
     }
 
     /// Check if an address is an active validator.
@@ -333,10 +339,9 @@ pub enum SetUpdateError {
 impl std::fmt::Display for SetUpdateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::WrongEpoch(got, expected) => write!(
-                f,
-                "set update targets epoch {got}, expected {expected}"
-            ),
+            Self::WrongEpoch(got, expected) => {
+                write!(f, "set update targets epoch {got}, expected {expected}")
+            }
             Self::InvalidQc => f.write_str("invalid set update QC"),
             Self::InsufficientStake => f.write_str("insufficient validator stake"),
         }
@@ -349,6 +354,7 @@ impl std::error::Error for SetUpdateError {}
 mod tests {
     use super::*;
     use crate::bls::BlsSecretKey;
+    use crate::qc::VoteType;
 
     fn test_address(index: u8) -> Address {
         Address::from_bytes([index; 20])
@@ -361,12 +367,6 @@ mod tests {
             status: ValidatorStatus::Active,
             epoch: 0,
         }
-    }
-
-    fn seed_for(index: u8) -> [u8; 32] {
-        let mut s = [0u8; 32];
-        s[0] = index;
-        s
     }
 
     fn make_qc(block_hash: Hash, view: u64, round: u64) -> QuorumCertificate {
@@ -392,9 +392,7 @@ mod tests {
 
     #[test]
     fn new_validator_set() {
-        let validators: Vec<Validator> = (0..4)
-            .map(|i| test_validator(i, 1000))
-            .collect();
+        let validators: Vec<Validator> = (0..4).map(|i| test_validator(i, 1000)).collect();
         let set = ValidatorSet::new(validators.clone(), 100);
         assert_eq!(set.len(), 4);
         assert_eq!(set.total_stake(), 4000);
@@ -406,19 +404,14 @@ mod tests {
 
     #[test]
     fn quorum_stake_threshold() {
-        let validators: Vec<Validator> = (0..4)
-            .map(|i| test_validator(i, 1000))
-            .collect();
+        let validators: Vec<Validator> = (0..4).map(|i| test_validator(i, 1000)).collect();
         let set = ValidatorSet::new(validators, 100);
         assert_eq!(set.quorum_stake(), 2667);
     }
 
     #[test]
     fn enter_and_exit_queue() {
-        let mut set = ValidatorSet::new(
-            vec![test_validator(0, DEFAULT_MIN_STAKE)],
-            100,
-        );
+        let mut set = ValidatorSet::new(vec![test_validator(0, DEFAULT_MIN_STAKE)], 100);
 
         set.request_enter(test_address(1), DEFAULT_MIN_STAKE * 2, 0);
         assert_eq!(set.enter_queue.len(), 1);
@@ -441,20 +434,14 @@ mod tests {
 
     #[test]
     fn below_min_stake_ignored() {
-        let mut set = ValidatorSet::new(
-            vec![test_validator(0, DEFAULT_MIN_STAKE)],
-            100,
-        );
+        let mut set = ValidatorSet::new(vec![test_validator(0, DEFAULT_MIN_STAKE)], 100);
         set.request_enter(test_address(1), 100, 0);
         assert_eq!(set.enter_queue.len(), 0);
     }
 
     #[test]
     fn duplicate_enter_ignored() {
-        let mut set = ValidatorSet::new(
-            vec![test_validator(0, DEFAULT_MIN_STAKE)],
-            100,
-        );
+        let mut set = ValidatorSet::new(vec![test_validator(0, DEFAULT_MIN_STAKE)], 100);
         set.request_enter(test_address(0), DEFAULT_MIN_STAKE * 2, 0);
         assert_eq!(set.enter_queue.len(), 0);
     }
@@ -474,10 +461,7 @@ mod tests {
 
     #[test]
     fn set_update_wrong_epoch() {
-        let mut set = ValidatorSet::new(
-            vec![test_validator(0, DEFAULT_MIN_STAKE)],
-            100,
-        );
+        let mut set = ValidatorSet::new(vec![test_validator(0, DEFAULT_MIN_STAKE)], 100);
         let qc = make_qc(Hash::from_bytes([0x42; 32]), 0, 0);
         let update = SetUpdate {
             epoch: 5,
@@ -485,18 +469,12 @@ mod tests {
             qc,
         };
         let err = set.apply_set_update(update, &Hash::from_bytes([0; 32]));
-        assert!(matches!(
-            err,
-            Err(SetUpdateError::WrongEpoch(5, 1))
-        ));
+        assert!(matches!(err, Err(SetUpdateError::WrongEpoch(5, 1))));
     }
 
     #[test]
     fn total_stake_updates_on_enter_exit() {
-        let mut set = ValidatorSet::new(
-            vec![test_validator(0, DEFAULT_MIN_STAKE)],
-            100,
-        );
+        let mut set = ValidatorSet::new(vec![test_validator(0, DEFAULT_MIN_STAKE)], 100);
         assert_eq!(set.total_stake(), DEFAULT_MIN_STAKE);
 
         set.request_enter(test_address(1), DEFAULT_MIN_STAKE * 3, 0);
@@ -514,10 +492,7 @@ mod tests {
 
     #[test]
     fn is_active_after_exit() {
-        let mut set = ValidatorSet::new(
-            vec![test_validator(0, DEFAULT_MIN_STAKE)],
-            100,
-        );
+        let mut set = ValidatorSet::new(vec![test_validator(0, DEFAULT_MIN_STAKE)], 100);
         set.request_exit(test_address(0), 0);
         assert!(set.is_active(&test_address(0)));
         for _ in 0..99 {

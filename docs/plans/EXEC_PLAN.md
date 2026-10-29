@@ -27,11 +27,11 @@ The plan first **measures the nondeterminism surface**, then closes it.
 | ✅ **X1** | Sandbox | engine, memory/stack/fuel limits, zero host imports | NC: contract with `wasi_snapshot_preview1` → `Err` at deploy |
 | ✅ **X2** | Gas + ABI v1 | `storage_read/write`, `balance`, `transfer`, `emit`, `hash`, `block_ctx`; gas table; OutOfGas → revert (S3) | 23 vectors, host gas recomputed from an independent table copy; NC: gas table zeroed → red |
 | ✅ **X3** | Lifecycle | deploy/instantiate/upgrade/code_hash/version, `init`, storage migration | upgrade preserves balance, changes logic; NC: upgrade without version check → red |
-| **X4** | `aura-sdk` | Rust macros `#[entrypoint]`, typed storage, events, ABI-JSON generation | 3 example contracts build to WASM, size and hash reproducible |
-| **X5** | Reference standards | ARC-20, ARC-721, minimal multisig | vector table: transfer/mint/burn/approve/ownerOf + reentrancy test |
-| **X6** | Call isolation | call depth, reentrancy guard, value transfer, atomic revert of the tree | "evil" contract cannot drain others' funds; NC: guard off → test red |
-| **X7** | Determinism gate | 8 nodes × 1000 contract txs × 3 platforms → byte-identical `state_root` | decisive M0 gate; any divergence = ⛔ NO-GO for mainnet |
-| **X8** | Static verifier | ban floats/forbidden imports/size/stack, error report | 100 mutants: all invalid rejected, valid accepted |
+| ✅ **X4** | `aura-sdk` | Rust macros `#[entrypoint]`, typed storage, events, ABI-JSON generation | 3 example contracts build to WASM, size and hash reproducible |
+| ✅ **X5** | Reference standards | ARC-20, ARC-721, minimal multisig | vector table: transfer/mint/burn/approve/ownerOf + reentrancy test |
+| ✅ **X6** | Call isolation | call depth, reentrancy guard, value transfer, atomic revert of the tree | "evil" contract cannot drain others' funds; NC: guard off → test red |
+| ✅ **X7** | Determinism gate | 8 nodes × 1000 contract txs × 3 platforms → byte-identical `state_root` | decisive M0 gate; any divergence = ⛔ NO-GO for mainnet |
+| ✅ **X8** | Static verifier | ban floats/forbidden imports/size/stack, error report | 100 mutants: all invalid rejected, valid accepted |
 | ⏸ **X9** | Optional EVM-lane (stretch) | `revm` behind a feature flag, shared state/gas, address mapping | compatibility with 10 known ERC-20 contracts; **not the critical path**, can be moved after M4 |
 
 ### X0 receipt (2026-10-28)
@@ -300,6 +300,32 @@ The plan first **measures the nondeterminism surface**, then closes it.
 - Deferred: SDK (X4), standards (X5), call isolation (X6), the decisive
   multi-node determinism gate (X7), the static verifier with 100 mutants (X8),
   EVM lane (X9, Stage 2).
+
+### X4 receipt (2026-10-29)
+
+- Delivered `aura-sdk`/`aura-sdk-macros` and three Rust reference contracts (`store`, `kv`, `events`); their WASM artifacts and ABI manifests are pinned.
+- The SDK provides the ABI v1 wrappers, typed storage/codec and events; the host agreement test checks the SDK table against `aura-exec`.
+- Evidence: `docs/evidence/x4/` and the X4 SDK and artifact gates. The recorded gate covers contract artifact hashes and measured lifecycle gas.
+
+### X5 receipt (2026-10-29)
+
+- Added the separate `env2` ABI surface and the ARC-20, ARC-721 and multisig reference standards under `standards/`; calldata/return sizes are bounded and artifacts are pinned.
+- Evidence: `docs/evidence/x5/`; tests cover ABI agreement, standards behavior, and that failed standard operations leave no writes.
+
+### X6 receipt (2026-10-29)
+
+- Added ABI v3 contract composition with host-enforced active-frame re-entry refusal and maximum call depth, plus vault/attacker/recursion fixtures.
+- Evidence: `docs/evidence/x6/`; tests cover re-entry, call isolation, depth refusal, rollback and pinned contract artifacts.
+
+### X7 receipt (2026-10-29)
+
+- Added the reproducible determinism workload and runner. Eight separate processes replay the pinned 1,004-step workload and compare state root, gas and event digest across three build configurations.
+- Evidence: `docs/evidence/x7/`; the documented operating-system matrix remains a separate CI responsibility and is not claimed as locally measured.
+
+### X8 receipt (2026-10-29)
+
+- Added the pre-engine static WASM verifier with stable refusal codes and bounded structural checks. The gate compares 100 independent golden mutants and the six shipped artifacts.
+- Evidence: `docs/evidence/x8/`; limitations of the verifier remain documented alongside the results.
 
 ## Risks
 

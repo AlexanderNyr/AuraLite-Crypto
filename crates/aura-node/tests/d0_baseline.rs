@@ -217,7 +217,7 @@ fn report_measures_this_tree() {
     assert!(out.contains("aura-exec"), "{out}");
     assert!(out.contains("implemented"), "{out}");
     assert!(
-        out.contains("node capabilities present: 0 of 9"),
+        out.contains("node capabilities present: 0 of 7"),
         "the report must state the node is absent:\n{out}"
     );
 }
@@ -265,17 +265,17 @@ fn the_pinned_baseline_matches_this_tree() {
 }
 
 #[test]
-fn the_four_unlanded_layers_are_still_placeholders() {
+fn the_unlanded_layers_are_still_placeholders() {
     let measured = survey(&repo_root());
     assert_eq!(
         measured.placeholder_names(),
-        vec!["aura-consensus", "aura-p2p", "aura-mempool", "aura-rpc"],
+        vec!["aura-p2p", "aura-mempool", "aura-rpc"],
         "a placeholder grew public API without the plan being updated"
     );
     for entry in &measured.layers {
         let phase = entry.layer.phase;
         let is_placeholder = entry.presence == Presence::Placeholder;
-        if matches!(phase, "B1" | "N1" | "D3" | "D4") {
+        if matches!(phase, "N1" | "D3" | "D4") {
             assert!(
                 is_placeholder,
                 "{} must still be a placeholder at D0",

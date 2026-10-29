@@ -160,18 +160,12 @@ pub struct Capability {
     pub what: &'static str,
 }
 
-/// The nine capabilities a runnable node needs and this tree does not have.
-pub const MISSING_CAPABILITIES: [Capability; 9] = [
-    Capability {
-        name: "config",
-        phase: "D1",
-        what: "TOML + env + CLI, validated at startup, `chain-id` mandatory",
-    },
-    Capability {
-        name: "lifecycle",
-        phase: "D1",
-        what: "tracing, graceful shutdown, signals, PID file, health probe",
-    },
+/// The seven capabilities a node still needs after D1.
+///
+/// `config` and `lifecycle` land with D1 (this file), so they are no longer
+/// missing — `aurad` loads configuration, initialises tracing, writes a PID
+/// file and shuts down on signal. Everything below is D2+.
+pub const MISSING_CAPABILITIES: [Capability; 7] = [
     Capability {
         name: "tx-pipeline",
         phase: "D2",
@@ -480,7 +474,11 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     }
 }
 
-fn report(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+/// Handle the `report` subcommand: measure the workspace and print what exists.
+///
+/// Returns [`EXIT_NO_WORKSPACE`] (3) when the directory has no `crates/`,
+/// [`EXIT_USAGE`] (64) on a bad argument, and 0 on success.
+pub fn report(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     let mut root = default_root();
     let mut fixture = false;
     let mut index = 0;

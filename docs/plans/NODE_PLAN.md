@@ -28,8 +28,8 @@ tx, keys, snapshot, upgrade) and its 30 vectors.
 
 | Phase | Title | DoD | Test gate |
 |---|---|---|---|
-| **D0** | Baseline | no binary; report "libraries exist, node does not" | `cargo run -p aurad` → meaningful error/stub, NC recorded |
-| **D1** | `aurad` skeleton | config, tracing, graceful shutdown, signals, PID/health | start/stop without state loss; NC: SIGTERM without shutdown → red |
+| ✅ **D0** | Baseline | no binary; report "libraries exist, node does not" | `cargo run -p aurad` → meaningful error/stub, NC recorded |
+| ✅ **D1** | `aurad` skeleton | config, tracing, graceful shutdown, signals, PID/health | start/stop without state loss; NC: SIGTERM without shutdown → red |
 | **D2** | Tx pipeline | `rpc → mempool → exec → block → consensus → storage → event` | 1000 txs travel end-to-end, receipts match expectations |
 | **D3** | Mempool | nonce/balance/gas checks, `effective_tip` priority, eviction, reorg | 10 000 txs: no double spend, no stuck nonces; NC: nonce check off → red |
 | **D4** | JSON-RPC 2.0 | `submit_tx`, `get_balance`, `get_tx`, `get_block`, `call`, `estimate_gas`, `subscribe` (WS) | spec contract test + 50 vectors; fuzz the RPC parser (H3) |
@@ -37,6 +37,17 @@ tx, keys, snapshot, upgrade) and its 30 vectors.
 | **D6** | Observability | Prometheus, `/health`, `/metrics`, OpenTelemetry traces, structured logs | dashboard: height, finality lag, mempool size, peer count, gas/s |
 | **D7** | Devnet | `make devnet` / `docker compose`: 4 validators, genesis, faucet key, logs | M1: 100 blocks, identical head, RPC returns a balance; NC: one validator down → network alive |
 | **D8** | CLI `aura` | node ops, query, tx, keys, genesis, snapshot, upgrade | 30 CLI vectors; `aura --help` fully documented |
+
+### D0 receipt (2026-10-29)
+
+- Added the `aurad` baseline/report command: it measures the layer inventory and refuses to claim a working node when capabilities are absent.
+- Evidence: `docs/evidence/d0/`; the refusal behavior and the measured fixture are pinned. D0 is a baseline, not a running node.
+
+### D1 receipt (2026-10-29)
+
+- Added configuration loading (TOML, environment and CLI), mandatory chain ID, startup tracing, PID/health bookkeeping and graceful shutdown for the skeleton process.
+- The node still has no transaction pipeline, mempool, RPC, P2P transport or devnet; those remain later phases.
+- Evidence: `docs/evidence/d1/`; the config/lifecycle tests and negative-control log are recorded there.
 
 ## Risks
 

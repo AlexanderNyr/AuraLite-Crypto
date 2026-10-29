@@ -28,6 +28,14 @@ pub const DEFAULT_MAX_STACK_BYTES: usize = 512 * 1024;
 /// contract from allocating unbounded memory in the observer.
 pub const DEFAULT_MAX_TRACE_EVENTS: usize = 4096;
 
+/// Maximum number of call frames, the top-level call included.
+///
+/// The same number as [`crate::abi_v3::MAX_CALL_DEPTH`]: the ABI refuses the
+/// ninth frame to the contract, and the executor refuses it again if a session
+/// is constructed with a stack that deep. Two checks over one number, because
+/// the second one is what a host-side caller can trust.
+pub const DEFAULT_MAX_CALL_DEPTH: u32 = crate::abi_v3::MAX_CALL_DEPTH;
+
 /// The complete sandbox configuration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SandboxLimits {
@@ -43,6 +51,8 @@ pub struct SandboxLimits {
     pub max_stack_bytes: usize,
     /// Maximum recorded trace events.
     pub max_trace_events: usize,
+    /// Maximum call frames, the top-level call included (X6).
+    pub max_call_depth: u32,
 }
 
 impl SandboxLimits {
@@ -57,6 +67,7 @@ impl SandboxLimits {
             module_bytes: MAX_MODULE_BYTES as u32,
             max_stack_bytes: DEFAULT_MAX_STACK_BYTES,
             max_trace_events: DEFAULT_MAX_TRACE_EVENTS,
+            max_call_depth: DEFAULT_MAX_CALL_DEPTH,
         }
     }
 
@@ -85,6 +96,9 @@ impl SandboxLimits {
         }
         if self.max_stack_bytes == 0 {
             return Err("stack ceiling must be positive");
+        }
+        if self.max_call_depth == 0 || self.max_call_depth > crate::abi_v3::MAX_CALL_DEPTH {
+            return Err("max_call_depth outside the published ceiling");
         }
         Ok(())
     }

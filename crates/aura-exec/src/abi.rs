@@ -157,6 +157,12 @@ pub const fn arity(name: &str) -> Option<usize> {
 /// True when `module.name` is an ABI v1 import. The census uses this to decide
 /// whether an import is allowed; everything else stays banned.
 pub fn is_abi_import(module: &str, name: &str) -> bool {
+    if module == crate::abi_v2::ABI2_MODULE {
+        return crate::abi_v2::is_abi2_import(module, name);
+    }
+    if module == crate::abi_v3::ABI3_MODULE {
+        return crate::abi_v3::is_abi3_import(module, name);
+    }
     module == ABI_MODULE && arity(name).is_some()
 }
 
@@ -197,6 +203,14 @@ pub enum AbiError {
     OutOfGas,
     /// The receipt already holds the maximum number of events.
     TooManyEvents,
+    /// X6: the target address is already on the call stack.
+    Reentrancy,
+    /// X6: the call stack has reached its published depth.
+    CallDepth,
+    /// X6: the address being called holds no code.
+    NoCode,
+    /// X6: the callee reverted; its writes and its value were discarded.
+    CalleeFailed,
 }
 
 impl AbiError {
@@ -212,6 +226,34 @@ impl AbiError {
             Self::Overflow => -7,
             Self::OutOfGas => -8,
             Self::TooManyEvents => -11,
+            Self::Reentrancy => -14,
+            Self::CallDepth => -15,
+            Self::NoCode => -16,
+            Self::CalleeFailed => -17,
+        }
+    }
+
+    /// Map a status code back to an `AbiError`; `None` for `0` (success) and
+    /// for the two non-error statuses (`-9` absent key, `-10` unknown field).
+    ///
+    /// A receipt carries the raw `i32`, so this is the way back for anything
+    /// that wants to report *why* a call returned what it did.
+    pub const fn from_code(code: i32) -> Option<Self> {
+        match code {
+            -1 => Some(Self::OutOfMemory),
+            -2 => Some(Self::KeyTooLong),
+            -3 => Some(Self::ValueTooLong),
+            -4 => Some(Self::TopicTooLong),
+            -5 => Some(Self::NotOwned),
+            -6 => Some(Self::InsufficientBalance),
+            -7 => Some(Self::Overflow),
+            -8 => Some(Self::OutOfGas),
+            -11 => Some(Self::TooManyEvents),
+            -14 => Some(Self::Reentrancy),
+            -15 => Some(Self::CallDepth),
+            -16 => Some(Self::NoCode),
+            -17 => Some(Self::CalleeFailed),
+            _ => None,
         }
     }
 
@@ -227,6 +269,10 @@ impl AbiError {
             Self::Overflow => "overflow",
             Self::OutOfGas => "out_of_gas",
             Self::TooManyEvents => "too_many_events",
+            Self::Reentrancy => "reentrancy",
+            Self::CallDepth => "call_depth",
+            Self::NoCode => "no_code",
+            Self::CalleeFailed => "callee_failed",
         }
     }
 }

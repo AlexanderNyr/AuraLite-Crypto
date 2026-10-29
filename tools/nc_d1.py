@@ -111,33 +111,23 @@ def main() -> int:
         expect_red(
             "NC-1 `aurad` without --chain-id exits 0",
             AURAD,
-            """        Err(e) => {
-            let _ = writeln!(err, "aurad: configuration error: {e}");
-            let _ = writeln!(err, "  the `config` capability lands with D1 (TOML + env + CLI, `chain-id` mandatory)");
-            let _ = writeln!(err, "  pass --chain-id <id>, set AURA_CHAIN_ID, or add chain_id to aurad.toml");
-            return baseline::EXIT_STUB;
-        }""",
-            """        Err(_e) => {
-            return 0;
-        }""",
+            """            return baseline::EXIT_STUB;""",
+            """            return 0;""",
             "binary_without_chain_id_refuses_and_names_d1",
         ),
         expect_red(
             "NC-2 a TOML config with an unknown field is accepted",
             CONFIG,
-            """#[serde(deny_unknown_fields)]
-pub struct TomlConfig {
-    chain_id: Option<String>,
-    data_dir: Option<String>,
-    rpc_addr: Option<String>,
-    validator_key: Option<String>,
-}""",
-            """pub struct TomlConfig {
-    chain_id: Option<String>,
-    data_dir: Option<String>,
-    rpc_addr: Option<String>,
-    validator_key: Option<String>,
-}""",
+            """        for key in table.keys() {
+            if !allowed.contains(&key.as_str()) {
+                return Err(ConfigError::UnknownField(key.clone()));
+            }
+        }""",
+            """        for key in table.keys() {
+            if false {
+                return Err(ConfigError::UnknownField(key.clone()));
+            }
+        }""",
             "config_toml_unknown_field_is_rejected",
         ),
         expect_red(
@@ -165,15 +155,15 @@ pub struct TomlConfig {
         expect_red(
             "NC-5 the refusal stops naming the D1 phase",
             AURAD,
-            """            let _ = writeln!(err, "  the `config` capability lands with D1 (TOML + env + CLI, `chain-id` mandatory)");""",
-            """            let _ = writeln!(err, "  not implemented");""",
+            """the `config` capability lands with D1""",
+            """the `config` capability lands with unknown phase""",
             "binary_without_chain_id_refuses_and_names_d1",
         ),
         expect_red(
             "NC-6 `config::load` accepts a missing chain-id",
             CONFIG,
             """.ok_or(ConfigError::MissingChainId)?""",
-            """.unwrap_or("dummy-chain".to_string())?""",
+            """.unwrap_or("dummy-chain")""",
             "config_chain_id_is_mandatory",
         ),
     ]

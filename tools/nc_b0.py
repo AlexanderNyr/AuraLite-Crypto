@@ -1,196 +1,69 @@
 #!/usr/bin/env python3
-"""Negative controls for B0 (the consensus baseline).
-
-Six tampers, each one a mistake that looks harmless and destroys the claim
-"there is no consensus, and this module measures that claim". Every one of
-them turns a *named* test in `crates/aura-consensus/src/baseline.rs` red — a
-gate that cannot go red is not a gate (CONTRIBUTING.md §1).
-
-  NC-1 the baseline exits 0                             -> consensus looks
-                                                           implemented when it is not.
-  NC-2 every layer is classified `implemented`          -> the baseline stops
-                                                           measuring, and the
-                                                           six consensus
-                                                           components are
-                                                           reported as finished
-                                                           work.
-  NC-3 `report` measures a tree that is not a workspace -> the survey invents
-                                                           numbers for a path
-                                                           that has no crates/
-                                                           directory.
-  NC-4 an unknown command falls through to exit 0       -> a typo looks like
-                                                           success.
-  NC-5 the refusal stops naming the capabilities        -> the reader is told
-                                                           "not implemented"
-                                                           with no phase to
-                                                           follow.
-  NC-6 two different logs are treated as equivalent     -> without consensus,
-                                                           any ordering claim
-                                                           is invalid.
-
-Each control runs one focused test rather than the whole file. A green
-baseline run of the full gate comes first, so a red caused by a broken tree
-can never be mistaken for a successful control.
-
-Usage:
-    python3 tools/nc_b0.py
-    make nc-b0
-"""
-
-from __future__ import annotations
-
-import os
-import re
-import subprocess
+"""Six B0 negative controls against the current consensus baseline."""
 from pathlib import Path
+import sys
 
-REPO = Path(__file__).resolve().parents[1]
-BASELINE = REPO / "crates" / "aura-consensus" / "src" / "baseline.rs"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from nc_rust import run_controls
 
-GATE = ["cargo", "test", "-p", "aura-consensus", "--quiet"]
+BASE = "crates/aura-consensus/src/baseline.rs"
 
-
-def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, check=False)
-
-
-def expect_red(
-    label: str,
-    path: Path,
-    old: str,
-    new: str,
-    test: str | None = None,
-) -> bool:
-    cmd = list(GATE)
-    if test:
-        cmd += ["--test", "baseline", "--exact", test]
-    original = path.read_text(encoding="utf-8")
-    if old not in original:
-        print(f"{label}: FAIL — tamper target not found in {path.name}")
-        return False
-    tampered = original.replace(old, new, 1)
-    if tampered == original:
-        print(f"{label}: FAIL — tamper was a no-op")
-        return False
-    try:
-        path.write_text(tampered, encoding="utf-8")
-        os.utime(path, None)
-        result = run(cmd)
-        went_red = result.returncode != 0
-        shown = test or "the whole gate"
-        raw = "\n".join((result.stdout + result.stderr).strip().splitlines()[-2:])
-        snippet = re.sub(r"finished in [\d.]+s", "finished", raw)
-        print(f"{label}: {'PASS' if went_red else 'FAIL'}")
-        print(
-            f"      {shown} -> rc={result.returncode} "
-            f"({'RED as expected' if went_red else 'UNEXPECTEDLY GREEN'})"
-        )
-        print(f"      {snippet}")
-        return went_red
-    finally:
-        path.write_text(original, encoding="utf-8")
-        os.utime(path, None)
-
-
-def main() -> int:
-    print("B0 NEGATIVE CONTROLS (consensus baseline gate)")
-    print("Rule: a gate that cannot go red is not a gate (CONTRIBUTING.md §1).")
-    print()
-
-    print("baseline: the untampered gate")
-    baseline = run(GATE)
-    print(
-        f"      rc={baseline.returncode} "
-        f"({'GREEN as expected' if baseline.returncode == 0 else 'RED — fix the tree first'})"
-    )
-    if baseline.returncode != 0:
-        tail = "\n".join((baseline.stdout + baseline.stderr).strip().splitlines()[-10:])
-        print(tail)
-        print("RESULT: 0/6 negative controls PASS (baseline is not green)")
-        return 1
-    print()
-
-    results = [
-        expect_red(
-            "NC-1 the baseline exits 0",
-            BASELINE,
-            """    let Some(command) = args.first().map(String::as_str) else {
-        return refuse(err);
-    };""",
-            """    let Some(command) = args.first().map(String::as_str) else {
-        let _ = refuse(err);
-        return 0;
-    };""",
-            "refusal_exits_stub_without_arguments",
-        ),
-        expect_red(
-            "NC-2 every layer is classified `implemented`",
-            BASELINE,
-            """    let presence = if files == 0 {
-        Presence::Missing
-    } else {
-        Presence::Placeholder
-    };""",
-            """    let presence = Presence::Implemented;
-    let _ = (files, public_items);""",
-            "consensus_crate_is_a_placeholder",
-        ),
-        expect_red(
-            "NC-3 `report` measures a tree that is not a workspace",
-            BASELINE,
-            """    if !root.join("crates").is_dir() {""",
-            """    if false {""",
-            "report_refuses_a_tree_that_is_not_a_workspace",
-        ),
-        expect_red(
-            "NC-4 an unknown command falls through to exit 0",
-            BASELINE,
-            """        other => {
-            let _ = writeln!(err, "aura-consensus: unknown command `{other}`.",);
-            let _ = writeln!(err, "{}", usage());
-            EXIT_USAGE
-        }""",
-            """        other => {
-            let _ = writeln!(err, "aura-consensus: unknown command `{other}`.",);
-            let _ = writeln!(err, "{}", usage());
-            let _ = other;
-            0
-        }""",
-            "unknown_command_exits_usage",
-        ),
-        expect_red(
-            "NC-5 the refusal stops naming the capabilities",
-            BASELINE,
-            """    for capability in &MISSING_CAPABILITIES {
+CASES = [
+    (
+        "NC-1 missing arguments must refuse",
+        BASE,
+        "        return refuse(err);",
+        "        return 0;",
+        "baseline::tests::refusal_exits_stub_without_arguments",
+    ),
+    (
+        "NC-2 placeholder consensus layers must remain placeholders",
+        BASE,
+        "else if layer.has_consensus_logic() {",
+        "else if true {",
+        "baseline::tests::b3_implemented_and_placeholders",
+    ),
+    (
+        "NC-3 report must reject non-workspace paths",
+        BASE,
+        '    if !root.join("crates").is_dir() {',
+        "    if false {",
+        "baseline::tests::report_refuses_a_tree_that_is_not_a_workspace",
+    ),
+    (
+        "NC-4 unknown commands must return usage error",
+        BASE,
+        '            let _ = writeln!(err, "{}", usage());\n            EXIT_USAGE',
+        '            let _ = writeln!(err, "{}", usage());\n            0',
+        "baseline::tests::unknown_command_exits_usage",
+    ),
+    (
+        "NC-5 refusal must name every missing capability",
+        BASE,
+        '''    for capability in &MISSING_CAPABILITIES {
         let _ = writeln!(
             text,
             "  {:<14} {:<4} {}",
             capability.name, capability.phase, capability.what
         );
-    }""",
-            """    let _ = &MISSING_CAPABILITIES;""",
-            "refusal_names_every_missing_capability",
-        ),
-        expect_red(
-            "NC-6 two different logs are treated as equivalent",
-            BASELINE,
-            """    fn logs_equivalent(_a: &[&str], _b: &[&str]) -> bool {
-        // No consensus → no equivalence at B0.
+    }''',
+        "    let _ = &MISSING_CAPABILITIES;",
+        "baseline::tests::refusal_names_every_missing_capability",
+    ),
+    (
+        "NC-6 distinct logs must not be equivalent without consensus",
+        BASE,
+        '''    fn logs_equivalent(_a: &[&str], _b: &[&str]) -> bool {
+        // No full consensus → no equivalence at B3.
         false
-    }""",
-            """    fn logs_equivalent(_a: &[&str], _b: &[&str]) -> bool {
-        // No consensus → no equivalence at B0.
+    }''',
+        '''    fn logs_equivalent(_a: &[&str], _b: &[&str]) -> bool {
+        // No full consensus → no equivalence at B1.
         true
-    }""",
-            "two_different_logs_are_not_equivalent",
-        ),
-    ]
-
-    print()
-    passed = sum(results)
-    print(f"RESULT: {passed}/{len(results)} negative controls PASS")
-    return 0 if passed == len(results) else 1
-
+    }''',
+        "baseline::tests::two_different_logs_are_not_equivalent",
+    ),
+]
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(run_controls("B0", CASES))

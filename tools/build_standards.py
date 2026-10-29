@@ -144,8 +144,11 @@ def build_env() -> dict[str, str]:
     env["CARGO_TARGET_DIR"] = str(TARGET)
     env["CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS"] = TARGET_RUSTFLAGS
     env.pop("RUSTFLAGS", None)
-    env.setdefault("CARGO_HOME", str(Path.home() / ".cache" / "aura" / "cargo"))
-    env.setdefault("RUSTUP_HOME", str(Path.home() / ".cache" / "aura" / "rustup"))
+    # Respect an explicit Rust installation, and otherwise use rustup's actual
+    # defaults. Pointing at a fresh private cache makes rustup shims select an
+    # empty toolchain home and fails with E0463 (missing target `core`).
+    env.setdefault("CARGO_HOME", str(Path.home() / ".cargo"))
+    env.setdefault("RUSTUP_HOME", str(Path.home() / ".rustup"))
     env["PATH"] = str(Path(env["CARGO_HOME"]) / "bin") + os.pathsep + env.get("PATH", "")
     return env
 

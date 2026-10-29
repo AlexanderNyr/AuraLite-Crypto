@@ -7,8 +7,13 @@
 //! this repository: `wasmtime`'s Cranelift codegen does not fit in a 2 GB
 //! sandbox and is a separate CI job).
 //!
+//! X6 adds cross-contract calls: a host function that instantiates and runs a
+//! *second* module inside the first. The nested store is a fresh one, so the two
+//! executions cannot share a stack; what they share is the parent's gas, the
+//! frame stack and one rule — a frame commits wholly or not at all.
+//!
 //! The configuration below mirrors [`crate::census::CENSUS`] one row at a time:
-//! floats off, mutable globals off, bulk memory off, reference types off, tail
+//! floats off, reference types off, tail
 //! calls off, multi-memory off, start functions off, strict enforced limits,
 //! fuel on. The feature is enabled with `default-features = false` +
 //! `deterministic` + `std` (see `Cargo.toml`), so SIMD is not even compiled in.
@@ -21,8 +26,11 @@ use wasmi::{
 };
 
 use crate::abi::{self, AbiError, AbiFn, LinearMemory};
-use crate::contract::HostState;
+use crate::abi_v2::{self, Abi2Fn};
+use crate::abi_v3::{self, Abi3Fn};
+use crate::contract::{ContractCall, Executor, HostState, RUN_ENTRY};
 use crate::error::{SandboxError, TrapKind};
+use crate::lifecycle::code_of;
 use crate::limits::SandboxLimits;
 use crate::sandbox::{Engine, Event, Execution, Outcome};
 
@@ -43,6 +51,9 @@ struct State {
     /// Fuel value at the last host-call boundary — the instruction meter is
     /// reset to `gas_left` there, so this is where the current segment starts.
     boundary: u64,
+    /// The sandbox configuration, kept so a nested call can build a child store
+    /// under exactly the same limits as its parent.
+    sandbox: SandboxLimits,
 }
 
 impl State {
@@ -67,6 +78,7 @@ impl State {
             trace: Vec::new(),
             host,
             boundary: limits.fuel,
+            sandbox: *limits,
         }
     }
 }
@@ -106,6 +118,23 @@ impl LinearMemory for GuestMemory<'_, '_> {
 /// bills its own work, then the meter is reset to what is left. One counter,
 /// two consumers — this is what removes the X1 `fuel_used` under-report.
 fn host_abi(caller: &mut Caller<'_, State>, func: AbiFn, args: &[i32]) -> i32 {
+    host_call(caller, args, |host, memory, args| {
+        abi::dispatch(host, memory, func, args)
+    })
+}
+
+/// One ABI v2 (`env2`) call, with the same fuel settlement as v1.
+fn host_abi2(caller: &mut Caller<'_, State>, func: Abi2Fn, args: &[i32]) -> i32 {
+    host_call(caller, args, |host, memory, args| {
+        abi_v2::dispatch(host, memory, func, args)
+    })
+}
+
+fn host_call(
+    caller: &mut Caller<'_, State>,
+    args: &[i32],
+    run: impl FnOnce(&mut HostState, &mut GuestMemory<'_, '_>, &[i32]) -> i32,
+) -> i32 {
     let Some(memory) = caller
         .get_export("memory")
         .and_then(|export| export.into_memory())
@@ -126,7 +155,7 @@ fn host_abi(caller: &mut Caller<'_, State>, func: AbiFn, args: &[i32]) -> i32 {
     // 2. Run the ABI; it bills its own gas into the same view.
     let code = {
         let mut memory = GuestMemory { caller, memory };
-        abi::dispatch(&mut host, &mut memory, func, args)
+        run(&mut host, &mut memory, args)
     };
 
     // 3. Reset the instruction meter to what the call has left.
@@ -136,6 +165,198 @@ fn host_abi(caller: &mut Caller<'_, State>, func: AbiFn, args: &[i32]) -> i32 {
     data.boundary = left;
     data.host = Some(host);
     code
+}
+
+/// One `env3.call`: bill the segment, run the callee, settle the meter.
+///
+/// The callee runs in its own [`Store`], built from the same
+/// [`SandboxLimits`] as this frame — a nested call cannot loosen a limit its
+/// parent was given. The two stores never share a stack, which is what makes the
+/// depth limit meaningful: without it, depth would be the host's stack, and a
+/// hostile contract would find it as a segfault instead of a status code.
+fn host_abi3_call(
+    caller: &mut Caller<'_, State>,
+    addr_ptr: i32,
+    addr_len: i32,
+    data_ptr: i32,
+    data_len: i32,
+    value_lo: i64,
+    value_hi: i64,
+) -> i32 {
+    let Some(memory) = caller
+        .get_export("memory")
+        .and_then(|export| export.into_memory())
+    else {
+        return AbiError::OutOfMemory.code();
+    };
+    let Some(mut host) = caller.data_mut().host.take() else {
+        return AbiError::OutOfMemory.code();
+    };
+    let limits = caller.data().sandbox;
+
+    let current = caller.get_fuel().unwrap_or(0);
+    let boundary = caller.data().boundary;
+    host.settle_instructions(boundary.saturating_sub(current));
+
+    let code = {
+        let mut memory = GuestMemory { caller, memory };
+        nested_call(
+            &mut host,
+            &mut memory,
+            &limits,
+            addr_ptr,
+            addr_len,
+            data_ptr,
+            data_len,
+            value_lo,
+            value_hi,
+        )
+    };
+
+    let left = host.gas_left();
+    let _ = caller.set_fuel(left);
+    let data = caller.data_mut();
+    data.boundary = left;
+    data.host = Some(host);
+    code
+}
+
+/// The body of `env3.call`, engine-independent apart from the child run.
+#[allow(clippy::too_many_arguments)]
+fn nested_call(
+    host: &mut HostState,
+    mem: &mut GuestMemory<'_, '_>,
+    limits: &SandboxLimits,
+    addr_ptr: i32,
+    addr_len: i32,
+    data_ptr: i32,
+    data_len: i32,
+    value_lo: i64,
+    value_hi: i64,
+) -> i32 {
+    let Ok(addr_ptr) = u32::try_from(addr_ptr) else {
+        return AbiError::OutOfMemory.code();
+    };
+    let Ok(addr_len) = u32::try_from(addr_len) else {
+        return AbiError::OutOfMemory.code();
+    };
+    let Ok(data_ptr) = u32::try_from(data_ptr) else {
+        return AbiError::OutOfMemory.code();
+    };
+    let Ok(data_len) = u32::try_from(data_len) else {
+        return AbiError::OutOfMemory.code();
+    };
+    let Some(raw_address) = mem.read(addr_ptr, addr_len) else {
+        return AbiError::OutOfMemory.code();
+    };
+    if raw_address.len() != abi_v2::ADDRESS_LEN {
+        // A 19- or 21-byte "address" is a caller bug, and guessing which byte to
+        // drop would be a way to reach an account the caller did not name.
+        return AbiError::OutOfMemory.code();
+    }
+    let Ok(target) = aura_types::Address::from_slice(&raw_address) else {
+        return AbiError::OutOfMemory.code();
+    };
+    let Some(calldata) = mem.read(data_ptr, data_len) else {
+        return AbiError::OutOfMemory.code();
+    };
+    if calldata.len() > abi_v2::MAX_CALLDATA_LEN {
+        return AbiError::ValueTooLong.code();
+    }
+    let gas = abi_v3::gas_for("call", (raw_address.len() + calldata.len()) as u64).unwrap_or(0);
+    if host.charge(gas).is_err() {
+        return AbiError::OutOfGas.code();
+    }
+    let value = match abi_v3::amount_from_halves(value_lo, value_hi) {
+        Ok(value) => value,
+        Err(error) => return error.code(),
+    };
+    // Policy before code: a refused call must not even reveal whether the target
+    // is a contract.
+    if let Err(error) = abi_v3::admit(&host.frames, &target) {
+        return error.code();
+    }
+    let record = match code_of(&host.view, &target) {
+        Ok(Some(record)) => record,
+        _ => return AbiError::NoCode.code(),
+    };
+    let undo = match host.stage_value(&target, aura_types::Amount::from_units(value)) {
+        Ok(undo) => undo,
+        Err(error) => return error.code(),
+    };
+
+    // The child sees this frame's writes — including the value just staged — and
+    // nothing else: its base is our overlay materialised at our version.
+    let version = host.view.base_version() + 1;
+    let base = host.view.materialize(version);
+    let mut frames = host.frames.clone();
+    frames.push(target);
+    let child_call = ContractCall {
+        contract: target,
+        caller: host.call.contract,
+        block: host.call.block,
+        gas_limit: host.gas_left(),
+    };
+    let Ok(executor) = Executor::with_engine(*limits, WasmiEngine) else {
+        return AbiError::OutOfMemory.code();
+    };
+    let mut session = executor.open(&base, child_call);
+    session.set_frames(frames);
+    if session.set_calldata(calldata).is_err() {
+        if let Some(undo) = undo {
+            host.undo_value(undo);
+        }
+        return AbiError::ValueTooLong.code();
+    }
+    if let Err(error) = session.run(&record.code, RUN_ENTRY, &[]) {
+        if let Some(undo) = undo {
+            host.undo_value(undo);
+        }
+        host.returndata.clear();
+        // A callee the sandbox refused outright is a failed call, not a trap in
+        // this frame: the caller gets `-17` and decides what to do with it.
+        let _ = error;
+        return AbiError::CalleeFailed.code();
+    }
+    let receipt = session.finish();
+    host.calls += 1;
+
+    // Gas is spent either way: a failed callee still ran, and its instructions
+    // were metered by its own store.
+    let charged = host.charge(receipt.gas_used).is_ok();
+    if !charged {
+        host.out_of_gas = true;
+    }
+    if !receipt.status.is_success() {
+        if let Some(undo) = undo {
+            host.undo_value(undo);
+        }
+        host.returndata.clear();
+        if matches!(receipt.status, crate::contract::ExecStatus::OutOfGas) {
+            host.out_of_gas = true;
+            return AbiError::OutOfGas.code();
+        }
+        return AbiError::CalleeFailed.code();
+    }
+    if let Some(diff) = &receipt.diff {
+        host.merge_child(diff);
+    }
+    host.merge_events(&receipt.events);
+    host.returndata = receipt.return_data;
+    if host.out_of_gas {
+        return AbiError::OutOfGas.code();
+    }
+    // A committed callee answers with its own status code, and the caller sees
+    // it: `0` is success, a negative value is the callee's refusal — the X5
+    // standards answer `-6` and `-24`, and a caller must be able to read that.
+    // Anything wider than an `i32` is a status this ABI cannot carry, so it is
+    // clamped to the ABI's own "unknown" answer rather than truncated silently.
+    match receipt.status {
+        crate::contract::ExecStatus::Returned(value) => {
+            i32::try_from(value).unwrap_or(AbiError::CalleeFailed.code())
+        }
+        _ => 0,
+    }
 }
 
 /// Link the whole X2 ABI (`env.*`, version 1) into `linker`.
@@ -160,12 +381,82 @@ fn link_abi(linker: &mut Linker<State>) -> Result<(), SandboxError> {
     wrap!("emit", AbiFn::Emit, a, b, c, d);
     wrap!("hash", AbiFn::Hash, a, b, c);
     wrap!("block_ctx", AbiFn::BlockCtx, a, b);
+
+    // ABI v2 lives in its own module name, so a v1 module is unaffected and a
+    // contract declares which surface it speaks by what it imports.
+    macro_rules! wrap2 {
+        ($name:literal, $func:expr $(, $arg:ident)*) => {
+            linker
+                .func_wrap(
+                    abi_v2::ABI2_MODULE,
+                    $name,
+                    |mut caller: Caller<'_, State>, $($arg: i32),*| -> i32 {
+                        host_abi2(&mut caller, $func, &[$($arg),*])
+                    },
+                )
+                .map_err(SandboxError::instantiate)?;
+        };
+    }
+    macro_rules! wrap3 {
+        ($name:literal, $func:expr $(, $arg:ident)*) => {
+            linker
+                .func_wrap(
+                    abi_v3::ABI3_MODULE,
+                    $name,
+                    |mut caller: Caller<'_, State>, $($arg: i32),*| -> i32 {
+                        host_call(&mut caller, &[$($arg),*], |host, memory, args| {
+                            abi_v3::dispatch(host, memory, $func, args)
+                        })
+                    },
+                )
+                .map_err(SandboxError::instantiate)?;
+        };
+    }
+    wrap2!("calldata_len", Abi2Fn::CalldataLen);
+    wrap2!("calldata_read", Abi2Fn::CalldataRead, a, b);
+    wrap2!("return_write", Abi2Fn::ReturnWrite, a, b);
+    wrap2!("caller", Abi2Fn::Caller, a, b);
+    wrap2!("self_address", Abi2Fn::SelfAddress, a, b);
+    wrap2!("abi_version", Abi2Fn::AbiVersion);
+
+    // ABI v3 (`env3`): the only surface that can re-enter the machine. `call`
+    // takes two `i64` halves for the `u128` value, so it is linked by hand
+    // rather than through the `i32`-only macro above.
+    linker
+        .func_wrap(
+            abi_v3::ABI3_MODULE,
+            "call",
+            |mut caller: Caller<'_, State>,
+             addr_ptr: i32,
+             addr_len: i32,
+             data_ptr: i32,
+             data_len: i32,
+             value_lo: i64,
+             value_hi: i64|
+             -> i32 {
+                host_abi3_call(
+                    &mut caller,
+                    addr_ptr,
+                    addr_len,
+                    data_ptr,
+                    data_len,
+                    value_lo,
+                    value_hi,
+                )
+            },
+        )
+        .map_err(SandboxError::instantiate)?;
+    wrap3!("returndata_len", Abi3Fn::ReturnDataLen);
+    wrap3!("returndata_read", Abi3Fn::ReturnDataRead, a, b);
+    wrap3!("depth", Abi3Fn::Depth);
     Ok(())
 }
 
-/// Reject every import that is not part of ABI v1.
+/// Reject every import that is not part of ABI v1, v2 or v3.
 ///
-/// X1 refused *all* imports; X2 refuses every import it cannot account for.
+/// X1 refused *all* imports; X2 refuses every import it cannot account for, and
+/// X5 adds the `env2` surface and X6 the `env3` one — three closed lists,
+/// checked the same way.
 /// The set is closed and named: an unknown `env.*` name, a different module, a
 /// memory or a global import — all of them are refusal, not a link failure that
 /// a later phase could paper over.
@@ -173,9 +464,11 @@ fn check_imports(module: &Module) -> Result<usize, SandboxError> {
     let mut allowed = 0usize;
     for import in module.imports() {
         let name = import.name();
-        let ok = import.module() == abi::ABI_MODULE
-            && AbiFn::from_name(name).is_some()
-            && matches!(import.ty(), wasmi::ExternType::Func(_));
+        let func_import = matches!(import.ty(), wasmi::ExternType::Func(_));
+        let ok = func_import
+            && ((import.module() == abi::ABI_MODULE && AbiFn::from_name(name).is_some())
+                || (import.module() == abi_v2::ABI2_MODULE && Abi2Fn::from_name(name).is_some())
+                || (import.module() == abi_v3::ABI3_MODULE && Abi3Fn::from_name(name).is_some()));
         if !ok {
             return Err(SandboxError::ImportsNotAllowed {
                 count: allowed + 1,
@@ -209,11 +502,19 @@ fn map_trap(code: TrapCode) -> TrapKind {
 fn engine_config(limits: &SandboxLimits) -> Config {
     let mut config = Config::default();
     config
-        // determinism: no floats anywhere, no threads, no bulk helpers
+        // determinism: no floats anywhere, no threads.
+        //
+        // Mutable globals and bulk memory are **enabled** because the engine
+        // mirrors the *hosted* policy: `memory.copy`/`memory.fill` are exactly
+        // specified byte moves, and a module-level mutable global is private to
+        // one instantiation (reset on every call). What is allowed is decided by
+        // the X0 census, which runs before the engine and is what X4 relaxed —
+        // the engine flag only stops a valid module from being rejected after
+        // the census accepted it.
         .floats(false)
-        .wasm_mutable_global(false)
-        .wasm_bulk_memory(false)
-        .wasm_reference_types(false)
+        .wasm_mutable_global(true)
+        .wasm_bulk_memory(true)
+        .wasm_reference_types(true)
         .wasm_tail_call(false)
         .wasm_multi_memory(false)
         .wasm_extended_const(false)

@@ -1,199 +1,71 @@
 #!/usr/bin/env python3
-"""Negative controls for B2 (the QC / BLS aggregation phase).
-
-Six tampers, each one a mistake that looks harmless and destroys the claim
-"B2 lands QC / BLS aggregation; three capabilities remain missing".
-Every one of them turns a *named* test in `crates/aura-consensus/src/baseline.rs`
-red — a gate that cannot go red is not a gate (CONTRIBUTING.md §1).
-
-  NC-1 the baseline exits 0                            -> consensus looks
-                                                           implemented when it is not.
-  NC-2 every layer is classified `implemented`          -> the baseline stops
-                                                           measuring, and the
-                                                           three B3-B5 layers are
-                                                           reported as finished work.
-  NC-3 `report` measures a tree that is not a workspace -> the survey invents
-                                                           numbers for a path
-                                                           that has no crates/
-                                                           directory.
-  NC-4 an unknown command falls through to exit 0       -> a typo looks like
-                                                           success.
-  NC-5 the refusal stops naming the capabilities        -> the reader is told
-                                                           "not implemented"
-                                                           with no phase to
-                                                           follow.
-  NC-6 two different logs are treated as equivalent     -> without full
-                                                           consensus, any
-                                                           ordering claim is
-                                                           invalid.
-
-Each control runs one focused test rather than the whole file. A green
-baseline run of the full gate comes first, so a red caused by a broken tree
-can never be mistaken for a successful control.
-
-Usage:
-    python3 tools/nc_b2.py
-    make nc-b2
-"""
-
-from __future__ import annotations
-
-import os
-import re
-import subprocess
+"""Six B2 negative controls for QC aggregation and BLS verification."""
 from pathlib import Path
+import sys
 
-REPO = Path(__file__).resolve().parents[1]
-BASELINE = REPO / "crates" / "aura-consensus" / "src" / "baseline.rs"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from nc_rust import run_controls
 
-GATE = ["cargo", "test", "-p", "aura-consensus", "--quiet"]
-
-
-def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, check=False)
-
-
-def expect_red(
-    label: str,
-    path: Path,
-    old: str,
-    new: str,
-    test: str | None = None,
-) -> bool:
-    cmd = list(GATE)
-    if test:
-        cmd += ["--test", "baseline", "--exact", test]
-    original = path.read_text(encoding="utf-8")
-    if old not in original:
-        print(f"{label}: FAIL — tamper target not found in {path.name}")
-        return False
-    tampered = original.replace(old, new, 1)
-    if tampered == original:
-        print(f"{label}: FAIL — tamper was a no-op")
-        return False
-    try:
-        path.write_text(tampered, encoding="utf-8")
-        os.utime(path, None)
-        result = run(cmd)
-        went_red = result.returncode != 0
-        shown = test or "the whole gate"
-        raw = "\n".join((result.stdout + result.stderr).strip().splitlines()[-2:])
-        snippet = re.sub(r"finished in [\d.]+s", "finished", raw)
-        print(f"{label}: {'PASS' if went_red else 'FAIL'}")
-        print(
-            f"      {shown} -> rc={result.returncode} "
-            f"({'RED as expected' if went_red else 'UNEXPECTEDLY GREEN'})"
-        )
-        print(f"      {snippet}")
-        return went_red
-    finally:
-        path.write_text(original, encoding="utf-8")
-        os.utime(path, None)
-
-
-def main() -> int:
-    print("B2 NEGATIVE CONTROLS (QC / BLS aggregation gate)")
-    print("Rule: a gate that cannot go red is not a gate (CONTRIBUTING.md §1).")
-    print()
-
-    print("baseline: the untampered gate")
-    baseline = run(GATE)
-    print(
-        f"      rc={baseline.returncode} "
-        f"({'GREEN as expected' if baseline.returncode == 0 else 'RED — fix the tree first'})"
-    )
-    if baseline.returncode != 0:
-        tail = "\n".join((baseline.stdout + baseline.stderr).strip().splitlines()[-10:])
-        print(tail)
-        print("RESULT: 0/6 negative controls PASS (baseline is not green)")
-        return 1
-    print()
-
-    results = [
-        expect_red(
-            "NC-1 the baseline exits 0",
-            BASELINE,
-            """    let Some(command) = args.first().map(String::as_str) else {
-        return refuse(err);
-    };""",
-            """    let Some(command) = args.first().map(String::as_str) else {
-        let _ = refuse(err);
-        return 0;
-    };""",
-            "refusal_exits_stub_without_arguments",
+QC = "crates/aura-consensus/src/qc.rs"
+BLS = "crates/aura-consensus/src/bls.rs"
+VERIFY_DIGEST = '''    let digest = hash_domain(chain_id, domain, message);
+    let dst = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_";'''
+CASES = [
+    (
+        "NC-1 quorum threshold must be 2f+1",
+        QC,
+        "2 * f + 1",
+        "2 * f",
+        "qc::tests::quorum_threshold_basic",
+    ),
+    (
+        "NC-2 duplicate validators must not add a second vote",
+        QC,
+        '''        if self.votes.contains_key(&vote.validator) {
+            return None;
+        }
+''',
+        "",
+        "qc::tests::aggregator_ignores_duplicate_validator",
+    ),
+    (
+        "NC-3 an aggregator must form a QC at its threshold",
+        QC,
+        "self.votes.len() as u64 >= self.threshold",
+        "self.votes.len() as u64 > self.threshold",
+        "qc::tests::aggregator_reaches_quorum",
+    ),
+    (
+        "NC-4 BLS signatures must be chain separated",
+        BLS,
+        VERIFY_DIGEST,
+        VERIFY_DIGEST.replace(
+            "hash_domain(chain_id, domain, message)",
+            'hash_domain("auralite-test-1", domain, message)',
         ),
-        expect_red(
-            "NC-2 every layer is classified `implemented`",
-            BASELINE,
-            """    // B2: proposer, block-signature, and qc have real consensus modules;
-    // finality, validator-set, vrf-leader are still placeholders.
-    let presence = if files == 0 {
-        Presence::Missing
-    } else if layer.has_consensus_logic() {
-        Presence::Implemented
-    } else {
-        Presence::Placeholder
-    };""",
-            """    let presence = Presence::Implemented;
-    let _ = (files, layer);""",
-            "b2_implemented_and_placeholders",
+        "bls::tests::wrong_chain_id_fails",
+    ),
+    (
+        "NC-5 BLS signatures must be domain separated",
+        BLS,
+        VERIFY_DIGEST,
+        VERIFY_DIGEST.replace(
+            "hash_domain(chain_id, domain, message)",
+            "hash_domain(chain_id, Domain::Vote, message)",
         ),
-        expect_red(
-            "NC-3 `report` measures a tree that is not a workspace",
-            BASELINE,
-            """    if !root.join("crates").is_dir() {""",
-            """    if false {""",
-            "report_refuses_a_tree_that_is_not_a_workspace",
+        "bls::tests::wrong_domain_fails",
+    ),
+    (
+        "NC-6 BLS verification must bind the vote message",
+        BLS,
+        VERIFY_DIGEST,
+        VERIFY_DIGEST.replace(
+            "hash_domain(chain_id, domain, message)",
+            'hash_domain(chain_id, domain, b"original")',
         ),
-        expect_red(
-            "NC-4 an unknown command falls through to exit 0",
-            BASELINE,
-            """        other => {
-            let _ = writeln!(err, "aura-consensus: unknown command `{other}`.",);
-            let _ = writeln!(err, "{}", usage());
-            EXIT_USAGE
-        }""",
-            """        other => {
-            let _ = writeln!(err, "aura-consensus: unknown command `{other}`.",);
-            let _ = writeln!(err, "{}", usage());
-            let _ = other;
-            0
-        }""",
-            "unknown_command_exits_usage",
-        ),
-        expect_red(
-            "NC-5 the refusal stops naming the capabilities",
-            BASELINE,
-            """    for capability in &MISSING_CAPABILITIES {
-        let _ = writeln!(
-            text,
-            "  {:<14} {:<4} {}",
-            capability.name, capability.phase, capability.what
-        );
-    }""",
-            """    let _ = &MISSING_CAPABILITIES;""",
-            "refusal_names_every_missing_capability",
-        ),
-        expect_red(
-            "NC-6 two different logs are treated as equivalent",
-            BASELINE,
-            """    fn logs_equivalent(_a: &[&str], _b: &[&str]) -> bool {
-        // No full consensus → no equivalence at B2.
-        false
-    }""",
-            """    fn logs_equivalent(_a: &[&str], _b: &[&str]) -> bool {
-        // No full consensus → no equivalence at B2.
-        true
-    }""",
-            "two_different_logs_are_not_equivalent",
-        ),
-    ]
-
-    print()
-    passed = sum(results)
-    print(f"RESULT: {passed}/{len(results)} negative controls PASS")
-    return 0 if passed == len(results) else 1
-
+        "bls::tests::tampered_message_fails",
+    ),
+]
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(run_controls("B2", CASES))

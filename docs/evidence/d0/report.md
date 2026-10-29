@@ -1,6 +1,6 @@
 # D0 baseline — the libraries exist, the node does not (measured)
 
-Generated (UTC): 2026-10-29T11:31:54+00:00. Every number below came out of `aurad report` in this
+Generated (UTC): 2026-10-29T19:21:16+00:00. Every number below came out of `aurad report` in this
 tree; `gates.txt` holds the raw command output, and
 `crates/aura-node/tests/fixtures/d0_baseline.txt` pins the same survey so it
 cannot drift silently.
@@ -44,12 +44,12 @@ every later script, CI job and demo lie.
 | `aura-storage` | S2 | implemented |
 | `aura-genesis` | C8 | implemented |
 | `aura-exec` | X1 | implemented |
-| `aura-consensus` | B1 | placeholder |
+| `aura-consensus` | B1 | implemented |
 | `aura-p2p` | N1 | placeholder |
 | `aura-mempool` | D3 | placeholder |
 | `aura-rpc` | D4 | placeholder |
 
-**9 implemented, 4 placeholders, 0 missing.**
+**10 implemented, 3 placeholders, 0 missing.**
 "Placeholder" is not a claim, it is a measurement: the crate's sources declare
 no public item at all, which is the C0 skeleton convention (an empty crate is
 honest; a fake `Ok(())` is not). Four libraries are still in that state.
@@ -58,8 +58,6 @@ honest; a fake `Ok(())` is not). Four libraries are still in that state.
 
 | capability | phase | what it will do |
 |---|---|---|
-| `config` | D1 | TOML + env + CLI, validated at startup, `chain-id` mandatory |
-| `lifecycle` | D1 | tracing, graceful shutdown, signals, PID file, health probe |
 | `tx-pipeline` | D2 | rpc -> mempool -> exec -> block -> consensus -> storage -> event |
 | `mempool` | D3 | nonce/balance/gas admission, `effective_tip` priority, eviction |
 | `json-rpc` | D4 | `submit_tx`, `get_balance`, `get_tx`, `get_block`, `call`, `estimate_gas`, `subscribe` |
@@ -116,5 +114,5 @@ broken tree can never be mistaken for a successful control.
 
 6/6 PASS; total **165** across C0–C10 + S0–S7 + X0–X8 + D0.
 
-Tests: **374** in the workspace, 15 of them in the D0 gate.
+Tests: **453** in the workspace, 38 of them in the D0 gate.
 Validators / blocks / transactions remain **0 / 0 / 0**.
