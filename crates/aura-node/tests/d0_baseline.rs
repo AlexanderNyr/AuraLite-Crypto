@@ -73,7 +73,7 @@ fn stub_refuses_without_arguments() {
         out.is_empty(),
         "the refusal belongs on stderr, got stdout {out:?}"
     );
-    assert!(err.contains("the node does not exist") || err.contains("the node does not"));
+    assert!(err.contains("missing capabilities"));
     assert!(
         err.contains("D0 baseline"),
         "the phase must be named: {err}"
@@ -171,8 +171,8 @@ fn help_and_version_succeed_and_are_documented() {
         "the version names the phase: {out}"
     );
     assert!(
-        out.contains("does not exist"),
-        "the version must not imply a node: {out}"
+        out.contains("historical baseline survey"),
+        "the baseline command identifies its historical role: {out}"
     );
 }
 
@@ -217,8 +217,8 @@ fn report_measures_this_tree() {
     assert!(out.contains("aura-exec"), "{out}");
     assert!(out.contains("implemented"), "{out}");
     assert!(
-        out.contains("node capabilities present: 0 of 7"),
-        "the report must state the node is absent:\n{out}"
+        out.contains("node capabilities present: 4 of 8"),
+        "the report must distinguish implemented from future node layers:\n{out}"
     );
 }
 
@@ -269,13 +269,13 @@ fn the_unlanded_layers_are_still_placeholders() {
     let measured = survey(&repo_root());
     assert_eq!(
         measured.placeholder_names(),
-        vec!["aura-p2p", "aura-mempool", "aura-rpc"],
+        vec!["aura-p2p"],
         "a placeholder grew public API without the plan being updated"
     );
     for entry in &measured.layers {
         let phase = entry.layer.phase;
         let is_placeholder = entry.presence == Presence::Placeholder;
-        if matches!(phase, "N1" | "D3" | "D4") {
+        if phase == "N1" {
             assert!(
                 is_placeholder,
                 "{} must still be a placeholder at D0",

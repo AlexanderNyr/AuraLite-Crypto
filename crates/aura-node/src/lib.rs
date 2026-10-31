@@ -5,3 +5,6 @@
 pub mod baseline;
 pub mod config;
 pub mod lifecycle;
+pub mod observability;
+pub mod pipeline;
+pub mod rpc;

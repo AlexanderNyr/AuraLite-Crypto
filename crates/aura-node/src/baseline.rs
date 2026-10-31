@@ -1,14 +1,12 @@
-//! D0 baseline — **the node does not exist**, and this module measures that claim
-//! instead of asserting it.
+//! D0 baseline survey — a historical starting-point measurement retained and
+//! regenerated as the node grows through later phases.
 //!
-//! # What D0 is
+//! # What D0 measured
 //!
-//! `NODE_PLAN` starts by measuring the gap it has to close. Fifteen phases of
-//! libraries exist (`aura-types` … `aura-exec`); what does not exist is a process
-//! that composes them: no config loader, no mempool, no block production, no RPC,
-//! no devnet. The honest artifact is therefore *not* a node that starts and
-//! pretends — it is a binary that refuses, names the phase that will fix each
-//! missing capability, and reports **measured** numbers about what is in the tree.
+//! At D0, `NODE_PLAN` measured the gap before a process existed: no config loader,
+//! mempool, block production, RPC or devnet. That receipt is immutable historical
+//! evidence. The live survey remains useful as crates gain APIs, but current node
+//! behavior is owned by `aurad` and the D1-D4 libraries.
 //!
 //! # Why the stub refuses
 //!
@@ -51,6 +49,11 @@ pub const EXIT_NO_WORKSPACE: i32 = 3;
 /// Exit code of a usage error (sysexits `EX_USAGE`).
 pub const EXIT_USAGE: i32 = 64;
 
+/// D1-D4 node capabilities currently implemented.
+pub const IMPLEMENTED_NODE_CAPABILITIES: usize = 4;
+/// Planned D1-D8 node capabilities in the local node roadmap.
+pub const TOTAL_NODE_CAPABILITIES: usize = 8;
+
 /// One library layer the node will have to compose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Layer {
@@ -67,8 +70,8 @@ pub struct Layer {
 /// Every library layer the node composes, in dependency order.
 ///
 /// The node crate itself is deliberately not in this list: `aura-node` is the
-/// composer, not a layer, and at D0 it contains this module plus the stub binary.
-pub const LAYERS: [Layer; 13] = [
+/// composer, not a library layer. At D0 it contained this module and a stub binary.
+pub const LAYERS: [Layer; 14] = [
     Layer {
         name: "aura-types",
         dir: "aura-types",
@@ -126,8 +129,8 @@ pub const LAYERS: [Layer; 13] = [
     Layer {
         name: "aura-consensus",
         dir: "aura-consensus",
-        phase: "B1",
-        what: "BFT-PoS with VRF, 2f+1 QC",
+        phase: "B3",
+        what: "BLS/QC and three-chain BFT finality; validator set and VRF remain open",
     },
     Layer {
         name: "aura-p2p",
@@ -145,7 +148,13 @@ pub const LAYERS: [Layer; 13] = [
         name: "aura-rpc",
         dir: "aura-rpc",
         phase: "D4",
-        what: "JSON-RPC 2.0, gRPC, REST",
+        what: "JSON-RPC 2.0 over HTTP/WebSocket",
+    },
+    Layer {
+        name: "aura-grpc-rest",
+        dir: "aura-grpc-rest",
+        phase: "D5",
+        what: "protobuf gRPC, versioned REST gateway and OpenAPI",
     },
 ];
 
@@ -160,37 +169,13 @@ pub struct Capability {
     pub what: &'static str,
 }
 
-/// The seven capabilities a node still needs after D1.
+/// The two capabilities still absent after the D6 observability phase.
 ///
-/// `config` and `lifecycle` land with D1 (this file), so they are no longer
-/// missing — `aurad` loads configuration, initialises tracing, writes a PID
-/// file and shuts down on signal. Everything below is D2+.
-pub const MISSING_CAPABILITIES: [Capability; 7] = [
-    Capability {
-        name: "tx-pipeline",
-        phase: "D2",
-        what: "rpc -> mempool -> exec -> block -> consensus -> storage -> event",
-    },
-    Capability {
-        name: "mempool",
-        phase: "D3",
-        what: "nonce/balance/gas admission, `effective_tip` priority, eviction",
-    },
-    Capability {
-        name: "json-rpc",
-        phase: "D4",
-        what: "`submit_tx`, `get_balance`, `get_tx`, `get_block`, `call`, `estimate_gas`, `subscribe`",
-    },
-    Capability {
-        name: "grpc-rest",
-        phase: "D5",
-        what: "protobuf schema, gateway, OpenAPI, versioning",
-    },
-    Capability {
-        name: "metrics",
-        phase: "D6",
-        what: "Prometheus, `/health`, `/metrics`, OpenTelemetry traces",
-    },
+/// D1 supplies config/lifecycle, D2 the in-process transfer pipeline, D3 the
+/// bounded mempool, D4 JSON-RPC, D5 versioned REST and protobuf gRPC, and D6
+/// health/metrics plus structured logs and optional OTLP traces. The
+/// multi-validator devnet remains later work.
+pub const MISSING_CAPABILITIES: [Capability; 2] = [
     Capability {
         name: "devnet",
         phase: "D7",
@@ -442,7 +427,7 @@ pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
         "--version" | "-V" => {
             let _ = writeln!(
                 out,
-                "aurad {} ({} baseline — the node does not exist)",
+                "aurad {} ({} historical baseline survey)",
                 env!("CARGO_PKG_VERSION"),
                 PHASE
             );
@@ -527,8 +512,9 @@ pub fn report(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 
     );
     let _ = writeln!(
         out,
-        "node capabilities present: 0 of {} — {}",
-        MISSING_CAPABILITIES.len(),
+        "node capabilities present: {} of {} — future work: {}",
+        IMPLEMENTED_NODE_CAPABILITIES,
+        TOTAL_NODE_CAPABILITIES,
         MISSING_CAPABILITIES
             .iter()
             .map(|entry| entry.phase)
@@ -586,8 +572,10 @@ fn refuse(err: &mut dyn Write) -> i32 {
 /// The refusal text: what is missing, and which phase adds it.
 fn refusal_lines() -> String {
     let mut text = String::new();
-    text.push_str("aurad — the AuraLite-Crypto node. This binary is the D0 baseline:\n");
-    text.push_str("the libraries exist, the node does not.\n\n");
+    text.push_str(
+        "aurad — AuraLite-Crypto local node. This is the D0 baseline refusal template:\n",
+    );
+    text.push_str("D1-D4 are implemented; the following roadmap capabilities remain:\n\n");
     text.push_str("missing capabilities:\n");
     for capability in &MISSING_CAPABILITIES {
         let _ = writeln!(
@@ -614,7 +602,7 @@ fn usage() -> String {
          \x20 aurad --help                      this text\n\
          \x20 aurad --version                   version and phase\n\
          \n\
-         running the node is not possible yet: {} capabilities are missing ({}..{}).\n\
+         the local node implements D1-D4; {} roadmap capabilities remain ({}..{}).\n\
          exit codes: {} = node not implemented, {} = not a workspace, {} = usage error.",
         env!("CARGO_PKG_VERSION"),
         PHASE,
@@ -660,5 +648,75 @@ mod tests {
         assert!(!declares_public_item("#![deny(missing_docs)]"));
         assert!(declares_public_item("pub fn run() {}"));
         assert!(declares_public_item("    pub struct Thing;"));
+    }
+
+    #[test]
+    fn stub_refuses_without_arguments() {
+        let (code, out, err) = run(&[]);
+        assert_eq!(code, EXIT_STUB);
+        assert!(out.is_empty());
+        assert!(err.contains("missing capabilities"));
+    }
+
+    #[test]
+    fn the_unlanded_layers_are_still_placeholders() {
+        let measured = survey(&default_root());
+        assert_eq!(measured.placeholder_names(), vec!["aura-p2p"]);
+        assert_eq!(measured.implemented(), 13);
+        assert_eq!(measured.placeholders(), 1);
+        assert_eq!(measured.missing(), 0);
+    }
+
+    #[test]
+    fn report_refuses_a_tree_that_is_not_a_workspace() {
+        let (code, out, err) = run(&["report", "--workspace", "/nonexistent-auralite"]);
+        assert_eq!(code, EXIT_NO_WORKSPACE);
+        assert!(out.is_empty());
+        assert!(err.contains("is not a workspace"));
+    }
+
+    #[test]
+    fn unknown_command_is_a_usage_error() {
+        let (code, _, err) = run(&["serve"]);
+        assert_eq!(code, EXIT_USAGE);
+        assert!(err.contains("unknown command `serve`"));
+    }
+
+    #[test]
+    fn refusal_names_every_missing_capability() {
+        let (code, _, err) = run(&["--chain-id", "test"]);
+        assert_eq!(code, EXIT_STUB);
+        for capability in &MISSING_CAPABILITIES {
+            assert!(
+                err.contains(capability.name),
+                "{} missing in {err}",
+                capability.name
+            );
+            assert!(
+                err.contains(capability.phase),
+                "{} missing in {err}",
+                capability.phase
+            );
+        }
+    }
+
+    #[test]
+    fn node_flag_is_a_capability_refusal() {
+        let (code, _, err) = run(&["--config", "aurad.toml"]);
+        assert_eq!(code, EXIT_STUB);
+        assert!(err.contains("config"));
+        assert!(err.contains("D1"));
+    }
+
+    fn run(args: &[&str]) -> (i32, String, String) {
+        let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = super::run(&args, &mut out, &mut err);
+        (
+            code,
+            String::from_utf8_lossy(&out).into_owned(),
+            String::from_utf8_lossy(&err).into_owned(),
+        )
     }
 }

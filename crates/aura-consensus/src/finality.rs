@@ -421,7 +421,16 @@ impl FinalityEngine {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
+        self.propose_at(timestamp_ms, transactions)
+    }
 
+    /// Propose at a caller-supplied deterministic timestamp.
+    ///
+    /// Nodes replaying the same block must supply the same timestamp; this
+    /// entry point lets the transaction pipeline use the timestamp already
+    /// committed by its canonical block header instead of consulting a local
+    /// wall clock.
+    pub fn propose_at(&mut self, timestamp_ms: u64, transactions: Vec<Vec<u8>>) -> FinalityBlock {
         let block = if transactions.is_empty() {
             FinalityBlock::propose_nil(
                 self.view_change.view,

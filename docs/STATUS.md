@@ -55,18 +55,16 @@ events chain — the decisive M0 gate, and X8 ✅
 (`patches/0028-X8-static-verifier.patch`) closes the subset statically: 22 stable
 refusal codes, 100 golden mutants from an independent mutator, every one refused
 with the code its damage deserves and every shipped artifact accepted.
-**Stage 1 (X0–X8) is complete.** D0 ✅ (`patches/0029-D0-node-baseline.patch`) opens
-**NODE_PLAN** with a measurement rather than a feature: the libraries exist, the node
-does not, and `aurad` refuses to pretend otherwise (exit 2, every missing capability
-named with the phase that owes it). D1 ✅
-(`patches/0030-D1-aurad-skeleton.patch`) lands the node skeleton: config, tracing,
-signals, graceful shutdown. B0 ✅
-(`patches/0031-B0-consensus-baseline.patch`) measures that no consensus exists
+**Stage 1 (X0–X8) is complete.** D0 ✅ (`patches/0029-D0-node-baseline.patch`)
+remains the historical starting survey. D1 ✅ (`patches/0030-D1-aurad-skeleton.patch`)
+introduced config, tracing and lifecycle; D2/D3 then supplied the transfer pipeline
+and bounded mempool; D4 adds JSON-RPC over HTTP/WebSocket and runs the local
+one-validator composition. Multi-validator devnet still depends on **N (network)**
+and later validator-set work. B0 ✅
+(`patches/0031-B0-consensus-baseline.patch`) measures the original consensus gap
 (exit 2, six missing capabilities named with B1–B5). **B1 ✅**
-(`patches/0032-B1-poa-proposer.patch`) lands the first real consensus code:
-deterministic round-robin proposer + Ed25519 block signature — 2 implemented,
-4 placeholders in `aura-consensus`. Next in dependency order: B2 (QC/BLS),
-then D2/D7 additionally need **B (consensus)** and **N (network)**.
+(`patches/0032-B1-poa-proposer.patch`) lands deterministic round-robin proposer +
+Ed25519 block signature — 2 implemented, 4 placeholders in `aura-consensus`.
 ⏸ X9 (EVM lane), W/E/T/H/P/O remain out of scope for now.
 
 ## Maturity level
@@ -104,28 +102,19 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
   ⚠️ AUDIT: the §3 crate graph in `docs/ARCHITECTURE.md` had a cycle
   (`aura-state <- aura-storage` while `aura-storage <- aura-state`); S3
   corrected it to match the real `Cargo.toml` edges.
-- **D0 (current).** `NODE_PLAN` opens with the measurement the other plans started
-  with: **the libraries exist, the node does not.** `aura_node::baseline` surveys
-  `crates/<layer>/src` — files, lines, public item declarations — and classifies each
-  of thirteen layers as `implemented`, `placeholder` or `missing`: measured now **9
-  implemented, 4 placeholders, 0 missing**, the placeholders being `aura-consensus`
-  (B1), `aura-p2p` (N1), `aura-mempool` (D3) and `aura-rpc` (D4), which declare no
-  public item at all. The `aurad` binary ships **the opposite of a fake node**: no
-  arguments → exit **2** with all nine missing capabilities and their phases;
-  `--config`/`--chain-id`/`--data-dir`/`--rpc-addr`/`--validator-key` → recognised and
-  refused the same way; an unknown command → exit **64**; `report` measures the tree
-  and exits **3** when there is no workspace; `--version` says
-  `(D0 baseline — the node does not exist)`. The survey is pinned in
-  `crates/aura-node/tests/fixtures/d0_baseline.txt` from the binary's own
-  `report --fixture` output, so landing consensus code fails the build until the plan
-  and the fixture move together. 15 tests in the D0 gate, 374 in the workspace, 4 857
-  vectors, 165 NC. Report: `docs/evidence/d0/report.md`; doc: [`NODE.md`](NODE.md).
+- **D0 baseline (refreshed at D5).** D0's evidence remains the historical
+  measurement of the original stub; the live survey now measures **13 implemented,
+  1 placeholder, 0 missing** across fourteen layers. Only `aura-p2p` (N1) has no
+  public items. The refusal template lists the three remaining D6–D8 capabilities.
+  D0's original receipt and 165-control cumulative inventory remain in
+  `docs/evidence/d0/`; the project-wide D5 inventory totals 219 NCs. The current
+  fixture is generated from `aurad report --fixture`. Historical report:
+  `docs/evidence/d0/report.md`; current node doc: [`NODE.md`](NODE.md).
   ⚠️ AUDIT: **a static count is not an audit** — "implemented" says nothing about
-  correctness (that is what the other 28 phases' gates measure), and the survey trusts
-  `crates/<dir>/src` to exist. Nothing here starts a process, binds a port or parses a
-  config file, on purpose: a node that opens a socket before D1 owns shutdown leaks a
-  socket on every failed start. **M0 still needs B (consensus), N (network) and the
-  rest of D.**
+  correctness (that is what the other phases' gates measure), and the survey trusts
+  `crates/<dir>/src` to exist. D0 itself did not start a process or bind a port;
+  D1 later added a process shell. D4 supplies local RPC; M0 still needs N (network)
+  and the remaining D phases.
 - **X8.** The subset is now **enforced, not just documented**.
   `aura_exec::verify` is a pure function over bytes — no engine, no execution — that
   answers with a `Report`: verdict, size, functions, instructions, peak stack depth,
@@ -456,11 +445,11 @@ standards (X5)                    -> ABI v2 (env2), ARC-20/ARC-721/ARC-M1, 41 22
 call isolation (X6)               -> ABI v3 (env3), depth 8, no re-entry, 30 459 B, 15 tests, attacker gets 1 attempt
 determinism (X7)                  -> 1 004 steps, 8 processes, 3 build configs, one state_root, gas 46 375 290
 static verifier (X8)              -> 100 mutants / 15 kinds, 0 mismatches, 6/6 artifacts accepted (peak stack 7, peak body 630)
-node baseline (D0)                -> aurad exits 2 and names 9 missing capabilities; 9 layers implemented, 4 placeholders, 0 missing
+node baseline (D0 historical)     -> original stub survey; live D4 survey: 12 layers implemented, 1 placeholder
 consensus baseline (B0)           -> aura-consensus exits 2 and names 6 missing capabilities; 0 implemented, 6 placeholders, 0 missing
 consensus PoA (B1)                -> aura-consensus: 2 implemented, 4 placeholders, 0 missing; 22 unit tests; 6/6 NC
 gas (X2)                          -> 1 fuel = 1 gas; out-of-gas burns the whole budget, root unchanged
-validators / blocks / tx          -> 0 / 0 / 0
+distributed validators / P2P peers -> 0 / 0; local D4 node produces native-transfer blocks
 ```
 
 Pre-C0 baseline and post-C0/C1/C2/C3/C4/C5/C6/C7/C8/C9/C10/S0/S1/S2
@@ -483,10 +472,15 @@ numbers with raw command output are in `docs/evidence/c0-baseline.txt`,
   migration (H2), no `cargo deny` (H1). The decisive determinism gate (X7) and the
   static verifier (X8) are shipped, but **M0 still needs the D-phase node**, and the
   three-OS determinism matrix is still a CI job that has never run.
-- No consensus (B1), no P2P (N1), no mempool (D3), no RPC (D4): the four layer
-  crates are empty placeholders, measured by `aurad report` and pinned in D0's gate.
-- No node **process**: `aurad` is a refusal plus a survey; nothing starts, serves or
-  shuts down until D1.
+- Consensus baseline/finality (B1–B3), bounded mempool (D3), JSON-RPC 2.0
+  over HTTP/WebSocket (D4), versioned REST/protobuf gRPC (D5), and D6
+  Prometheus/health/structured logs/optional OTLP traces are present. P2P
+  transport (N1), multi-validator devnet (D7) and full CLI (D8) remain.
+  The D0 capability report is retained as historical baseline evidence.
+- The current `aurad` process starts a local one-validator transaction pipeline
+  and RPC server, but has no default funded genesis accounts, persistent block
+  index or distributed network. `call` is explicitly unsupported until contract
+  transaction dispatch lands.
 - No wallet, explorer, contracts, token.
 - No audit, no bug bounty, no legal opinion.
 - No users and no validators.

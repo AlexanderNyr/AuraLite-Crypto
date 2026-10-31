@@ -124,7 +124,7 @@ fn read_head_file(dir: &Path) -> Result<Head, StorageError> {
 }
 
 /// Interface every state backend must implement.
-pub trait StateBackend {
+pub trait StateBackend: Send {
     /// Read and verify the published head.
     fn read_head(&self) -> Result<Head, StorageError>;
     /// Rebuild materialised state from WAL records `1..=upto`.

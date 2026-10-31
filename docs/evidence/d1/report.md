@@ -1,6 +1,6 @@
 # D1 skeleton — aurad starts, traces, writes a PID file, shuts down (measured)
 
-Generated (UTC): 2026-10-29T12:44:24+00:00. Every number below came out of `aurad` in this
+Generated (UTC): 2026-10-29T20:16:55+00:00. Every number below came out of `aurad` in this
 tree; `gates.txt` holds the raw command output, and
 `crates/aura-node/tests/fixtures/d1_skeleton.txt` pins the same survey so it
 cannot drift silently.
@@ -37,18 +37,17 @@ cannot drift silently.
 | `aura-storage` | S2 | implemented |
 | `aura-genesis` | C8 | implemented |
 | `aura-exec` | X1 | implemented |
-| `aura-consensus` | B1 | placeholder |
+| `aura-consensus` | B3 | implemented |
 | `aura-p2p` | N1 | placeholder |
 | `aura-mempool` | D3 | placeholder |
 | `aura-rpc` | D4 | placeholder |
 
-**9 implemented, 4 placeholders, 0 missing.**
+**10 implemented, 3 placeholders, 0 missing.**
 
 ## The seven capabilities a node still needs after D1
 
 | capability | phase | what it will do |
 |---|---|---|
-| `tx-pipeline` | D2 | rpc -> mempool -> exec -> block -> consensus -> storage -> event |
 | `mempool` | D3 | nonce/balance/gas admission, `effective_tip` priority, eviction |
 | `json-rpc` | D4 | `submit_tx`, `get_balance`, `get_tx`, `get_block`, `call`, `estimate_gas`, `subscribe` |
 | `grpc-rest` | D5 | protobuf schema, gateway, OpenAPI, versioning |
@@ -99,5 +98,5 @@ successful control.
 
 6/6 PASS; total **171** across C0–C10 + S0–S7 + X0–X8 + D0 + D1.
 
-Tests: **0** in the workspace, 0 of them in the D1 gate.
+Tests: **462** in the workspace, 47 of them in the D1 gate.
 Validators / blocks / transactions remain **0 / 0 / 0**.

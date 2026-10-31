@@ -31,7 +31,7 @@ PATCHES = REPO / "patches"
 CORE_PHASES = [f"C{index}" for index in range(11)]      # C0..C10 (closed)
 STATE_PHASES = ["S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7"]  # STATE_PLAN complete
 EXEC_PHASES = ["X0", "X1", "X2", "X3", "X4", "X5", "X6", "X7", "X8"]                # grows with each X phase
-NODE_PHASES = ["D0", "D1"]                                        # grows with each D phase
+NODE_PHASES = ["D0", "D1", "D2", "D3", "D4", "D5", "D6"]                   # grows with each D phase
 CONSENSUS_PHASES = ["B0", "B1", "B2", "B3"]                        # grows with each B phase
 NET_PHASES = []                                                   # grows with each N phase
 PHASES = CORE_PHASES + STATE_PHASES + EXEC_PHASES + NODE_PHASES + CONSENSUS_PHASES + NET_PHASES
@@ -55,11 +55,16 @@ SHIPPED = CORE_PHASES + [
     "X8",
     "D0",
     "D1",
+    "D2",
+    "D3",
+    "D4",
+    "D5",
     "B0",
     "B1",
     "B2",
+    "B3",
 ]
-CURRENT = "B3"
+CURRENT = "D6"
 
 PLAN_FOR_PREFIX = {
     "C": "CORE_PLAN.md",
@@ -77,27 +82,28 @@ PLAN_FOR_PREFIX = {
 }
 
 NC_PER_PHASE = {f"C{i}": 6 for i in range(4, 11)}
-NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6})
-SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)   # 189 (incl. D0 + D1 + B2)
-EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + NC_PER_PHASE[CURRENT]       # 195 (incl. B3)
+NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6})
+SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)  # 207 (through D3)
+EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + (0 if CURRENT in SHIPPED else NC_PER_PHASE[CURRENT])
 
 DONE_ROW = re.compile(r"^\| ✅ \*\*([A-Z]+\d+)\*\* \|", re.M)
 RESULT_LINE = re.compile(r"^RESULT: (\d+)/(\d+) negative controls PASS", re.M)
 
 
-# Where each plan's patch numbering starts. Patches are numbered in landing order,
-# so a plan that has not landed a phase yet has no base: closing one of its phases
-# is an error until the base is added here, which is the property we want.
-PATCH_BASE = {"C": 1, "S": 12, "X": 20, "D": 29, "B": 31}
+# Patches follow landing order across plans. D2 follows the already shipped
+# B0-B3 series, rather than colliding with B0's historical 0031 number.
+PATCH_ORDER = CORE_PHASES + STATE_PHASES + EXEC_PHASES + ["D0", "D1"]
+PATCH_ORDER += ["B0", "B1", "B2", "B3"] + [f"D{i}" for i in range(2, 9)]
+PATCH_ORDER += [f"B{i}" for i in range(4, 11)]
+PATCH_NUMBERS = {phase: index + 1 for index, phase in enumerate(PATCH_ORDER)}
 
 
 def patch_prefix(phase: str) -> str:
-    base = PATCH_BASE.get(phase[0])
-    if base is None:
-        # A plan whose phases have never been cut: match nothing, so the caller
-        # reports "patch: pending" instead of silently accepting another plan's file.
+    number = PATCH_NUMBERS.get(phase)
+    if number is None:
+        # No numbered patch slot exists yet; never accept another plan's file.
         return f"----{phase}-"
-    return f"{base + int(phase[1:]):04d}-{phase}-"
+    return f"{number:04d}-{phase}-"
 
 
 def patch_path(phase: str) -> Path | None:
@@ -188,12 +194,12 @@ def check(strict: bool) -> tuple[list[str], list[str]]:
             )
         if phase == CURRENT:
             current_nc = passed
-        else:
+        if phase != CURRENT or CURRENT in SHIPPED:
             shipped_nc += passed
 
     if shipped_nc != SHIPPED_NC_TOTAL:
         errors.append(f"shipped NC total = {shipped_nc}, expected {SHIPPED_NC_TOTAL}")
-    total_nc = shipped_nc + (current_nc or 0)
+    total_nc = shipped_nc if CURRENT in SHIPPED else shipped_nc + (current_nc or 0)
     if current_nc is None:
         notes.append(f"NC total so far: {total_nc} of {EXPECTED_TOTAL_NC} ({CURRENT} pending)")
         if strict:
@@ -292,9 +298,13 @@ def check(strict: bool) -> tuple[list[str], list[str]]:
     # total AS OF that phase, not the current project-wide total.
     cumulative: list[tuple[str, int]] = []
     running = 56  # CORE closed with 56 NCs; S0 is the first phase after it
-    for phase in ("S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7") + tuple(EXEC_PHASES) + tuple(
-        NODE_PHASES
-    ) + tuple(CONSENSUS_PHASES) + tuple(NET_PHASES):
+    inventory_order = STATE_PHASES + EXEC_PHASES + ["D0", "D1"]
+    inventory_order += CONSENSUS_PHASES + ["D2"]
+    inventory_order += [f"D{i}" for i in range(3, 9)] + [f"B{i}" for i in range(4, 11)]
+    inventory_order += NET_PHASES
+    for phase in inventory_order:
+        if phase not in NC_PER_PHASE:
+            continue
         running += NC_PER_PHASE[phase]
         cumulative.append((phase.lower(), running))
     for phase, expected in cumulative:
@@ -316,10 +326,12 @@ def main() -> int:
     errors, notes = check(args.strict)
     print("CLOSE-OUT PLAN<->TREE AUDIT (CORE + STATE)")
     print(f"  phases audited: {len(PHASES)} ({PHASES[0]}-{PHASES[-1]})")
-    print(
-        f"  expected NC total: {EXPECTED_TOTAL_NC} "
-        f"({SHIPPED_NC_TOTAL} shipped + {NC_PER_PHASE[CURRENT]} {CURRENT})"
+    current_label = (
+        f"{SHIPPED_NC_TOTAL} shipped through {CURRENT}"
+        if CURRENT in SHIPPED
+        else f"{SHIPPED_NC_TOTAL} shipped + {NC_PER_PHASE[CURRENT]} {CURRENT}"
     )
+    print(f"  expected NC total: {EXPECTED_TOTAL_NC} ({current_label})")
     print(f"  evidence checksum files: {len(sha_files())}")
     print(f"  spec files indexed: {len([p for p in SPEC.iterdir() if p.is_file()])}")
     for note in notes:

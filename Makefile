@@ -35,6 +35,12 @@ PYTHON ?= python3
         gen-x8-mutants nc-x8 evidence-x8 test-x8 \
         gen-d0-vectors nc-d0 evidence-d0 test-d0 \
         gen-d1-vectors nc-d1 evidence-d1 test-d1 \
+        test-b0 test-b1 test-b2 test-b3 nc-b0 nc-b1 nc-b2 nc-b3 evidence-b0 evidence-b1 evidence-b2 evidence-b3 \
+        test-d2 nc-d2 evidence-d2 \
+        test-d3 nc-d3 evidence-d3 \
+        test-d4 nc-d4 evidence-d4 \
+        test-d5 nc-d5 evidence-d5 \
+        test-d6 nc-d6 evidence-d6 \
         devnet clean
 
 help:
@@ -55,7 +61,7 @@ help:
 	@echo "  make gen-c3-vectors    regenerate independent crypto golden vectors"
 	@echo "  make nc-c3             C3 negative controls -> docs/evidence/c3/nc.log"
 	@echo "  make evidence-c3       regenerate docs/evidence/c3/gates.txt + SHA256SUMS"
-	@echo "  make nc-all            all C0-C4 NCs without rewriting historical logs"
+	@echo "  make nc-all            all phase NCs without rewriting historical logs"
 	@echo "  make gen-c4-vectors    regenerate independent tx golden vectors"
 	@echo "  make nc-c4             C4 negative controls -> docs/evidence/c4/nc.log"
 	@echo "  make evidence-c4       regenerate docs/evidence/c4/gates.txt + SHA256SUMS"
@@ -148,6 +154,21 @@ help:
 	@echo "  make test-d1           D1 skeleton gate (config, tracing, PID, health)"
 	@echo "  make nc-d1             D1 skeleton negative controls -> docs/evidence/d1/nc.log"
 	@echo "  make evidence-d1       regenerate D1 skeleton report + receipts"
+	@echo "  make test-d2           D2 transfer pipeline + 1,000-transaction acceptance"
+	@echo "  make nc-d2             D2 mutation controls -> docs/evidence/d2/nc.log"
+	@echo "  make evidence-d2       run D2 and full workspace gates; write evidence receipts"
+	@echo "  make test-d3           D3 mempool plus 10,000-transaction acceptance"
+	@echo "  make nc-d3             D3 mutation controls -> docs/evidence/d3/nc.log"
+	@echo "  make evidence-d3       run D3/full gates and write evidence receipts"
+	@echo "  make test-d4           D4 JSON-RPC contract vectors + node-backed API tests"
+	@echo "  make nc-d4             D4 mutation controls -> docs/evidence/d4/nc.log"
+	@echo "  make evidence-d4       aggregate completed D4 gates into evidence receipts"
+	@echo "  make test-d5           D5 REST/gRPC versioning and live transport tests"
+	@echo "  make nc-d5             D5 unit-test mutation controls -> docs/evidence/d5/nc.log"
+	@echo "  make evidence-d5       aggregate completed D5 gates into evidence receipts"
+	@echo "  make test-d6           D6 health, Prometheus and tracing contract tests"
+	@echo "  make nc-d6             D6 unit-test mutation controls -> docs/evidence/d6/nc.log"
+	@echo "  make evidence-d6       aggregate completed D6 gates into evidence receipts"
 	@echo "  make gen-b0-vectors    regenerate the pinned B0 consensus baseline fixture"
 	@echo "  make test-b0           B0 baseline gate (no consensus, measured)"
 	@echo "  make nc-b0             B0 consensus-baseline negative controls -> docs/evidence/b0/nc.log"
@@ -281,7 +302,7 @@ evidence-c3:
 # Runs every NC script WITHOUT rewriting the historical C0-C3 evidence logs,
 # so their committed SHA256SUMS stay valid. CI uses this instead of nc-cX.
 nc-all:
-	@for phase in c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 s0 s1 s2 s3 s4 s5 s6 s7 x0 x1 x2 x3 x4 x5 x6 x7 x8 d0 d1 b0 b1 b2 b3; do \
+	@for phase in c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 s0 s1 s2 s3 s4 s5 s6 s7 x0 x1 x2 x3 x4 x5 x6 x7 x8 d0 d1 b0 b1 b2 b3 d2 d3 d4 d5 d6; do \
 	    $(PYTHON) tools/nc_$$phase.py > /tmp/aura-nc-$$phase.log 2>&1 || \
 	      { echo "$$phase NEGATIVE CONTROLS FAILED"; tail -30 /tmp/aura-nc-$$phase.log; exit 1; }; \
 	    grep '^RESULT:' /tmp/aura-nc-$$phase.log; \
@@ -728,6 +749,70 @@ nc-b3:
 
 evidence-b3:
 	@$(PYTHON) tools/write_b3_evidence.py
+
+test-d2:
+	@$(CARGO) test -p aura-node --test d2_pipeline
+
+nc-d2:
+	@mkdir -p docs/evidence/d2
+	@$(PYTHON) tools/nc_d2.py > docs/evidence/d2/nc.log 2>&1 || { cat docs/evidence/d2/nc.log; exit 1; }
+	@cat docs/evidence/d2/nc.log
+
+evidence-d2:
+	@$(PYTHON) tools/write_d2_evidence.py
+
+test-d3:
+	@$(CARGO) test -p aura-mempool
+	@$(CARGO) test -p aura-node --test d3_mempool
+
+nc-d3:
+	@mkdir -p docs/evidence/d3
+	@$(PYTHON) tools/nc_d3.py > docs/evidence/d3/nc.log 2>&1 || { cat docs/evidence/d3/nc.log; exit 1; }
+	@cat docs/evidence/d3/nc.log
+
+evidence-d3:
+	@$(PYTHON) tools/write_d3_evidence.py
+
+test-d4:
+	@$(CARGO) test -p aura-rpc --lib
+	@$(CARGO) test -p aura-rpc --test d4_vectors
+	@$(CARGO) test -p aura-node --test d4_rpc
+	@$(CARGO) test -p aura-node --lib pipeline::tests::managed_subscriptions_are_pruned_after_disconnect -- --exact
+
+nc-d4:
+	@mkdir -p docs/evidence/d4
+	@$(PYTHON) tools/nc_d4.py > docs/evidence/d4/nc.log 2>&1 || { cat docs/evidence/d4/nc.log; exit 1; }
+	@cat docs/evidence/d4/nc.log
+
+evidence-d4:
+	@$(PYTHON) tools/write_d4_evidence.py
+
+test-d5:
+	@$(CARGO) test -p aura-grpc-rest --lib
+	@$(CARGO) test -p aura-grpc-rest --test d5_contract
+	@$(CARGO) test -p aura-node --bin aurad
+
+nc-d5:
+	@mkdir -p docs/evidence/d5
+	@$(PYTHON) tools/nc_d5.py > docs/evidence/d5/nc.log 2>&1 || { cat docs/evidence/d5/nc.log; exit 1; }
+	@cat docs/evidence/d5/nc.log
+
+evidence-d5:
+	@$(PYTHON) tools/write_d5_evidence.py
+
+test-d6:
+	@$(CARGO) test -p aura-node --lib observability::tests
+	@$(CARGO) test -p aura-node --lib lifecycle::tests::structured_log_events_are_json -- --exact
+	@$(CARGO) test -p aura-node --lib lifecycle::tests::otel_layer_exports_recorded_spans -- --exact
+	@$(CARGO) test -p aura-node --test d6_observability
+
+nc-d6:
+	@mkdir -p docs/evidence/d6
+	@$(PYTHON) tools/nc_d6.py > docs/evidence/d6/nc.log 2>&1 || { cat docs/evidence/d6/nc.log; exit 1; }
+	@cat docs/evidence/d6/nc.log
+
+evidence-d6:
+	@$(PYTHON) tools/write_d6_evidence.py
 
 devnet:
 	@echo "ERROR: devnet is D7 (NODE_PLAN). It is not implemented at C0." >&2

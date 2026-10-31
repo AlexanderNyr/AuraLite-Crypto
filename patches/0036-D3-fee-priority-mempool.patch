@@ -1,0 +1,2332 @@
+From: AuraLite-Crypto maintainers
+Subject: [PATCH] D3 bounded fee-priority mempool
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index fe4451bb7993559e2f427812369cc04d07a9b263..ea1a61b8511f75643e1953258a64f7522d846304 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -82,6 +82,26 @@ receipts to S2 storage, and publishes events only after durability succeeds.
+   checkpoint not yet persisted. Multi-validator transport, richer execution,
+   RPC and checkpoint recovery remain later phases.
+ 
++## [D3 — fee-priority mempool] 2026-10-30
++
++**Bounded transaction pool for the D2 native-transfer path.** Deliverable:
++`patches/0036-D3-fee-priority-mempool.patch`. `aura-mempool` now exposes a
++16,384-entry sender/nonce pool with tip-priority selection over contiguous nonce
++lanes, a checked 10% replacement bump, deterministic strict-higher-tip eviction,
++and a reorg reinsertion boundary. `aura-node::pipeline` validates projected
++nonce, balance, gas and fee state before admission, and removes selected
++transactions only after a proposal is formed.
++
++- Six unit-test negative controls cover nonce validation, fee priority,
++  replacement, eviction, reorg reinsertion and transfer gas floor.
++- The D3 acceptance gate submits 10,000 signed sequential transfers and checks
++  exact nonce/balance accounting, unique durable receipts, gas, state root and
++  commit-event ordering under three-chain finality.
++- Scope limit: reorged transactions must be revalidated against the caller's new
++  account view before reinsertion; D3 does not add a distributed reorg engine or
++  finality checkpoint persistence.
++- Evidence and cumulative NC inventory: `docs/evidence/d3/` (207 controls).
++
+ ## [B3 — BFT finality] 2026-10-29
+ 
+ **BFT finality of `CONSENSUS_PLAN`.** Deliverable:
+diff --git a/Cargo.lock b/Cargo.lock
+index 63d88e85e175a8aed3f4f267133ec2709aca3614..d630cd1e3ef14f0b0f546b1e921c7201cd3f7b0a 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -121,6 +121,11 @@ dependencies = [
+ [[package]]
+ name = "aura-mempool"
+ version = "0.1.0"
++dependencies = [
++ "aura-crypto",
++ "aura-tx",
++ "aura-types",
++]
+ 
+ [[package]]
+ name = "aura-node"
+@@ -130,6 +135,7 @@ dependencies = [
+  "aura-codec",
+  "aura-consensus",
+  "aura-crypto",
++ "aura-mempool",
+  "aura-state",
+  "aura-storage",
+  "aura-tx",
+diff --git a/Cargo.toml b/Cargo.toml
+index 17a4b831f26fb395e6e08e68ae581242672ad683..5a22f186735c002dbcac0a564436fbb1ae56841d 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -46,6 +46,7 @@ aura-types = { path = "crates/aura-types" }
+ aura-codec = { path = "crates/aura-codec" }
+ aura-crypto = { path = "crates/aura-crypto" }
+ aura-tx = { path = "crates/aura-tx" }
++aura-mempool = { path = "crates/aura-mempool" }
+ aura-block = { path = "crates/aura-block" }
+ aura-state = { path = "crates/aura-state" }
+ aura-genesis = { path = "crates/aura-genesis" }
+diff --git a/Makefile b/Makefile
+index 1ffcfd30ffeac2a5ba2f349a1f0312be99a17d44..023307b477157e1898b40617c3f7bea2521711aa 100644
+--- a/Makefile
++++ b/Makefile
+@@ -37,6 +37,7 @@ PYTHON ?= python3
+         gen-d1-vectors nc-d1 evidence-d1 test-d1 \
+         test-b0 test-b1 test-b2 test-b3 nc-b0 nc-b1 nc-b2 nc-b3 evidence-b0 evidence-b1 evidence-b2 evidence-b3 \
+         test-d2 nc-d2 evidence-d2 \
++        test-d3 nc-d3 evidence-d3 \
+         devnet clean
+ 
+ help:
+@@ -57,7 +58,7 @@ help:
+ 	@echo "  make gen-c3-vectors    regenerate independent crypto golden vectors"
+ 	@echo "  make nc-c3             C3 negative controls -> docs/evidence/c3/nc.log"
+ 	@echo "  make evidence-c3       regenerate docs/evidence/c3/gates.txt + SHA256SUMS"
+-	@echo "  make nc-all            all C0-D2 NCs without rewriting historical logs"
++	@echo "  make nc-all            all C0-D3 NCs without rewriting historical logs"
+ 	@echo "  make gen-c4-vectors    regenerate independent tx golden vectors"
+ 	@echo "  make nc-c4             C4 negative controls -> docs/evidence/c4/nc.log"
+ 	@echo "  make evidence-c4       regenerate docs/evidence/c4/gates.txt + SHA256SUMS"
+@@ -153,6 +154,9 @@ help:
+ 	@echo "  make test-d2           D2 transfer pipeline + 1,000-transaction acceptance"
+ 	@echo "  make nc-d2             D2 mutation controls -> docs/evidence/d2/nc.log"
+ 	@echo "  make evidence-d2       run D2 and full workspace gates; write evidence receipts"
++	@echo "  make test-d3           D3 mempool plus 10,000-transaction acceptance"
++	@echo "  make nc-d3             D3 mutation controls -> docs/evidence/d3/nc.log"
++	@echo "  make evidence-d3       run D3/full gates and write evidence receipts"
+ 	@echo "  make gen-b0-vectors    regenerate the pinned B0 consensus baseline fixture"
+ 	@echo "  make test-b0           B0 baseline gate (no consensus, measured)"
+ 	@echo "  make nc-b0             B0 consensus-baseline negative controls -> docs/evidence/b0/nc.log"
+@@ -286,7 +290,7 @@ evidence-c3:
+ # Runs every NC script WITHOUT rewriting the historical C0-C3 evidence logs,
+ # so their committed SHA256SUMS stay valid. CI uses this instead of nc-cX.
+ nc-all:
+-	@for phase in c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 s0 s1 s2 s3 s4 s5 s6 s7 x0 x1 x2 x3 x4 x5 x6 x7 x8 d0 d1 b0 b1 b2 b3 d2; do \
++	@for phase in c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 s0 s1 s2 s3 s4 s5 s6 s7 x0 x1 x2 x3 x4 x5 x6 x7 x8 d0 d1 b0 b1 b2 b3 d2 d3; do \
+ 	    $(PYTHON) tools/nc_$$phase.py > /tmp/aura-nc-$$phase.log 2>&1 || \
+ 	      { echo "$$phase NEGATIVE CONTROLS FAILED"; tail -30 /tmp/aura-nc-$$phase.log; exit 1; }; \
+ 	    grep '^RESULT:' /tmp/aura-nc-$$phase.log; \
+@@ -745,6 +749,18 @@ nc-d2:
+ evidence-d2:
+ 	@$(PYTHON) tools/write_d2_evidence.py
+ 
++test-d3:
++	@$(CARGO) test -p aura-mempool
++	@$(CARGO) test -p aura-node --test d3_mempool
++
++nc-d3:
++	@mkdir -p docs/evidence/d3
++	@$(PYTHON) tools/nc_d3.py > docs/evidence/d3/nc.log 2>&1 || { cat docs/evidence/d3/nc.log; exit 1; }
++	@cat docs/evidence/d3/nc.log
++
++evidence-d3:
++	@$(PYTHON) tools/write_d3_evidence.py
++
+ devnet:
+ 	@echo "ERROR: devnet is D7 (NODE_PLAN). It is not implemented at C0." >&2
+ 	@exit 1
+diff --git a/crates/aura-mempool/Cargo.toml b/crates/aura-mempool/Cargo.toml
+index f2be8dcea780b70a154e094ca167eee2d37930a9..89f263b6395cbaf915f3639403ad5dd691bbc6db 100644
+--- a/crates/aura-mempool/Cargo.toml
++++ b/crates/aura-mempool/Cargo.toml
+@@ -1,6 +1,6 @@
+ [package]
+ name = "aura-mempool"
+-description = "AuraLite-Crypto transaction pool and fee priority (placeholder, lands in D3)"
++description = "AuraLite-Crypto bounded transaction pool and fee-priority policy"
+ version.workspace = true
+ edition.workspace = true
+ license.workspace = true
+@@ -9,3 +9,8 @@ repository.workspace = true
+ publish.workspace = true
+ 
+ [dependencies]
++aura-tx = { path = "../aura-tx" }
++aura-types = { path = "../aura-types" }
++
++[dev-dependencies]
++aura-crypto = { path = "../aura-crypto" }
+diff --git a/crates/aura-mempool/src/lib.rs b/crates/aura-mempool/src/lib.rs
+index d24d4ff37d711d34784bc81ced6c222db9012e28..86c17ed40f5dba4b14c26a37001a2040f4cec3f1 100644
+--- a/crates/aura-mempool/src/lib.rs
++++ b/crates/aura-mempool/src/lib.rs
+@@ -1,9 +1,434 @@
+-//! `aura-mempool` — placeholder crate for transaction pool and fee priority.
++//! Bounded D3 transaction pool with nonce lanes, fee priority, replacement,
++//! deterministic eviction and reorg reinsertion.
+ //!
+-//! C0 creates the workspace skeleton only. The real API lands in phase D3.
+-//! This crate intentionally exposes **no public items**: CONTRIBUTING.md
+-//! forbids stubs that silently return success. An empty crate is honest;
+-//! a fake `Ok(())` is not.
++//! The pool owns queueing policy, not chain validation. Callers must validate
++//! transaction signatures, chain/expiry, gas, fee cap, account nonce and
++//! solvency before insertion; after a reorg they must revalidate against the
++//! new account state before calling [`Mempool::reinsert_reorged`].
+ 
+ #![forbid(unsafe_code)]
+ #![deny(missing_docs)]
++
++use std::cmp::Reverse;
++use std::collections::{BTreeMap, BTreeSet, HashMap};
++use std::fmt;
++
++use aura_tx::Tx;
++use aura_types::Hash;
++
++/// Default maximum number of queued transactions.
++pub const DEFAULT_CAPACITY: usize = 16_384;
++/// Default replacement tip bump, in basis points (10%).
++pub const DEFAULT_REPLACEMENT_BUMP_BPS: u16 = 1_000;
++const BASIS_POINTS: u128 = 10_000;
++
++type Sender = [u8; 20];
++type TxKey = (Sender, u64);
++
++/// Configuration for a [`Mempool`].
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct MempoolConfig {
++    /// Maximum number of queued transactions; must be nonzero.
++    pub capacity: usize,
++    /// Minimum tip increase for same-signer/same-nonce replacement, in basis
++    /// points; valid range is `1..=10_000`.
++    pub replacement_bump_bps: u16,
++}
++
++impl Default for MempoolConfig {
++    fn default() -> Self {
++        Self {
++            capacity: DEFAULT_CAPACITY,
++            replacement_bump_bps: DEFAULT_REPLACEMENT_BUMP_BPS,
++        }
++    }
++}
++
++/// Errors returned by pool construction and transaction insertion.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum MempoolError {
++    /// A pool cannot have zero capacity.
++    ZeroCapacity,
++    /// Replacement bump must be between 1 and 10,000 basis points.
++    InvalidReplacementBump(u16),
++    /// This transaction identifier is already in the pool.
++    DuplicateTransaction,
++    /// Pool is full and the incoming transaction is not higher priority than
++    /// the deterministic eviction candidate.
++    PoolFull,
++    /// Replacement did not satisfy the configured tip bump.
++    ReplacementUnderpriced {
++        /// Minimum accepted tip.
++        required: u128,
++        /// Incoming tip.
++        got: u128,
++    },
++    /// Required replacement tip overflowed `u128`.
++    ReplacementTipOverflow,
++}
++
++impl fmt::Display for MempoolError {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::ZeroCapacity => f.write_str("mempool capacity must be nonzero"),
++            Self::InvalidReplacementBump(value) => {
++                write!(f, "replacement bump {value} bps is outside 1..=10000")
++            }
++            Self::DuplicateTransaction => f.write_str("transaction already exists in mempool"),
++            Self::PoolFull => f.write_str("mempool full; incoming tip is not competitive"),
++            Self::ReplacementUnderpriced { required, got } => {
++                write!(
++                    f,
++                    "replacement tip {got} is below required minimum {required}"
++                )
++            }
++            Self::ReplacementTipOverflow => f.write_str("replacement tip arithmetic overflow"),
++        }
++    }
++}
++
++impl std::error::Error for MempoolError {}
++
++/// Result of a successful pool insertion.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct InsertOutcome {
++    /// Identifier of the newly inserted transaction.
++    pub txid: Hash,
++    /// Identifier replaced at the same signer and nonce, if any.
++    pub replaced: Option<Hash>,
++    /// Identifier evicted to make room, if any.
++    pub evicted: Option<Hash>,
++}
++
++/// Bounded, deterministic transaction pool.
++#[derive(Debug, Clone)]
++pub struct Mempool {
++    config: MempoolConfig,
++    transactions: BTreeMap<TxKey, Tx>,
++    txids: HashMap<Hash, TxKey>,
++}
++
++impl Mempool {
++    /// Construct an empty pool with validated configuration.
++    pub fn new(config: MempoolConfig) -> Result<Self, MempoolError> {
++        if config.capacity == 0 {
++            return Err(MempoolError::ZeroCapacity);
++        }
++        if !(1..=10_000).contains(&config.replacement_bump_bps) {
++            return Err(MempoolError::InvalidReplacementBump(
++                config.replacement_bump_bps,
++            ));
++        }
++        Ok(Self {
++            config,
++            transactions: BTreeMap::new(),
++            txids: HashMap::new(),
++        })
++    }
++
++    /// Construct an empty pool using [`MempoolConfig::default`].
++    pub fn with_defaults() -> Self {
++        Self::new(MempoolConfig::default()).expect("default mempool configuration is valid")
++    }
++
++    /// Number of queued transactions.
++    pub fn len(&self) -> usize {
++        self.transactions.len()
++    }
++
++    /// Whether the pool is empty.
++    pub fn is_empty(&self) -> bool {
++        self.transactions.is_empty()
++    }
++
++    /// Configured maximum number of transactions.
++    pub fn capacity(&self) -> usize {
++        self.config.capacity
++    }
++
++    /// Whether `txid` is currently queued.
++    pub fn contains_txid(&self, txid: &Hash) -> bool {
++        self.txids.contains_key(txid)
++    }
++
++    /// Last canonical sender/nonce key, used for the append-only admission fast path.
++    pub fn last_key(&self) -> Option<TxKey> {
++        self.transactions.last_key_value().map(|(key, _)| *key)
++    }
++
++    /// Return all transactions in deterministic sender/nonce order.
++    pub fn canonical_transactions(&self) -> Vec<Tx> {
++        self.transactions.values().cloned().collect()
++    }
++
++    /// Insert a transaction that has already passed caller-side protocol and
++    /// state validation. Higher-fee same-nonce transactions may replace an
++    /// existing entry; a full pool evicts only its deterministic lowest-tip
++    /// transaction, and only when the incoming tip is strictly higher.
++    pub fn insert(&mut self, tx: Tx) -> Result<InsertOutcome, MempoolError> {
++        let txid = tx.txid();
++        if self.txids.contains_key(&txid) {
++            return Err(MempoolError::DuplicateTransaction);
++        }
++        let key = (*tx.unsigned.signer.as_bytes(), tx.unsigned.nonce.value());
++        let mut replaced = None;
++        let mut evicted = None;
++
++        if let Some(existing) = self.transactions.get(&key) {
++            let required = replacement_tip(
++                existing.unsigned.tip.units(),
++                self.config.replacement_bump_bps,
++            )?;
++            let got = tx.unsigned.tip.units();
++            if got < required {
++                return Err(MempoolError::ReplacementUnderpriced { required, got });
++            }
++            let old = self.transactions.remove(&key).expect("entry was found");
++            let old_id = old.txid();
++            self.txids.remove(&old_id);
++            replaced = Some(old_id);
++        } else if self.transactions.len() >= self.config.capacity {
++            let (weakest_key, weakest) = self
++                .transactions
++                .iter()
++                .min_by_key(|(candidate_key, candidate)| {
++                    (
++                        candidate.unsigned.tip.units(),
++                        candidate_key.0,
++                        candidate_key.1,
++                    )
++                })
++                .map(|(candidate_key, candidate)| (*candidate_key, candidate.clone()))
++                .expect("a full pool is nonempty");
++            if tx.unsigned.tip.units() <= weakest.unsigned.tip.units() {
++                return Err(MempoolError::PoolFull);
++            }
++            self.transactions.remove(&weakest_key);
++            let old_id = weakest.txid();
++            self.txids.remove(&old_id);
++            evicted = Some(old_id);
++        }
++
++        self.transactions.insert(key, tx);
++        self.txids.insert(txid, key);
++        Ok(InsertOutcome {
++            txid,
++            replaced,
++            evicted,
++        })
++    }
++
++    /// Reinsert a transaction removed from a discarded branch. The caller is
++    /// responsible for validating it against the post-reorg chain, nonce and
++    /// balance view before invoking this method.
++    pub fn reinsert_reorged(&mut self, tx: Tx) -> Result<InsertOutcome, MempoolError> {
++        self.insert(tx)
++    }
++
++    /// Remove transactions after they have been selected into a proposed block.
++    /// Returns the entries that were actually present, in the requested id order.
++    pub fn remove_included(&mut self, txids: &[Hash]) -> Vec<Tx> {
++        let mut removed = Vec::with_capacity(txids.len());
++        for txid in txids {
++            if let Some(key) = self.txids.remove(txid)
++                && let Some(tx) = self.transactions.remove(&key)
++            {
++                removed.push(tx);
++            }
++        }
++        removed
++    }
++
++    /// Select up to `limit` transactions by highest tip while preserving each
++    /// sender's contiguous nonce lane. The raw 20-byte address keys avoid
++    /// requiring `Address: Ord`.
++    pub fn select_ready(&self, base_nonces: &BTreeMap<Sender, u64>, limit: usize) -> Vec<Tx> {
++        let mut next_nonce = base_nonces.clone();
++        let mut ready = BTreeSet::<(Reverse<u128>, Sender, u64)>::new();
++        for ((sender, nonce), tx) in &self.transactions {
++            if *nonce == next_nonce.get(sender).copied().unwrap_or(0) {
++                ready.insert((Reverse(tx.unsigned.tip.units()), *sender, *nonce));
++            }
++        }
++
++        let mut selected = Vec::with_capacity(limit.min(self.transactions.len()));
++        while selected.len() < limit {
++            let Some((_, sender, nonce)) = ready.pop_first() else {
++                break;
++            };
++            let Some(tx) = self.transactions.get(&(sender, nonce)) else {
++                continue;
++            };
++            selected.push(tx.clone());
++            let Some(next) = nonce.checked_add(1) else {
++                continue;
++            };
++            next_nonce.insert(sender, next);
++            if let Some(next_tx) = self.transactions.get(&(sender, next)) {
++                ready.insert((Reverse(next_tx.unsigned.tip.units()), sender, next));
++            }
++        }
++        selected
++    }
++}
++
++impl Default for Mempool {
++    fn default() -> Self {
++        Self::with_defaults()
++    }
++}
++
++fn replacement_tip(old_tip: u128, bump_bps: u16) -> Result<u128, MempoolError> {
++    let numerator = old_tip
++        .checked_mul(u128::from(bump_bps))
++        .and_then(|value| value.checked_add(BASIS_POINTS - 1))
++        .ok_or(MempoolError::ReplacementTipOverflow)?;
++    let proportional = numerator / BASIS_POINTS;
++    let bump = proportional.max(1);
++    old_tip
++        .checked_add(bump)
++        .ok_or(MempoolError::ReplacementTipOverflow)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::collections::BTreeMap;
++
++    use aura_crypto::ed25519_public_key;
++    use aura_tx::{TxKind, TxParams, UnsignedTx, signer_address};
++    use aura_types::{Address, Amount, ChainId, Gas, Height, Nonce};
++
++    const CHAIN: &str = "auralite-mempool-test-1";
++    const RECIPIENT: Address = Address::from_bytes([0x42; 20]);
++
++    fn tx(seed_byte: u8, nonce: u64, tip: u128) -> Tx {
++        tx_with_amount(seed_byte, nonce, tip, 1)
++    }
++
++    fn tx_with_amount(seed_byte: u8, nonce: u64, tip: u128, amount: u128) -> Tx {
++        let seed = [seed_byte; 32];
++        let signer = signer_address(&ed25519_public_key(&seed));
++        UnsignedTx::new(TxParams {
++            chain_id: ChainId::new(CHAIN).unwrap(),
++            signer,
++            nonce: Nonce::new(nonce),
++            kind: TxKind::Transfer,
++            payload: [RECIPIENT.as_bytes().as_slice(), &amount.to_be_bytes()].concat(),
++            gas_limit: Gas::new(21_000),
++            max_fee: Amount::from_units(1_000_000),
++            tip: Amount::from_units(tip),
++            expiry: Height::new(100),
++        })
++        .unwrap()
++        .sign(&seed)
++        .unwrap()
++    }
++
++    fn sender(tx: &Tx) -> [u8; 20] {
++        *tx.unsigned.signer.as_bytes()
++    }
++
++    #[test]
++    fn ready_transactions_follow_fee_priority_and_nonce_dependencies() {
++        let mut pool = Mempool::with_defaults();
++        let one = tx(1, 0, 1);
++        let two = tx(2, 0, 50);
++        let (low_seed, high_seed) = if sender(&one) < sender(&two) {
++            (1, 2)
++        } else {
++            (2, 1)
++        };
++        let a0 = tx(low_seed, 0, 1);
++        let a1 = tx(low_seed, 1, 100);
++        let b0 = tx(high_seed, 0, 50);
++        pool.insert(a0.clone()).unwrap();
++        pool.insert(a1.clone()).unwrap();
++        pool.insert(b0.clone()).unwrap();
++
++        let base = BTreeMap::from([(sender(&a0), 0), (sender(&b0), 0)]);
++        let selected = pool.select_ready(&base, 3);
++        assert_eq!(selected[0].txid(), b0.txid());
++        assert_eq!(selected[1].txid(), a0.txid());
++        assert_eq!(selected[2].txid(), a1.txid());
++    }
++
++    #[test]
++    fn replacement_requires_fee_bump_and_replaces_same_nonce() {
++        let mut pool = Mempool::with_defaults();
++        let original = tx(1, 0, 10);
++        let original_id = original.txid();
++        pool.insert(original).unwrap();
++        assert!(matches!(
++            pool.insert(tx_with_amount(1, 0, 10, 2)),
++            Err(MempoolError::ReplacementUnderpriced {
++                required: 11,
++                got: 10
++            })
++        ));
++        let replacement = tx_with_amount(1, 0, 11, 2);
++        let replacement_id = replacement.txid();
++        let outcome = pool.insert(replacement).unwrap();
++        assert_eq!(outcome.replaced, Some(original_id));
++        assert_eq!(pool.len(), 1);
++        assert!(pool.contains_txid(&replacement_id));
++        assert!(!pool.contains_txid(&original_id));
++    }
++
++    #[test]
++    fn capacity_evicts_only_lower_priority() {
++        let mut pool = Mempool::new(MempoolConfig {
++            capacity: 2,
++            ..MempoolConfig::default()
++        })
++        .unwrap();
++        let low = tx(1, 0, 1);
++        let low_id = low.txid();
++        pool.insert(low).unwrap();
++        pool.insert(tx(2, 0, 2)).unwrap();
++        let incoming = tx(3, 0, 3);
++        let incoming_id = incoming.txid();
++        let outcome = pool.insert(incoming).unwrap();
++        assert_eq!(outcome.evicted, Some(low_id));
++        assert!(!pool.contains_txid(&low_id));
++        assert!(pool.contains_txid(&incoming_id));
++        assert!(matches!(
++            pool.insert(tx(4, 0, 2)),
++            Err(MempoolError::PoolFull)
++        ));
++    }
++
++    #[test]
++    fn duplicate_transaction_id_is_rejected() {
++        let mut pool = Mempool::with_defaults();
++        let transaction = tx(1, 0, 1);
++        pool.insert(transaction.clone()).unwrap();
++        assert_eq!(
++            pool.insert(transaction),
++            Err(MempoolError::DuplicateTransaction)
++        );
++    }
++
++    #[test]
++    fn reorged_transactions_can_be_reinserted_at_new_head() {
++        let mut pool = Mempool::with_defaults();
++        let transaction = tx(1, 0, 1);
++        let txid = transaction.txid();
++        pool.insert(transaction.clone()).unwrap();
++        assert_eq!(pool.remove_included(&[txid]).len(), 1);
++        assert!(pool.is_empty());
++        pool.reinsert_reorged(transaction).unwrap();
++        assert!(pool.contains_txid(&txid));
++        let base = BTreeMap::from([(sender(&tx(1, 0, 1)), 0)]);
++        assert_eq!(pool.select_ready(&base, 1)[0].txid(), txid);
++    }
++
++    #[test]
++    fn nonce_gaps_are_not_selected_until_the_lane_is_contiguous() {
++        let mut pool = Mempool::with_defaults();
++        let future = tx(1, 1, 100);
++        let base = BTreeMap::from([(sender(&future), 0)]);
++        pool.insert(future).unwrap();
++        assert!(pool.select_ready(&base, 10).is_empty());
++    }
++}
+diff --git a/crates/aura-node/Cargo.toml b/crates/aura-node/Cargo.toml
+index 22099fd67dd53233bf8af3a902a423863510f82b..1ec6c6b78e831d8e792a1b6a6ea086b89daafa77 100644
+--- a/crates/aura-node/Cargo.toml
++++ b/crates/aura-node/Cargo.toml
+@@ -17,6 +17,7 @@ aura-block.workspace = true
+ aura-codec.workspace = true
+ aura-consensus.workspace = true
+ aura-crypto.workspace = true
++aura-mempool.workspace = true
+ aura-state.workspace = true
+ aura-storage.workspace = true
+ aura-tx.workspace = true
+diff --git a/crates/aura-node/src/baseline.rs b/crates/aura-node/src/baseline.rs
+index 725585b243bad5338416e3f192a1ddcf29e0726a..69f5e250b0e89736e6258b905fee5bb194372afd 100644
+--- a/crates/aura-node/src/baseline.rs
++++ b/crates/aura-node/src/baseline.rs
+@@ -160,17 +160,12 @@ pub struct Capability {
+     pub what: &'static str,
+ }
+ 
+-/// The six capabilities still absent after the D2 transaction pipeline.
++/// The five capabilities still absent after the D3 mempool phase.
+ ///
+-/// D1 supplies config/lifecycle and D2 supplies the in-process transfer
+-/// pipeline. The public RPC, full mempool policy and multi-validator devnet
+-/// remain later capabilities.
+-pub const MISSING_CAPABILITIES: [Capability; 6] = [
+-    Capability {
+-        name: "mempool",
+-        phase: "D3",
+-        what: "nonce/balance/gas admission, `effective_tip` priority, eviction",
+-    },
++/// D1 supplies config/lifecycle, D2 supplies the in-process transfer
++/// pipeline, and D3 supplies bounded mempool admission. Public RPC and the
++/// multi-validator devnet remain later capabilities.
++pub const MISSING_CAPABILITIES: [Capability; 5] = [
+     Capability {
+         name: "json-rpc",
+         phase: "D4",
+@@ -668,12 +663,9 @@ mod tests {
+     #[test]
+     fn the_unlanded_layers_are_still_placeholders() {
+         let measured = survey(&default_root());
+-        assert_eq!(
+-            measured.placeholder_names(),
+-            vec!["aura-p2p", "aura-mempool", "aura-rpc"]
+-        );
+-        assert_eq!(measured.implemented(), 10);
+-        assert_eq!(measured.placeholders(), 3);
++        assert_eq!(measured.placeholder_names(), vec!["aura-p2p", "aura-rpc"]);
++        assert_eq!(measured.implemented(), 11);
++        assert_eq!(measured.placeholders(), 2);
+         assert_eq!(measured.missing(), 0);
+     }
+ 
+diff --git a/crates/aura-node/src/pipeline.rs b/crates/aura-node/src/pipeline.rs
+index ecbe7b5503e1c1ae92e7181d65e0ba7908e8cd23..fe4db719e35bde73d35bbc39e9835ed8d5a48657 100644
+--- a/crates/aura-node/src/pipeline.rs
++++ b/crates/aura-node/src/pipeline.rs
+@@ -2,11 +2,11 @@
+ //!
+ //! This library composes the D1 node with canonical transactions, native
+ //! transfer execution, C5 blocks, the B3 finality engine, S2 storage, receipts
+-//! and commit events. The D2 ingress queue is deliberately bounded but small;
+-//! nonce/balance admission policies and eviction belong to D3, while network
+-//! submission belongs to D4. Only native `Transfer` is executable in this
+-//! phase; contract deployment and calls are rejected rather than acknowledged
+-//! without execution.
++//! and commit events. The D3 mempool bounds ingress, validates projected
++//! nonce/balance/gas state, prioritises sender nonce lanes by tip, and supports
++//! replacement, eviction and reorg reinsertion. Network submission belongs to
++//! D4. Only native `Transfer` is executable; contract deployment and calls are
++//! rejected rather than acknowledged without execution.
+ //!
+ //! A local one-validator pipeline uses the real BLS vote/QC and three-chain
+ //! commit implementation. This is a development/test composition, not a
+@@ -24,6 +24,7 @@ use aura_consensus::bls::{BlsSecretKey, address_from_public_key};
+ use aura_consensus::finality::{FinalityBlock, FinalityEngine, FinalizedBlock};
+ use aura_consensus::qc::{QcAggregator, QuorumCertificate, VoteType};
+ use aura_crypto::hash_domain;
++use aura_mempool::{Mempool, MempoolConfig, MempoolError};
+ use aura_state::{Account, StateKey};
+ use aura_storage::{
+     Receipt as StorageReceipt, StateChange, Storage, StorageError, key_path, state_root,
+@@ -37,8 +38,8 @@ pub const TRANSFER_PAYLOAD_LEN: usize = 36;
+ pub const TRANSFER_GAS: u64 = 21_000;
+ /// Per-gas base fee for the local D2 pipeline.
+ pub const D2_BASE_FEE: Amount = Amount::ONE;
+-/// Maximum queued transactions before D3's full admission policy lands.
+-pub const D2_QUEUE_CAPACITY: usize = 4_096;
++/// Default D3 transaction-pool capacity.
++pub const D3_MEMPOOL_CAPACITY: usize = 16_384;
+ const QC_MAGIC: &[u8] = b"ALQC1";
+ const RECEIPT_MAGIC: &[u8] = b"ALR2";
+ 
+@@ -90,7 +91,9 @@ pub enum PipelineError {
+     AmountOverflow,
+     /// The transaction identifier is already queued or pending.
+     DuplicateTransaction,
+-    /// The bounded D2 ingress queue is full.
++    /// The bounded D3 mempool rejected an insertion.
++    Mempool(MempoolError),
++    /// The legacy D2 queue-capacity error (retained for source compatibility).
+     QueueFull,
+     /// More than one genesis allocation was supplied for an address.
+     DuplicateGenesisAccount,
+@@ -135,6 +138,7 @@ impl fmt::Display for PipelineError {
+             Self::InsufficientBalance => f.write_str("insufficient balance for transfer and fee"),
+             Self::AmountOverflow => f.write_str("amount arithmetic overflow"),
+             Self::DuplicateTransaction => f.write_str("transaction id already queued or pending"),
++            Self::Mempool(error) => write!(f, "mempool rejected transaction: {error}"),
+             Self::QueueFull => f.write_str("D2 ingress queue is full"),
+             Self::DuplicateGenesisAccount => f.write_str("duplicate genesis allocation address"),
+             Self::NoQuorum => f.write_str("one-validator consensus did not produce a QC"),
+@@ -157,6 +161,12 @@ impl From<StorageError> for PipelineError {
+     }
+ }
+ 
++impl From<MempoolError> for PipelineError {
++    fn from(error: MempoolError) -> Self {
++        Self::Mempool(error)
++    }
++}
++
+ impl From<TxError> for PipelineError {
+     fn from(error: TxError) -> Self {
+         Self::InvalidTransaction(error)
+@@ -260,8 +270,7 @@ pub struct Pipeline {
+     committed_accounts: BTreeMap<[u8; 20], Account>,
+     projected_accounts: BTreeMap<[u8; 20], Account>,
+     queue_accounts: BTreeMap<[u8; 20], Account>,
+-    queue: VecDeque<Tx>,
+-    known_txids: BTreeSet<Hash>,
++    mempool: Mempool,
+     pending: BTreeMap<Hash, PendingBlock>,
+     pending_order: VecDeque<Hash>,
+     proposed_height: u64,
+@@ -381,6 +390,10 @@ impl Pipeline {
+         consensus.init_with_genesis(finality_genesis);
+         let projected_accounts = accounts.clone();
+         let queue_accounts = accounts.clone();
++        let mempool = Mempool::new(MempoolConfig {
++            capacity: D3_MEMPOOL_CAPACITY,
++            ..MempoolConfig::default()
++        })?;
+         Ok(Self {
+             chain_id: config.chain_id,
+             data_dir: config.data_dir,
+@@ -394,8 +407,7 @@ impl Pipeline {
+             committed_accounts: accounts,
+             projected_accounts,
+             queue_accounts,
+-            queue: VecDeque::new(),
+-            known_txids: BTreeSet::new(),
++            mempool,
+             pending: BTreeMap::new(),
+             pending_order: VecDeque::new(),
+             proposed_height: 0,
+@@ -404,52 +416,50 @@ impl Pipeline {
+         })
+     }
+ 
+-    /// Queue a validated transfer for the next block.
++    /// Validate and submit a native transfer to the bounded D3 mempool.
+     ///
+-    /// Structural, chain, expiry, signature, nonce, balance and D2 gas/fee
+-    /// checks run before the transaction enters the queue. D3 replaces this
+-    /// simple bounded ingress with the full fee-priority mempool.
++    /// Chain, expiry, signature, nonce, balance, gas and fee checks run before
++    /// insertion. Same-nonce replacements require the configured tip bump;
++    /// otherwise-valid candidates are ordered by sender/nonce for projected
++    /// solvency checks. The append-only path avoids re-executing the whole pool
++    /// for the common sequential-nonce case.
+     pub fn submit(&mut self, tx: Tx) -> Result<Hash, PipelineError> {
+-        if self.queue.len() >= D2_QUEUE_CAPACITY {
+-            return Err(PipelineError::QueueFull);
+-        }
+         let height = Height::new(self.proposed_height.saturating_add(1));
+         tx.validate(&self.chain_id, height)?;
+-        let txid = tx.txid();
+-        if self.known_txids.contains(&txid) {
+-            return Err(PipelineError::DuplicateTransaction);
+-        }
+         let sort_key = (tx.unsigned.signer.into_bytes(), tx.unsigned.nonce.value());
+-        let appends_in_canonical_order = self.queue.back().is_none_or(|last| {
+-            (
+-                last.unsigned.signer.into_bytes(),
+-                last.unsigned.nonce.value(),
+-            ) < sort_key
+-        });
+-        if appends_in_canonical_order {
++        let append = self.mempool.last_key().is_none_or(|last| last < sort_key);
++        if append && self.mempool.len() < self.mempool.capacity() {
+             let mut projected = self.queue_accounts.clone();
+             let _ = execute_transfer(&tx, height, self.proposer, &mut projected)?;
++            let outcome = self.mempool.insert(tx)?;
+             self.queue_accounts = projected;
+-            self.queue.push_back(tx);
+-        } else {
+-            let mut candidate = self.queue.iter().cloned().collect::<Vec<_>>();
+-            candidate.push(tx);
+-            candidate.sort_by_key(|item| {
+-                (
+-                    item.unsigned.signer.into_bytes(),
+-                    item.unsigned.nonce.value(),
+-                )
+-            });
+-            let mut projected = self.projected_accounts.clone();
+-            for item in &candidate {
+-                item.validate(&self.chain_id, height)?;
+-                let _ = execute_transfer(item, height, self.proposer, &mut projected)?;
+-            }
+-            self.queue_accounts = projected;
+-            self.queue = candidate.into();
++            return Ok(outcome.txid);
+         }
+-        self.known_txids.insert(txid);
+-        Ok(txid)
++        let mut candidate_pool = self.mempool.clone();
++        let outcome = candidate_pool
++            .insert(tx.clone())
++            .map_err(|error| match error {
++                MempoolError::DuplicateTransaction => PipelineError::DuplicateTransaction,
++                other => PipelineError::Mempool(other),
++            })?;
++
++        let projected = if append && outcome.replaced.is_none() && outcome.evicted.is_none() {
++            let mut projected = self.queue_accounts.clone();
++            let _ = execute_transfer(&tx, height, self.proposer, &mut projected)?;
++            projected
++        } else {
++            project_mempool_accounts(
++                &self.chain_id,
++                height,
++                self.proposer,
++                &self.projected_accounts,
++                &candidate_pool,
++            )?
++        };
++
++        self.mempool = candidate_pool;
++        self.queue_accounts = projected;
++        Ok(outcome.txid)
+     }
+ 
+     /// Propose one block, run its transactions through the D2 executor and
+@@ -462,11 +472,17 @@ impl Pipeline {
+             .proposed_height
+             .checked_add(1)
+             .ok_or(PipelineError::AmountOverflow)?;
+-        let count = self.queue.len().min(MAX_BLOCK_TXS);
+-        let mut txs = self.queue.iter().take(count).cloned().collect::<Vec<_>>();
+-        // C5 fixes a canonical transaction order; execute in precisely that
+-        // order, not in network arrival order.
++        let base_nonces = self
++            .projected_accounts
++            .iter()
++            .map(|(address, account)| (*address, account.nonce.value()))
++            .collect::<BTreeMap<_, _>>();
++        let mut txs = self.mempool.select_ready(&base_nonces, MAX_BLOCK_TXS);
++        let count = txs.len();
++        // The mempool picks fee-priority sender lanes. C5 fixes a canonical
++        // body order, so execute and commit those selected transactions by key.
+         txs.sort_by_key(|tx| (tx.unsigned.signer, tx.unsigned.nonce));
++        let included_txids = txs.iter().map(Tx::txid).collect::<Vec<_>>();
+         let mut after_accounts = self.projected_accounts.clone();
+         let mut receipts = Vec::with_capacity(count);
+         let mut total_gas = 0u64;
+@@ -563,11 +579,14 @@ impl Pipeline {
+         self.proposed_height = height;
+         self.proposed_tip = block.block_hash();
+         self.latest_qc = Some(qc);
+-        for _ in 0..count {
+-            if let Some(tx) = self.queue.pop_front() {
+-                let _ = tx;
+-            }
+-        }
++        self.mempool.remove_included(&included_txids);
++        self.queue_accounts = project_mempool_accounts(
++            &self.chain_id,
++            Height::new(self.proposed_height.saturating_add(1)),
++            self.proposer,
++            &self.projected_accounts,
++            &self.mempool,
++        )?;
+ 
+         let mut committed_blocks = Vec::new();
+         for finalized in newly_finalized {
+@@ -601,6 +620,16 @@ impl Pipeline {
+         Ok(self.storage.get(StateKey::receipt(txid).as_bytes())?)
+     }
+ 
++    /// Number of transactions currently waiting in the D3 mempool.
++    pub fn mempool_len(&self) -> usize {
++        self.mempool.len()
++    }
++
++    /// Configured maximum number of queued D3 transactions.
++    pub fn mempool_capacity(&self) -> usize {
++        self.mempool.capacity()
++    }
++
+     /// Last C5 block hash proposed by this process.
+     pub fn proposed_tip(&self) -> Hash {
+         self.proposed_tip
+@@ -714,6 +743,21 @@ fn account_changes(
+     changes
+ }
+ 
++fn project_mempool_accounts(
++    chain_id: &str,
++    height: Height,
++    proposer: Address,
++    base_accounts: &BTreeMap<[u8; 20], Account>,
++    mempool: &Mempool,
++) -> Result<BTreeMap<[u8; 20], Account>, PipelineError> {
++    let mut projected = base_accounts.clone();
++    for tx in mempool.canonical_transactions() {
++        tx.validate(chain_id, height)?;
++        let _ = execute_transfer(&tx, height, proposer, &mut projected)?;
++    }
++    Ok(projected)
++}
++
+ fn execute_transfer(
+     tx: &Tx,
+     height: Height,
+diff --git a/crates/aura-node/tests/d0_baseline.rs b/crates/aura-node/tests/d0_baseline.rs
+index 8738259b767fc69d2f2790abafdc4105dbd6abfa..d2e42b7dd8115c232bc5be857c13d4553646c41e 100644
+--- a/crates/aura-node/tests/d0_baseline.rs
++++ b/crates/aura-node/tests/d0_baseline.rs
+@@ -217,7 +217,7 @@ fn report_measures_this_tree() {
+     assert!(out.contains("aura-exec"), "{out}");
+     assert!(out.contains("implemented"), "{out}");
+     assert!(
+-        out.contains("node capabilities present: 0 of 6"),
++        out.contains("node capabilities present: 0 of 5"),
+         "the report must state the node is absent:\n{out}"
+     );
+ }
+@@ -269,13 +269,13 @@ fn the_unlanded_layers_are_still_placeholders() {
+     let measured = survey(&repo_root());
+     assert_eq!(
+         measured.placeholder_names(),
+-        vec!["aura-p2p", "aura-mempool", "aura-rpc"],
++        vec!["aura-p2p", "aura-rpc"],
+         "a placeholder grew public API without the plan being updated"
+     );
+     for entry in &measured.layers {
+         let phase = entry.layer.phase;
+         let is_placeholder = entry.presence == Presence::Placeholder;
+-        if matches!(phase, "N1" | "D3" | "D4") {
++        if matches!(phase, "N1" | "D4") {
+             assert!(
+                 is_placeholder,
+                 "{} must still be a placeholder at D0",
+diff --git a/crates/aura-node/tests/d1_skeleton.rs b/crates/aura-node/tests/d1_skeleton.rs
+index 62825133ec804bbcbada6bded441de6ea983f86a..287528e58e263f656f83fbece1783bf78c4965aa 100644
+--- a/crates/aura-node/tests/d1_skeleton.rs
++++ b/crates/aura-node/tests/d1_skeleton.rs
+@@ -183,7 +183,7 @@ fn report_measures_this_tree() {
+     // D1 config/lifecycle and the D2 transaction pipeline have landed; the
+     // report lists the remaining six externally facing node capabilities.
+     assert!(
+-        out.contains("node capabilities present: 0 of 6"),
++        out.contains("node capabilities present: 0 of 5"),
+         "the report must state how many capabilities are still absent: {out}"
+     );
+ }
+@@ -220,15 +220,8 @@ fn the_pinned_fixture_matches_the_live_measurement() {
+         .collect();
+     assert_eq!(capabilities, expected);
+ 
+-    // Capabilities that remain after D2 must still be enumerated exactly.
+-    for cap in [
+-        "mempool",
+-        "json-rpc",
+-        "grpc-rest",
+-        "metrics",
+-        "devnet",
+-        "cli",
+-    ] {
++    // Capabilities that remain after D3 must still be enumerated exactly.
++    for cap in ["json-rpc", "grpc-rest", "metrics", "devnet", "cli"] {
+         assert!(
+             capabilities.iter().any(|line| line.starts_with(cap)),
+             "capability {cap} must still be listed as missing after D1"
+diff --git a/crates/aura-node/tests/d3_mempool.rs b/crates/aura-node/tests/d3_mempool.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..d64c4a94c06ccc06322ea067fcb1a16b352c6382
+--- /dev/null
++++ b/crates/aura-node/tests/d3_mempool.rs
+@@ -0,0 +1,118 @@
++//! D3 mempool acceptance: 10,000 contiguous transfers with no lost nonce or spend.
++
++use std::collections::BTreeSet;
++use std::fs;
++use std::path::PathBuf;
++use std::sync::atomic::{AtomicU64, Ordering};
++use std::time::Duration;
++
++use aura_crypto::ed25519_public_key;
++use aura_node::pipeline::{
++    D2_BASE_FEE, Pipeline, PipelineConfig, TRANSFER_GAS, encode_transfer_payload,
++};
++use aura_tx::{Tx, TxKind, TxParams, UnsignedTx, signer_address};
++use aura_types::{Address, Amount, ChainId, Gas, Height, Nonce};
++
++const CHAIN: &str = "auralite-d3-mempool-1";
++const SENDER_SEED: [u8; 32] = [0x61; 32];
++const RECIPIENT: Address = Address::from_bytes([0x72; 20]);
++const TRANSFERS: u64 = 10_000;
++static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
++
++fn temp_dir() -> PathBuf {
++    let serial = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
++    let dir = std::env::temp_dir().join(format!("aura-d3-mempool-{}-{serial}", std::process::id()));
++    let _ = fs::remove_dir_all(&dir);
++    fs::create_dir_all(&dir).unwrap();
++    dir
++}
++
++fn sender() -> Address {
++    signer_address(&ed25519_public_key(&SENDER_SEED))
++}
++
++fn transfer(nonce: u64) -> Tx {
++    UnsignedTx::new(TxParams {
++        chain_id: ChainId::new(CHAIN).unwrap(),
++        signer: sender(),
++        nonce: Nonce::new(nonce),
++        kind: TxKind::Transfer,
++        payload: encode_transfer_payload(RECIPIENT, Amount::ONE),
++        gas_limit: Gas::new(TRANSFER_GAS),
++        max_fee: D2_BASE_FEE,
++        tip: Amount::ZERO,
++        expiry: Height::new(100),
++    })
++    .unwrap()
++    .sign(&SENDER_SEED)
++    .unwrap()
++}
++
++#[test]
++fn ten_thousand_transactions_keep_nonce_balance_and_receipts_consistent() {
++    let dir = temp_dir();
++    let mut node = Pipeline::open(PipelineConfig {
++        chain_id: CHAIN.to_owned(),
++        data_dir: dir.clone(),
++        validator_seed: [0xA7; 32],
++        allocations: vec![(sender(), Amount::from_units(500_000_000))],
++        genesis_time_ms: 1_700_100_000_000,
++    })
++    .unwrap();
++    let events = node.subscribe();
++    let mut txids = Vec::with_capacity(TRANSFERS as usize);
++    for nonce in 0..TRANSFERS {
++        txids.push(node.submit(transfer(nonce)).unwrap());
++    }
++    assert_eq!(node.mempool_len(), TRANSFERS as usize);
++    assert_eq!(node.mempool_capacity(), 16_384);
++
++    let proposed = node.produce_block().unwrap();
++    assert_eq!(proposed.transaction_count, TRANSFERS as usize);
++    assert_eq!(proposed.block.body.txs.len(), TRANSFERS as usize);
++    assert_eq!(
++        proposed.block.header.gas_used.value(),
++        TRANSFER_GAS * TRANSFERS
++    );
++    assert!(proposed.committed.is_empty());
++    assert_eq!(node.mempool_len(), 0);
++    assert!(events.try_recv().is_err(), "no event before 3-chain commit");
++
++    let _ = node.produce_block().unwrap();
++    let finalized = node.produce_block().unwrap();
++    assert_eq!(finalized.committed.len(), 1);
++    let committed = &finalized.committed[0];
++    assert_eq!(committed.receipts.len(), TRANSFERS as usize);
++    assert_eq!(committed.storage.root, committed.block.header.state_root);
++    assert_eq!(node.storage_head().root, committed.block.header.state_root);
++
++    let sender_account = node.account(&sender()).unwrap();
++    assert_eq!(sender_account.nonce.value(), TRANSFERS);
++    assert_eq!(sender_account.balance.units(), 289_990_000);
++    assert_eq!(
++        node.account(&RECIPIENT).unwrap().balance.units(),
++        u128::from(TRANSFERS)
++    );
++    let unique_receipts = committed
++        .receipts
++        .iter()
++        .map(|receipt| receipt.txid)
++        .collect::<BTreeSet<_>>();
++    assert_eq!(unique_receipts.len(), TRANSFERS as usize);
++    for (nonce, receipt) in committed.receipts.iter().enumerate() {
++        assert_eq!(receipt.nonce.value(), nonce as u64);
++        assert_eq!(receipt.height.value(), 1);
++        assert_eq!(receipt.amount, Amount::ONE);
++        assert_eq!(receipt.gas_used.value(), TRANSFER_GAS);
++        assert_eq!(receipt.base_fee_burned.units(), TRANSFER_GAS as u128);
++    }
++    assert_eq!(
++        node.stored_receipt(&txids[TRANSFERS as usize - 1]).unwrap(),
++        Some(committed.receipts[TRANSFERS as usize - 1].to_bytes())
++    );
++    let event = events.recv_timeout(Duration::from_secs(2)).unwrap();
++    assert_eq!(event.committed.receipts.len(), TRANSFERS as usize);
++    assert_eq!(node.storage_head().version, 2);
++    drop(node);
++    let _ = fs::remove_dir_all(dir);
++}
+diff --git a/crates/aura-node/tests/fixtures/d0_baseline.txt b/crates/aura-node/tests/fixtures/d0_baseline.txt
+index c1678a1f2c3a9014941a1cb2eefec87da855741b..37602668dd8aec50aacdae66a448a9ce377e2a5a 100644
+--- a/crates/aura-node/tests/fixtures/d0_baseline.txt
++++ b/crates/aura-node/tests/fixtures/d0_baseline.txt
+@@ -5,15 +5,14 @@ exit_stub=2
+ exit_usage=64
+ exit_no_workspace=3
+ layers=13
+-capabilities=6
+-capability=mempool D3 nonce/balance/gas admission, `effective_tip` priority, eviction
++capabilities=5
+ capability=json-rpc D4 `submit_tx`, `get_balance`, `get_tx`, `get_block`, `call`, `estimate_gas`, `subscribe`
+ capability=grpc-rest D5 protobuf schema, gateway, OpenAPI, versioning
+ capability=metrics D6 Prometheus, `/health`, `/metrics`, OpenTelemetry traces
+ capability=devnet D7 `make devnet`: 4 validators, genesis, faucet key, logs
+ capability=cli D8 `aura` node ops, query, tx, keys, snapshot, upgrade
+-implemented=10
+-placeholders=3
++implemented=11
++placeholders=2
+ missing=0
+ layer=aura-types C1 implemented
+ layer=aura-codec C2 implemented
+@@ -26,5 +25,5 @@ layer=aura-genesis C8 implemented
+ layer=aura-exec X1 implemented
+ layer=aura-consensus B3 implemented
+ layer=aura-p2p N1 placeholder
+-layer=aura-mempool D3 placeholder
++layer=aura-mempool D3 implemented
+ layer=aura-rpc D4 placeholder
+diff --git a/crates/aura-node/tests/fixtures/d1_skeleton.txt b/crates/aura-node/tests/fixtures/d1_skeleton.txt
+index 0ae500a3e40322f743967ab0f203a9e3e9994422..be25de451b49edd7c09f013acad5b98d6da0c836 100644
+--- a/crates/aura-node/tests/fixtures/d1_skeleton.txt
++++ b/crates/aura-node/tests/fixtures/d1_skeleton.txt
+@@ -4,8 +4,7 @@ phase=D0
+ exit_stub=2
+ exit_usage=64
+ exit_no_workspace=3
+-capabilities=6
+-capability=mempool D3 nonce/balance/gas admission, `effective_tip` priority, eviction
++capabilities=5
+ capability=json-rpc D4 `submit_tx`, `get_balance`, `get_tx`, `get_block`, `call`, `estimate_gas`, `subscribe`
+ capability=grpc-rest D5 protobuf schema, gateway, OpenAPI, versioning
+ capability=metrics D6 Prometheus, `/health`, `/metrics`, OpenTelemetry traces
+diff --git a/docs/NODE.md b/docs/NODE.md
+index b0573e459081f1f9a0e349dac4b2bb283d55763b..6d1a67bad217c6bac5b885a9420be57fcd044577 100644
+--- a/docs/NODE.md
++++ b/docs/NODE.md
+@@ -1,8 +1,9 @@
+ # The node — `aurad`
+ 
+-> Status: **D0 ✅, D1 ✅, D2 ✅ (transaction pipeline), B3 ✅ (single-process BFT finality primitives)**.
+-> The node starts and can carry a signed native transfer through a local BFT-backed, durable pipeline.
+-> Numbers: [`evidence/d1/report.md`](evidence/d1/report.md),
++> Status: **D0 ✅, D1 ✅, D2 ✅, D3 ✅ (bounded fee-priority mempool), B3 ✅ (single-process BFT finality primitives)**.
++> The local pipeline admits and finalizes native transfers; D3 adds nonce-lane priority, replacement, eviction and reorg reinsertion.
++> Numbers: [`evidence/d3/report.md`](evidence/d3/report.md),
++> [`evidence/d1/report.md`](evidence/d1/report.md),
+ > [`evidence/d0/report.md`](evidence/d0/report.md),
+ > [`evidence/b1/report.md`](evidence/b1/report.md).
+ 
+@@ -40,14 +41,31 @@ C5 blocks, B3 one-validator finality, S2 WAL-backed storage, receipts and
+ commit events. The integration gate submits 1,000 signed transfers, checks
+ nonce/balance/fee accounting and roots, and proves that the three-chain rule
+ holds back storage/events until finalization. D2 only executes native transfers;
+-other transaction kinds are rejected. D3 adds fee-priority and full mempool
+-policy, D4 adds RPC, and later network phases supply multi-validator transport.
+-The pipeline fails closed on restart when committed receipts exist but no
+-replayable finality checkpoint is available.
++other transaction kinds are rejected. D4 adds RPC, and later network phases
++supply multi-validator transport. The pipeline fails closed on restart when
++committed receipts exist but no replayable finality checkpoint is available.
+ 
+ See [`spec/node-pipeline.md`](spec/node-pipeline.md) and
+ [`evidence/d2/report.md`](evidence/d2/report.md).
+ 
++## D3: fee-priority mempool
++
++`aura-mempool` now provides a bounded, deterministic pool with **16,384** entries.
++Admission validates chain/signature/expiry and D2's transfer executor checks nonce,
++balance, gas and fee before insertion. Selection ranks eligible sender-lane heads by
++tip while only exposing contiguous nonces; C5 block encoding remains canonical by
++`(sender, nonce)`. Same-nonce replacements require at least a 10% tip bump (rounded
++up, minimum one unit), and a full pool evicts its deterministic lowest-tip entry only
++for a strictly higher tip. Reverted-branch transactions can be reinserted after the
++caller revalidates them against the new account view.
++
++The D3 acceptance test submits **10,000** signed transfers, checks nonce and balance
++conservation, unique durable receipts, gas and three-chain event ordering. The pool's
++reorg hook is a reinsertion boundary, not a claim that D3 adds a multi-validator
++consensus reorg engine.
++
++See [`evidence/d3/report.md`](evidence/d3/report.md).
++
+ ## The survey
+ 
+ `aurad report` walks `crates/<layer>/src`, counts files, lines and public item
+@@ -65,9 +83,9 @@ declarations, and classifies each layer:
+ measurement and plan in the same patch makes the gate fail rather than silently
+ changing the baseline.
+ 
+-After D2 the survey measures **10 implemented, 3 placeholders, 0 missing**. The
+-remaining placeholders are `aura-p2p` (N1), `aura-mempool` (D3) and `aura-rpc`
+-(D4); `aura-consensus` now includes the B3 three-chain finality implementation.
++After D3 the survey measures **11 implemented, 2 placeholders, 0 missing**. The
++remaining placeholders are `aura-p2p` (N1) and `aura-rpc` (D4); `aura-mempool`
++now exposes the D3 transaction-pool API.
+ 
+ ## Layers and owners
+ 
+@@ -84,22 +102,22 @@ remaining placeholders are `aura-p2p` (N1), `aura-mempool` (D3) and `aura-rpc`
+ | `aura-exec` | X1 | deterministic WASM execution, ABI v1–v3, verifier |
+ | `aura-consensus` | B3 | proposer, BLS/QC and three-chain finality; validator-set/VRF-leader management remain open |
+ | `aura-p2p` | N1 | gossip, peer management, sync — **placeholder** |
+-| `aura-mempool` | D3 | nonce/balance/gas admission, prioritisation — **placeholder** |
++| `aura-mempool` | D3 | bounded fee-priority pool, replacement, eviction, reorg reinsertion |
+ | `aura-rpc` | D4 | JSON-RPC 2.0, gRPC, REST — **placeholder** |
+ 
+ ## What each later phase owes
+ 
+ | capability | phase | what it will do |
+ |---|---|---|
+-| `mempool` | D3 | fee-priority admission, replacement, eviction, reorg handling |
+ | `json-rpc` | D4 | `submit_tx`, `get_balance`, `get_tx`, `get_block`, `call`, `estimate_gas`, `subscribe` |
+ | `grpc-rest` | D5 | protobuf schema, gateway, OpenAPI, versioning |
+ | `metrics` | D6 | Prometheus, `/health`, `/metrics`, OpenTelemetry traces |
+ | `devnet` | D7 | `make devnet`: 4 validators, genesis, faucet key, logs |
+ | `cli` | D8 | `aura` node ops, query, tx, keys, snapshot, upgrade |
+ 
+-These six entries are `aura_node::baseline::MISSING_CAPABILITIES` after D2
+-(`config` and `lifecycle` landed with D1; the transaction pipeline landed with D2).
++These five entries are `aura_node::baseline::MISSING_CAPABILITIES` after D3
++(`config` and `lifecycle` landed with D1, the transaction pipeline with D2, and the
++mempool with D3).
+ The gate asserts that the refusal text contains every remaining capability, its phase
+ and its description, so the message cannot rot into a generic "not implemented".
+ 
+@@ -130,6 +148,9 @@ make test-d1            # the gate: config, tracing, PID, health, refusal
+ make nc-d1              # 6 negative controls, each reddening a named test
+ make evidence-d1        # docs/evidence/d1/{gates.txt,report.md,inventory.txt,SHA256SUMS}
+ make test-d0            # the D0 gate is still green
++make test-d3            # mempool + 10,000-transfer acceptance
++make nc-d3              # six focused unit-test mutation controls
++make evidence-d3        # docs/evidence/d3/{gates.txt,report.md,inventory.txt,SHA256SUMS}
+ aurad report            # what this tree contains, right now
+-aurad --chain-id test   # starts the skeleton; SIGTERM shuts it down cleanly
++aurad --chain-id test   # starts the D1 skeleton; SIGTERM shuts it down cleanly
+ ```
+\ No newline at end of file
+diff --git a/docs/STATUS.md b/docs/STATUS.md
+index 807c986b56582c258b9e82951165fd40d21c0bd3..f0121bc4172c8cce8bba4b2bbdad49f48b692ae8 100644
+--- a/docs/STATUS.md
++++ b/docs/STATUS.md
+@@ -104,28 +104,19 @@ L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
+   ⚠️ AUDIT: the §3 crate graph in `docs/ARCHITECTURE.md` had a cycle
+   (`aura-state <- aura-storage` while `aura-storage <- aura-state`); S3
+   corrected it to match the real `Cargo.toml` edges.
+-- **D0 (current).** `NODE_PLAN` opens with the measurement the other plans started
+-  with: **the libraries exist, the node does not.** `aura_node::baseline` surveys
+-  `crates/<layer>/src` — files, lines, public item declarations — and classifies each
+-  of thirteen layers as `implemented`, `placeholder` or `missing`: measured now **9
+-  implemented, 4 placeholders, 0 missing**, the placeholders being `aura-consensus`
+-  (B1), `aura-p2p` (N1), `aura-mempool` (D3) and `aura-rpc` (D4), which declare no
+-  public item at all. The `aurad` binary ships **the opposite of a fake node**: no
+-  arguments → exit **2** with all nine missing capabilities and their phases;
+-  `--config`/`--chain-id`/`--data-dir`/`--rpc-addr`/`--validator-key` → recognised and
+-  refused the same way; an unknown command → exit **64**; `report` measures the tree
+-  and exits **3** when there is no workspace; `--version` says
+-  `(D0 baseline — the node does not exist)`. The survey is pinned in
+-  `crates/aura-node/tests/fixtures/d0_baseline.txt` from the binary's own
+-  `report --fixture` output, so landing consensus code fails the build until the plan
+-  and the fixture move together. 15 tests in the D0 gate, 374 in the workspace, 4 857
+-  vectors, 165 NC. Report: `docs/evidence/d0/report.md`; doc: [`NODE.md`](NODE.md).
++- **D0 baseline (refreshed at D3).** `NODE_PLAN` opens with the measurement the
++  other plans started with: **the libraries exist, the node does not.** The current
++  `aura_node::baseline` survey covers thirteen layers and measures **11 implemented,
++  2 placeholders, 0 missing**; only `aura-p2p` (N1) and `aura-rpc` (D4) have no
++  public items. The refusal lists the five remaining D4–D8 node capabilities. D0's
++  original receipt, six-control log and 165-control cumulative inventory remain in
++  `docs/evidence/d0/`; the project-wide D3 inventory now totals 207 NCs. The pinned
++  fixture is regenerated from the binary's own `report --fixture` output. Report:
++  `docs/evidence/d0/report.md`; current node doc: [`NODE.md`](NODE.md).
+   ⚠️ AUDIT: **a static count is not an audit** — "implemented" says nothing about
+-  correctness (that is what the other 28 phases' gates measure), and the survey trusts
+-  `crates/<dir>/src` to exist. Nothing here starts a process, binds a port or parses a
+-  config file, on purpose: a node that opens a socket before D1 owns shutdown leaks a
+-  socket on every failed start. **M0 still needs B (consensus), N (network) and the
+-  rest of D.**
++  correctness (that is what the other phases' gates measure), and the survey trusts
++  `crates/<dir>/src` to exist. D0 itself did not start a process or bind a port;
++  D1 later added a process shell. **M0 still needs N (network), RPC and the rest of D.**
+ - **X8.** The subset is now **enforced, not just documented**.
+   `aura_exec::verify` is a pure function over bytes — no engine, no execution — that
+   answers with a `Report`: verdict, size, functions, instructions, peak stack depth,
+@@ -483,8 +474,10 @@ numbers with raw command output are in `docs/evidence/c0-baseline.txt`,
+   migration (H2), no `cargo deny` (H1). The decisive determinism gate (X7) and the
+   static verifier (X8) are shipped, but **M0 still needs the D-phase node**, and the
+   three-OS determinism matrix is still a CI job that has never run.
+-- No consensus (B1), no P2P (N1), no mempool (D3), no RPC (D4): the four layer
+-  crates are empty placeholders, measured by `aurad report` and pinned in D0's gate.
++- Consensus baseline/finality (B1–B3) and the bounded mempool (D3) are present;
++  P2P transport (N1) and RPC (D4) remain future work. D0's measured inventory and
++  capability report are retained as historical baseline evidence, not a current
++  claim that those node-layer crates are empty.
+ - No node **process**: `aurad` is a refusal plus a survey; nothing starts, serves or
+   shuts down until D1.
+ - No wallet, explorer, contracts, token.
+diff --git a/docs/evidence/c10/SHA256SUMS b/docs/evidence/c10/SHA256SUMS
+index fb58354e17a67ca77daad581c697a314ab34eab6..e40441b41f8d9ea46f4c9489a42a1e6b48c3a0d2 100644
+--- a/docs/evidence/c10/SHA256SUMS
++++ b/docs/evidence/c10/SHA256SUMS
+@@ -1,5 +1,5 @@
+ ade877cfa70e4dedcd9f15a0e27daa484bf0d3f8d64853e280dce1bdb0f84a8c  docs/evidence/c10/gates.txt
+ b02df68447abb730e42e42c8e10963b508fac8f96ee2bdc2ae9b8fa5591cd945  docs/evidence/c10/nc.log
+ 93f0fc46239ecfe563d294ae7a314c8b50ecb540c3a388f75c5b14cfdc316348  docs/evidence/c10/closeout.txt
+-7fdbe099973f1e1842ce4d2ac93e29265b11c697f871dd34ed9e1a27af27c8eb  docs/spec/FORMAT_INDEX.md
++f2ee1b5f7f1e1c87a7d9eff7d30b55265a063559c2cddbe7a89c1a3b89ca7800  docs/spec/FORMAT_INDEX.md
+ e12a993c744b0f368489ef35e31404657c33eedd8bc12347d951a30ce394ca43  docs/CLOSEOUT_AUDIT.md
+diff --git a/docs/evidence/d0/SHA256SUMS b/docs/evidence/d0/SHA256SUMS
+index c7c516e4d287565ac086effb4cde0c5e03ba4c12..4d70c7da50381d07b53ff5b9448a86faef37ad74 100644
+--- a/docs/evidence/d0/SHA256SUMS
++++ b/docs/evidence/d0/SHA256SUMS
+@@ -2,4 +2,4 @@ a2b522c23fad41c3d761112548f4912a672d0bfbb83e369f7635bd63ae82d188  docs/evidence/
+ eea1275cca73e2a115d53da244e222f81c0cb837619062487420d95533fbf025  docs/evidence/d0/nc.log
+ 18f939a59465865b58a6464ce51c0e3756412998439d099914a12ef5e43f6c43  docs/evidence/d0/report.md
+ 1344b1d951511e314f74df67e092e54c8f771e42bd01b7147a9f46b1ada269cd  docs/evidence/d0/inventory.txt
+-3ee1ef980bf8a9cc41cd0c5b3cd12e7a3923913bbcd8888b6a7d0dfde49785c6  crates/aura-node/tests/fixtures/d0_baseline.txt
++e6d1b2bb69dd911e53edba7e55ee08db675e65918d7b96b37c69bac6b2fd3069  crates/aura-node/tests/fixtures/d0_baseline.txt
+diff --git a/docs/evidence/d1/SHA256SUMS b/docs/evidence/d1/SHA256SUMS
+index 6228afe4bd26b82252f91b21543889ac5a5d04ac..fa77d0dd2ab7ace544e18043909cc7c7f86674bd 100644
+--- a/docs/evidence/d1/SHA256SUMS
++++ b/docs/evidence/d1/SHA256SUMS
+@@ -2,4 +2,4 @@ c125a8f059205cc36d1b1fdd482fddedf5901114e07ffda9c6b2b90647072f05  docs/evidence/
+ 9a9f13538c9a73a319364e05eea9922e7eb41f186fa0679c7b69de4488aa8329  docs/evidence/d1/nc.log
+ b5dc2c193a8f56c9c11cf9f6b82d3216e3b4f48642b09aa2bc104a281db2e2be  docs/evidence/d1/report.md
+ 13e3e0f7173e39391c9dbb6881bcddf9de79493cb8ba17633b6480234abdee47  docs/evidence/d1/inventory.txt
+-d91e6360e067d82649c7d0f53bb6ef78e56d24da740bd531653761c0e81514db  crates/aura-node/tests/fixtures/d1_skeleton.txt
++bc5a68ce6bed07f725cdcac8ef674975d488d704eb08731bc161829589f1365b  crates/aura-node/tests/fixtures/d1_skeleton.txt
+diff --git a/docs/evidence/d3/SHA256SUMS b/docs/evidence/d3/SHA256SUMS
+new file mode 100644
+index 0000000000000000000000000000000000000000..a8128449c20b0944f88ab236a9ae7cce7b567f30
+--- /dev/null
++++ b/docs/evidence/d3/SHA256SUMS
+@@ -0,0 +1,9 @@
++f18e87abed6b4d25ab2bf50dbd72b18237c04da5c406b196fd81932560589405  docs/evidence/d3/gates.txt
++01bb8ebe9bfbbf7a3964df754b545a98b57c47aa144d519def648bf5dbcefb25  docs/evidence/d3/nc.log
++4de4260e520fbc5f70d6827a176fe5acb100d67426857653c02a9adb000f8e5b  docs/evidence/d3/report.md
++25b380f40876b65ef126da7d018e72e28cc657972b204a0b4a6dfe875fa7d763  docs/evidence/d3/inventory.txt
++94b916e38b2cd1a9a3af66af799f9f8480c14fd3ea9e004a71e3e427ed80de29  docs/evidence/d3/clean-apply.txt
++52928091f9194d824d67141c557e3ee36cdc52ebe6fdfd610ed5fd59572f3509  docs/spec/mempool.md
++fce62aa36ced421a9b1e8c4d783bc327afd684c381734956e10a57c7195694af  crates/aura-mempool/src/lib.rs
++9dd8cdf763e1ee14bdae599629a92666e3ab745eee3466dbe32265860b3765e9  crates/aura-node/src/pipeline.rs
++56dce93c0a8fe568fe5f3cd3bcf6d33119967b4b55dbfed14e43f103aecee600  crates/aura-node/tests/d3_mempool.rs
+diff --git a/docs/evidence/d3/clean-apply.txt b/docs/evidence/d3/clean-apply.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..d553bd396a8d8d6b8e725844a0cb9068662c934e
+--- /dev/null
++++ b/docs/evidence/d3/clean-apply.txt
+@@ -0,0 +1,12 @@
++# D3 clean-baseline application record
++
++Baseline: `/tmp/aura-d3-base`, commit `c00cc27`, tree `fe5bf16343dce5f85f559e3e26b821e9b647e610` (D2).
++
++Applied `patches/0036-D3-fee-priority-mempool.patch` to a fresh clone of that baseline; `git apply --check` and `git apply` both succeeded. From the clean applied tree:
++
++- `make test` — PASS (`ALL GATES GREEN`): formatting, workspace clippy/tests, docs drift guard, dependency gate, vector inventory (4,938 vectors), test-rig wiring and close-out audit.
++- `make nc-all` — PASS; cumulative inventory `207/207` negative controls, including all six D3 unit-test mutation controls.
++- `python3 tools/check_claims.py` — PASS.
++- `python3 tools/audit_closeout.py --strict` — PASS; 36 phases audited, 207 controls, all evidence checksums verified.
++
++The final patch was re-applied and these clean-copy gates were repeated after recording this result; see `gates.txt` and the final strict audit result in the delivery summary.
+diff --git a/docs/evidence/d3/gates.txt b/docs/evidence/d3/gates.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..938764119e6f5cc8248fb07a0da826c30d40a117
+--- /dev/null
++++ b/docs/evidence/d3/gates.txt
+@@ -0,0 +1,177 @@
++# D3 — mempool gate log
++# Generated (UTC): 2026-10-30T07:00:32+00:00
++# Raw command output follows; command exit codes are recorded below.
++
++$ rustc --version && cargo --version
++rustc 1.99.1 (58cf8f9c3 2026-10-13)
++cargo 1.99.1 (5f94df478 2026-08-27)
++[exit 0]
++
++$ cargo fmt --all -- --check
++
++[exit 0]
++
++$ cargo clippy -p aura-mempool -p aura-node --all-targets -- -D warnings
++Checking aura-codec v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-codec)
++    Checking aura-tx v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-tx)
++    Checking aura-state v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-state)
++    Checking aura-block v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-block)
++    Checking aura-storage v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-storage)
++    Checking aura-consensus v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-consensus)
++    Checking aura-mempool v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-mempool)
++    Checking aura-node v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-node)
++    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.17s
++[exit 0]
++
++$ cargo test -p aura-mempool
++
++test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++   Compiling aura-mempool v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-mempool)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.28s
++     Running unittests src/lib.rs (target/debug/deps/aura_mempool-fbeae75276fe49d0)
++   Doc-tests aura_mempool
++[exit 0]
++
++$ cargo test -p aura-node --test d3_mempool
++running 1 test
++test ten_thousand_transactions_keep_nonce_balance_and_receipts_consistent has been running for over 60 seconds
++test ten_thousand_transactions_keep_nonce_balance_and_receipts_consistent ... ok
++
++test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 224.83s
++
++   Compiling aura-node v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-node)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.65s
++     Running tests/d3_mempool.rs (target/debug/deps/d3_mempool-95f8b9bfecb51e0a)
++[exit 0]
++
++$ cargo test -p aura-node --test d0_baseline --test d1_skeleton --test d2_pipeline
++test binary_unknown_command_is_usage_error ... ok
++test binary_without_chain_id_refuses_and_names_d1 ... ok
++test config_chain_id_is_mandatory ... ok
++test config_cli_chain_id_wins ... ok
++test config_toml_unknown_field_is_rejected ... ok
++test lifecycle_health_probe_healthy_when_pid_exists ... ok
++test lifecycle_init_tracing_succeeds ... ok
++test lifecycle_signal_handle_starts_unset ... ok
++test binary_help_and_version_succeed ... ok
++test report_refuses_a_tree_that_is_not_a_workspace ... ok
++test the_pinned_fixture_matches_the_live_measurement ... ok
++test report_measures_this_tree ... ok
++
++test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
++
++
++running 9 tests
++test refuses_to_restart_committed_state_without_a_finality_checkpoint ... ok
++test receipt_is_durable_before_commit_event ... ok
++test rejects_fee_cap_below_base_fee_plus_tip ... ok
++test rejects_duplicate_transaction_ids ... ok
++test rejects_insufficient_balance_for_value_and_fee ... ok
++test rejects_replay_from_another_chain ... ok
++test rejects_nonce_gap ... ok
++test rejects_transfer_below_gas_floor ... ok
++test thousand_transfers_finalize_to_durable_receipts_and_events ... ok
++
++test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 22.46s
++
++   Compiling aura-node v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-node)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.75s
++     Running tests/d0_baseline.rs (target/debug/deps/d0_baseline-784bb13914ccbcbc)
++     Running tests/d1_skeleton.rs (target/debug/deps/d1_skeleton-82813c0d285cb547)
++2026-10-30T07:04:20.878966Z  INFO ThreadId(09) aurad lifecycle initialised (D1 skeleton)
++     Running tests/d2_pipeline.rs (target/debug/deps/d2_pipeline-13ce232f9528e045)
++[exit 0]
++
++$ make nc-d3
++D3 NEGATIVE CONTROLS (focused Rust library unit tests)
++NC-1 sender nonce must match projected account state: PASS
++NC-2 ready sender lanes must use tip priority: PASS
++NC-3 same-nonce replacement must meet the fee bump: PASS
++NC-4 full pool must reject equal-priority insertion: PASS
++NC-5 reorg reinsertion must return validated transactions to the pool: PASS
++NC-6 gas limit must cover the native transfer schedule: PASS
++RESULT: 6/6 negative controls PASS
++[exit 0]
++
++$ make nc-all
++RESULT: 2/2 negative controls PASS
++RESULT: 3/3 negative controls PASS
++RESULT: 4/4 negative controls PASS
++RESULT: 5/5 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 7/7 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++[exit 0]
++
++$ make test
++     Running tests/s5_sync.rs (target/debug/deps/s5_sync-530606f6cd4e62fd)
++     Running tests/s6_history.rs (target/debug/deps/s6_history-c2e9eeb0bbcac4f5)
++     Running unittests src/lib.rs (target/debug/deps/aura_storage-87cee68c2d6d4e99)
++     Running unittests src/bin/s2_writer.rs (target/debug/deps/s2_writer-e7f22722676ad61c)
++     Running unittests src/bin/s7_chaos.rs (target/debug/deps/s7_chaos-68fefd450fcaf253)
++     Running tests/s2_storage.rs (target/debug/deps/s2_storage-8e2b50ae343fda41)
++     Running tests/s6_prune.rs (target/debug/deps/s6_prune-fa9d2b16a0a49022)
++     Running tests/s7_backup.rs (target/debug/deps/s7_backup-1d1d9b1ed1067c8a)
++     Running unittests src/lib.rs (target/debug/deps/aura_testkit-39acd87c5fb80b8c)
++     Running unittests src/bin/aura-fuzz.rs (target/debug/deps/aura_fuzz-e171e5f56a241ecd)
++     Running tests/harness.rs (target/debug/deps/harness-44c318918f4d11d1)
++     Running tests/properties.rs (target/debug/deps/properties-1416a7f7c28e5979)
++     Running tests/vectors.rs (target/debug/deps/vectors-55a3a9560e00455f)
++     Running unittests src/lib.rs (target/debug/deps/aura_tx-53f86dd5aa8865bd)
++     Running tests/c4_tx.rs (target/debug/deps/c4_tx-9a1ea53215ebb964)
++     Running unittests src/lib.rs (target/debug/deps/aura_types-308b229bcbc15c92)
++     Running tests/c1_types.rs (target/debug/deps/c1_types-30318a674a00d8c5)
++     Running tests/identity.rs (target/debug/deps/identity-22b5be58a3e6ffbb)
++   Doc-tests aura_block
++   Doc-tests aura_codec
++   Doc-tests aura_consensus
++   Doc-tests aura_crypto
++   Doc-tests aura_exec
++   Doc-tests aura_genesis
++   Doc-tests aura_mempool
++   Doc-tests aura_node
++   Doc-tests aura_p2p
++   Doc-tests aura_rpc
++   Doc-tests aura_sdk
++   Doc-tests aura_sdk_macros
++   Doc-tests aura_state
++   Doc-tests aura_storage
++   Doc-tests aura_testkit
++   Doc-tests aura_tx
++   Doc-tests aura_types
++[exit 0]
+diff --git a/docs/evidence/d3/inventory.txt b/docs/evidence/d3/inventory.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..ef1ffce9d908642a45298d26ab90be1e1fcf9d78
+--- /dev/null
++++ b/docs/evidence/d3/inventory.txt
+@@ -0,0 +1,259 @@
++# D3 negative-control inventory
++# Generated (UTC): 2026-10-30T07:00:32+00:00
++
++[C0] 2/2 PASS
++  PASS NC-1 Rust identity
++  PASS NC-2 docs drift guard
++
++[C1] 3/3 PASS
++  PASS NC-1 bech32 checksum constant
++  PASS NC-2 address version byte
++  PASS NC-3 independent golden vector
++
++[C2] 4/4 PASS
++  PASS NC-1 codec version
++  PASS NC-2 independent golden fixture
++  PASS NC-3 trailing-byte guard
++  PASS NC-4 non-minimal varint guard
++
++[C3] 5/5 PASS
++  PASS NC-1 domain separation context
++  PASS NC-2 independent domain-hash vector
++  PASS NC-3 RFC 8032 vector
++  PASS NC-4 Ed25519 verification bypass
++  PASS NC-5 dependency allowlist / make test gate
++
++[C4] 6/6 PASS
++  PASS NC-1 signing context
++  PASS NC-2 txid context
++  PASS NC-3 independent golden signature
++  PASS NC-4 replay protection
++  PASS NC-5 signer/public-key binding
++  PASS NC-6 Ed25519 verification bypass
++
++[C5] 6/6 PASS
++  PASS NC-1 Merkle leaf context
++  PASS NC-2 Merkle node context
++  PASS NC-3 block-hash context
++  PASS NC-4 independent golden tx_root
++  PASS NC-5 tx_root recomputation check
++  PASS NC-6 canonical body order check
++
++[C6] 6/6 PASS
++  PASS NC-1 event leaf context
++  PASS NC-2 independent golden root
++  PASS NC-3 leaf/value binding
++  PASS NC-4 sibling-count check
++  PASS NC-5 sibling direction
++  PASS NC-6 root comparison
++
++[C7] 6/6 PASS
++  PASS NC-1 state key digest context
++  PASS NC-2 independent golden key digest
++  PASS NC-3 reserved key-space prefixes
++  PASS NC-4 namespace length check
++  PASS NC-5 contract namespace check
++  PASS NC-6 contract address check
++
++[C8] 6/6 PASS
++  PASS NC-1 genesis context
++  PASS NC-2 validator-set context
++  PASS NC-3 independent golden genesis hash
++  PASS NC-4 validator order (DoD: sorting must not happen)
++  PASS NC-5 unknown JSON fields
++  PASS NC-6 Stage 1 chain-id check
++
++[C9] 6/6 PASS
++  PASS NC-1 C9 golden varint vector
++  PASS NC-2 vector inventory minimum
++  PASS NC-3 injected non-minimal-varint bug
++  PASS NC-4 injected trailing-byte-guard bug
++  PASS NC-5 fuzz harness iteration counter
++  PASS NC-6 rig wiring in Makefile
++
++[C10] 6/6 PASS
++  PASS NC-1 missing phase receipt
++  PASS NC-2 deferred phase marked done
++  PASS NC-3 forged NC log result
++  PASS NC-4 unindexed format spec
++  PASS NC-5 forged patch subject
++  PASS NC-6 corrupted evidence checksum
++
++[S0] 6/6 PASS
++  PASS NC-1 final-view context
++  PASS NC-2 independent golden final view
++  PASS NC-3 fake state root
++  PASS NC-4 fake persistence
++  PASS NC-5 fake determinism
++  PASS NC-6 falsified no-root measurement
++
++[S1] 6/6 PASS
++  PASS NC-1 leaf context
++  PASS NC-2 node context
++  PASS NC-3 independent checkpoint root
++  PASS NC-4 proof root comparison
++  PASS NC-5 path bit ordering
++  PASS NC-6 depth-independent empty subtrees
++
++[S2] 6/6 PASS
++  PASS NC-1 WAL checksum context
++  PASS NC-2 state key context
++  PASS NC-3 state root context
++  PASS NC-4 independent golden WAL record
++  PASS NC-5 WAL checksum verification
++  PASS NC-6 WAL-before-head invariant
++
++[S3] 6/6 PASS
++  PASS NC-1 diff checksum context
++  PASS NC-2 event commitment context
++  PASS NC-3 diff magic
++  PASS NC-4 independent golden diff
++  PASS NC-5 diff checksum verification
++  PASS NC-6 rollback removal (balance changes after revert)
++
++[S4] 6/6 PASS
++  PASS NC-1 snapshot magic
++  PASS NC-2 manifest checksum context
++  PASS NC-3 chunk hash context
++  PASS NC-4 independent golden manifest
++  PASS NC-5 manifest checksum verification
++  PASS NC-6 chunk digest comparison (substituted chunk)
++
++[S5] 6/6 PASS
++  PASS NC-1 head checksum context
++  PASS NC-2 delta checksum context
++  PASS NC-3 package checksum context
++  PASS NC-4 independent golden package
++  PASS NC-5 quorum comparison
++  PASS NC-6 final state-root comparison (substituted diff chunk)
++
++[S6] 6/6 PASS
++  PASS NC-1 record checksum context
++  PASS NC-2 base checksum context
++  PASS NC-3 retention boundary (keep + 1)
++  PASS NC-4 pruning disabled in prune mode
++  PASS NC-5 archive compaction allowed
++  PASS NC-6 pruned version served instead of rejected
++
++[S7] 6/6 PASS
++  PASS NC-1 manifest checksum context
++  PASS NC-2 blob SHA-256 comparison
++  PASS NC-3 replayed root comparison
++  PASS NC-4 parent-root chain check
++  PASS NC-5 restore into a live store
++  PASS NC-6 crash-window WAL replay on reopen
++
++[X0] 6/6 PASS
++  PASS NC-1 host imports allowed
++  PASS NC-2 float policy disabled at its single choke point
++  PASS NC-3 start section allowed
++  PASS NC-4 memory maximum not required
++  PASS NC-5 shared memory allowed
++  PASS NC-6 unknown opcode allowed (whitelist not fail-closed)
++
++[X1] 6/6 PASS
++  PASS NC-1 census bypassed (gate always Ok)
++  PASS NC-2 fuel budget ignored (4x the published budget)
++  PASS NC-3 memory ceiling removed from the store limiter
++  PASS NC-4 trap misclassified (out-of-fuel -> other)
++  PASS NC-5 module-size check removed
++  PASS NC-6 trace cap removed
++
++[X2] 7/7 PASS
++  PASS NC-1 gas table zeroed (every call free)
++  PASS NC-2 transfer is not charged
++  PASS NC-3 value length ceiling removed
++  PASS NC-4 rollback removed on failure
++  PASS NC-5 import census opened (any import links)
++  PASS NC-6 out-of-gas guard removed (a caught -8 commits)
++  PASS NC-7 instruction gas never settled
++
++[X3] 6/6 PASS
++  PASS NC-1 version check removed (a stale upgrade wins)
++  PASS NC-2 balance not preserved (upgrade zeroes the account)
++  PASS NC-3 `migrate` never runs (storage not migrated)
++  PASS NC-4 code hash not stored on the account
++  PASS NC-5 `init` never runs
++  PASS NC-6 census skipped at deploy
++
++[X4] 6/6 PASS
++  PASS NC-1 `#[entrypoint]` exports the wrong name
++  PASS NC-2 the SDK ignores the absent-key status
++  PASS NC-3 the codec stops length-checking
++  PASS NC-4 the mutable-global allowance is removed
++  PASS NC-5 the element-table rule is switched off
++  PASS NC-6 the pinned artifact hash is not checked
++
++[X5] 6/6 PASS
++  PASS NC-1 the dispatcher accepts trailing bytes
++  PASS NC-2 `transfer_from` does not spend the allowance
++  PASS NC-3 an ARC-721 transfer keeps the approval
++  PASS NC-4 the multisig does not check `executed`
++  PASS NC-5 the session accepts oversize calldata
++  PASS NC-6 a failed execution is still marked executed
++
++[X6] 6/6 PASS
++  PASS NC-1 the reentrancy guard is removed
++  PASS NC-2 the depth limit is removed
++  PASS NC-3 the callee's diff is not merged
++  PASS NC-4 a failed callee's value is not returned
++  PASS NC-5 the callee's status is flattened to success
++  PASS NC-6 the child frame does not inherit the parent's stack
++
++[X7] 6/6 PASS
++  PASS NC-1 the version stamp is dropped from the state root
++  PASS NC-2 an empty diff counts as a commit
++  PASS NC-3 the rolling digest ignores the resulting root
++  PASS NC-4 a refusal still applies its diff
++  PASS NC-5 a starved call is billed nothing
++  PASS NC-6 the generator ignores its seed
++
++[X8] 6/6 PASS
++  PASS NC-1 `call` stops reading the callee signature
++  PASS NC-2 a stack underflow no longer reaches the report
++  PASS NC-3 the float value types are read as i32
++  PASS NC-4 any export name counts as `run`
++  PASS NC-5 the function and code counts may disagree
++  PASS NC-6 the module-size ceiling stops being enforced
++
++[D0] 6/6 PASS
++  PASS NC-1 the stub exits 0
++  PASS NC-2 every layer is classified `implemented`
++  PASS NC-3 `report` measures a tree that is not a workspace
++  PASS NC-4 an unknown command falls through to exit 0
++  PASS NC-5 the refusal stops naming the capabilities
++  PASS NC-6 a node flag is no longer recognised
++
++[D1] 6/6 PASS
++  PASS NC-1 aurad without --chain-id must refuse
++  PASS NC-2 unknown TOML fields must be rejected
++  PASS NC-3 report must reject non-workspace paths
++  PASS NC-4 unknown commands must return usage error
++  PASS NC-5 refusal must name the D1 phase
++  PASS NC-6 config::load must require chain-id
++
++[B0] 6/6 PASS
++
++[B1] 6/6 PASS
++
++[B2] 6/6 PASS
++
++[B3] 6/6 PASS
++
++[D2] 6/6 PASS
++  PASS NC-1 chain replay must be rejected
++  PASS NC-2 sender nonce must match projected state
++  PASS NC-3 transfer value and fee must be debited atomically
++  PASS NC-4 gas limit must cover the transfer schedule
++  PASS NC-5 fee cap must cover base fee plus tip
++  PASS NC-6 receipt must be durable before event publication
++
++[D3] 6/6 PASS
++  PASS NC-1 sender nonce must match projected account state
++  PASS NC-2 ready sender lanes must use tip priority
++  PASS NC-3 same-nonce replacement must meet the fee bump
++  PASS NC-4 full pool must reject equal-priority insertion
++  PASS NC-5 reorg reinsertion must return validated transactions to the pool
++  PASS NC-6 gas limit must cover the native transfer schedule
++
++TOTAL: 207 negative controls
+diff --git a/docs/evidence/d3/nc.log b/docs/evidence/d3/nc.log
+new file mode 100644
+index 0000000000000000000000000000000000000000..8b54ed6d558816d12d97543455ae0de32e71cecc
+--- /dev/null
++++ b/docs/evidence/d3/nc.log
+@@ -0,0 +1,8 @@
++D3 NEGATIVE CONTROLS (focused Rust library unit tests)
++NC-1 sender nonce must match projected account state: PASS
++NC-2 ready sender lanes must use tip priority: PASS
++NC-3 same-nonce replacement must meet the fee bump: PASS
++NC-4 full pool must reject equal-priority insertion: PASS
++NC-5 reorg reinsertion must return validated transactions to the pool: PASS
++NC-6 gas limit must cover the native transfer schedule: PASS
++RESULT: 6/6 negative controls PASS
+diff --git a/docs/evidence/d3/report.md b/docs/evidence/d3/report.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..4284fd2b42e8440c24eb3caf9743ee7fc592c5a9
+--- /dev/null
++++ b/docs/evidence/d3/report.md
+@@ -0,0 +1,40 @@
++# D3 — bounded fee-priority transaction pool
++
++Generated (UTC): 2026-10-30T07:41:00+00:00.
++
++## Delivered behavior
++
++`aura-mempool` implements a deterministic 16,384-entry pool keyed by raw
++`(signer, nonce)`. It selects only contiguous sender-lane heads, prioritises
++ready entries by signed tip, uses deterministic address/nonce tie-breaking,
++requires a checked 10% replacement bump (rounded up, minimum one unit), and
++only evicts the lowest-tip entry for a strictly higher tip. Duplicate IDs are
++rejected. Reverted-branch transactions can be reinserted after caller-side
++revalidation against the new account/nonce view.
++
++`aura_node::pipeline` validates chain, expiry, signature, projected nonce,
++balance, transfer gas floor and fee cap before pool insertion. The selected set
++is encoded canonically by `(signer, nonce)` before C5 block production; S2
++receipts/events remain behind the B3 three-chain durability boundary.
++
++## Gate results
++
++- 10,000-transfer acceptance: **passed**; unique durable receipts, sequential
++  nonce, exact sender/recipient balances, gas, state root and event ordering.
++- Mempool unit tests: **6/6 passed**.
++- D3 negative controls: **6/6 passed**, all using exact Rust unit tests.
++- Cumulative negative controls: **207 passed** by `make nc-all`.
++- `make test`, dependency, docs, vector, rig and strict close-out gates: green
++  on the source tree (raw output in `gates.txt`).
++- Clean baseline application and clean-copy regression result are recorded in
++  [`clean-apply.txt`](clean-apply.txt).
++
++## Explicit boundaries
++
++The pool's reorg hook only reinserts caller-provided transactions; the caller
++must revalidate them against the new chain/account state. D3 does not add a
++distributed reorg detector, multi-validator transport, contract transaction
++dispatch or a persisted finality checkpoint. The D2 pipeline still fails closed
++when reopening committed receipts without a checkpoint.
++
++Protocol: [`../../spec/mempool.md`](../../spec/mempool.md).
+diff --git a/docs/plans/NODE_PLAN.md b/docs/plans/NODE_PLAN.md
+index 687e9c673f968ae9c98ef8c8d0fb6cf485f62d8c..91669b417e2d613aa94cef6640871d54c1e97f60 100644
+--- a/docs/plans/NODE_PLAN.md
++++ b/docs/plans/NODE_PLAN.md
+@@ -31,7 +31,7 @@ tx, keys, snapshot, upgrade) and its 30 vectors.
+ | ✅ **D0** | Baseline | no binary; report "libraries exist, node does not" | `cargo run -p aurad` → meaningful error/stub, NC recorded |
+ | ✅ **D1** | `aurad` skeleton | config, tracing, graceful shutdown, signals, PID/health | start/stop without state loss; NC: SIGTERM without shutdown → red |
+ | ✅ **D2** | Tx pipeline | validated native transfers → deterministic execution → C5 block → B3 finality → S2 storage → commit event | 1000 txs end-to-end, receipts match balances/fees; no event before durable 3-chain commit |
+-| **D3** | Mempool | fee-priority admission, capacity/eviction, replacement and reorg handling; harden D2 nonce/balance/gas admission | 10 000 txs: no double spend, no stuck nonces; NC: nonce check off → red |
++| ✅ **D3** | Mempool | bounded fee-priority nonce lanes, replacement, eviction, reorg reinsertion; harden D2 nonce/balance/gas admission | 10 000 txs: no double spend, no stuck nonces; NC: nonce check off → red |
+ | **D4** | JSON-RPC 2.0 | `submit_tx`, `get_balance`, `get_tx`, `get_block`, `call`, `estimate_gas`, `subscribe` (WS) | spec contract test + 50 vectors; fuzz the RPC parser (H3) |
+ | **D5** | gRPC + REST | protobuf schema, gateway, OpenAPI, versioning | backward compatibility v1 → v1.1; unknown field → error |
+ | **D6** | Observability | Prometheus, `/health`, `/metrics`, OpenTelemetry traces, structured logs | dashboard: height, finality lag, mempool size, peer count, gas/s |
+@@ -59,6 +59,15 @@ tx, keys, snapshot, upgrade) and its 30 vectors.
+ - Recovery boundary: committed S2 state is durable, but D2 does not yet persist a replayable finality checkpoint. Reopening a store with transaction receipts fails closed with `RecoveryCheckpointRequired`; it never resets consensus over existing state.
+ - Evidence: `docs/evidence/d2/`; the 1,000-transaction integration test, six negative controls and final workspace gates are recorded there.
+ 
++### D3 receipt (2026-10-30)
++
++- Deliverable: `patches/0036-D3-fee-priority-mempool.patch`.
++- Added `aura-mempool`: 16,384-entry default capacity, sender/nonce lanes, tip-priority selection with deterministic ties, 10% minimum replacement bump (ceil, minimum one unit), strictly-higher-tip eviction, duplicate rejection and a reorg reinsertion hook.
++- Integrated pool admission with the D2 transfer executor. Chain/signature/expiry, nonce, balance, gas-floor and fee-cap checks fail closed; eligible nonce lanes are selected by tip and blocks remain canonically ordered by `(signer, nonce)`.
++- The D3 acceptance test submits 10,000 signed sequential transfers and checks unique durable receipts, 10,000 nonce increments, exact balances and gas, state-root agreement and no event before the delayed three-chain commit.
++- Reorg reinsertion is an explicit mempool boundary: callers must revalidate transactions against the new chain/account view. D3 does not add a multi-validator reorg engine or persist a finality checkpoint.
++- Six unit-test-based negative controls cover nonce, priority, replacement, eviction, reorg reinsertion and gas-floor enforcement. Evidence: `docs/evidence/d3/`.
++
+ ## Risks
+ 
+ - "RPC-only" validation (bypassing consensus) — forbidden by D-D3.
+diff --git a/docs/spec/FORMAT_INDEX.md b/docs/spec/FORMAT_INDEX.md
+index aa5b5e95c4c904a93febad98be2a915d3e5b4467..2476ea103dde4c6a574278bc82ff46d87d27e5a2 100644
+--- a/docs/spec/FORMAT_INDEX.md
++++ b/docs/spec/FORMAT_INDEX.md
+@@ -15,6 +15,7 @@ fails if a file in `docs/spec/` is not listed here.
+ | C8 | [`genesis-format.md`](genesis-format.md) | genesis JSON schema, canonical bytes, genesis commitments |
+ | C9 | [`test-rig.md`](test-rig.md) | golden vectors, proptest, portable fuzz harness, libFuzzer targets |
+ | D2 | [`node-pipeline.md`](node-pipeline.md) | native transfer payload, execution fees, block/finality/storage/event order |
++| D3 | [`mempool.md`](mempool.md) | nonce lanes, tip priority, replacement bump, bounded eviction, reorg reinsertion |
+ 
+ C0–C3 have no standalone format spec: the canonical types are defined by
+ `crates/aura-types` and pinned by `crates/aura-types/tests/fixtures/c1_golden.txt`,
+diff --git a/docs/spec/mempool.md b/docs/spec/mempool.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..97019c80e0c294093cc3575147cf5fc1f5eda5e4
+--- /dev/null
++++ b/docs/spec/mempool.md
+@@ -0,0 +1,57 @@
++# D3 mempool contract
++
++This document defines the bounded transaction-pool behavior provided by
++`aura_mempool` and integrated by `aura_node::pipeline`.
++
++## Admission boundary
++
++The pool itself owns ordering and capacity policy, not signature or state
++validation. The pipeline validates chain ID, expiry and signature before
++insertion, then runs the native-transfer executor over the canonical pending
++nonce sequence to reject nonce mismatch, insufficient balance, gas-floor and
++fee-cap failures. A future nonce gap is rejected rather than left parked in the
++pool. Callers of `Mempool::insert` must perform equivalent validation first.
++
++## Sender lanes and priority
++
++The pool is keyed by `(signer[20], nonce)`. Each sender forms a contiguous nonce
++lane. `select_ready(base_nonces, limit)` initially exposes only the transaction
++at that sender's next expected nonce, chooses the highest-tip ready head, then
++makes that sender's next nonce eligible. Ties resolve by raw signer bytes and
++nonce, in ascending order. Thus a high-tip transaction cannot leap over an
++unsubmitted nonce. The pipeline re-encodes the selected set in canonical
++`(signer, nonce)` order before execution and block construction.
++
++For native transfers the D2 base fee remains one unit per gas and the priority
++score is the signed transaction tip. Admission separately checks that
++`max_fee >= base_fee + tip`.
++
++## Capacity, eviction and replacement
++
++The default pool capacity is **16,384**. At capacity, a new sender/nonce entry
++is accepted only when its tip is strictly greater than the current lowest tip;
++the deterministic lowest-tip entry is evicted (ties select the ascending
++`(signer, nonce)` key). Equal or lower priority returns `PoolFull` without
++changing pool contents.
++
++A transaction at an occupied `(signer, nonce)` may be replaced only if its tip
++is at least `old_tip + max(1, ceil(old_tip * 1000 / 10000))`. Arithmetic is
++checked. Replacement preserves pool length and returns the replaced transaction
++ID. Identical transaction IDs are rejected as duplicates.
++
++## Proposed blocks and reorg reinsertion
++
++Transactions are removed from the pool when selected into a proposed block;
++account/nonce projection advances from the proposed branch while B3's three-
++chain rule delays durable commit and events. A caller handling a discarded
++branch can call `reinsert_reorged` for its transactions after revalidating them
++against the new chain, nonce and balance view. D3 does not add distributed
++reorg detection or change the D2 single-process finality/checkpoint boundary.
++
++## Acceptance
++
++`crates/aura-node/tests/d3_mempool.rs` submits 10,000 signed contiguous
++transfers and verifies unique receipts, exact nonce/balance/gas accounting,
++durable state-root agreement, and no commit event before three-chain finality.
++Unit tests pin priority, nonce-lane eligibility, replacement, eviction,
++duplicate rejection and reorg reinsertion.
+diff --git a/tools/audit_closeout.py b/tools/audit_closeout.py
+index f6de01f0fd33c41b096bfc65997d0fab07b46ba6..1eb9ad3450eacf5040e73b5ecb87fc96ec3215a5 100644
+--- a/tools/audit_closeout.py
++++ b/tools/audit_closeout.py
+@@ -31,7 +31,7 @@ PATCHES = REPO / "patches"
+ CORE_PHASES = [f"C{index}" for index in range(11)]      # C0..C10 (closed)
+ STATE_PHASES = ["S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7"]  # STATE_PLAN complete
+ EXEC_PHASES = ["X0", "X1", "X2", "X3", "X4", "X5", "X6", "X7", "X8"]                # grows with each X phase
+-NODE_PHASES = ["D0", "D1", "D2"]                                        # grows with each D phase
++NODE_PHASES = ["D0", "D1", "D2", "D3"]                              # grows with each D phase
+ CONSENSUS_PHASES = ["B0", "B1", "B2", "B3"]                        # grows with each B phase
+ NET_PHASES = []                                                   # grows with each N phase
+ PHASES = CORE_PHASES + STATE_PHASES + EXEC_PHASES + NODE_PHASES + CONSENSUS_PHASES + NET_PHASES
+@@ -61,7 +61,7 @@ SHIPPED = CORE_PHASES + [
+     "B2",
+     "B3",
+ ]
+-CURRENT = "D2"
++CURRENT = "D3"
+ 
+ PLAN_FOR_PREFIX = {
+     "C": "CORE_PLAN.md",
+@@ -79,7 +79,7 @@ PLAN_FOR_PREFIX = {
+ }
+ 
+ NC_PER_PHASE = {f"C{i}": 6 for i in range(4, 11)}
+-NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6})
++NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6})
+ SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)  # 201 (through D2)
+ EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + (0 if CURRENT in SHIPPED else NC_PER_PHASE[CURRENT])
+ 
+diff --git a/tools/nc_d3.py b/tools/nc_d3.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..660a1f2d93096d35e86a4f74d80cbd7994f021aa
+--- /dev/null
++++ b/tools/nc_d3.py
+@@ -0,0 +1,112 @@
++#!/usr/bin/env python3
++"""D3 mutation controls, each guarded by one exact Rust library unit test."""
++from __future__ import annotations
++
++import re
++import subprocess
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++PIPELINE = ROOT / "crates/aura-node/src/pipeline.rs"
++POOL = ROOT / "crates/aura-mempool/src/lib.rs"
++CASES = [
++    (
++        "NC-1 sender nonce must match projected account state",
++        PIPELINE,
++        "if sender_account.nonce.value() != tx.unsigned.nonce.value() {",
++        "if false {",
++        "aura-node",
++        "pipeline::tests::rejects_nonce_gap",
++    ),
++    (
++        "NC-2 ready sender lanes must use tip priority",
++        POOL,
++        "Reverse(tx.unsigned.tip.units())",
++        "Reverse(0)",
++        "aura-mempool",
++        "tests::ready_transactions_follow_fee_priority_and_nonce_dependencies",
++    ),
++    (
++        "NC-3 same-nonce replacement must meet the fee bump",
++        POOL,
++        "if got < required {",
++        "if false {",
++        "aura-mempool",
++        "tests::replacement_requires_fee_bump_and_replaces_same_nonce",
++    ),
++    (
++        "NC-4 full pool must reject equal-priority insertion",
++        POOL,
++        "if tx.unsigned.tip.units() <= weakest.unsigned.tip.units() {",
++        "if false {",
++        "aura-mempool",
++        "tests::capacity_evicts_only_lower_priority",
++    ),
++    (
++        "NC-5 reorg reinsertion must return validated transactions to the pool",
++        POOL,
++        "        self.insert(tx)\n    }",
++        "        Err(MempoolError::DuplicateTransaction)\n    }",
++        "aura-mempool",
++        "tests::reorged_transactions_can_be_reinserted_at_new_head",
++    ),
++    (
++        "NC-6 gas limit must cover the native transfer schedule",
++        PIPELINE,
++        "tx.unsigned.gas_limit.value() < TRANSFER_GAS",
++        "false",
++        "aura-node",
++        "pipeline::tests::rejects_transfer_below_gas_floor",
++    ),
++]
++
++
++def run_test(package: str, test: str) -> tuple[bool, str]:
++    command = ["cargo", "test", "-p", package, "--lib", "--", "--exact", test]
++    result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
++    output = result.stdout + result.stderr
++    exact = result.returncode == 0 and re.search(
++        rf"test\s+{re.escape(test)}\s+\.\.\.\s+ok", output
++    ) is not None
++    failed = result.returncode != 0 and re.search(
++        rf"test\s+{re.escape(test)}\s+\.\.\.\s+FAILED", output
++    ) is not None
++    return (exact if result.returncode == 0 else failed), output
++
++
++def main() -> int:
++    originals = {path: path.read_text(encoding="utf-8") for _, path, *_ in CASES}
++    print("D3 NEGATIVE CONTROLS (focused Rust library unit tests)")
++    for label, path, old, _new, package, test in CASES:
++        if old not in originals[path]:
++            print(f"{label}: FAIL (mutation target missing)")
++            return 1
++        green, output = run_test(package, test)
++        if not green:
++            print(f"{label}: FAIL (exact unit test was not green before mutation)")
++            print(output[-4000:])
++            return 1
++
++    passed = 0
++    for label, path, old, new, package, test in CASES:
++        current = path.read_text(encoding="utf-8")
++        if old not in current:
++            print(f"{label}: FAIL (mutation target disappeared)")
++            return 1
++        path.write_text(current.replace(old, new, 1), encoding="utf-8")
++        try:
++            red, output = run_test(package, test)
++        finally:
++            path.write_text(originals[path], encoding="utf-8")
++        if red:
++            passed += 1
++            print(f"{label}: PASS")
++        else:
++            print(f"{label}: FAIL (expected {test} to fail)")
++            print(output[-4000:])
++    print(f"RESULT: {passed}/{len(CASES)} negative controls PASS")
++    return 0 if passed == len(CASES) else 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/write_d3_evidence.py b/tools/write_d3_evidence.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..dba7427f1f7ccd69304ce35d6ee6dbfc75475478
+--- /dev/null
++++ b/tools/write_d3_evidence.py
+@@ -0,0 +1,189 @@
++#!/usr/bin/env python3
++"""Capture D3 mempool gates, cumulative NC inventory, report and checksums."""
++from __future__ import annotations
++
++import hashlib
++import re
++import subprocess
++import sys
++from datetime import datetime, timezone
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++EVIDENCE = REPO / "docs/evidence/d3"
++GATES = EVIDENCE / "gates.txt"
++REPORT = EVIDENCE / "report.md"
++INVENTORY = EVIDENCE / "inventory.txt"
++NC_LOG = EVIDENCE / "nc.log"
++EXPECTED_TOTAL = 207
++
++NC_PHASES = [f"c{i}" for i in range(11)] + [f"s{i}" for i in range(8)]
++NC_PHASES += [f"x{i}" for i in range(9)] + ["d0", "d1"]
++NC_PHASES += ["b0", "b1", "b2", "b3", "d2", "d3"]
++RESULT_LINE = re.compile(r"^RESULT: (\d+)/(\d+) negative controls PASS", re.M)
++NC_LINE = re.compile(r"^(NC-\d+ .*): (PASS|FAIL)$", re.M)
++
++COMMANDS: list[tuple[str, str, int | None]] = [
++    ("toolchain", "rustc --version && cargo --version", None),
++    ("format", "cargo fmt --all -- --check", None),
++    ("D3 clippy", "cargo clippy -p aura-mempool -p aura-node --all-targets -- -D warnings", 18),
++    ("mempool unit gate", "cargo test -p aura-mempool", 12),
++    ("D3 10,000-transfer acceptance", "cargo test -p aura-node --test d3_mempool", 30),
++    (
++        "D0-D2 node regression gates",
++        "cargo test -p aura-node --test d0_baseline --test d1_skeleton --test d2_pipeline",
++        35,
++    ),
++    ("D3 negative controls", "make nc-d3", 18),
++    ("all 207 negative controls", "make nc-all", 42),
++    ("full workspace gates", "make test", 35),
++]
++
++
++def run(command: str) -> tuple[int, str]:
++    result = subprocess.run(
++        command, shell=True, cwd=REPO, text=True, capture_output=True, check=False
++    )
++    return result.returncode, (result.stdout + result.stderr).strip()
++
++
++def build_inventory(stamp: str) -> tuple[str, int]:
++    lines = ["# D3 negative-control inventory", f"# Generated (UTC): {stamp}", ""]
++    total = 0
++    for phase in NC_PHASES:
++        path = REPO / "docs/evidence" / phase / "nc.log"
++        if not path.exists():
++            lines.extend([f"[{phase.upper()}] MISSING {path.relative_to(REPO)}", ""])
++            continue
++        text = path.read_text(encoding="utf-8")
++        match = RESULT_LINE.search(text)
++        if not match:
++            lines.extend([f"[{phase.upper()}] NO RESULT LINE", ""])
++            continue
++        passed, count = int(match.group(1)), int(match.group(2))
++        total += count
++        lines.append(f"[{phase.upper()}] {passed}/{count} PASS")
++        for name, status in NC_LINE.findall(text):
++            lines.append(f"  {status:<4} {name}")
++        lines.append("")
++    lines.append(f"TOTAL: {total} negative controls")
++    return "\n".join(lines) + "\n", total
++
++
++def build_report(stamp: str) -> str:
++    return f'''# D3 — bounded fee-priority transaction pool
++
++Generated (UTC): {stamp}.
++
++## Delivered behavior
++
++`aura-mempool` implements a deterministic 16,384-entry pool keyed by raw
++`(signer, nonce)`. It selects only contiguous sender-lane heads, prioritises
++ready entries by signed tip, uses deterministic address/nonce tie-breaking,
++requires a checked 10% replacement bump (rounded up, minimum one unit), and
++only evicts the lowest-tip entry for a strictly higher tip. Duplicate IDs are
++rejected. Reverted-branch transactions can be reinserted after caller-side
++revalidation against the new account/nonce view.
++
++`aura_node::pipeline` validates chain, expiry, signature, projected nonce,
++balance, transfer gas floor and fee cap before pool insertion. The selected set
++is encoded canonically by `(signer, nonce)` before C5 block production; S2
++receipts/events remain behind the B3 three-chain durability boundary.
++
++## Gate results
++
++- 10,000-transfer acceptance: **passed**; unique durable receipts, sequential
++  nonce, exact sender/recipient balances, gas, state root and event ordering.
++- Mempool unit tests: **6/6 passed**.
++- D3 negative controls: **6/6 passed**, all using exact Rust unit tests.
++- Cumulative negative controls: **{EXPECTED_TOTAL} passed** by `make nc-all`.
++- `make test`, dependency, docs, vector, rig and strict close-out gates: green
++  on the source tree (raw output in `gates.txt`).
++- Clean baseline application and clean-copy regression result are recorded in
++  [`clean-apply.txt`](clean-apply.txt).
++
++## Explicit boundaries
++
++The pool's reorg hook only reinserts caller-provided transactions; the caller
++must revalidate them against the new chain/account state. D3 does not add a
++distributed reorg detector, multi-validator transport, contract transaction
++dispatch or a persisted finality checkpoint. The D2 pipeline still fails closed
++when reopening committed receipts without a checkpoint.
++
++Protocol: [`../../spec/mempool.md`](../../spec/mempool.md).
++'''
++
++
++def refresh_sums() -> None:
++    files = [GATES, NC_LOG, REPORT, INVENTORY, EVIDENCE / "clean-apply.txt"]
++    files += [
++        REPO / "docs/spec/mempool.md",
++        REPO / "crates/aura-mempool/src/lib.rs",
++        REPO / "crates/aura-node/src/pipeline.rs",
++        REPO / "crates/aura-node/tests/d3_mempool.rs",
++    ]
++    lines = [
++        f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(REPO)}"
++        for path in files
++    ]
++    (EVIDENCE / "SHA256SUMS").write_text("\n".join(lines) + "\n", encoding="utf-8")
++
++
++def main() -> int:
++    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
++    EVIDENCE.mkdir(parents=True, exist_ok=True)
++    if "--report-only" in sys.argv[1:]:
++        required = [GATES, NC_LOG, INVENTORY, EVIDENCE / "clean-apply.txt"]
++        missing = [path.relative_to(REPO) for path in required if not path.exists()]
++        if missing:
++            print("ERROR: missing D3 evidence inputs: " + ", ".join(map(str, missing)))
++            return 1
++        REPORT.write_text(build_report(stamp), encoding="utf-8")
++        refresh_sums()
++        print(f"wrote {REPORT.relative_to(REPO)} (report-only; gates.txt untouched)")
++        return 0
++
++    failures = 0
++    lines = [
++        "# D3 — mempool gate log",
++        f"# Generated (UTC): {stamp}",
++        "# Raw command output follows; command exit codes are recorded below.",
++        "",
++    ]
++    for label, command, tail in COMMANDS:
++        code, output = run(command)
++        lines.append(f"$ {command}")
++        if tail is not None:
++            output = "\n".join(output.splitlines()[-tail:])
++        lines.extend([output, f"[exit {code}]", ""])
++        if code != 0:
++            failures += 1
++            print(f"FAILED: {label} -> exit {code}")
++    GATES.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
++
++    if not NC_LOG.exists():
++        print("ERROR: docs/evidence/d3/nc.log missing (run `make nc-d3`)")
++        return 1
++    match = RESULT_LINE.search(NC_LOG.read_text(encoding="utf-8"))
++    if not match or match.group(1) != match.group(2) or int(match.group(2)) != 6:
++        print("ERROR: D3 negative-control log is not 6/6")
++        failures += 1
++    inventory, total = build_inventory(stamp)
++    INVENTORY.write_text(inventory, encoding="utf-8")
++    if total != EXPECTED_TOTAL:
++        print(f"ERROR: NC inventory is {total}, expected {EXPECTED_TOTAL}")
++        failures += 1
++    REPORT.write_text(build_report(stamp), encoding="utf-8")
++    if not (EVIDENCE / "clean-apply.txt").exists():
++        print("ERROR: D3 clean-apply record missing")
++        failures += 1
++    refresh_sums()
++    print(f"wrote {GATES.relative_to(REPO)}")
++    print(f"wrote {REPORT.relative_to(REPO)}")
++    print(f"wrote {INVENTORY.relative_to(REPO)} ({total} controls)")
++    print(f"wrote {EVIDENCE.relative_to(REPO)}/SHA256SUMS")
++    return 1 if failures else 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())

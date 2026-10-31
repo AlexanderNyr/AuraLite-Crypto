@@ -73,6 +73,7 @@ fn config_cli_chain_id_wins() {
     assert_eq!(config.chain_id, "cli-chain");
     assert_eq!(config.data_dir, PathBuf::from(".aura"));
     assert_eq!(config.rpc_addr, "127.0.0.1:8545");
+    assert_eq!(config.grpc_addr, "127.0.0.1:9090");
     assert!(config.validator_key.is_none());
 }
 
@@ -102,7 +103,7 @@ fn config_toml_unknown_field_is_rejected() {
 #[test]
 fn lifecycle_init_tracing_succeeds() {
     let result = lifecycle::init_tracing();
-    assert!(result.is_ok(), "tracing must initialise: {result:?}");
+    assert!(result.is_ok(), "structured tracing must initialise");
 }
 
 #[test]
@@ -121,7 +122,7 @@ fn lifecycle_health_probe_healthy_when_pid_exists() {
 
 #[test]
 fn lifecycle_signal_handle_starts_unset() {
-    let handle = lifecycle::install_signal_handlers();
+    let handle = lifecycle::install_signal_handlers().unwrap();
     assert!(!handle.shutdown_requested());
 }
 
@@ -144,7 +145,7 @@ fn binary_help_and_version_succeed() {
     assert_eq!(output.status.code(), Some(0));
     let out = String::from_utf8_lossy(&output.stdout);
     assert!(out.contains("aurad"));
-    assert!(out.contains("D1 skeleton"));
+    assert!(out.contains("D6 observability"));
 }
 
 #[test]
@@ -180,10 +181,10 @@ fn report_measures_this_tree() {
     assert_eq!(code, 0);
     assert!(out.contains("aura-exec"));
     assert!(out.contains("implemented"));
-    // After D1, config and lifecycle are implemented — the node still lacks
-    // tx-pipeline, mempool, RPC, etc. (7 capabilities remain).
+    // D1 config/lifecycle and the D2 transaction pipeline have landed; the
+    // report lists the remaining six externally facing node capabilities.
     assert!(
-        out.contains("node capabilities present: 0 of 7"),
+        out.contains("node capabilities present: 4 of 8"),
         "the report must state how many capabilities are still absent: {out}"
     );
 }
@@ -220,19 +221,11 @@ fn the_pinned_fixture_matches_the_live_measurement() {
         .collect();
     assert_eq!(capabilities, expected);
 
-    // Every `tx-pipeline`-era capability is still missing after D1.
-    for cap in [
-        "tx-pipeline",
-        "mempool",
-        "json-rpc",
-        "grpc-rest",
-        "metrics",
-        "devnet",
-        "cli",
-    ] {
+    // Capabilities remaining after D4 must still be enumerated exactly.
+    for cap in ["devnet", "cli"] {
         assert!(
             capabilities.iter().any(|line| line.starts_with(cap)),
-            "capability {cap} must still be listed as missing after D1"
+            "capability {cap} must still be listed as missing after D4"
         );
     }
 }

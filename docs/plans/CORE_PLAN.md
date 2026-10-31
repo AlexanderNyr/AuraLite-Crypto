@@ -434,10 +434,12 @@ other 11 plans rest.
   counters. `aura-fuzz --seconds 60 --target all` is the DoD gate (60 s is
   the TOTAL budget, split across targets); `make test-core` uses a short
   iteration-bounded pass.
-- Landed: four `libfuzzer-sys` source targets in `fuzz/` (its own workspace,
-  `exclude = ["fuzz"]` at the root) calling the same `fuzz_one`. They were
-  **not executed** here (stable toolchain, no cargo-fuzz/nightly); H3 runs
-  the 24-hour campaign. This is stated explicitly rather than claimed.
+- Landed: four C9 `libfuzzer-sys` source targets in `fuzz/` (its own workspace,
+  `exclude = ["fuzz"]` at the root) calling the same `fuzz_one`. A separate
+  `fuzz_rpc` target was added with D4 for JSON-RPC HTTP/WebSocket parser
+  coverage. The C9 targets were **not executed** at that time (stable toolchain,
+  no cargo-fuzz/nightly); H3 runs the 24-hour campaign. This is stated
+  explicitly rather than claimed.
 - `make test-core` and `make fuzz-smoke` are now real (the C0 stubs are
   replaced); `make test` additionally runs the vector inventory and
   `tools/check_rig.py`, which fails if any gate is unwired.

@@ -38,8 +38,10 @@ pub struct Config {
     pub chain_id: String,
     /// Directory for state, snapshots, PID file and logs.
     pub data_dir: PathBuf,
-    /// RPC listen address (`127.0.0.1:8545` style).
+    /// HTTP JSON-RPC and REST listen address (`127.0.0.1:8545` style).
     pub rpc_addr: String,
+    /// HTTP/2 gRPC listen address (`127.0.0.1:9090` style).
+    pub grpc_addr: String,
     /// Optional validator key file (used by D7 devnet).
     pub validator_key: Option<PathBuf>,
 }
@@ -95,8 +97,10 @@ pub struct CliConfig {
     pub chain_id: Option<String>,
     /// Data directory (from `--data-dir` or `AURA_DATA_DIR`).
     pub data_dir: Option<PathBuf>,
-    /// RPC listen address (from `--rpc-addr` or `AURA_RPC_ADDR`).
+    /// HTTP JSON-RPC/REST listen address (from `--rpc-addr` or `AURA_RPC_ADDR`).
     pub rpc_addr: Option<String>,
+    /// gRPC listen address (from `--grpc-addr` or `AURA_GRPC_ADDR`).
+    pub grpc_addr: Option<String>,
     /// Validator key file (from `--validator-key` or `AURA_VALIDATOR_KEY`).
     pub validator_key: Option<PathBuf>,
 }
@@ -133,6 +137,14 @@ pub fn load(cli: &CliConfig) -> Result<Config, ConfigError> {
         .unwrap_or("127.0.0.1:8545")
         .to_string();
 
+    let grpc_addr = cli
+        .grpc_addr
+        .as_deref()
+        .or(env.grpc_addr.as_deref())
+        .or(toml_grpc_addr(&toml_value))
+        .unwrap_or("127.0.0.1:9090")
+        .to_string();
+
     let validator_key = cli
         .validator_key
         .clone()
@@ -147,6 +159,7 @@ pub fn load(cli: &CliConfig) -> Result<Config, ConfigError> {
         chain_id: chain_id.to_string(),
         data_dir,
         rpc_addr,
+        grpc_addr,
         validator_key,
     })
 }
@@ -181,7 +194,13 @@ fn load_toml(cli: &CliConfig) -> Result<toml::Value, ConfigError> {
         .map_err(|err| ConfigError::DataDir(path.to_path_buf(), err.to_string()))?;
     let value = toml::from_str::<toml::Value>(&text)
         .map_err(|err| ConfigError::TomlParse(path.to_path_buf(), err.to_string()))?;
-    let allowed = ["chain_id", "data_dir", "rpc_addr", "validator_key"];
+    let allowed = [
+        "chain_id",
+        "data_dir",
+        "rpc_addr",
+        "grpc_addr",
+        "validator_key",
+    ];
     if let Some(table) = value.as_table() {
         for key in table.keys() {
             if !allowed.contains(&key.as_str()) {
@@ -197,6 +216,7 @@ fn load_env() -> EnvConfig {
         chain_id: env::var("AURA_CHAIN_ID").ok(),
         data_dir: env::var("AURA_DATA_DIR").ok(),
         rpc_addr: env::var("AURA_RPC_ADDR").ok(),
+        grpc_addr: env::var("AURA_GRPC_ADDR").ok(),
         validator_key: env::var("AURA_VALIDATOR_KEY").ok(),
     }
 }
@@ -207,6 +227,7 @@ struct EnvConfig {
     chain_id: Option<String>,
     data_dir: Option<String>,
     rpc_addr: Option<String>,
+    grpc_addr: Option<String>,
     validator_key: Option<String>,
 }
 
@@ -225,6 +246,10 @@ fn toml_data_dir(value: &toml::Value) -> Option<String> {
 
 fn toml_rpc_addr(value: &toml::Value) -> Option<&str> {
     value.get("rpc_addr").and_then(|v| v.as_str())
+}
+
+fn toml_grpc_addr(value: &toml::Value) -> Option<&str> {
+    value.get("grpc_addr").and_then(|v| v.as_str())
 }
 
 fn toml_validator_key(value: &toml::Value) -> Option<String> {
@@ -278,6 +303,7 @@ mod tests {
         let config = load(&cli).unwrap();
         assert_eq!(config.data_dir, PathBuf::from(".aura"));
         assert_eq!(config.rpc_addr, "127.0.0.1:8545");
+        assert_eq!(config.grpc_addr, "127.0.0.1:9090");
         assert!(config.validator_key.is_none());
     }
 
@@ -298,5 +324,34 @@ mod tests {
     fn toml_chain_id_can_be_read_from_a_known_field() {
         let value = toml::from_str::<toml::Value>("chain_id = \"test\"").unwrap();
         assert_eq!(toml_chain_id(&value), Some("test"));
+    }
+
+    #[test]
+    fn config_toml_unknown_field_is_rejected() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SERIAL: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "aurad-config-unit-{}-{}.toml",
+            std::process::id(),
+            SERIAL.fetch_add(1, Ordering::Relaxed)
+        ));
+        let data_dir = path.with_extension("data");
+        fs::write(
+            &path,
+            format!(
+                "chain_id = \"test\"\ndata_dir = \"{}\"\nunknown_field = 1\n",
+                data_dir.display()
+            ),
+        )
+        .unwrap();
+        let result = load(&CliConfig {
+            config: Some(path.clone()),
+            ..Default::default()
+        });
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(&data_dir);
+        assert!(
+            matches!(result, Err(ConfigError::UnknownField(field)) if field == "unknown_field")
+        );
     }
 }

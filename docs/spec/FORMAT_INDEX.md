@@ -14,6 +14,10 @@ fails if a file in `docs/spec/` is not listed here.
 | C7 | [`account-model.md`](account-model.md) | `Account`, `StateKey`, five namespaces, reserved prefixes |
 | C8 | [`genesis-format.md`](genesis-format.md) | genesis JSON schema, canonical bytes, genesis commitments |
 | C9 | [`test-rig.md`](test-rig.md) | golden vectors, proptest, portable fuzz harness, libFuzzer targets |
+| D2 | [`node-pipeline.md`](node-pipeline.md) | native transfer payload, execution fees, block/finality/storage/event order |
+| D3 | [`mempool.md`](mempool.md) | nonce lanes, tip priority, replacement bump, bounded eviction, reorg reinsertion |
+| D4 | [`json-rpc.md`](json-rpc.md) | JSON-RPC 2.0 methods, HTTP/WS transports, errors, resource bounds, commit subscriptions |
+| D5 | [`grpc-rest.md`](grpc-rest.md) | protobuf gRPC service, REST gateway, OpenAPI, additive v1.1 compatibility |
 
 C0–C3 have no standalone format spec: the canonical types are defined by
 `crates/aura-types` and pinned by `crates/aura-types/tests/fixtures/c1_golden.txt`,
@@ -29,6 +33,8 @@ the wire format by `crates/aura-codec` and `c2_golden.txt`, and the crypto by
 | [`c3-dependency-allowlist.txt`](c3-dependency-allowlist.txt) | **frozen** C3 baseline of 54 external crates (pinned by C3 evidence checksums) |
 | [`c8-dependency-addendum.txt`](c8-dependency-addendum.txt) | reviewed +4 delta (serde_json config parsing) |
 | [`c9-dependency-addendum.txt`](c9-dependency-addendum.txt) | reviewed +13 dev-only delta (proptest tree) |
+| [`d4-dependency-addendum.txt`](../evidence/d4-dependency-addendum.txt) | pinned SHA-1/WebSocket handshake and safe signal-hook dependencies |
+| [`d5-dependency-addendum.txt`](../evidence/d5-dependency-addendum.txt) | pinned tonic/prost/Tokio stack and vendored protoc for gRPC |
 | [`FORMAT_INDEX.md`](FORMAT_INDEX.md) | this file |
 
 `tools/check_deps.py` compares `Cargo.lock` against the union of the baseline

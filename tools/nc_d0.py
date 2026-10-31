@@ -2,8 +2,8 @@
 """Negative controls for D0 (the node baseline).
 
 Six tampers, each one a mistake that looks harmless and destroys the claim "the
-libraries exist, the node does not". Every one of them turns a *named* test in
-`crates/aura-node/tests/d0_baseline.rs` red — a gate that cannot go red is not a gate
+libraries exist, the node does not". Every one of them turns a *named* unit test in
+`crates/aura-node/src/baseline.rs` red — a gate that cannot go red is not a gate
 (CONTRIBUTING.md §1).
 
   NC-1 the stub exits 0                         -> the binary looks like a working node
@@ -39,7 +39,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 BASELINE = REPO / "crates" / "aura-node" / "src" / "baseline.rs"
 
-GATE = ["cargo", "test", "-p", "aura-node", "--test", "d0_baseline", "--quiet"]
+GATE = ["cargo", "test", "-p", "aura-node", "--lib", "--quiet"]
 
 
 def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
@@ -49,7 +49,7 @@ def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
 def expect_red(label: str, path: Path, old: str, new: str, test: str | None = None) -> bool:
     cmd = list(GATE)
     if test:
-        cmd += ["--", "--exact", test]
+        cmd += ["--", "--exact", f"baseline::tests::{test}"]
     original = path.read_text(encoding="utf-8")
     if old not in original:
         print(f"{label}: FAIL — tamper target not found in {path.name}")
@@ -157,14 +157,14 @@ def main() -> int:
         );
     }""",
             """    let _ = &MISSING_CAPABILITIES;""",
-            "stub_names_every_missing_capability",
+            "refusal_names_every_missing_capability",
         ),
         expect_red(
             "NC-6 a node flag is no longer recognised",
             BASELINE,
             """        "--config" | "--data-dir" | "--rpc-addr" | "--chain-id" | "--validator-key" => {""",
             """        "--data-dir" | "--rpc-addr" | "--chain-id" | "--validator-key" => {""",
-            "node_flags_name_their_phase",
+            "node_flag_is_a_capability_refusal",
         ),
     ]
 

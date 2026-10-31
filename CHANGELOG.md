@@ -3,6 +3,49 @@
 All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
 never rewritten: corrections are made with a new entry or an explicit note.
 
+## [D6 — observability] 2026-10-30
+
+**Deliverable:** `patches/0039-D6-observability.patch`. The node now emits JSON
+structured logs, optionally exports OpenTelemetry spans via OTLP/gRPC, and serves
+Prometheus `/metrics` plus readiness `/health` through the existing shared HTTP
+listener. Pipeline height, finality lag and mempool gauges refresh from live state;
+committed blocks update gas/transaction counters and a rolling gas-per-second gauge.
+
+- Added a Grafana dashboard for committed height, finality lag, mempool size,
+  peer count and committed gas/s, with setup and metric semantics in
+  [`docs/observability/`](docs/observability/).
+- P2P is not implemented. `aurad_peer_count` and `aurad_p2p_available` are
+  explicitly zero; D6 does not claim network peers or multi-validator behavior.
+- `make test-d6`: four observability unit tests, JSON log test, in-memory OTLP
+  span-export test and two live HTTP contract tests passed. `make nc-d6`:
+  **6/6** exact library-unit-test mutations reddened; restored library tests pass.
+- Evidence and clean D5-baseline apply/revalidation: `docs/evidence/d6/`.
+
+## [D5 — gRPC + REST] 2026-10-30
+
+**Deliverable:** `patches/0038-D5-grpc-rest.patch`. Added `aura-grpc-rest` with
+protobuf schema/codegen, an HTTP REST gateway and served OpenAPI 3.1 documents.
+Both adapters use the existing D4 RPC service and preserve the D2/D3 execution
+and validation boundaries.
+
+- REST `/api/v1` and `/api/v1.1` share the same result contract; v1.1 adds
+  `apiVersion` without changing the payload. Closed JSON request schemas reject
+  unknown fields; unsupported versions and operations return explicit errors.
+- gRPC uses a separate configurable listener (`--grpc-addr`, `AURA_GRPC_ADDR`,
+  or TOML `grpc_addr`, default `127.0.0.1:9090`). Its additive v1.1 response
+  metadata leaves prior protobuf field numbers and method paths unchanged.
+- Only native transfers execute. Contract calls and unsupported transaction
+  kinds remain explicit errors; D5 adds no P2P, multi-validator network or
+  contract execution.
+- `make test-d5`: seven REST/gRPC unit tests, one live HTTP + HTTP/2 contract,
+  and four daemon CLI tests. `make nc-d5`: **6/6** exact-library-unit-test
+  negative controls. Clean `make test`: workspace formatting, clippy, all tests,
+  docs/dependency/vector/rig guards and close-out audit passed. Cumulative
+  negative controls: **219/219**.
+- Evidence: `docs/evidence/d5/`; complete contract:
+  [`docs/spec/grpc-rest.md`](docs/spec/grpc-rest.md) and
+  [`docs/api/openapi-d5.yaml`](docs/api/openapi-d5.yaml).
+
 ## [D0 — node baseline] 2026-10-29
 
 **First `NODE_PLAN` phase, and a measurement rather than a feature.** Deliverable:
@@ -61,6 +104,68 @@ dependency beyond `toml`, `tracing` and `tracing-subscriber`.
 - Gates: 12 integration tests in the D1 gate; D0 gate still green (13 tests);
   374 total workspace tests; 171 negative controls (6 new); 4 857 vectors / 27
   fixtures unchanged.
+
+## [D2 — transaction pipeline] 2026-10-29
+
+**D2 transaction path.** Deliverable: `patches/0035-D2-transaction-pipeline.patch`.
+`aura_node::pipeline` now validates signed native transfers, executes them in
+canonical `(signer, nonce)` order, constructs C5 blocks, obtains BLS precommit
+QCs through the B3 three-chain engine, commits account state and transaction
+receipts to S2 storage, and publishes events only after durability succeeds.
+
+- Transfer payload: fixed `recipient[20] || amount_be[16]`; fixed gas 21,000,
+  base fee 1, tip paid to proposer and base fee burned.
+- Nine integration tests include a 1,000-transfer end-to-end run, receipt/root
+  checks, finality delay, replay/nonce/balance/gas/fee rejection and fail-closed
+  reopen behavior.
+- `tools/nc_d2.py`: six controls that require named D2 tests to go red; the
+  full close-out inventory now covers 201 negative controls.
+- Honest boundary: the in-process composition is one-validator/local, only
+  `Transfer` is executable, and committed-state recovery requires a finality
+  checkpoint not yet persisted. Multi-validator transport, richer execution,
+  RPC and checkpoint recovery remain later phases.
+
+## [D3 — fee-priority mempool] 2026-10-30
+
+**Bounded transaction pool for the D2 native-transfer path.** Deliverable:
+`patches/0036-D3-fee-priority-mempool.patch`. `aura-mempool` now exposes a
+16,384-entry sender/nonce pool with tip-priority selection over contiguous nonce
+lanes, a checked 10% replacement bump, deterministic strict-higher-tip eviction,
+and a reorg reinsertion boundary. `aura-node::pipeline` validates projected
+nonce, balance, gas and fee state before admission, and removes selected
+transactions only after a proposal is formed.
+
+- Six unit-test negative controls cover nonce validation, fee priority,
+  replacement, eviction, reorg reinsertion and transfer gas floor.
+- The D3 acceptance gate submits 10,000 signed sequential transfers and checks
+  exact nonce/balance accounting, unique durable receipts, gas, state root and
+  commit-event ordering under three-chain finality.
+- Scope limit: reorged transactions must be revalidated against the caller's new
+  account view before reinsertion; D3 does not add a distributed reorg engine or
+  finality checkpoint persistence.
+- Evidence and cumulative NC inventory: `docs/evidence/d3/` (207 controls).
+
+## [D4 — JSON-RPC 2.0] 2026-10-30
+
+**Bounded HTTP and WebSocket RPC over the validated local pipeline.** Deliverable:
+`patches/0037-D4-json-rpc.patch`. The new `aura-rpc` service implements JSON-RPC
+2.0 request/error/batch/notification semantics, an HTTP transport and RFC 6455
+WebSocket commit subscriptions. The node adapter exposes transaction submission,
+account and transaction queries, bounded recent committed-block lookup, gas
+estimation, and explicit unsupported-contract errors.
+
+- Body/message, batch, connection and incomplete-request time limits are bounded;
+  WebSocket client frames must be masked. Node locks are released before response
+  serialization or network writes. Drop-aware subscriptions unregister even when
+  no later commit arrives.
+- Contract tests cover the pipeline-backed service and transport. The 50 golden
+  wire vectors pass; six unit-test-based negative controls pass.
+- `fuzz_rpc` exercises the HTTP and WebSocket JSON parsers. A 60-second H3
+  parser shard completed 733,119 executions with no crashes; the full 24-hour H3
+  campaign and remaining parser targets are explicitly not claimed.
+- Boundary: only native transfers execute. Contract calls and unsupported
+  transaction execution return errors; D4 does not add P2P or multiple validators.
+- Evidence and cumulative inventory: `docs/evidence/d4/` (213 controls).
 
 ## [B3 — BFT finality] 2026-10-29
 
