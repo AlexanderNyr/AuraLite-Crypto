@@ -1,11 +1,16 @@
 # The node — `aurad`
 
-> Status: **D0 ✅, D1 ✅, D2 ✅, D3 ✅ (bounded fee-priority mempool), D4 ✅ (JSON-RPC 2.0), D5 ✅ (versioned REST + protobuf gRPC), B3 ✅ (single-process BFT finality primitives)**.
-> The local pipeline admits and finalizes native transfers; D3 adds nonce-lane priority, replacement, eviction and reorg reinsertion. D4 adds bounded HTTP JSON-RPC and WebSocket commit subscriptions; D5 exposes that same backend through versioned REST and gRPC.
-> Numbers: [`evidence/d3/report.md`](evidence/d3/report.md),
+> Status: **D0 ✅, D1 ✅, D2 ✅, D3 ✅ (bounded fee-priority mempool), D4 ✅ (JSON-RPC 2.0), D5 ✅ (versioned REST + protobuf gRPC), D6 ✅ (observability), D7 ✅ (4-validator devnet / M1), D8 ✅ (`aura` CLI), B0–B5 ✅, N0–N2 ✅**.
+> The local pipeline admits and finalizes native transfers; D3 adds nonce-lane priority, replacement, eviction and reorg reinsertion. D4 adds bounded HTTP JSON-RPC and WebSocket commit subscriptions; D5 exposes that same backend through versioned REST and gRPC; D6 adds `/health`, Prometheus `/metrics`, JSON logs and optional OTLP tracing; D7 adds the 4-validator `make devnet` (M1) composing N1/N2 P2P and B3–B5 consensus; D8 completes the `aura` operator/client CLI across `genesis`, `keys`, `tx`, `query`, `node`, `snapshot`, and `upgrade`.
+> Numbers: [`evidence/d8/report.md`](evidence/d8/report.md),
+> [`evidence/d7/report.md`](evidence/d7/report.md),
+> [`evidence/d6/report.md`](evidence/d6/report.md),
+> [`evidence/d5/report.md`](evidence/d5/report.md),
+> [`evidence/d4/report.md`](evidence/d4/report.md),
+> [`evidence/d3/report.md`](evidence/d3/report.md),
+> [`evidence/d2/report.md`](evidence/d2/report.md),
 > [`evidence/d1/report.md`](evidence/d1/report.md),
-> [`evidence/d0/report.md`](evidence/d0/report.md),
-> [`evidence/b1/report.md`](evidence/b1/report.md).
+> [`evidence/d0/report.md`](evidence/d0/report.md).
 
 ## Why a baseline phase
 
@@ -158,8 +163,47 @@ includes committed height, finality lag, mempool size/capacity, peer count,
 committed gas/transactions and rolling gas per second. JSON structured logs and
 optional OTLP gRPC span export are configured through `AURA_LOG`/`RUST_LOG` and
 `OTEL_EXPORTER_OTLP_ENDPOINT`. The Grafana dashboard and setup notes are in
-[`observability/`](observability/). P2P remains unimplemented and peer metrics
-stay explicitly zero; see the D6 docs for exact boundaries.
+[`observability/`](observability/).
+
+## D7: 4-validator devnet (Milestone M1)
+
+`aura_node::devnet`, `tools/run_devnet.py` (`make devnet`) and `docker-compose.yml`
+compose four independent `aurad` validator processes (`validator-0` .. `validator-3`)
+with distinct BLS12-381 consensus keys, distinct Ed25519 N1 peer identities
+(`peer_id = BLAKE3(pubkey)`), signed and deduplicated N2 `GossipTopic::{Tx,Proposal,Vote}`
+wire frames, B4 validator set, B5 VRF leader election, and 3-of-4 (`2f + 1`) BLS
+quorum certificates gating each validator's independent S2 WAL-backed `Pipeline`.
+
+At genesis (`auralite-devnet-1`), a deterministic development-only faucet account
+is funded with `1_000_000_000_000` units across all four validators. In `make test-d7`
+and `make devnet`:
+* Four separate `aurad` processes start on distinct JSON-RPC/REST/metrics and gRPC
+  ports and report HTTP 200 on `/health` and `/metrics`.
+* A signed transfer from the faucet key is submitted to `validator-0` via JSON-RPC
+  (`submit_tx`), gossiped over N2 `GossipTopic::Tx`, and finalized across all 4
+  validators.
+* Over 100 blocks are finalized with all 4 validators reporting the exact same
+  `height`, `hash` (`block_hash`), `stateRoot` (`state_root`), and account balances
+  via `get_block` and `get_balance`.
+* Stopping 1 of the 4 validators (`validator-3`, `SIGTERM`) leaves the remaining
+  3 validators with a valid `f = 1` quorum (`3 of 4`), and they continue finalizing
+  blocks and faucet transfers with identical `state_root`s.
+
+Evidence: [`evidence/d7/report.md`](evidence/d7/report.md).
+
+## D8: `aura` operator and client CLI
+
+`aura_node::cli` and the `aura` binary provide the full D8 command-line interface
+across seven subcommand families:
+* `aura genesis` (`hash`, `verify`, `show`) — deterministic C8 genesis inspection and verification.
+* `aura keys` (`derive`, `inspect`, `sign`, `verify`) — Ed25519 key derivation, Bech32 address inspection, and domain-separated `Domain::Tx` signing/verification.
+* `aura tx` (`transfer`, `decode`, `hash`) — canonical C4 transfer construction, gas-floor (`21,000`) and fee-cap validation, offline decoding/verification, and optional live JSON-RPC submission (`--rpc`).
+* `aura query` (`balance`, `block`, `tx`, `health`) — JSON-RPC 2.0 and HTTP `/health` queries against a live `aurad` node.
+* `aura node` (`config-check`, `status`, `health`) — strict TOML node configuration validation (rejecting unknown keys and missing `chain_id`) and live daemon status inspection.
+* `aura snapshot` (`create`, `verify`, `info`) — domain-separated deterministic snapshot manifest digest creation and constant-time verification (`SNAPSHOT_CLI_DOMAIN`).
+* `aura upgrade` (`plan`, `verify`) — domain-separated deterministic protocol upgrade plan generation and verification (`UPGRADE_CLI_DOMAIN`), enforcing strictly increasing protocol versions (`to_version > from_version`).
+
+Contract and 30 golden vectors: `crates/aura-node/tests/fixtures/d8_golden.txt` and `crates/aura-node/tests/d8_cli.rs`. Evidence: [`evidence/d8/report.md`](evidence/d8/report.md).
 
 ## Dependencies that must land first
 

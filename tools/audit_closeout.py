@@ -31,10 +31,11 @@ PATCHES = REPO / "patches"
 CORE_PHASES = [f"C{index}" for index in range(11)]      # C0..C10 (closed)
 STATE_PHASES = ["S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7"]  # STATE_PLAN complete
 EXEC_PHASES = ["X0", "X1", "X2", "X3", "X4", "X5", "X6", "X7", "X8"]                # grows with each X phase
-NODE_PHASES = ["D0", "D1", "D2", "D3", "D4", "D5", "D6"]                   # grows with each D phase
-CONSENSUS_PHASES = ["B0", "B1", "B2", "B3"]                        # grows with each B phase
-NET_PHASES = []                                                   # grows with each N phase
-PHASES = CORE_PHASES + STATE_PHASES + EXEC_PHASES + NODE_PHASES + CONSENSUS_PHASES + NET_PHASES
+NODE_PHASES = ["D0", "D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8"]             # NODE_PLAN complete
+CONSENSUS_PHASES = ["B0", "B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9", "B10"]  # CONSENSUS_PLAN complete
+NET_PHASES = ["N0", "N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8"]  # NET_PLAN complete
+WALLET_PHASES = ["W0"]  # grows with each W phase
+PHASES = CORE_PHASES + STATE_PHASES + EXEC_PHASES + NODE_PHASES + CONSENSUS_PHASES + NET_PHASES + WALLET_PHASES
 SHIPPED = CORE_PHASES + [
     "S0",
     "S1",
@@ -59,12 +60,31 @@ SHIPPED = CORE_PHASES + [
     "D3",
     "D4",
     "D5",
+    "D6",
     "B0",
     "B1",
     "B2",
     "B3",
+    "N0",
+    "N1",
+    "N2",
+    "B4",
+    "B5",
+    "D7",
+    "D8",
+    "N3",
+    "N4",
+    "N5",
+    "N6",
+    "N7",
+    "N8",
+    "B6",
+    "B7",
+    "B8",
+    "B9",
+    "B10",
 ]
-CURRENT = "D6"
+CURRENT = "W0"
 
 PLAN_FOR_PREFIX = {
     "C": "CORE_PLAN.md",
@@ -82,8 +102,8 @@ PLAN_FOR_PREFIX = {
 }
 
 NC_PER_PHASE = {f"C{i}": 6 for i in range(4, 11)}
-NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6})
-SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)  # 207 (through D3)
+NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6})
+SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)  # 333 (through B10)
 EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + (0 if CURRENT in SHIPPED else NC_PER_PHASE[CURRENT])
 
 DONE_ROW = re.compile(r"^\| ✅ \*\*([A-Z]+\d+)\*\* \|", re.M)
@@ -93,8 +113,9 @@ RESULT_LINE = re.compile(r"^RESULT: (\d+)/(\d+) negative controls PASS", re.M)
 # Patches follow landing order across plans. D2 follows the already shipped
 # B0-B3 series, rather than colliding with B0's historical 0031 number.
 PATCH_ORDER = CORE_PHASES + STATE_PHASES + EXEC_PHASES + ["D0", "D1"]
-PATCH_ORDER += ["B0", "B1", "B2", "B3"] + [f"D{i}" for i in range(2, 9)]
-PATCH_ORDER += [f"B{i}" for i in range(4, 11)]
+PATCH_ORDER += ["B0", "B1", "B2", "B3"] + [f"D{i}" for i in range(2, 7)]
+PATCH_ORDER += ["N0", "N1", "N2"] + ["B4", "B5"] + ["D7", "D8"]
+PATCH_ORDER += [f"N{i}" for i in range(3, 9)] + [f"B{i}" for i in range(6, 11)] + ["W0"]
 PATCH_NUMBERS = {phase: index + 1 for index, phase in enumerate(PATCH_ORDER)}
 
 
@@ -298,10 +319,7 @@ def check(strict: bool) -> tuple[list[str], list[str]]:
     # total AS OF that phase, not the current project-wide total.
     cumulative: list[tuple[str, int]] = []
     running = 56  # CORE closed with 56 NCs; S0 is the first phase after it
-    inventory_order = STATE_PHASES + EXEC_PHASES + ["D0", "D1"]
-    inventory_order += CONSENSUS_PHASES + ["D2"]
-    inventory_order += [f"D{i}" for i in range(3, 9)] + [f"B{i}" for i in range(4, 11)]
-    inventory_order += NET_PHASES
+    inventory_order = PATCH_ORDER[len(CORE_PHASES) :]
     for phase in inventory_order:
         if phase not in NC_PER_PHASE:
             continue

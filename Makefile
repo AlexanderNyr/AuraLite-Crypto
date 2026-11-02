@@ -35,12 +35,25 @@ PYTHON ?= python3
         gen-x8-mutants nc-x8 evidence-x8 test-x8 \
         gen-d0-vectors nc-d0 evidence-d0 test-d0 \
         gen-d1-vectors nc-d1 evidence-d1 test-d1 \
-        test-b0 test-b1 test-b2 test-b3 nc-b0 nc-b1 nc-b2 nc-b3 evidence-b0 evidence-b1 evidence-b2 evidence-b3 \
+        test-b0 test-b1 test-b2 test-b3 test-b4 test-b5 test-b6 test-b7 test-b8 test-b9 test-b10 nc-b0 nc-b1 nc-b2 nc-b3 nc-b4 nc-b5 nc-b6 nc-b7 nc-b8 nc-b9 nc-b10 evidence-b0 evidence-b1 evidence-b2 evidence-b3 evidence-b4 evidence-b5 evidence-b6 evidence-b7 evidence-b8 evidence-b9 evidence-b10 \
+        gen-b0-vectors gen-b1-vectors gen-b2-vectors gen-b3-vectors gen-b4-vectors gen-b5-vectors gen-b6-vectors gen-b7-vectors gen-b8-vectors gen-b9-vectors gen-b10-vectors \
         test-d2 nc-d2 evidence-d2 \
         test-d3 nc-d3 evidence-d3 \
         test-d4 nc-d4 evidence-d4 \
         test-d5 nc-d5 evidence-d5 \
         test-d6 nc-d6 evidence-d6 \
+        test-d7 nc-d7 evidence-d7 \
+        gen-d8-vectors test-d8 nc-d8 evidence-d8 \
+        gen-n0-vectors test-n0 nc-n0 evidence-n0 \
+        gen-n1-vectors test-n1 nc-n1 evidence-n1 \
+        gen-n2-vectors test-n2 nc-n2 evidence-n2 \
+        gen-n3-vectors test-n3 nc-n3 evidence-n3 \
+        gen-n4-vectors test-n4 nc-n4 evidence-n4 \
+        gen-n5-vectors test-n5 nc-n5 evidence-n5 \
+        gen-n6-vectors test-n6 nc-n6 evidence-n6 \
+        gen-n7-vectors test-n7 nc-n7 evidence-n7 \
+        gen-n8-vectors test-n8 nc-n8 evidence-n8 \
+        gen-w0-vectors test-w0 nc-w0 evidence-w0 \
         devnet clean
 
 help:
@@ -169,6 +182,10 @@ help:
 	@echo "  make test-d6           D6 health, Prometheus and tracing contract tests"
 	@echo "  make nc-d6             D6 unit-test mutation controls -> docs/evidence/d6/nc.log"
 	@echo "  make evidence-d6       aggregate completed D6 gates into evidence receipts"
+	@echo "  make gen-n0-vectors    regenerate the pinned N0 P2P baseline fixture"
+	@echo "  make test-n0           N0 baseline gate (no P2P survey + 2-node RPC isolation)"
+	@echo "  make nc-n0             N0 unit-test mutation controls -> docs/evidence/n0/nc.log"
+	@echo "  make evidence-n0       aggregate completed N0 gates into evidence receipts"
 	@echo "  make gen-b0-vectors    regenerate the pinned B0 consensus baseline fixture"
 	@echo "  make test-b0           B0 baseline gate (no consensus, measured)"
 	@echo "  make nc-b0             B0 consensus-baseline negative controls -> docs/evidence/b0/nc.log"
@@ -302,7 +319,7 @@ evidence-c3:
 # Runs every NC script WITHOUT rewriting the historical C0-C3 evidence logs,
 # so their committed SHA256SUMS stay valid. CI uses this instead of nc-cX.
 nc-all:
-	@for phase in c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 s0 s1 s2 s3 s4 s5 s6 s7 x0 x1 x2 x3 x4 x5 x6 x7 x8 d0 d1 b0 b1 b2 b3 d2 d3 d4 d5 d6; do \
+	@for phase in c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 s0 s1 s2 s3 s4 s5 s6 s7 x0 x1 x2 x3 x4 x5 x6 x7 x8 d0 d1 b0 b1 b2 b3 d2 d3 d4 d5 d6 n0 n1 n2 b4 b5 d7 d8 n3 n4 n5 n6 n7 n8 b6 b7 b8 b9 b10 w0; do \
 	    $(PYTHON) tools/nc_$$phase.py > /tmp/aura-nc-$$phase.log 2>&1 || \
 	      { echo "$$phase NEGATIVE CONTROLS FAILED"; tail -30 /tmp/aura-nc-$$phase.log; exit 1; }; \
 	    grep '^RESULT:' /tmp/aura-nc-$$phase.log; \
@@ -750,6 +767,111 @@ nc-b3:
 evidence-b3:
 	@$(PYTHON) tools/write_b3_evidence.py
 
+gen-b4-vectors:
+	@$(PYTHON) tools/gen_b4_vectors.py
+
+test-b4:
+	@$(CARGO) test -p aura-consensus --lib
+	@$(CARGO) test -p aura-consensus --test b4_validator_set
+
+nc-b4:
+	@mkdir -p docs/evidence/b4
+	@$(PYTHON) tools/nc_b4.py > docs/evidence/b4/nc.log 2>&1 || { cat docs/evidence/b4/nc.log; exit 1; }
+	@cat docs/evidence/b4/nc.log
+
+evidence-b4:
+	@$(PYTHON) tools/write_b4_evidence.py
+
+gen-b5-vectors:
+	@$(PYTHON) tools/gen_b5_vectors.py
+
+test-b5:
+	@$(CARGO) test -p aura-consensus --lib
+	@$(CARGO) test -p aura-consensus --test b5_vrf_leader
+
+nc-b5:
+	@mkdir -p docs/evidence/b5
+	@$(PYTHON) tools/nc_b5.py > docs/evidence/b5/nc.log 2>&1 || { cat docs/evidence/b5/nc.log; exit 1; }
+	@cat docs/evidence/b5/nc.log
+
+evidence-b5:
+	@$(PYTHON) tools/write_b5_evidence.py
+
+gen-b6-vectors:
+	@$(PYTHON) tools/gen_b6_vectors.py
+
+test-b6:
+	@$(CARGO) test -p aura-consensus --lib
+	@$(CARGO) test -p aura-consensus --test b6_slashing
+
+nc-b6:
+	@mkdir -p docs/evidence/b6
+	@$(PYTHON) tools/nc_b6.py > docs/evidence/b6/nc.log 2>&1 || { cat docs/evidence/b6/nc.log; exit 1; }
+	@cat docs/evidence/b6/nc.log
+
+evidence-b6:
+	@$(PYTHON) tools/write_b6_evidence.py
+
+gen-b7-vectors:
+	@$(PYTHON) tools/gen_b7_vectors.py
+
+test-b7:
+	@$(CARGO) test -p aura-consensus --lib
+	@$(CARGO) test -p aura-consensus --test b7_rewards
+
+nc-b7:
+	@mkdir -p docs/evidence/b7
+	@$(PYTHON) tools/nc_b7.py > docs/evidence/b7/nc.log 2>&1 || { cat docs/evidence/b7/nc.log; exit 1; }
+	@cat docs/evidence/b7/nc.log
+
+evidence-b7:
+	@$(PYTHON) tools/write_b7_evidence.py
+
+gen-b8-vectors:
+	@$(PYTHON) tools/gen_b8_vectors.py
+
+test-b8:
+	@$(CARGO) test -p aura-consensus --lib
+	@$(CARGO) test -p aura-consensus --test b8_fork_choice
+
+nc-b8:
+	@mkdir -p docs/evidence/b8
+	@$(PYTHON) tools/nc_b8.py > docs/evidence/b8/nc.log 2>&1 || { cat docs/evidence/b8/nc.log; exit 1; }
+	@cat docs/evidence/b8/nc.log
+
+evidence-b8:
+	@$(PYTHON) tools/write_b8_evidence.py
+
+gen-b9-vectors:
+	@$(PYTHON) tools/gen_b9_vectors.py
+
+test-b9:
+	@$(CARGO) test -p aura-consensus --lib
+	@$(CARGO) test -p aura-consensus --test b9_governance
+
+nc-b9:
+	@mkdir -p docs/evidence/b9
+	@$(PYTHON) tools/nc_b9.py > docs/evidence/b9/nc.log 2>&1 || { cat docs/evidence/b9/nc.log; exit 1; }
+	@cat docs/evidence/b9/nc.log
+
+evidence-b9:
+	@$(PYTHON) tools/write_b9_evidence.py
+
+gen-b10-vectors:
+	@$(PYTHON) tools/gen_b10_vectors.py
+
+test-b10:
+	@$(CARGO) test -p aura-consensus --lib
+	@$(CARGO) test -p aura-consensus --test b10_safety_evidence
+
+nc-b10:
+	@mkdir -p docs/evidence/b10
+	@$(PYTHON) tools/nc_b10.py > docs/evidence/b10/nc.log 2>&1 || { cat docs/evidence/b10/nc.log; exit 1; }
+	@cat docs/evidence/b10/nc.log
+
+evidence-b10:
+	@$(PYTHON) tools/write_b10_evidence.py
+
 test-d2:
 	@$(CARGO) test -p aura-node --test d2_pipeline
 
@@ -814,9 +936,185 @@ nc-d6:
 evidence-d6:
 	@$(PYTHON) tools/write_d6_evidence.py
 
+test-d7:
+	@$(CARGO) test -p aura-node --lib devnet::tests
+	@$(CARGO) test -p aura-node --test d7_devnet
+
+nc-d7:
+	@mkdir -p docs/evidence/d7
+	@$(PYTHON) tools/nc_d7.py > docs/evidence/d7/nc.log 2>&1 || { cat docs/evidence/d7/nc.log; exit 1; }
+	@cat docs/evidence/d7/nc.log
+
+evidence-d7:
+	@$(PYTHON) tools/write_d7_evidence.py
+
+gen-d8-vectors:
+	@$(PYTHON) tools/gen_d8_vectors.py
+
+test-d8:
+	@$(CARGO) test -p aura-node --lib cli::tests
+	@$(CARGO) test -p aura-node --test d8_cli
+
+nc-d8:
+	@mkdir -p docs/evidence/d8
+	@$(PYTHON) tools/nc_d8.py > docs/evidence/d8/nc.log 2>&1 || { cat docs/evidence/d8/nc.log; exit 1; }
+	@cat docs/evidence/d8/nc.log
+
+evidence-d8:
+	@$(PYTHON) tools/write_d8_evidence.py
+
+gen-n0-vectors:
+	@$(PYTHON) tools/gen_n0_vectors.py
+
+test-n0:
+	@$(CARGO) test -p aura-p2p --lib
+	@$(CARGO) test -p aura-node --test n0_two_nodes_no_p2p
+
+nc-n0:
+	@mkdir -p docs/evidence/n0
+	@$(PYTHON) tools/nc_n0.py > docs/evidence/n0/nc.log 2>&1 || { cat docs/evidence/n0/nc.log; exit 1; }
+	@cat docs/evidence/n0/nc.log
+
+evidence-n0:
+	@$(PYTHON) tools/write_n0_evidence.py
+
+gen-n1-vectors:
+	@$(PYTHON) tools/gen_n1_vectors.py
+
+test-n1:
+	@$(CARGO) test -p aura-p2p --lib
+	@$(CARGO) test -p aura-p2p --test n1_transport
+
+nc-n1:
+	@mkdir -p docs/evidence/n1
+	@$(PYTHON) tools/nc_n1.py > docs/evidence/n1/nc.log 2>&1 || { cat docs/evidence/n1/nc.log; exit 1; }
+	@cat docs/evidence/n1/nc.log
+
+evidence-n1:
+	@$(PYTHON) tools/write_n1_evidence.py
+
+gen-n2-vectors:
+	@$(PYTHON) tools/gen_n2_vectors.py
+
+test-n2:
+	@$(CARGO) test -p aura-p2p --lib
+	@$(CARGO) test -p aura-p2p --test n2_gossipsub
+
+nc-n2:
+	@mkdir -p docs/evidence/n2
+	@$(PYTHON) tools/nc_n2.py > docs/evidence/n2/nc.log 2>&1 || { cat docs/evidence/n2/nc.log; exit 1; }
+	@cat docs/evidence/n2/nc.log
+
+evidence-n2:
+	@$(PYTHON) tools/write_n2_evidence.py
+
+gen-n3-vectors:
+	@$(PYTHON) tools/gen_n3_vectors.py
+
+test-n3:
+	@$(CARGO) test -p aura-p2p --lib
+	@$(CARGO) test -p aura-p2p --test n3_discovery
+
+nc-n3:
+	@mkdir -p docs/evidence/n3
+	@$(PYTHON) tools/nc_n3.py > docs/evidence/n3/nc.log 2>&1 || { cat docs/evidence/n3/nc.log; exit 1; }
+	@cat docs/evidence/n3/nc.log
+
+evidence-n3:
+	@$(PYTHON) tools/write_n3_evidence.py
+
+gen-n4-vectors:
+	@$(PYTHON) tools/gen_n4_vectors.py
+
+test-n4:
+	@$(CARGO) test -p aura-p2p --lib
+	@$(CARGO) test -p aura-p2p --test n4_block_sync
+
+nc-n4:
+	@mkdir -p docs/evidence/n4
+	@$(PYTHON) tools/nc_n4.py > docs/evidence/n4/nc.log 2>&1 || { cat docs/evidence/n4/nc.log; exit 1; }
+	@cat docs/evidence/n4/nc.log
+
+evidence-n4:
+	@$(PYTHON) tools/write_n4_evidence.py
+
+gen-n5-vectors:
+	@$(PYTHON) tools/gen_n5_vectors.py
+
+test-n5:
+	@$(CARGO) test -p aura-p2p --lib
+	@$(CARGO) test -p aura-p2p --test n5_state_sync
+
+nc-n5:
+	@mkdir -p docs/evidence/n5
+	@$(PYTHON) tools/nc_n5.py > docs/evidence/n5/nc.log 2>&1 || { cat docs/evidence/n5/nc.log; exit 1; }
+	@cat docs/evidence/n5/nc.log
+
+evidence-n5:
+	@$(PYTHON) tools/write_n5_evidence.py
+
+gen-n6-vectors:
+	@$(PYTHON) tools/gen_n6_vectors.py
+
+test-n6:
+	@$(CARGO) test -p aura-p2p --lib
+	@$(CARGO) test -p aura-p2p --test n6_dos_defence
+
+nc-n6:
+	@mkdir -p docs/evidence/n6
+	@$(PYTHON) tools/nc_n6.py > docs/evidence/n6/nc.log 2>&1 || { cat docs/evidence/n6/nc.log; exit 1; }
+	@cat docs/evidence/n6/nc.log
+
+evidence-n6:
+	@$(PYTHON) tools/write_n6_evidence.py
+
+gen-n7-vectors:
+	@$(PYTHON) tools/gen_n7_vectors.py
+
+test-n7:
+	@$(CARGO) test -p aura-p2p --lib
+	@$(CARGO) test -p aura-p2p --test n7_light_client
+
+nc-n7:
+	@mkdir -p docs/evidence/n7
+	@$(PYTHON) tools/nc_n7.py > docs/evidence/n7/nc.log 2>&1 || { cat docs/evidence/n7/nc.log; exit 1; }
+	@cat docs/evidence/n7/nc.log
+
+evidence-n7:
+	@$(PYTHON) tools/write_n7_evidence.py
+
+gen-n8-vectors:
+	@$(PYTHON) tools/gen_n8_vectors.py
+
+test-n8:
+	@$(CARGO) test -p aura-p2p --lib
+	@$(CARGO) test -p aura-p2p --test n8_chaos
+
+nc-n8:
+	@mkdir -p docs/evidence/n8
+	@$(PYTHON) tools/nc_n8.py > docs/evidence/n8/nc.log 2>&1 || { cat docs/evidence/n8/nc.log; exit 1; }
+	@cat docs/evidence/n8/nc.log
+
+evidence-n8:
+	@$(PYTHON) tools/write_n8_evidence.py
+
+gen-w0-vectors:
+	@$(PYTHON) tools/gen_w0_vectors.py
+
+test-w0:
+	@$(CARGO) test -p aura-wallet --lib
+	@$(CARGO) test -p aura-wallet --test w0_key_audit
+
+nc-w0:
+	@mkdir -p docs/evidence/w0
+	@$(PYTHON) tools/nc_w0.py > docs/evidence/w0/nc.log 2>&1 || { cat docs/evidence/w0/nc.log; exit 1; }
+	@cat docs/evidence/w0/nc.log
+
+evidence-w0:
+	@$(PYTHON) tools/write_w0_evidence.py
+
 devnet:
-	@echo "ERROR: devnet is D7 (NODE_PLAN). It is not implemented at C0." >&2
-	@exit 1
+	@$(PYTHON) tools/run_devnet.py
 
 clean:
 	@$(CARGO) clean

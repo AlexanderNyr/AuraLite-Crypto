@@ -39,7 +39,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// The phase these numbers belong to.
-pub const PHASE: &str = "B3";
+pub const PHASE: &str = "B10";
 
 /// Exit code of the refusal: no consensus exists.
 pub const EXIT_STUB: i32 = 2;
@@ -115,7 +115,7 @@ impl Layer {
     pub fn has_consensus_logic(&self) -> bool {
         matches!(
             self.name,
-            "proposer" | "block-signature" | "qc" | "finality"
+            "proposer" | "block-signature" | "qc" | "finality" | "validator-set" | "vrf-leader"
         )
     }
 }
@@ -131,20 +131,13 @@ pub struct Capability {
     pub what: &'static str,
 }
 
-/// The two capabilities B4-B5 will add; B1's proposer, block-signature,
-/// B2's qc, and B3's finality are no longer missing.
-pub const MISSING_CAPABILITIES: [Capability; 2] = [
-    Capability {
-        name: "validator-set",
-        phase: "B4",
-        what: "staking contract, epoch, enter/exit queue, set update",
-    },
-    Capability {
-        name: "vrf-leader",
-        phase: "B5",
-        what: "stake-weighted VRF leader election, grinding protection",
-    },
-];
+/// Cross-plan capability still open after B0–B10 (`CONSENSUS_PLAN` complete):
+/// H2 external security audit and consensus invariant review.
+pub const MISSING_CAPABILITIES: [Capability; 1] = [Capability {
+    name: "external-security-audit",
+    phase: "H2",
+    what: "external security audit, consensus invariant review, and formal handoff",
+}];
 
 /// What a consensus component turned out to be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -458,10 +451,10 @@ fn report(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
 /// The pinned `key=value` form of a survey: one line per layer, plus the constants.
 pub fn fixture_text(measured: &Survey) -> String {
     let mut text = String::new();
-    let _ = writeln!(text, "# B3 baseline: BFT finality, measured.");
+    let _ = writeln!(text, "# B5 baseline: VRF leader election landed, measured.");
     let _ = writeln!(
         text,
-        "# Written by tools/gen_b3_vectors.py; pinned by tests/b3_baseline.rs."
+        "# Written by tools/gen_b5_vectors.py; pinned by baseline::tests."
     );
     let _ = writeln!(text, "phase={PHASE}");
     let _ = writeln!(text, "exit_stub={EXIT_STUB}");
@@ -548,39 +541,36 @@ mod tests {
         let root = default_root();
         let measured = survey(&root);
         assert_eq!(measured.layers.len(), LAYERS.len());
-        // proposer, block-signature, qc, and finality are implemented at B3.
+        // All 6 B1–B5 layers are implemented at B5.
         assert_eq!(
             measured.implemented(),
-            4,
-            "proposer + block-signature + qc + finality implemented"
+            6,
+            "proposer + block-signature + qc + finality + validator-set + vrf-leader implemented"
         );
         assert_eq!(
             measured.placeholders(),
-            2,
-            "validator-set, vrf-leader still placeholders"
+            0,
+            "0 placeholders in B1–B5 layers at B5"
         );
         assert_eq!(measured.missing(), 0);
-        let live: Vec<_> = measured
-            .layers
-            .iter()
-            .map(|e| (e.layer.name, e.presence))
-            .collect();
-        assert_eq!(live[0].1, Presence::Implemented, "proposer is implemented");
-        assert_eq!(
-            live[1].1,
-            Presence::Implemented,
-            "block-signature is implemented"
-        );
-        assert_eq!(live[2].1, Presence::Implemented, "qc is implemented");
-        assert_eq!(live[3].1, Presence::Implemented, "finality is implemented");
-        for entry in &measured.layers[4..] {
+        for entry in &measured.layers {
             assert_eq!(
                 entry.presence,
-                Presence::Placeholder,
-                "{} must still be a placeholder at B3",
+                Presence::Implemented,
+                "{} must be implemented at B5",
                 entry.layer.name
             );
         }
+        // Also verify an unlanded cross-plan H2 layer measures as Placeholder.
+        let unlanded = measure(
+            &root,
+            Layer {
+                name: "external-security-audit",
+                phase: "H2",
+                what: "external security audit, consensus invariant review, and formal handoff",
+            },
+        );
+        assert_eq!(unlanded.presence, Presence::Placeholder);
     }
 
     #[test]
@@ -710,13 +700,16 @@ mod tests {
     fn the_fixture_is_what_the_binary_prints() {
         let (code, out, _) = run(&["report", "--fixture"]);
         assert_eq!(code, 0);
-        assert_eq!(out, FIXTURE, "run `make gen-b3-vectors` to refresh the pin");
+        assert_eq!(
+            out, FIXTURE,
+            "run `make gen-b10-vectors` to refresh the pin"
+        );
     }
 
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
-    const FIXTURE: &str = include_str!("../tests/fixtures/b3_baseline.txt");
+    const FIXTURE: &str = include_str!("../tests/fixtures/b10_baseline.txt");
 
     fn repo_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")

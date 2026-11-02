@@ -267,27 +267,17 @@ fn the_pinned_baseline_matches_this_tree() {
 #[test]
 fn the_unlanded_layers_are_still_placeholders() {
     let measured = survey(&repo_root());
-    assert_eq!(
-        measured.placeholder_names(),
-        vec!["aura-p2p"],
-        "a placeholder grew public API without the plan being updated"
+    assert!(
+        measured.placeholder_names().is_empty(),
+        "all 14 library layers have landed their baseline/initial phase through N1"
     );
     for entry in &measured.layers {
-        let phase = entry.layer.phase;
         let is_placeholder = entry.presence == Presence::Placeholder;
-        if phase == "N1" {
-            assert!(
-                is_placeholder,
-                "{} must still be a placeholder at D0",
-                entry.layer.name
-            );
-        } else {
-            assert!(
-                !is_placeholder,
-                "{} must be implemented at D0",
-                entry.layer.name
-            );
-        }
+        assert!(
+            !is_placeholder,
+            "{} must be implemented after N1",
+            entry.layer.name
+        );
     }
 }
 

@@ -3,6 +3,431 @@
 All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
 never rewritten: corrections are made with a new entry or an explicit note.
 
+## [W0 — Wallet baseline: key-exposure surface audit, threat notes, and tree/log secret scanner] 2026-11-02
+
+**First `WALLET_PLAN` phase (`W0` complete).**
+Deliverable: `patches/0058-W0-wallet-baseline.patch`. Adds the 19th workspace crate (`aura-wallet`) with zero new external crate dependencies.
+
+- `aura_wallet::baseline`, `crates/aura-wallet/src/bin/aura-wallet.rs`, and `docs/evidence/w0/threat-notes.md` —
+  adds the W0 capability survey across W1–W4 (`keystore`, `wallet-cli`,
+  `offline-signing`, `multisig`: `0` implemented, `4` placeholders, `0` missing),
+  explicit stub refusal (`EXIT_STUB = 2`), the 8-surface key-exposure audit
+  (`EXPOSURE_SURFACES`), 6 threat model notes (`THREAT_NOTES`, `T-W0-1`..`T-W0-6`,
+  locking `m/44'/ALCRY'/0'/0/i`), and the tree/log secret-material scanner
+  (`scan_text_for_key_leaks`, `audit_tree_for_key_leaks`).
+- `crates/aura-wallet/tests/w0_key_audit.rs`, `crates/aura-wallet/tests/fixtures/w0_baseline.txt`,
+  and `crates/aura-wallet/tests/fixtures/w0_key_audit.txt` — verifies that the
+  live repository tree contains zero leaked keys in any log or file, that
+  injecting a key into a log file turns the tree-search gate red, and that all
+  64 deterministic scanner vectors pass.
+- `tools/nc_w0.py` — **6/6** negative controls targeting exact library unit
+  tests in `crates/aura-wallet/src/baseline.rs` (`--lib -- --exact`), including
+  `NC-1: key in a log -> tree search must fail`. Cumulative negative controls:
+  **339/339**. Evidence: `docs/evidence/w0/`.
+
+## [B10 — Safety evidence: TLA+/Apalache model, 100-node simulation, long-range analysis, and `CONSENSUS_PLAN` close-out] 2026-11-01
+
+**Eleventh and final `CONSENSUS_PLAN` phase (`B0`–`B10` complete).**
+Deliverable: `patches/0057-B10-safety-evidence.patch`. Zero new external crate dependencies added.
+
+- `aura_consensus::safety_model`, `aura_consensus::baseline`, and `docs/evidence/b10/HotStuff3ChainSafety.tla` —
+  ships the TLA+/Apalache formal specification of 3-chain HotStuff BFT finality,
+  an executable bounded model checker (`BftSafetyModelChecker`) proving
+  `AccountableSafetyInvariant` for `f < n/3` and generating a concrete 6-step
+  `CounterexampleTrace` when the `2f+1` quorum check is removed (`NC-1`) or
+  `f >= n/3`, a 100-node (`n = 100, f = 33, quorum = 67`) BFT simulation
+  (`run_hundred_node_simulation`) with zero finalized-head divergence, and a
+  long-range / weak-subjectivity attack analyzer (`analyze_long_range_attack`),
+  advancing `aura_consensus::baseline` to `B10` and closing `CONSENSUS_PLAN`.
+- `crates/aura-consensus/tests/b10_safety_evidence.rs`, `crates/aura-consensus/tests/fixtures/b10_baseline.txt`,
+  and `crates/aura-consensus/tests/fixtures/b10_safety_model.txt` — verifies the
+  TLA+ specification, `f < n/3` safety proof, counterexample extraction without
+  the quorum check, 100-node simulation, and 64 deterministic safety vectors.
+- `tools/nc_b10.py` — **6/6** negative controls targeting exact library unit
+  tests in `crates/aura-consensus/src/safety_model.rs` (`--lib -- --exact`),
+  including `NC-1: remove quorum check -> model finds a counterexample`.
+  Cumulative negative controls: **333/333**. Evidence: `docs/evidence/b10/`.
+
+## [B9 — On-chain governance: proposal, vote, timelock, WASM runtime upgrade, and emergency pause] 2026-11-01
+
+**Tenth `CONSENSUS_PLAN` phase.**
+Deliverable: `patches/0056-B9-on-chain-governance.patch`. Zero new external crate dependencies added.
+
+- `aura_consensus::governance` and `aura_consensus::baseline` — implements
+  on-chain governance proposal submission with deposit escrow and WASM bytecode
+  validation (`WASM_MAGIC_AND_VERSION`, `BLAKE3` code hash, strictly increasing
+  `to_version`), stake-weighted BLS12-381 validator voting (`Yes`, `No`,
+  `Abstain`, `NoWithVeto`), quorum/supermajority/veto tallying, mandatory
+  timelock queue (`ProposalStatus::Timelocked`), `2f+1` QC-authorized emergency
+  pause/resume, and hot WASM runtime upgrades across a 4-validator testnet
+  without a manual validator restart (`HotUpgradableTestnet`), advancing
+  `aura_consensus::baseline` to `B9`.
+- `crates/aura-consensus/tests/b9_governance.rs`, `crates/aura-consensus/tests/fixtures/b9_baseline.txt`,
+  and `crates/aura-consensus/tests/fixtures/b9_governance.txt` — verifies the
+  first protocol upgrade in a 4-validator testnet without a manual validator
+  restart (`restart_count == 0`) and checks 64 deterministic governance vectors.
+- `tools/nc_b9.py` — **6/6** negative controls targeting exact library unit
+  tests in `crates/aura-consensus/src/governance.rs` (`--lib -- --exact`).
+  Cumulative negative controls: **327/327**. Evidence: `docs/evidence/b9/`.
+
+## [B8 — Finality: fork choice, finalized checkpoint, light-client proof, and deep-reorg defence] 2026-11-01
+
+**Ninth `CONSENSUS_PLAN` phase.**
+Deliverable: `patches/0055-B8-finality-fork-choice.patch`. Zero new external crate dependencies added.
+
+- `aura_consensus::fork_choice` and `aura_consensus::baseline` — implements
+  fork-choice head selection (`ForkChoiceTree::select_canonical_head`),
+  weak-subjectivity-bounded finalized checkpoints (`FinalizedCheckpoint`,
+  `DEFAULT_WEAK_SUBJECTIVITY_WINDOW`), 3-chain consensus light-client proofs
+  (`ConsensusLightClientProof`), and deep-reorg rejection with cryptographic
+  `SlashingEvidence` emission (`ReorgRejection`, `ForkChoiceError::DeepReorgPastFinalized`),
+  advancing `aura_consensus::baseline` to `B8` (`D-B3`, `D-B4`).
+- `crates/aura-consensus/tests/b8_fork_choice.rs`, `crates/aura-consensus/tests/fixtures/b8_baseline.txt`,
+  and `crates/aura-consensus/tests/fixtures/b8_fork_choice.txt` — verifies
+  deep-reorg rejection + `SlashingEngine` tombstoning of the offending validator
+  and checks 64 deterministic fork-choice / reorg vectors.
+- `tools/nc_b8.py` — **6/6** negative controls targeting exact library unit
+  tests in `crates/aura-consensus/src/fork_choice.rs` (`--lib -- --exact`).
+  Cumulative negative controls: **321/321**. Evidence: `docs/evidence/b8/`.
+
+## [B7 — Rewards: inflation/reward, fee burn, delegation, commission, and 100,000-block sum invariant] 2026-11-01
+
+**Eighth `CONSENSUS_PLAN` phase.**
+Deliverable: `patches/0054-B7-rewards.patch`. Zero new external crate dependencies added.
+
+- `aura_consensus::rewards` and `aura_consensus::baseline` — implements block
+  inflation/reward emission (`RewardParams`, `RewardsEngine`, `BlockRewardReceipt`),
+  transaction fee burn (`fee_burn_bps`), proposer bonus (`proposer_bonus_bps`),
+  stake delegation (`ValidatorRewardConfig`, `RewardsEngine::delegate`), validator
+  commission (`commission_bps`), and the conservation invariant
+  `sum(balances) + burned == issued` (`verify_sum_invariant`), advancing
+  `aura_consensus::baseline` to `B7`.
+- `crates/aura-consensus/tests/b7_rewards.rs`, `crates/aura-consensus/tests/fixtures/b7_baseline.txt`,
+  and `crates/aura-consensus/tests/fixtures/b7_rewards.txt` — verifies
+  `sum(balances) + burned == issued` within 1 unit (`0` exact drift) over
+  100,000 blocks and checks 64 deterministic reward/fee-burn/commission vectors.
+- `tools/nc_b7.py` — **6/6** negative controls targeting exact library unit
+  tests in `crates/aura-consensus/src/rewards.rs` (`--lib -- --exact`).
+  Cumulative negative controls: **315/315**. Evidence: `docs/evidence/b7/`.
+
+## [B6 — Slashing / evidence: 6 attack types, penalties, jailing/tombstoning, and distribution] 2026-11-01
+
+**Seventh `CONSENSUS_PLAN` phase.**
+Deliverable: `patches/0053-B6-slashing-evidence.patch`. Zero new external crate dependencies added.
+
+- `aura_consensus::slashing`, `aura_consensus::validator_set`, and `aura_consensus::baseline`
+  — implements cryptographic evidence verification (`SlashingEvidence`, `SlashingEngine`,
+  `CheckpointAttestation`) for all 6 slashable attack types (`DoubleSignProposal`,
+  `DoubleSignVote`, `SurroundVote`, `AmnesiaVote`, `InvalidVrfLeaderClaim`,
+  `ExtendedDowntime`), stake slashing and jailing/tombstoning (`ValidatorSet::slash_validator`),
+  and deterministic penalty distribution (`PenaltyDistribution`: 10% reporter reward,
+  40% protocol treasury share, 50% burn), advancing `aura_consensus::baseline` to `B6` (`D-B4`).
+- `crates/aura-consensus/tests/b6_slashing.rs`, `crates/aura-consensus/tests/fixtures/b6_baseline.txt`,
+  and `crates/aura-consensus/tests/fixtures/b6_slashing.txt` — verifies all 6 attack
+  types against `ValidatorSet` and 64 deterministic slashing vectors.
+- `tools/nc_b6.py` — **6/6** negative controls targeting exact library unit
+  tests in `crates/aura-consensus/src/slashing.rs` (`--lib -- --exact`),
+  including `NC-1: slashing off -> test red`. Cumulative negative controls:
+  **309/309**. Evidence: `docs/evidence/b6/`.
+
+## [N8 — Chaos harness: latency/loss/partition/eclipse simulation and 100-node stand (`NET_PLAN` complete)] 2026-11-01
+
+**Ninth and final `NET_PLAN` phase.**
+Deliverable: `patches/0052-N8-chaos-harness.patch`. Zero new external crate dependencies added.
+
+- `aura_p2p::chaos` and `aura_p2p::baseline` — implements the 100-node P2P chaos
+  stand (`ChaosStand`, `ChaosScenarioConfig`, `canonical_20_scenarios`,
+  `run_chaos_matrix`, `verify_cluster_convergence`) with deterministic latency +
+  jitter, packet loss up to 40%, network partitions + post-heal header-first
+  sync, Sybil eclipse defence via `2f+1` QC verification, Byzantine equivocation
+  isolation via `DosDefenceEngine`, and N7 `LightClientVerifier` checkpoint
+  verification, completing all 8 `NET_PLAN` components (`8 implemented, 0 placeholders`).
+- `crates/aura-p2p/tests/n8_chaos.rs` and `crates/aura-p2p/tests/fixtures/n8_baseline.txt`
+  — runs 20 scenarios × 3 runs (= 60 runs) across the 100-node stand with zero
+  finalized-head divergence (`divergent_runs == 0`) and verifies the `NET_PLAN`
+  closure criteria (100 nodes, 20% packet loss, 1 Byzantine peer -> identical
+  finalized `state_root` verified by a light client without a full node).
+- `tools/nc_n8.py` — **6/6** negative controls targeting exact library unit
+  tests in `crates/aura-p2p/src/chaos.rs` (`--lib -- --exact`). Cumulative
+  negative controls: **303/303**. Evidence: `docs/evidence/n8/`.
+
+## [N7 — Light client: header+QC proof, finalized checkpoint check, and simplified DAS] 2026-11-01
+
+**Eighth `NET_PLAN` phase.**
+Deliverable: `patches/0051-N7-light-client.patch`. Zero new external crate dependencies added.
+
+- `aura_p2p::light_client` and `aura_p2p::baseline` — implements light-client
+  header+QC proof verification (`LightClientProof`, `LightClientVerifier`),
+  trusted finalized checkpoint progression (`FinalizedCheckpoint`), simplified
+  Data-Availability Sampling (`DasChunkSample`, `build_das_tree`,
+  `sample_das_chunks`, `LIGHT_CLIENT_LEAF_DOMAIN`, `LIGHT_CLIENT_BRANCH_DOMAIN`),
+  and pre-crypto proof byte-size (`<= 16 KiB`) and verification-gas
+  (`<= 150,000`) bounds (`LightClientBounds`), advancing `aura_p2p::baseline`
+  to `N7` (7 implemented, 1 placeholder).
+- `crates/aura-p2p/tests/n7_light_client.rs` and `crates/aura-p2p/tests/fixtures/n7_baseline.txt`
+  — a light client rejects forged headers, mismatched QCs, and corrupted DAS
+  samples (banning the offending peers) and advances its finalized checkpoint
+  across adjacent and multi-block jumps with bounded proof size and gas.
+- `tools/nc_n7.py` — **6/6** negative controls targeting exact library unit
+  tests in `crates/aura-p2p/src/light_client.rs` (`--lib -- --exact`).
+  Cumulative negative controls: **297/297**. Evidence: `docs/evidence/n7/`.
+
+## [N6 — DoS defence: size/rate limits, signature rate limit, and equivocation detection] 2026-11-01
+
+**Seventh `NET_PLAN` phase.**
+Deliverable: `patches/0050-N6-dos-defence.patch`. Zero new external crate dependencies added.
+
+- `aura_p2p::dos_defence` and `aura_p2p::baseline` — implements pre-crypto
+  `BanList` filtering, frame size caps (`max_frame_bytes = 256 KiB`), per-peer
+  sliding-window message rate limits (`128 msg/s`), per-peer Ed25519 signature
+  verification CPU budgets (`64 sig/s`), invalid-signature strike escalation,
+  and consensus double-proposal / double-vote equivocation detection with
+  self-contained verifiable `EquivocationEvidence`, advancing
+  `aura_p2p::baseline` to `N6` (6 implemented, 2 placeholders).
+- `crates/aura-p2p/tests/n6_dos_defence.rs` and `crates/aura-p2p/tests/fixtures/n6_baseline.txt`
+  — 1 malicious peer sends 10,000 msg/s (flood, corrupted signatures, and
+  oversized frames) while 4 honest validators keep finalizing blocks `1..=5`
+  uninterrupted; the malicious peer is banned and `>= 9,936` messages are
+  dropped before Ed25519 verification.
+- `tools/nc_n6.py` — **6/6** negative controls targeting exact library unit
+  tests in `crates/aura-p2p/src/dos_defence.rs` (`--lib -- --exact`). Cumulative
+  negative controls: **291/291**. Evidence: `docs/evidence/n6/`.
+
+## [N5 — State sync: S4 chunks, manifest, S1 root verification, and corrupt-chunk rollback] 2026-11-01
+
+**Sixth `NET_PLAN` phase.**
+Deliverable: `patches/0049-N5-state-sync.patch`. Zero new external crate dependencies added.
+
+- `aura_p2p::state_sync` and `aura_p2p::baseline` — integrates P2P state sync
+  with S4 (`aura-state` `SnapshotManifest`, `chunk_hash`, `decode_chunk`,
+  `export_snapshot`, `import_snapshot`, and S1 `state_root`), anchoring on a
+  QC-certified `SyncedHeader`, verifying manifest checksum/`chunk_root`/`state_root`,
+  rolling back and banning peers that serve corrupt chunks while re-requesting
+  from honest peers, verifying the recomputed S1 sparse Merkle `state_root`,
+  and advancing `aura_p2p::baseline` to `N5` (5 implemented, 3 placeholders).
+- `crates/aura-p2p/tests/n5_state_sync.rs` and `crates/aura-p2p/tests/fixtures/n5_baseline.txt`
+  — a new node syncs a 1,000-account S4 state snapshot (10 chunks) within
+  measured time, rolls back a corrupted chunk, bans the offending peer,
+  re-requests the chunk from an honest fallback peer, and verifies the S1
+  `state_root`.
+- `tools/nc_n5.py` — **6/6** negative controls targeting exact library unit
+  tests in `crates/aura-p2p/src/state_sync.rs` (`--lib -- --exact`). Cumulative
+  negative controls: **285/285**. Evidence: `docs/evidence/n5/`.
+
+## [N4 — Block sync: header-first verification, QC validation, and parallel body download] 2026-11-01
+
+**Fifth `NET_PLAN` phase.**
+Deliverable: `patches/0048-N4-block-sync.patch`. Zero new external crate dependencies added.
+
+- `aura_p2p::block_sync` and `aura_p2p::baseline` — implements header-first
+  chain synchronization (`SyncedHeader`, `BLOCK_SYNC_HEADER_DOMAIN`), Quorum
+  Certificate verification (`SyncQc`, `SyncValidatorSet`, `BLOCK_SYNC_QC_DOMAIN`,
+  `>= 2/3 + 1` quorum stake), parallel block body download and `tx_root`
+  verification (`SyncedBlockBody`, `BlockSyncEngine::download_bodies_parallel`,
+  `BLOCK_SYNC_BODY_DOMAIN`) with automatic `BanList` escalation on corrupt peers,
+  and advances `aura_p2p::baseline` to `N4` (4 implemented, 4 placeholders).
+- `crates/aura-p2p/tests/n4_block_sync.rs` and `crates/aura-p2p/tests/fixtures/n4_baseline.txt`
+  — a lagging node catches up 10,000 blocks via header-first verification and
+  parallel body download across 4 peers (with out-of-order chunk completion) and
+  reaches the exact canonical `block_hash` and `state_root`; corrupt body peers
+  are banned and recovered from honest peers.
+- `tools/nc_n4.py` — **6/6** negative controls targeting exact library unit
+  tests in `crates/aura-p2p/src/block_sync.rs` (`--lib -- --exact`). Cumulative
+  negative controls: **279/279**. Evidence: `docs/evidence/n4/`.
+
+## [N3 — Peer discovery: Kademlia DHT, bootstrap list, NAT/UPnP, and Circuit Relay v2] 2026-11-01
+
+**Fourth `NET_PLAN` phase.**
+Deliverable: `patches/0047-N3-discovery.patch`. Zero new external crate dependencies added.
+
+- `aura_p2p::discovery` and `aura_p2p::baseline` — implements the 256-bit
+  Kademlia XOR metric (`XorDistance`), 256-bucket `KademliaTable` (`k = 20`,
+  `alpha = 3`, `closest_peers`, stale `seq` rejection, `BanList` check),
+  domain-separated Ed25519 `SignedPeerRecord` (`PeerId == BLAKE3(public_key)`
+  and `chain_id` binding), `BootstrapList`, `UpnpMapper` (`NatStatus::UpnpMapped`),
+  `RelayServer` / `RelayReservation` (`NatStatus::BehindSymmetricNat`), and
+  advances `aura_p2p::baseline` to `N3` (3 implemented, 5 placeholders).
+- `crates/aura-p2p/tests/n3_discovery.rs` and `crates/aura-p2p/tests/fixtures/n3_baseline.txt`
+  — 30 nodes behind NAT (cone NAT with UPnP + symmetric NAT with Circuit Relay v2)
+  find all 29 other peers in `<= 4` iterative Kademlia lookup rounds with no
+  central server and exchange bounded frames over relay and UPnP endpoints.
+- `tools/nc_n3.py` — **6/6** negative controls targeting exact library unit
+  tests in `crates/aura-p2p/src/discovery.rs` (`--lib -- --exact`). Cumulative
+  negative controls: **273/273**. Evidence: `docs/evidence/n3/`.
+
+## [D8 — `aura` CLI: node ops, query, tx, keys, genesis, snapshot, and upgrade] 2026-10-31
+
+**Ninth and final `NODE_PLAN` phase (`NODE_PLAN` D0–D8 complete).**
+Deliverable: `patches/0046-D8-cli-aura.patch`. Zero new external crate dependencies added.
+
+- `aura_node::cli` and `crates/aura-genesis/src/bin/aura.rs` — implements the
+  complete `aura` command-line interface across all seven subcommand families:
+  `genesis` (`hash`, `verify`, `show`), `keys` (`derive`, `inspect`, `sign`,
+  `verify`), `tx` (`transfer`, `decode`, `hash`), `query` (`balance`, `block`,
+  `tx`, `health`), `node` (`config-check`, `status`, `health`), `snapshot`
+  (`create`, `verify`, `info`), and `upgrade` (`plan`, `verify`), plus complete
+  `--help` and `--version` documentation.
+- `crates/aura-node/tests/fixtures/d8_golden.txt` and `crates/aura-node/tests/d8_cli.rs`
+  — 30 golden CLI vectors verified end-to-end plus live `aurad` devnet transaction
+  submission (`aura tx transfer --rpc`) and RPC/health queries (`aura query`,
+  `aura node`).
+- `tools/nc_d8.py` — **6/6** negative controls targeting exact library unit
+  tests in `crates/aura-node/src/cli.rs` (`--lib -- --exact`). Cumulative
+  negative controls: **267/267**. Evidence: `docs/evidence/d8/`.
+
+## [D7 — Four-validator devnet (M1), `make devnet` orchestration, and 3-of-4 quorum resilience] 2026-10-31
+
+**Eighth `NODE_PLAN` phase (Step 4 of `D7_READINESS.md`, Milestone M1).**
+Deliverable: `patches/0045-D7-devnet.patch`. Zero new external crate dependencies added.
+
+- `aura_node::devnet` — implements deterministic 4-validator devnet composition
+  (`DEVNET_CHAIN_ID = "auralite-devnet-1"`, `DEVNET_VALIDATOR_COUNT = 4`,
+  `DEVNET_QUORUM_THRESHOLD = 3`, funded development-only faucet key),
+  constant-time peer identity verification (`verify_devnet_peer_identity`),
+  signed and deduplicated N2 gossip frame ingestion (`ingest_devnet_gossip`),
+  3-of-4 (`2f + 1`) BLS vote verification and QC aggregation
+  (`devnet_quorum_threshold`, `try_commit_round_votes`), in-process
+  `DevnetCluster`, and the multi-process `aurad` devnet worker loop
+  (`run_devnet_worker`, `trigger_and_wait_devnet_round`).
+- `crates/aura-node/tests/d7_devnet.rs`, `tools/run_devnet.py` (`make devnet`),
+  and `docker-compose.yml` — launch 4 independent `aurad` validator processes
+  with separate storage and ports, verify `/health` and `/metrics`, execute a
+  signed faucet transfer via JSON-RPC (`submit_tx`), finalize >= 100 blocks
+  across all 4 nodes with identical `height`, `block_hash`, `state_root`, and
+  account balances (`get_block`, `get_balance`), and verify continued
+  finalization across the remaining 3 validators after stopping `validator-3`
+  (`SIGTERM`, `f = 1` quorum of 3).
+- `tools/nc_d7.py` — **6/6** negative controls targeting exact library unit
+  tests in `crates/aura-node/src/devnet.rs` (`--lib -- --exact`). Cumulative
+  negative controls: **261/261**. Evidence: `docs/evidence/d7/`.
+
+## [B5 — Stake-weighted VRF leader election, grinding protection, and N1/N2 consensus wiring] 2026-10-31
+
+**Sixth `CONSENSUS_PLAN` phase (Step 3 of `D7_READINESS.md`).** Deliverable:
+`patches/0044-B5-vrf-leader.patch`. Zero new external crate dependencies added.
+
+- `aura_consensus::vrf_leader` — implements cryptographic BLS12-381 VRF proving
+  and public verification (`VrfInput`, `VrfProof`, `prove_vrf`, `verify_vrf`),
+  grinding protection (`VrfError::ZeroEpochRandomness` after epoch 0 and
+  `derive_epoch_randomness` over verified boundary `QuorumCertificate`s with
+  canonically sorted signer keys/signatures), and stake-weighted VRF leader
+  election (`VrfValidatorEntry`, `VrfLeaderElection`, `LeaderClaim`) mapping the
+  64-bit VRF ticket onto `[0, total_stake)` via 128-bit fixed-point arithmetic.
+- `aura_consensus::vrf_leader` N1/N2 wiring — connects `aura_p2p::identity::PeerIdentity`
+  and `aura_p2p::gossipsub::GossipEngine` (`GossipTopic::Proposal`,
+  `GossipTopic::Vote`, `ProposalEnvelope`, `VoteEnvelope`) to `FinalityEngine`,
+  `QcAggregator`, `ValidatorSet`, and `VrfLeaderElection` via
+  `NetworkedValidatorNode` and `FourValidatorNetwork` without bypassing BLS vote
+  or QC verification.
+- `crates/aura-consensus/tests/b5_vrf_leader.rs` — 10,000-round stake-weighted
+  VRF leader distribution within statistical confidence interval (`+/- 200`
+  rounds across `10%/20%/30%/40%` stakes), 4-validator 100-round N1/N2 BFT
+  finality surviving 1 validator offline (`f = 1`, quorum = 3), and forged
+  proposal/vote rejection.
+- `aura_consensus::baseline` — updated to `PHASE = "B5"` (all 6 B1–B5 layers
+  implemented, 0 placeholders).
+- `tools/nc_b5.py` — **6/6** negative controls targeting exact library unit
+  tests in `crates/aura-consensus/src/vrf_leader.rs` (`--lib -- --exact`).
+  Cumulative negative controls: **255/255**. Evidence: `docs/evidence/b5/`.
+
+## [B4 — Validator set: staking contract, epoch, enter/exit queue, and QC-verified set update] 2026-10-31
+
+**Fifth `CONSENSUS_PLAN` phase.** Deliverable:
+`patches/0043-B4-validator-set.patch`. Zero new external crate dependencies added.
+
+- `aura_consensus::validator_set` — implements `StakingContract` (validator
+  self-stake, delegations, `stake_and_enter`), deterministic epoch transitions
+  (`EpochInfo`, `EnterRequest`, `ExitRequest`, `ValidatorSet::advance_block`),
+  and QC-verified validator set updates (`SetUpdate`, `apply_set_update`,
+  `apply_verified_set_update`) enforcing `SetUpdateError::WrongEpoch`,
+  `SetUpdateError::InsufficientStake`, and `SetUpdateError::InvalidQc` (2f+1
+  BLS quorum certificate bound to `current_tip_hash`).
+- `crates/aura-consensus/tests/b4_validator_set.rs` — 7-node consensus test
+  transitioning from 4 to 7 active validators at height `H = 50` across 100
+  continuous blocks without stopping finality (quorum shifts from 3-of-4 to
+  5-of-7), plus QC-authorized set update verification.
+- `aura_consensus::baseline` — updated to `PHASE = "B4"` (5 implemented:
+  `proposer`, `block-signature`, `qc`, `finality`, `validator-set`; 1
+  placeholder: `vrf-leader` B5).
+- `tools/nc_b4.py` — **6/6** negative controls targeting exact library unit
+  tests in `crates/aura-consensus/src/validator_set.rs` (`--lib -- --exact`).
+  Cumulative negative controls: **249/249**. Evidence: `docs/evidence/b4/`.
+
+## [N2 — Gossipsub topics, message signatures, dedup, and peer scoring] 2026-10-31
+
+**Third `NET_PLAN` phase (Step 2 of `D7_READINESS.md`).** Deliverable:
+`patches/0042-N2-gossipsub.patch`. Zero new external crate dependencies added.
+
+- `aura_p2p::gossipsub` — implements the 5 canonical `D-N2` gossipsub topics
+  (`tx`, `proposal`, `vote`, `evidence`, `snapshot`), domain-separated Ed25519
+  message signatures (`AURA_P2P_GOSSIP_SIG_V1\0`) with constant-time
+  `PeerId == BLAKE3(pubkey)` verification (`D-N3`), bounded `SeenCache`
+  deduplication over deterministic `MessageId = BLAKE3(AURA_P2P_GOSSIP_ID_V1\0 || ...)`,
+  per-peer scoring (`PeerScoreParams`, `PeerScoreState`, `GossipEngine`) with
+  sliding-window flood rate limiting and automatic `BanList` escalation at
+  `ban_threshold`, and multi-node mesh propagation (`GossipMesh`).
+- `crates/aura-p2p/tests/n2_gossipsub.rs` — 1,000 signed transactions broadcast
+  across a 10-node mesh (ring + chords) in `< 1 s` with deduplication across all
+  10 nodes; flooding and signature-forging peers lose score and are banned.
+- `aura_p2p::baseline` — updated to `PHASE = "N2"` (2 implemented: `transport`,
+  `gossipsub`; 6 placeholders `N3..N8`).
+- `tools/nc_n2.py` — **6/6** negative controls targeting exact library unit
+  tests in `crates/aura-p2p/src/gossipsub.rs` (`--lib -- --exact`). Cumulative
+  negative controls: **243/243**. Evidence: `docs/evidence/n2/`.
+
+## [N1 — P2P transport, identity, handshake, and ban list] 2026-10-31
+
+**Second `NET_PLAN` phase (Step 1 of `D7_READINESS.md`).** Deliverable:
+`patches/0041-N1-transport.patch`. Zero new external crate dependencies added.
+
+- `aura_p2p::identity` — cryptographic peer identity (`PeerId = BLAKE3(ed25519_pubkey)`,
+  `D-N1`) with constant-time verification (`PeerId::verify_public_key`) and
+  domain-separated Ed25519 handshake transcript signing/verification
+  (`AURA_P2P_HANDSHAKE_V1\0` binding `protocol_version`, `chain_id`,
+  initiator/responder role, local & remote challenges, and public key).
+- `aura_p2p::ban` — deterministic `BanList` tracking banned `PeerId`s and
+  `IpAddr`s with permanent or expiring bans (`BanEntry`, `BanReason`).
+- `aura_p2p::transport` — Noise-inspired `HandshakeHello` challenge-response
+  exchange (`PROTOCOL_VERSION = 1`, `TransportKind`), directional BLAKE3-keyed
+  stream + MAC session cipher (`SessionCipher`) with monotonic sequence-number
+  anti-replay and `MAX_FRAME_BYTES` cap, and live TCP `TransportSwarm`.
+- `crates/aura-p2p/tests/n1_transport.rs` — 10 live `TransportSwarm` nodes
+  connect over TCP (`127.0.0.1:0`), authenticate each other, reject identity
+  substitution (`P2pError::IdentitySubstitution`) and automatically ban the
+  impostor `PeerId`, reject self-connections, and enforce peer/IP bans.
+- `aura_p2p::baseline` — updated to `PHASE = "N1"` (1 implemented `transport`,
+  7 placeholders `N2..N8`).
+- `tools/nc_n1.py` — **6/6** negative controls targeting exact library unit
+  tests in `crates/aura-p2p` (`--lib -- --exact`). Cumulative negative controls:
+  **237/237**. Evidence: `docs/evidence/n1/`.
+
+## [N0 — P2P network baseline] 2026-10-31
+
+**First `NET_PLAN` phase, and a measurement rather than a feature.** Deliverable:
+`patches/0040-N0-net-baseline.patch`. The claim: *there is no P2P network yet,
+and Node B cannot observe Node A's transactions over RPC without N1 transport
+and N2 gossipsub*. Zero external dependencies added.
+
+- `aura_p2p::baseline` — surveys the eight `NET_PLAN` layers (`transport` N1,
+  `gossipsub` N2, `discovery` N3, `block-sync` N4, `state-sync` N5,
+  `dos-defence` N6, `light-client` N7, `chaos-harness` N8), classifying all
+  eight as `placeholder` at N0 (0 implemented, 8 placeholders, 0 missing), and
+  records the two-node isolation probe (`node_a_knows_tx=true`,
+  `node_b_knows_tx=false`, `peer_count=0`,
+  `documented_gap=N1-transport+N2-gossipsub-absent:node_b_cannot_see_node_a_tx`).
+- The `aura-p2p` binary: no arguments → exit **2** (`EXIT_STUB`) naming every
+  missing N1–N8 capability; `report` and `report --fixture` measure the tree and
+  exit **3** on a non-workspace; unknown command → exit **64**.
+- `crates/aura-node/tests/n0_two_nodes_no_p2p.rs` — starts two independent live
+  `aurad` HTTP/JSON-RPC nodes (`node-a` and `node-b`), submits and commits a
+  signed transfer on Node A, and proves over HTTP JSON-RPC that Node B cannot
+  observe Node A's transaction (`get_tx` returns `null`, recipient balance stays
+  `0`, height stays `0`, `/health` reports `peerCount=0` and
+  `p2p="not_implemented"`).
+- `tools/nc_n0.py` — **6/6** negative controls targeting exact library unit
+  tests in `crates/aura-p2p/src/baseline.rs` (`--lib -- --exact`). Cumulative
+  negative controls: **231/231**. Evidence: `docs/evidence/n0/`.
+
 ## [D6 — observability] 2026-10-30
 
 **Deliverable:** `patches/0039-D6-observability.patch`. The node now emits JSON

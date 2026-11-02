@@ -329,6 +329,7 @@ fn measure(root: &Path, layer: Layer) -> Measurement {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
+        let is_baseline_survey = path.file_name().is_some_and(|name| name == "baseline.rs");
         files += 1;
         for line in text.lines() {
             let trimmed = line.trim_start();
@@ -336,7 +337,10 @@ fn measure(root: &Path, layer: Layer) -> Measurement {
                 continue;
             }
             lines += 1;
-            if declares_public_item(trimmed) {
+            if !is_baseline_survey
+                && trimmed != "pub mod baseline;"
+                && declares_public_item(trimmed)
+            {
                 public_items += 1;
             }
         }
@@ -661,10 +665,22 @@ mod tests {
     #[test]
     fn the_unlanded_layers_are_still_placeholders() {
         let measured = survey(&default_root());
-        assert_eq!(measured.placeholder_names(), vec!["aura-p2p"]);
-        assert_eq!(measured.implemented(), 13);
-        assert_eq!(measured.placeholders(), 1);
+        assert!(measured.placeholder_names().is_empty());
+        assert_eq!(measured.implemented(), 14);
+        assert_eq!(measured.placeholders(), 0);
         assert_eq!(measured.missing(), 0);
+
+        let temp =
+            std::env::temp_dir().join(format!("aura-d0-placeholder-check-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let p2p_src = temp.join("crates/aura-p2p/src");
+        std::fs::create_dir_all(&p2p_src).unwrap();
+        std::fs::write(p2p_src.join("lib.rs"), "//! placeholder only\n").unwrap();
+        let synthetic = survey(&temp);
+        let _ = std::fs::remove_dir_all(&temp);
+        assert_eq!(synthetic.placeholder_names(), vec!["aura-p2p"]);
+        assert_eq!(synthetic.placeholders(), 1);
+        assert_eq!(synthetic.missing(), 13);
     }
 
     #[test]

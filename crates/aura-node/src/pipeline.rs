@@ -797,6 +797,11 @@ impl Pipeline {
         &self.data_dir
     }
 
+    /// Snapshot of transactions currently queued in the D3 mempool in canonical order.
+    pub fn pending_mempool_transactions(&self) -> Vec<Tx> {
+        self.mempool.canonical_transactions()
+    }
+
     fn root_after_pending(&self, changes: &[StateChange]) -> Result<Hash, PipelineError> {
         let mut entries = self
             .storage

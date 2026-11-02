@@ -123,12 +123,37 @@ fn run_node(args: &[String], _out: &mut dyn std::io::Write, err: &mut dyn std::i
             return baseline::EXIT_STUB;
         }
     };
+    let devnet_mode = std::env::var("AURA_DEVNET_DIR").ok().and_then(|dir| {
+        let idx = std::env::var("AURA_VALIDATOR_INDEX")
+            .ok()?
+            .parse::<usize>()
+            .ok()?;
+        if idx < aura_node::devnet::DEVNET_VALIDATOR_COUNT {
+            Some((PathBuf::from(dir), idx))
+        } else {
+            None
+        }
+    });
+
+    let (pipeline_seed, allocations, genesis_time_ms) = if devnet_mode.is_some() {
+        (
+            aura_node::devnet::DEVNET_CANONICAL_VALIDATOR_SEED,
+            vec![(
+                aura_node::devnet::faucet_address(),
+                aura_types::Amount::from_units(aura_node::devnet::DEVNET_FAUCET_INITIAL_BALANCE),
+            )],
+            aura_node::devnet::DEVNET_GENESIS_TIME_MS,
+        )
+    } else {
+        (validator_seed, Vec::new(), 0)
+    };
+
     let pipeline = match aura_node::pipeline::Pipeline::open(aura_node::pipeline::PipelineConfig {
         chain_id: config.chain_id.clone(),
         data_dir: config.data_dir.clone(),
-        validator_seed,
-        allocations: Vec::new(),
-        genesis_time_ms: 0,
+        validator_seed: pipeline_seed,
+        allocations,
+        genesis_time_ms,
     }) {
         Ok(pipeline) => pipeline,
         Err(error) => {
@@ -195,6 +220,16 @@ fn run_node(args: &[String], _out: &mut dyn std::io::Write, err: &mut dyn std::i
     let producer = std::thread::Builder::new()
         .name("aura-local-producer".to_owned())
         .spawn(move || {
+            if let Some((devnet_dir, validator_index)) = devnet_mode {
+                aura_node::devnet::run_devnet_worker(
+                    devnet_dir,
+                    validator_index,
+                    producer_pipeline,
+                    producer_metrics,
+                    producer_stop,
+                );
+                return;
+            }
             while !producer_stop.load(std::sync::atomic::Ordering::Acquire) {
                 if let Ok(mut pipeline) = producer_pipeline.lock()
                     && pipeline.needs_block_production()

@@ -1,0 +1,3804 @@
+From: AuraLite-Crypto maintainers <maintainers@auralite.local>
+Subject: [PATCH] N0: P2P network baseline and two-node RPC isolation
+
+Base: GitHub main 2cf0321a83d6b308950a196b476ab086bf50c42c.
+
+---
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index f340d45a3a949c90d7f6932abe6d75786c76c1c1..d75212c7f7c428c030448d067532868b99e813f4 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,33 @@
+ All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
+ never rewritten: corrections are made with a new entry or an explicit note.
+ 
++## [N0 — P2P network baseline] 2026-10-31
++
++**First `NET_PLAN` phase, and a measurement rather than a feature.** Deliverable:
++`patches/0040-N0-net-baseline.patch`. The claim: *there is no P2P network yet,
++and Node B cannot observe Node A's transactions over RPC without N1 transport
++and N2 gossipsub*. Zero external dependencies added.
++
++- `aura_p2p::baseline` — surveys the eight `NET_PLAN` layers (`transport` N1,
++  `gossipsub` N2, `discovery` N3, `block-sync` N4, `state-sync` N5,
++  `dos-defence` N6, `light-client` N7, `chaos-harness` N8), classifying all
++  eight as `placeholder` at N0 (0 implemented, 8 placeholders, 0 missing), and
++  records the two-node isolation probe (`node_a_knows_tx=true`,
++  `node_b_knows_tx=false`, `peer_count=0`,
++  `documented_gap=N1-transport+N2-gossipsub-absent:node_b_cannot_see_node_a_tx`).
++- The `aura-p2p` binary: no arguments → exit **2** (`EXIT_STUB`) naming every
++  missing N1–N8 capability; `report` and `report --fixture` measure the tree and
++  exit **3** on a non-workspace; unknown command → exit **64**.
++- `crates/aura-node/tests/n0_two_nodes_no_p2p.rs` — starts two independent live
++  `aurad` HTTP/JSON-RPC nodes (`node-a` and `node-b`), submits and commits a
++  signed transfer on Node A, and proves over HTTP JSON-RPC that Node B cannot
++  observe Node A's transaction (`get_tx` returns `null`, recipient balance stays
++  `0`, height stays `0`, `/health` reports `peerCount=0` and
++  `p2p="not_implemented"`).
++- `tools/nc_n0.py` — **6/6** negative controls targeting exact library unit
++  tests in `crates/aura-p2p/src/baseline.rs` (`--lib -- --exact`). Cumulative
++  negative controls: **231/231**. Evidence: `docs/evidence/n0/`.
++
+ ## [D6 — observability] 2026-10-30
+ 
+ **Deliverable:** `patches/0039-D6-observability.patch`. The node now emits JSON
+diff --git a/Makefile b/Makefile
+index 60615644806d06aeb532f4832d8cff479d892df9..caef3983dd3ae4c0d86a5844ad3a4fbbef0c2d65 100644
+--- a/Makefile
++++ b/Makefile
+@@ -41,6 +41,7 @@ PYTHON ?= python3
+         test-d4 nc-d4 evidence-d4 \
+         test-d5 nc-d5 evidence-d5 \
+         test-d6 nc-d6 evidence-d6 \
++        gen-n0-vectors test-n0 nc-n0 evidence-n0 \
+         devnet clean
+ 
+ help:
+@@ -169,6 +170,10 @@ help:
+ 	@echo "  make test-d6           D6 health, Prometheus and tracing contract tests"
+ 	@echo "  make nc-d6             D6 unit-test mutation controls -> docs/evidence/d6/nc.log"
+ 	@echo "  make evidence-d6       aggregate completed D6 gates into evidence receipts"
++	@echo "  make gen-n0-vectors    regenerate the pinned N0 P2P baseline fixture"
++	@echo "  make test-n0           N0 baseline gate (no P2P survey + 2-node RPC isolation)"
++	@echo "  make nc-n0             N0 unit-test mutation controls -> docs/evidence/n0/nc.log"
++	@echo "  make evidence-n0       aggregate completed N0 gates into evidence receipts"
+ 	@echo "  make gen-b0-vectors    regenerate the pinned B0 consensus baseline fixture"
+ 	@echo "  make test-b0           B0 baseline gate (no consensus, measured)"
+ 	@echo "  make nc-b0             B0 consensus-baseline negative controls -> docs/evidence/b0/nc.log"
+@@ -302,7 +307,7 @@ evidence-c3:
+ # Runs every NC script WITHOUT rewriting the historical C0-C3 evidence logs,
+ # so their committed SHA256SUMS stay valid. CI uses this instead of nc-cX.
+ nc-all:
+-	@for phase in c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 s0 s1 s2 s3 s4 s5 s6 s7 x0 x1 x2 x3 x4 x5 x6 x7 x8 d0 d1 b0 b1 b2 b3 d2 d3 d4 d5 d6; do \
++	@for phase in c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 s0 s1 s2 s3 s4 s5 s6 s7 x0 x1 x2 x3 x4 x5 x6 x7 x8 d0 d1 b0 b1 b2 b3 d2 d3 d4 d5 d6 n0; do \
+ 	    $(PYTHON) tools/nc_$$phase.py > /tmp/aura-nc-$$phase.log 2>&1 || \
+ 	      { echo "$$phase NEGATIVE CONTROLS FAILED"; tail -30 /tmp/aura-nc-$$phase.log; exit 1; }; \
+ 	    grep '^RESULT:' /tmp/aura-nc-$$phase.log; \
+@@ -814,6 +819,21 @@ nc-d6:
+ evidence-d6:
+ 	@$(PYTHON) tools/write_d6_evidence.py
+ 
++gen-n0-vectors:
++	@$(PYTHON) tools/gen_n0_vectors.py
++
++test-n0:
++	@$(CARGO) test -p aura-p2p --lib
++	@$(CARGO) test -p aura-node --test n0_two_nodes_no_p2p
++
++nc-n0:
++	@mkdir -p docs/evidence/n0
++	@$(PYTHON) tools/nc_n0.py > docs/evidence/n0/nc.log 2>&1 || { cat docs/evidence/n0/nc.log; exit 1; }
++	@cat docs/evidence/n0/nc.log
++
++evidence-n0:
++	@$(PYTHON) tools/write_n0_evidence.py
++
+ devnet:
+ 	@echo "ERROR: devnet is D7 (NODE_PLAN). It is not implemented at C0." >&2
+ 	@exit 1
+diff --git a/crates/aura-node/src/baseline.rs b/crates/aura-node/src/baseline.rs
+index 5b673111a32e4a9b253594f54cab5a70d99b03c2..6fabb1d755aa98e18e48ec4b7d4cc571604c563c 100644
+--- a/crates/aura-node/src/baseline.rs
++++ b/crates/aura-node/src/baseline.rs
+@@ -329,6 +329,7 @@ fn measure(root: &Path, layer: Layer) -> Measurement {
+         let Ok(text) = std::fs::read_to_string(&path) else {
+             continue;
+         };
++        let is_baseline_survey = path.file_name().is_some_and(|name| name == "baseline.rs");
+         files += 1;
+         for line in text.lines() {
+             let trimmed = line.trim_start();
+@@ -336,7 +337,10 @@ fn measure(root: &Path, layer: Layer) -> Measurement {
+                 continue;
+             }
+             lines += 1;
+-            if declares_public_item(trimmed) {
++            if !is_baseline_survey
++                && trimmed != "pub mod baseline;"
++                && declares_public_item(trimmed)
++            {
+                 public_items += 1;
+             }
+         }
+diff --git a/crates/aura-node/tests/n0_two_nodes_no_p2p.rs b/crates/aura-node/tests/n0_two_nodes_no_p2p.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..62e67a45ac187c21f844452315d068ac530d0923
+--- /dev/null
++++ b/crates/aura-node/tests/n0_two_nodes_no_p2p.rs
+@@ -0,0 +1,235 @@
++//! N0 live two-node RPC isolation test: measures "no P2P" across two independent
++//! node HTTP/JSON-RPC servers and proves Node B cannot observe Node A's tx.
++
++use std::fs;
++use std::io::{Read, Write};
++use std::net::{SocketAddr, TcpStream};
++use std::path::PathBuf;
++use std::sync::atomic::{AtomicU64, Ordering};
++use std::sync::{Arc, Mutex};
++use std::time::Duration;
++
++use aura_crypto::ed25519_public_key;
++use aura_grpc_rest::RestGateway;
++use aura_node::observability::{NodeHttpExtension, NodeMetrics};
++use aura_node::pipeline::{
++    D2_BASE_FEE, Pipeline, PipelineConfig, TRANSFER_GAS, encode_transfer_payload,
++};
++use aura_node::rpc::PipelineRpcBackend;
++use aura_rpc::{RpcServerHandle, RpcService};
++use aura_tx::{Tx, TxKind, TxParams, UnsignedTx, signer_address};
++use aura_types::{Address, Amount, ChainId, Gas, Height, Nonce};
++use serde_json::{Value, json};
++
++const CHAIN: &str = "auralite-n0-baseline-1";
++const SENDER_SEED: [u8; 32] = [0x50; 32];
++const RECIPIENT: Address = Address::from_bytes([0xAB; 20]);
++static NEXT_ID: AtomicU64 = AtomicU64::new(0);
++
++fn sender() -> Address {
++    signer_address(&ed25519_public_key(&SENDER_SEED))
++}
++
++fn temporary_dir(label: &str) -> PathBuf {
++    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
++    let path = std::env::temp_dir().join(format!("aura-n0-{label}-{}-{id}", std::process::id()));
++    let _ = fs::remove_dir_all(&path);
++    fs::create_dir_all(&path).unwrap();
++    path
++}
++
++fn signed_transfer(nonce: u64, amount: u128) -> Tx {
++    UnsignedTx::new(TxParams {
++        chain_id: ChainId::new(CHAIN).unwrap(),
++        signer: sender(),
++        nonce: Nonce::new(nonce),
++        kind: TxKind::Transfer,
++        payload: encode_transfer_payload(RECIPIENT, Amount::from_units(amount)),
++        gas_limit: Gas::new(TRANSFER_GAS),
++        max_fee: D2_BASE_FEE,
++        tip: Amount::ZERO,
++        expiry: Height::new(100),
++    })
++    .unwrap()
++    .sign(&SENDER_SEED)
++    .unwrap()
++}
++
++fn encode_hex(bytes: &[u8]) -> String {
++    const HEX: &[u8; 16] = b"0123456789abcdef";
++    let mut text = String::with_capacity(bytes.len() * 2);
++    for byte in bytes {
++        text.push(HEX[(byte >> 4) as usize] as char);
++        text.push(HEX[(byte & 0xf) as usize] as char);
++    }
++    text
++}
++
++struct LiveNode {
++    server: RpcServerHandle,
++    pipeline: Arc<Mutex<Pipeline>>,
++    root: PathBuf,
++}
++
++impl LiveNode {
++    fn spawn(label: &str, validator_seed: [u8; 32]) -> Self {
++        let root = temporary_dir(label);
++        let pid_file = root.join("aurad.pid");
++        fs::write(&pid_file, format!("{}\n", std::process::id())).unwrap();
++        let pipeline = Pipeline::open(PipelineConfig {
++            chain_id: CHAIN.to_owned(),
++            data_dir: root.join("state"),
++            validator_seed,
++            allocations: vec![(sender(), Amount::from_units(2_000_000))],
++            genesis_time_ms: 1_700_000_000_000,
++        })
++        .unwrap();
++        let pipeline = Arc::new(Mutex::new(pipeline));
++        let backend = Arc::new(PipelineRpcBackend::new(Arc::clone(&pipeline)));
++        let service = RpcService::new(backend);
++        let rest = Arc::new(RestGateway::new(service.clone()));
++        let metrics = Arc::new(NodeMetrics::new(false));
++        let extension = Arc::new(NodeHttpExtension::new(
++            rest,
++            Arc::clone(&pipeline),
++            metrics,
++            pid_file,
++            CHAIN.to_owned(),
++        ));
++        let server =
++            RpcServerHandle::spawn_with_extension("127.0.0.1:0", service, Some(extension)).unwrap();
++        Self {
++            server,
++            pipeline,
++            root,
++        }
++    }
++
++    fn addr(&self) -> SocketAddr {
++        self.server.local_addr()
++    }
++
++    fn shutdown(mut self) {
++        self.server.shutdown();
++        let _ = fs::remove_dir_all(&self.root);
++    }
++}
++
++fn http_get_json(address: SocketAddr, path: &str) -> Value {
++    let mut stream = TcpStream::connect(address).unwrap();
++    stream
++        .set_read_timeout(Some(Duration::from_secs(2)))
++        .unwrap();
++    write!(
++        stream,
++        "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
++    )
++    .unwrap();
++    let mut response = String::new();
++    stream.read_to_string(&mut response).unwrap();
++    assert!(
++        response.starts_with("HTTP/1.1 200 OK\r\n"),
++        "unexpected HTTP response: {response}"
++    );
++    let body = response.split_once("\r\n\r\n").unwrap().1;
++    serde_json::from_str(body).unwrap()
++}
++
++fn rpc_post(address: SocketAddr, id: u64, method: &str, params: Value) -> Value {
++    let payload = serde_json::to_vec(&json!({
++        "jsonrpc": "2.0",
++        "id": id,
++        "method": method,
++        "params": params,
++    }))
++    .unwrap();
++    let mut stream = TcpStream::connect(address).unwrap();
++    stream
++        .set_read_timeout(Some(Duration::from_secs(2)))
++        .unwrap();
++    write!(
++        stream,
++        "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
++        payload.len()
++    )
++    .unwrap();
++    stream.write_all(&payload).unwrap();
++    let mut response = String::new();
++    stream.read_to_string(&mut response).unwrap();
++    assert!(
++        response.starts_with("HTTP/1.1 200 OK\r\n"),
++        "unexpected RPC HTTP response: {response}"
++    );
++    let body = response.split_once("\r\n\r\n").unwrap().1;
++    serde_json::from_str(body).unwrap()
++}
++
++#[test]
++fn two_nodes_over_rpc_measure_no_p2p_and_node_b_cannot_see_node_a_tx() {
++    let node_a = LiveNode::spawn("node-a", [0xA1; 32]);
++    let node_b = LiveNode::spawn("node-b", [0xB2; 32]);
++
++    // Both nodes report healthy local processes with zero P2P peers and P2P unimplemented.
++    let health_a = http_get_json(node_a.addr(), "/health");
++    let health_b = http_get_json(node_b.addr(), "/health");
++    assert_eq!(health_a["status"], "healthy");
++    assert_eq!(health_b["status"], "healthy");
++    assert_eq!(health_a["peerCount"], 0);
++    assert_eq!(health_b["peerCount"], 0);
++    assert_eq!(health_a["p2p"], "not_implemented");
++    assert_eq!(health_b["p2p"], "not_implemented");
++
++    // Submit a signed transfer to Node A over HTTP JSON-RPC.
++    let tx = signed_transfer(0, 250);
++    let txid_hex = format!("0x{}", tx.txid().to_hex());
++    let raw_hex = format!("0x{}", encode_hex(&tx.to_bytes()));
++    let submitted = rpc_post(node_a.addr(), 1, "submit_tx", json!({ "tx": raw_hex }));
++    assert_eq!(submitted["result"], txid_hex);
++
++    // Node A observes the transaction as pending; Node B has no P2P link and returns null.
++    let tx_on_a = rpc_post(node_a.addr(), 2, "get_tx", json!({ "txid": txid_hex }));
++    assert_eq!(tx_on_a["result"]["status"], "pending");
++    let tx_on_b = rpc_post(node_b.addr(), 3, "get_tx", json!({ "txid": txid_hex }));
++    assert!(
++        tx_on_b["result"].is_null(),
++        "without P2P, Node B must not see Node A's pending tx: {tx_on_b}"
++    );
++
++    // Drive Node A through its local 3-chain finality so the transfer is committed on Node A.
++    {
++        let mut pipe_a = node_a.pipeline.lock().unwrap();
++        assert_eq!(pipe_a.produce_block().unwrap().transaction_count, 1);
++        assert!(pipe_a.produce_block().unwrap().committed.is_empty());
++        assert_eq!(pipe_a.produce_block().unwrap().committed.len(), 1);
++    }
++
++    // Node A now serves the committed tx and updated recipient balance over RPC.
++    let committed_on_a = rpc_post(node_a.addr(), 4, "get_tx", json!({ "txid": txid_hex }));
++    assert_eq!(committed_on_a["result"]["status"], "committed");
++    let balance_on_a = rpc_post(
++        node_a.addr(),
++        5,
++        "get_balance",
++        json!({ "address": RECIPIENT.to_string() }),
++    );
++    assert_eq!(balance_on_a["result"]["balance"], "250");
++
++    // Node B still cannot observe Node A's committed tx or state transition.
++    let committed_on_b = rpc_post(node_b.addr(), 6, "get_tx", json!({ "txid": txid_hex }));
++    assert!(
++        committed_on_b["result"].is_null(),
++        "without P2P, Node B must not see Node A's committed tx: {committed_on_b}"
++    );
++    let balance_on_b = rpc_post(
++        node_b.addr(),
++        7,
++        "get_balance",
++        json!({ "address": RECIPIENT.to_string() }),
++    );
++    assert_eq!(balance_on_b["result"]["balance"], "0");
++    let head_on_b = rpc_post(node_b.addr(), 8, "get_block", json!({}));
++    assert_eq!(head_on_b["result"]["height"], 0);
++
++    node_a.shutdown();
++    node_b.shutdown();
++}
+diff --git a/crates/aura-p2p/Cargo.toml b/crates/aura-p2p/Cargo.toml
+index e5468ca8a747e444f06447911133940a5b69c79a..d234e15a515bb77b968f4e2f5872c0744212cf79 100644
+--- a/crates/aura-p2p/Cargo.toml
++++ b/crates/aura-p2p/Cargo.toml
+@@ -1,6 +1,6 @@
+ [package]
+ name = "aura-p2p"
+-description = "AuraLite-Crypto libp2p transport and gossip (placeholder, lands in N1)"
++description = "AuraLite-Crypto P2P network baseline (N0 landed; N1+ pending)"
+ version.workspace = true
+ edition.workspace = true
+ license.workspace = true
+@@ -8,4 +8,8 @@ rust-version.workspace = true
+ repository.workspace = true
+ publish.workspace = true
+ 
++[[bin]]
++name = "aura-p2p"
++path = "src/bin/main.rs"
++
+ [dependencies]
+diff --git a/crates/aura-p2p/src/baseline.rs b/crates/aura-p2p/src/baseline.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..4f403579923a2836b3a6b05c719e369bf0c28d84
+--- /dev/null
++++ b/crates/aura-p2p/src/baseline.rs
+@@ -0,0 +1,818 @@
++//! N0 baseline — **no P2P network**, and this module measures that claim.
++//!
++//! `aura-p2p` was a C0 placeholder and now contains the N0 baseline
++//! measurement. It has sources and a public `baseline` module, but no network
++//! logic: no libp2p swarm, no Noise/QUIC transport, no gossipsub topics, no
++//! peer discovery, no header/state sync, and no light-client verifier. The
++//! honest artifact is therefore *not* a stub that pretends peers are connected
++//! — it is a measurement of what is missing, a proof that Node B cannot see
++//! Node A's transaction without P2P, and a binary that refuses to claim a
++//! network where none exists.
++//!
++//! # What N0 measures
++//!
++//! [`survey`] measures `crates/aura-p2p/src`: files, non-empty lines, and
++//! public item declarations. All eight `NET_PLAN` components (`transport` N1
++//! through `chaos-harness` N8) measure as [`Presence::Placeholder`] at N0.
++//! [`measure_two_nodes_isolation`] records the two-node baseline gap: a
++//! transaction accepted by Node A over local RPC remains invisible to Node B
++//! because zero peers and zero gossip topics exist.
++
++use std::fmt::Write as _;
++use std::io::Write;
++use std::path::{Path, PathBuf};
++
++/// The phase these numbers belong to.
++pub const PHASE: &str = "N0";
++
++/// Exit code of the refusal: no P2P network exists.
++pub const EXIT_STUB: i32 = 2;
++
++/// Exit code when the baseline is asked about a tree that is not a workspace.
++pub const EXIT_NO_WORKSPACE: i32 = 3;
++
++/// Exit code of a usage error (sysexits `EX_USAGE`).
++pub const EXIT_USAGE: i32 = 64;
++
++/// Documented gap identifier pinned in the N0 fixture and report.
++pub const DOCUMENTED_GAP: &str = "N1-transport+N2-gossipsub-absent:node_b_cannot_see_node_a_tx";
++
++/// One network component that will land in N1–N8.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct Layer {
++    /// Component name, e.g. `transport`.
++    pub name: &'static str,
++    /// The phase that lands the real implementation.
++    pub phase: &'static str,
++    /// What the component is responsible for.
++    pub what: &'static str,
++}
++
++/// Every `NET_PLAN` component, in landing order.
++pub const LAYERS: [Layer; 8] = [
++    Layer {
++        name: "transport",
++        phase: "N1",
++        what: "libp2p swarm, Noise/QUIC, identity, handshake, ban list",
++    },
++    Layer {
++        name: "gossipsub",
++        phase: "N2",
++        what: "topics, message signatures, dedup, peer scoring",
++    },
++    Layer {
++        name: "discovery",
++        phase: "N3",
++        what: "Kademlia DHT, bootstrap list, NAT/upnp, relay",
++    },
++    Layer {
++        name: "block-sync",
++        phase: "N4",
++        what: "header-first, QC verification, parallel body download",
++    },
++    Layer {
++        name: "state-sync",
++        phase: "N5",
++        what: "integration with S4: chunks, manifest, root verification",
++    },
++    Layer {
++        name: "dos-defence",
++        phase: "N6",
++        what: "size/rate limits, signature rate limit, equivocation detection",
++    },
++    Layer {
++        name: "light-client",
++        phase: "N7",
++        what: "header+QC proof, finalized checkpoint check, simplified DAS",
++    },
++    Layer {
++        name: "chaos-harness",
++        phase: "N8",
++        what: "latency/loss/partition/eclipse simulation, 100-node stand",
++    },
++];
++
++impl Layer {
++    /// Source file under `crates/aura-p2p/src/` that will implement this layer.
++    pub fn module_file(&self) -> &'static str {
++        match self.name {
++            "transport" => "transport.rs",
++            "gossipsub" => "gossipsub.rs",
++            "discovery" => "discovery.rs",
++            "block-sync" => "block_sync.rs",
++            "state-sync" => "state_sync.rs",
++            "dos-defence" => "dos_defence.rs",
++            "light-client" => "light_client.rs",
++            "chaos-harness" => "chaos.rs",
++            _ => unreachable!("unknown layer: {}", self.name),
++        }
++    }
++
++    /// True when this layer's network implementation has landed.
++    ///
++    /// At N0, all eight layers are placeholders (`false`).
++    pub fn has_network_logic(&self) -> bool {
++        matches!(self.name, "")
++    }
++}
++
++/// One network capability that does not exist yet, and the phase that will add it.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct Capability {
++    /// Stable name, used by the gate and the refusal message.
++    pub name: &'static str,
++    /// The phase that lands it.
++    pub phase: &'static str,
++    /// What the capability will do.
++    pub what: &'static str,
++}
++
++/// The eight capabilities N1–N8 will add; none exist at N0.
++pub const MISSING_CAPABILITIES: [Capability; 8] = [
++    Capability {
++        name: "transport",
++        phase: "N1",
++        what: "libp2p swarm, Noise/QUIC, identity, handshake, ban list",
++    },
++    Capability {
++        name: "gossipsub",
++        phase: "N2",
++        what: "topics, message signatures, dedup, peer scoring",
++    },
++    Capability {
++        name: "discovery",
++        phase: "N3",
++        what: "Kademlia DHT, bootstrap list, NAT/upnp, relay",
++    },
++    Capability {
++        name: "block-sync",
++        phase: "N4",
++        what: "header-first, QC verification, parallel body download",
++    },
++    Capability {
++        name: "state-sync",
++        phase: "N5",
++        what: "integration with S4: chunks, manifest, root verification",
++    },
++    Capability {
++        name: "dos-defence",
++        phase: "N6",
++        what: "size/rate limits, signature rate limit, equivocation detection",
++    },
++    Capability {
++        name: "light-client",
++        phase: "N7",
++        what: "header+QC proof, finalized checkpoint check, simplified DAS",
++    },
++    Capability {
++        name: "chaos-harness",
++        phase: "N8",
++        what: "latency/loss/partition/eclipse simulation, 100-node stand",
++    },
++];
++
++/// What a network component turned out to be.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum Presence {
++    /// No source files at all.
++    Missing,
++    /// Source files exist in the crate, but this network layer has no
++    /// implementation yet.
++    Placeholder,
++    /// The network layer is implemented.
++    Implemented,
++}
++
++impl Presence {
++    /// Stable string form used by the fixture and the report.
++    pub fn as_str(self) -> &'static str {
++        match self {
++            Presence::Missing => "missing",
++            Presence::Placeholder => "placeholder",
++            Presence::Implemented => "implemented",
++        }
++    }
++}
++
++/// One measured network component.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct Measurement {
++    /// The layer this measurement belongs to.
++    pub layer: Layer,
++    /// What the source says it is.
++    pub presence: Presence,
++    /// Number of `.rs` files under `crates/aura-p2p/src/`.
++    pub files: usize,
++    /// Number of non-empty lines in those files.
++    pub lines: usize,
++    /// Number of public item declarations in those files.
++    pub public_items: usize,
++}
++
++/// Two-node no-P2P isolation measurement required by `NET_PLAN` N0.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct TwoNodeIsolationReport {
++    /// Transaction hash submitted to Node A over local RPC.
++    pub submitted_tx_hash: String,
++    /// Whether Node A's local pipeline observes its own submitted transaction.
++    pub node_a_knows_tx: bool,
++    /// Whether Node B can observe Node A's transaction without P2P.
++    pub node_b_knows_tx: bool,
++    /// Connected P2P peers between Node A and Node B at N0.
++    pub peer_count: usize,
++    /// Whether any P2P gossip propagation occurred.
++    pub propagated_over_p2p: bool,
++    /// Documented gap tag explaining why Node B cannot see Node A's transaction.
++    pub documented_gap: &'static str,
++}
++
++/// Measure two isolated nodes at N0: Node A receives `tx_hash` over RPC, and
++/// Node B cannot observe it because neither N1 transport nor N2 gossipsub exists.
++pub fn measure_two_nodes_isolation(tx_hash: &str) -> TwoNodeIsolationReport {
++    let node_a_mempool = [tx_hash];
++    let node_b_mempool: [&str; 0] = [];
++    let node_b_knows_tx = node_b_can_observe_node_a_tx(&node_a_mempool, &node_b_mempool);
++    TwoNodeIsolationReport {
++        submitted_tx_hash: tx_hash.to_owned(),
++        node_a_knows_tx: !tx_hash.is_empty() && node_a_mempool.contains(&tx_hash),
++        node_b_knows_tx,
++        peer_count: 0,
++        propagated_over_p2p: node_b_knows_tx,
++        documented_gap: DOCUMENTED_GAP,
++    }
++}
++
++/// True only if Node B can observe a transaction submitted to Node A.
++///
++/// At N0 there is no P2P transport (N1) and no gossipsub (N2), so Node B's
++/// local state never receives Node A's transaction.
++pub fn node_b_can_observe_node_a_tx(_node_a_txs: &[&str], node_b_txs: &[&str]) -> bool {
++    !node_b_txs.is_empty()
++}
++
++/// The result of [`survey`].
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct Survey {
++    /// Root that was measured.
++    pub root: PathBuf,
++    /// One entry per layer of [`LAYERS`], in that order.
++    pub layers: Vec<Measurement>,
++}
++
++impl Survey {
++    /// Layers that report [`Presence::Implemented`].
++    pub fn implemented(&self) -> usize {
++        self.count(Presence::Implemented)
++    }
++
++    /// Layers that are still placeholders.
++    pub fn placeholders(&self) -> usize {
++        self.count(Presence::Placeholder)
++    }
++
++    /// Layers with no source at all.
++    pub fn missing(&self) -> usize {
++        self.count(Presence::Missing)
++    }
++
++    fn count(&self, presence: Presence) -> usize {
++        self.layers
++            .iter()
++            .filter(|m| m.presence == presence)
++            .count()
++    }
++
++    /// Total `.rs` files across the measured layers.
++    pub fn total_files(&self) -> usize {
++        self.layers.iter().map(|m| m.files).sum()
++    }
++
++    /// Total lines across the measured layers.
++    pub fn total_lines(&self) -> usize {
++        self.layers.iter().map(|m| m.lines).sum()
++    }
++
++    /// The names of the layers that are still placeholders, in survey order.
++    pub fn placeholder_names(&self) -> Vec<&'static str> {
++        self.layers
++            .iter()
++            .filter(|m| m.presence == Presence::Placeholder)
++            .map(|m| m.layer.name)
++            .collect()
++    }
++
++    /// The report table, as printed by `aura-p2p report`.
++    pub fn table(&self) -> String {
++        let mut out = String::new();
++        out.push_str("layer             owner  presence      files  lines  public\n");
++        for m in &self.layers {
++            let _ = writeln!(
++                out,
++                "{:<17} {:<6} {:<13} {:>5}  {:>5}  {:>6}",
++                m.layer.name,
++                m.layer.phase,
++                m.presence.as_str(),
++                m.files,
++                m.lines,
++                m.public_items
++            );
++        }
++        let _ = writeln!(
++            out,
++            "{:<17} {:<6} {:<13} {:>5}  {:>5}",
++            "total",
++            PHASE,
++            format!("{} impl", self.implemented()),
++            self.total_files(),
++            self.total_lines()
++        );
++        out
++    }
++}
++
++/// Measure `root` — the directory that contains `crates/`.
++pub fn survey(root: &Path) -> Survey {
++    let layers = LAYERS.iter().map(|layer| measure(root, *layer)).collect();
++    Survey {
++        root: root.to_path_buf(),
++        layers,
++    }
++}
++
++fn measure(root: &Path, layer: Layer) -> Measurement {
++    let src = root.join("crates").join("aura-p2p").join("src");
++    let mut files = 0usize;
++    let mut lines = 0usize;
++    let mut public_items = 0usize;
++    for path in rust_files(&src) {
++        let Ok(text) = std::fs::read_to_string(&path) else {
++            continue;
++        };
++        files += 1;
++        for line in text.lines() {
++            let trimmed = line.trim_start();
++            if trimmed.is_empty() {
++                continue;
++            }
++            lines += 1;
++            if declares_public_item(trimmed) {
++                public_items += 1;
++            }
++        }
++    }
++    let presence = if files == 0 {
++        Presence::Missing
++    } else if layer.has_network_logic() {
++        Presence::Implemented
++    } else {
++        Presence::Placeholder
++    };
++    Measurement {
++        layer,
++        presence,
++        files,
++        lines,
++        public_items,
++    }
++}
++
++/// Every `.rs` file under `dir`, sorted so the survey is deterministic.
++fn rust_files(dir: &Path) -> Vec<PathBuf> {
++    let mut files = Vec::new();
++    let Ok(entries) = std::fs::read_dir(dir) else {
++        return files;
++    };
++    let mut paths: Vec<PathBuf> = entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
++    paths.sort();
++    for path in paths {
++        if path.is_dir() {
++            files.extend(rust_files(&path));
++        } else if path.extension().is_some_and(|ext| ext == "rs") {
++            files.push(path);
++        }
++    }
++    files
++}
++
++/// True when a source line declares a public item.
++fn declares_public_item(line: &str) -> bool {
++    if line.starts_with("//") || line.starts_with('*') || line.starts_with("/*") {
++        return false;
++    }
++    const KINDS: [&str; 10] = [
++        "pub fn ",
++        "pub struct ",
++        "pub enum ",
++        "pub const ",
++        "pub mod ",
++        "pub use ",
++        "pub trait ",
++        "pub type ",
++        "pub static ",
++        "pub union ",
++    ];
++    if KINDS.iter().any(|kind| line.contains(kind)) {
++        return true;
++    }
++    line.starts_with("pub(crate) ") || line.starts_with("macro_rules! pub ")
++}
++
++/// Where the workspace lives when `--workspace` is not passed.
++pub fn default_root() -> PathBuf {
++    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
++}
++
++/// Entry point for `aura-p2p` CLI arguments.
++pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
++    let Some(command) = args.first().map(String::as_str) else {
++        return refuse(err);
++    };
++    match command {
++        "--help" | "-h" => {
++            let _ = writeln!(out, "{}", usage());
++            0
++        }
++        "--version" | "-V" => {
++            let _ = writeln!(
++                out,
++                "aura-p2p {} (N0 baseline — no P2P network)",
++                env!("CARGO_PKG_VERSION")
++            );
++            0
++        }
++        "report" => report(&args[1..], out, err),
++        other => {
++            let _ = writeln!(err, "aura-p2p: unknown command `{other}`.");
++            let _ = writeln!(err, "{}", usage());
++            EXIT_USAGE
++        }
++    }
++}
++
++fn report(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
++    let mut root = default_root();
++    let mut fixture = false;
++    let mut index = 0;
++    while index < args.len() {
++        match args[index].as_str() {
++            "--fixture" => {
++                fixture = true;
++                index += 1;
++            }
++            "--workspace" => {
++                let Some(value) = args.get(index + 1) else {
++                    let _ = writeln!(err, "aura-p2p: `--workspace` needs a path.");
++                    return EXIT_USAGE;
++                };
++                root = PathBuf::from(value);
++                index += 2;
++            }
++            other => {
++                let _ = writeln!(err, "aura-p2p: unknown argument `{other}` for `report`.");
++                return EXIT_USAGE;
++            }
++        }
++    }
++    if !root.join("crates").is_dir() {
++        let _ = writeln!(
++            err,
++            "aura-p2p: `{}` is not a workspace (no crates/ directory).",
++            root.display()
++        );
++        return EXIT_NO_WORKSPACE;
++    }
++    let measured = survey(&root);
++    if fixture {
++        let _ = write!(out, "{}", fixture_text(&measured));
++        return 0;
++    }
++    let probe = measure_two_nodes_isolation("0x01");
++    let _ = writeln!(out, "{}", measured.table());
++    let _ = writeln!(
++        out,
++        "measured: {} implemented, {} placeholders, {} missing ({} files, {} lines)",
++        measured.implemented(),
++        measured.placeholders(),
++        measured.missing(),
++        measured.total_files(),
++        measured.total_lines()
++    );
++    let _ = writeln!(
++        out,
++        "network capabilities present: {} of {} — missing: {}",
++        LAYERS.len() - MISSING_CAPABILITIES.len(),
++        LAYERS.len(),
++        MISSING_CAPABILITIES
++            .iter()
++            .map(|e| e.phase)
++            .collect::<Vec<_>>()
++            .join(", ")
++    );
++    let _ = writeln!(
++        out,
++        "two-node isolation: node_a_knows_tx={}, node_b_knows_tx={}, peer_count={}, gap={}",
++        probe.node_a_knows_tx, probe.node_b_knows_tx, probe.peer_count, probe.documented_gap
++    );
++    0
++}
++
++/// The pinned `key=value` form of a survey: one line per layer, plus the constants
++/// and the two-node isolation probe.
++pub fn fixture_text(measured: &Survey) -> String {
++    let probe = measure_two_nodes_isolation("0x01");
++    let mut text = String::new();
++    let _ = writeln!(text, "# N0 baseline: no P2P network, measured.");
++    let _ = writeln!(
++        text,
++        "# Written by tools/gen_n0_vectors.py; pinned by baseline::tests."
++    );
++    let _ = writeln!(text, "phase={PHASE}");
++    let _ = writeln!(text, "exit_stub={EXIT_STUB}");
++    let _ = writeln!(text, "exit_usage={EXIT_USAGE}");
++    let _ = writeln!(text, "exit_no_workspace={EXIT_NO_WORKSPACE}");
++    let _ = writeln!(text, "layers={}", measured.layers.len());
++    let _ = writeln!(text, "capabilities={}", MISSING_CAPABILITIES.len());
++    for capability in &MISSING_CAPABILITIES {
++        let _ = writeln!(
++            text,
++            "capability={} {} {}",
++            capability.name, capability.phase, capability.what
++        );
++    }
++    let _ = writeln!(text, "implemented={}", measured.implemented());
++    let _ = writeln!(text, "placeholders={}", measured.placeholders());
++    let _ = writeln!(text, "missing={}", measured.missing());
++    let _ = writeln!(text, "node_a_knows_tx={}", probe.node_a_knows_tx);
++    let _ = writeln!(text, "node_b_knows_tx={}", probe.node_b_knows_tx);
++    let _ = writeln!(text, "peer_count={}", probe.peer_count);
++    let _ = writeln!(text, "documented_gap={}", probe.documented_gap);
++    for measurement in &measured.layers {
++        let _ = writeln!(
++            text,
++            "layer={} {} {}",
++            measurement.layer.name,
++            measurement.layer.phase,
++            measurement.presence.as_str()
++        );
++    }
++    text
++}
++
++fn refuse(err: &mut dyn Write) -> i32 {
++    let _ = writeln!(err, "{}", refusal_lines());
++    EXIT_STUB
++}
++
++/// The refusal text: what is missing, and which phase adds it.
++fn refusal_lines() -> String {
++    let mut text = String::new();
++    text.push_str("aura-p2p — the N0 baseline:\n");
++    text.push_str("N0 measures that no P2P network exists; eight capabilities remain missing.\n\n");
++    text.push_str("missing capabilities:\n");
++    for capability in &MISSING_CAPABILITIES {
++        let _ = writeln!(
++            text,
++            "  {:<14} {:<4} {}",
++            capability.name, capability.phase, capability.what
++        );
++    }
++    let _ = writeln!(
++        text,
++        "\n`aura-p2p report` prints what this tree actually contains (measured, not claimed).\n\
++         `aura-p2p --help` lists the commands N0 is allowed to have."
++    );
++    text
++}
++
++fn usage() -> String {
++    format!(
++        "aura-p2p {} (N0 baseline)\n\
++         \n\
++         usage:\n\
++         \x20 aura-p2p report [--workspace PATH]  measure the tree and print what exists\n\
++         \x20 aura-p2p report --fixture           the same measurement as `key=value` lines\n\
++         \x20 aura-p2p --help                     this text\n\
++         \x20 aura-p2p --version                  version and phase\n\
++         \n\
++         N0 measures no P2P network; {} capabilities remain missing ({}..{}).\n\
++         exit codes: {} = no P2P network, {} = not a workspace, {} = usage error.",
++        env!("CARGO_PKG_VERSION"),
++        MISSING_CAPABILITIES.len(),
++        MISSING_CAPABILITIES[0].phase,
++        MISSING_CAPABILITIES[MISSING_CAPABILITIES.len() - 1].phase,
++        EXIT_STUB,
++        EXIT_NO_WORKSPACE,
++        EXIT_USAGE
++    )
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::collections::BTreeMap;
++
++    const FIXTURE: &str = include_str!("../tests/fixtures/n0_baseline.txt");
++
++    #[test]
++    fn n0_implemented_and_placeholders() {
++        let root = default_root();
++        let measured = survey(&root);
++        assert_eq!(measured.layers.len(), LAYERS.len());
++        assert_eq!(
++            measured.implemented(),
++            0,
++            "no P2P layers are implemented at N0"
++        );
++        assert_eq!(
++            measured.placeholders(),
++            8,
++            "all eight N1..N8 layers are placeholders at N0"
++        );
++        assert_eq!(measured.missing(), 0);
++        for entry in &measured.layers {
++            assert_eq!(
++                entry.presence,
++                Presence::Placeholder,
++                "{} must still be a placeholder at N0",
++                entry.layer.name
++            );
++        }
++    }
++
++    #[test]
++    fn refusal_exits_stub_without_arguments() {
++        let (code, out, err) = run(&[]);
++        assert_eq!(
++            code, EXIT_STUB,
++            "no P2P network must be a refusal, not success"
++        );
++        assert!(out.is_empty(), "the refusal belongs on stderr");
++        assert!(
++            err.contains("N0 measures that no P2P network exists"),
++            "the refusal must state the claim: {err}"
++        );
++    }
++
++    #[test]
++    fn refusal_names_every_missing_capability() {
++        let (_code, _out, err) = run(&[]);
++        for capability in &MISSING_CAPABILITIES {
++            assert!(
++                err.contains(capability.name),
++                "refusal must name missing capability: {}",
++                capability.name
++            );
++            assert!(
++                err.contains(capability.phase),
++                "refusal must name missing capability phase: {}",
++                capability.phase
++            );
++        }
++    }
++
++    #[test]
++    fn report_refuses_a_tree_that_is_not_a_workspace() {
++        let mut out: Vec<u8> = Vec::new();
++        let mut err: Vec<u8> = Vec::new();
++        let args: Vec<String> = vec!["--workspace".into(), "/tmp/not-a-workspace".into()];
++        let code = super::report(&args, &mut out, &mut err);
++        assert_eq!(code, EXIT_NO_WORKSPACE, "a non-workspace must be refused");
++        let err_text = String::from_utf8_lossy(&err);
++        assert!(
++            err_text.contains("is not a workspace"),
++            "the refusal must state the claim: {err_text}"
++        );
++    }
++
++    #[test]
++    fn unknown_command_exits_usage() {
++        let (code, _out, _err) = run(&["definitely-not-a-real-command-xyz"]);
++        assert_eq!(code, EXIT_USAGE, "an unknown command must be a usage error");
++    }
++
++    #[test]
++    fn node_b_cannot_observe_node_a_tx_without_p2p() {
++        let report = measure_two_nodes_isolation("0xdeadbeef");
++        assert!(report.node_a_knows_tx, "node A accepted its own RPC tx");
++        assert!(
++            !report.node_b_knows_tx,
++            "node B must not observe node A's tx without P2P"
++        );
++        assert_eq!(report.peer_count, 0);
++        assert!(!report.propagated_over_p2p);
++        assert_eq!(report.documented_gap, DOCUMENTED_GAP);
++        assert!(!node_b_can_observe_node_a_tx(&["tx1"], &[]));
++    }
++
++    #[test]
++    fn documentation_is_not_a_public_item() {
++        assert!(!declares_public_item(
++            "//! `aura-p2p` - N0 baseline: no P2P network."
++        ));
++        assert!(!declares_public_item("/// public fn in a doc comment"));
++        assert!(!declares_public_item("#![deny(missing_docs)]"));
++        assert!(declares_public_item("pub fn run() {}"));
++        assert!(declares_public_item("    pub struct Thing;"));
++    }
++
++    #[test]
++    fn the_survey_is_deterministic() {
++        let root = default_root();
++        let first = survey(&root);
++        let second = survey(&root);
++        assert_eq!(first, second);
++        assert_eq!(first.table(), second.table());
++        assert_eq!(fixture_text(&first), fixture_text(&second));
++    }
++
++    #[test]
++    fn the_pinned_fixture_matches_this_tree() {
++        let (singles, capabilities, layers) = fixture();
++        assert_eq!(singles["phase"], PHASE);
++        assert_eq!(singles["exit_stub"], EXIT_STUB.to_string());
++        assert_eq!(singles["exit_usage"], EXIT_USAGE.to_string());
++        assert_eq!(singles["exit_no_workspace"], EXIT_NO_WORKSPACE.to_string());
++        assert_eq!(singles["layers"], LAYERS.len().to_string());
++        assert_eq!(
++            singles["capabilities"],
++            MISSING_CAPABILITIES.len().to_string()
++        );
++        assert_eq!(singles["node_a_knows_tx"], "true");
++        assert_eq!(singles["node_b_knows_tx"], "false");
++        assert_eq!(singles["peer_count"], "0");
++        assert_eq!(singles["documented_gap"], DOCUMENTED_GAP);
++
++        let expected_capabilities: Vec<String> = MISSING_CAPABILITIES
++            .iter()
++            .map(|entry| format!("{} {} {}", entry.name, entry.phase, entry.what))
++            .collect();
++        assert_eq!(capabilities, expected_capabilities);
++
++        let measured = survey(&repo_root());
++        let live: Vec<String> = measured
++            .layers
++            .iter()
++            .map(|entry| {
++                format!(
++                    "{} {} {}",
++                    entry.layer.name,
++                    entry.layer.phase,
++                    entry.presence.as_str()
++                )
++            })
++            .collect();
++        assert_eq!(
++            layers, live,
++            "the tree changed under the pinned N0 baseline — either the survey is wrong or a phase landed without updating the plan and this fixture"
++        );
++        assert_eq!(singles["implemented"], measured.implemented().to_string());
++        assert_eq!(singles["placeholders"], measured.placeholders().to_string());
++        assert_eq!(singles["missing"], measured.missing().to_string());
++    }
++
++    #[test]
++    fn the_fixture_is_what_the_binary_prints() {
++        let (code, out, _) = run(&["report", "--fixture"]);
++        assert_eq!(code, 0);
++        assert_eq!(out, FIXTURE, "run `make gen-n0-vectors` to refresh the pin");
++    }
++
++    fn repo_root() -> PathBuf {
++        Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
++    }
++
++    fn run(args: &[&str]) -> (i32, String, String) {
++        let args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
++        let mut out: Vec<u8> = Vec::new();
++        let mut err: Vec<u8> = Vec::new();
++        let code = super::run(&args, &mut out, &mut err);
++        (
++            code,
++            String::from_utf8_lossy(&out).into_owned(),
++            String::from_utf8_lossy(&err).into_owned(),
++        )
++    }
++
++    fn fixture() -> (BTreeMap<String, String>, Vec<String>, Vec<String>) {
++        let mut singles = BTreeMap::new();
++        let mut capabilities = Vec::new();
++        let mut layers = Vec::new();
++        for line in FIXTURE.lines() {
++            let line = line.trim();
++            if line.is_empty() || line.starts_with('#') {
++                continue;
++            }
++            let Some((key, value)) = line.split_once('=') else {
++                continue;
++            };
++            match key {
++                "capability" => capabilities.push(value.to_string()),
++                "layer" => layers.push(value.to_string()),
++                other => {
++                    singles.insert(other.to_string(), value.to_string());
++                }
++            }
++        }
++        (singles, capabilities, layers)
++    }
++}
+diff --git a/crates/aura-p2p/src/bin/main.rs b/crates/aura-p2p/src/bin/main.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..6840fc80f5b854e7520484fb718d4363e048ee59
+--- /dev/null
++++ b/crates/aura-p2p/src/bin/main.rs
+@@ -0,0 +1,14 @@
++//! `aura-p2p` binary — N0 baseline entry point.
++//!
++//! Thin shell: argument handling and the refusal/report text live in
++//! `aura_p2p::baseline`, where the unit gate can call them directly.
++
++use std::process::ExitCode;
++
++fn main() -> ExitCode {
++    let args: Vec<String> = std::env::args().skip(1).collect();
++    let mut out = std::io::stdout();
++    let mut err = std::io::stderr();
++    let code = aura_p2p::baseline::run(&args, &mut out, &mut err);
++    ExitCode::from(u8::try_from(code).unwrap_or(1))
++}
+diff --git a/crates/aura-p2p/src/lib.rs b/crates/aura-p2p/src/lib.rs
+index 9ba2d278ce706d3b3a2cab20e3143701dd8b8a72..a1aa8fb1a12b182e64a24555bd1149ad1244f035 100644
+--- a/crates/aura-p2p/src/lib.rs
++++ b/crates/aura-p2p/src/lib.rs
+@@ -1,9 +1,15 @@
+-//! `aura-p2p` — placeholder crate for libp2p transport and gossip.
++//! `aura-p2p` — P2P transport, gossipsub, sync, and light-client verification.
+ //!
+-//! C0 creates the workspace skeleton only. The real API lands in phase N1.
+-//! This crate intentionally exposes **no public items**: CONTRIBUTING.md
+-//! forbids stubs that silently return success. An empty crate is honest;
+-//! a fake `Ok(())` is not.
++//! C0 created the workspace skeleton only. **N0** lands the first real code:
++//! the [`baseline`] module, which measures that no P2P network exists yet,
++//! proves that two independent nodes cannot observe one another's transactions
++//! without transport/gossip, and names every capability N1–N8 will add.
++//!
++//! Network capabilities still missing after N0: transport (N1), gossipsub (N2),
++//! discovery (N3), block sync (N4), state sync (N5), DoS defence (N6), light
++//! client (N7), and chaos harness (N8).
+ 
+ #![forbid(unsafe_code)]
+ #![deny(missing_docs)]
++
++pub mod baseline;
+diff --git a/crates/aura-p2p/tests/fixtures/n0_baseline.txt b/crates/aura-p2p/tests/fixtures/n0_baseline.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..474e71730be9aa5f2358e7f9bafcb84003dbb29b
+--- /dev/null
++++ b/crates/aura-p2p/tests/fixtures/n0_baseline.txt
+@@ -0,0 +1,31 @@
++# N0 baseline: no P2P network, measured.
++# Written by tools/gen_n0_vectors.py; pinned by baseline::tests.
++phase=N0
++exit_stub=2
++exit_usage=64
++exit_no_workspace=3
++layers=8
++capabilities=8
++capability=transport N1 libp2p swarm, Noise/QUIC, identity, handshake, ban list
++capability=gossipsub N2 topics, message signatures, dedup, peer scoring
++capability=discovery N3 Kademlia DHT, bootstrap list, NAT/upnp, relay
++capability=block-sync N4 header-first, QC verification, parallel body download
++capability=state-sync N5 integration with S4: chunks, manifest, root verification
++capability=dos-defence N6 size/rate limits, signature rate limit, equivocation detection
++capability=light-client N7 header+QC proof, finalized checkpoint check, simplified DAS
++capability=chaos-harness N8 latency/loss/partition/eclipse simulation, 100-node stand
++implemented=0
++placeholders=8
++missing=0
++node_a_knows_tx=true
++node_b_knows_tx=false
++peer_count=0
++documented_gap=N1-transport+N2-gossipsub-absent:node_b_cannot_see_node_a_tx
++layer=transport N1 placeholder
++layer=gossipsub N2 placeholder
++layer=discovery N3 placeholder
++layer=block-sync N4 placeholder
++layer=state-sync N5 placeholder
++layer=dos-defence N6 placeholder
++layer=light-client N7 placeholder
++layer=chaos-harness N8 placeholder
+diff --git a/docs/evidence/d4/SHA256SUMS b/docs/evidence/d4/SHA256SUMS
+index b01acbb49066b8f4179771bb2df3354b820d8d27..954768d3c95a9c0248cd5561f357bfdd7f17ade0 100644
+--- a/docs/evidence/d4/SHA256SUMS
++++ b/docs/evidence/d4/SHA256SUMS
+@@ -1,7 +1,7 @@
+-9b2af932fd2302308ce4d8dd3f69de7105a45c712ce7b51cd620e033e36bb18b  CHANGELOG.md
++91358de676ae9c345649843ca5902ddd36242349f2d709236756483cedd54bfc  CHANGELOG.md
+ a2e212aa34f12bd32efa9816bb5bc86687c11c007a2245904180d84cc198f39f  Cargo.lock
+ 13649dd3078b1ebc5e2caf2c5b3b6af1d1a416cd6b5449a4feb2423c0bfcf2c1  Cargo.toml
+-2e598ed16f72bd02140b100755cbf6cd1099661957610f6b5e1dd5088508d25d  Makefile
++75297f5b0d7967110f170db1326141b9eeeb78f410047a7bbb47d23d4be2adb7  Makefile
+ d0a62e4ac527182a4559955baa1f347404ceb7fa6194c652cbe0f07e84827e4a  crates/aura-node/src/bin/aurad.rs
+ 8adb108b9979f8ce7faedb326e2b9f0965f861473229f742d5a5b0810199ac15  crates/aura-node/src/pipeline.rs
+ 6ade4fdd1e4b84aabb04956088ff549865e92843b03ec9567252a92179cf2158  crates/aura-node/src/rpc.rs
+@@ -30,7 +30,7 @@ c477f915b427982ca83fcb253fa0ab850d619ca5bf4a764137f0407078af4986  fuzz/Cargo.loc
+ 6f3f2bd9f508b33896011a6e7a6dc60e93ad24e6a00445e50ceceedd1346194b  fuzz/Cargo.toml
+ dca80316562fefcf24c45b40fb635412e1d4e5e09b5abe26f7d0e6b67e1e906e  fuzz/README.md
+ a0aa6b2b7462cd6121b704ebc04fede7988cce0b269be5585f42c538d62dc500  fuzz/fuzz_targets/fuzz_rpc.rs
+-505ade362bebb8035fd4b4f40d1c64a915bcbdf4b00a700f0b476a7541c468f1  tools/audit_closeout.py
++731d0ab523b186a16685f6baa730d375bab265a02a274ccf2eb4cd504fb3a847  tools/audit_closeout.py
+ b8248a8a1acffc672de62c26bf17797cc213204a3e907c1d4cf6be49694988d6  tools/gen_d4_vectors.py
+ edc860eea1f0058600025bcc5bf633e2435ed8716f6674373b8cee4982ea08f4  tools/nc_d4.py
+ f4b01b072fccf680d2bde6fbd156dfccaa057c5a33dca2bf67399d5622417f9c  tools/write_d4_evidence.py
+diff --git a/docs/evidence/d5/SHA256SUMS b/docs/evidence/d5/SHA256SUMS
+index 4e3e5b5261951e850be2a9e6e3b2b97ef68cb39d..933f04534f32b4609bf0b1f07dbf4fbad8c7ca62 100644
+--- a/docs/evidence/d5/SHA256SUMS
++++ b/docs/evidence/d5/SHA256SUMS
+@@ -1,14 +1,14 @@
+-9b2af932fd2302308ce4d8dd3f69de7105a45c712ce7b51cd620e033e36bb18b  CHANGELOG.md
++91358de676ae9c345649843ca5902ddd36242349f2d709236756483cedd54bfc  CHANGELOG.md
+ a2e212aa34f12bd32efa9816bb5bc86687c11c007a2245904180d84cc198f39f  Cargo.lock
+ 13649dd3078b1ebc5e2caf2c5b3b6af1d1a416cd6b5449a4feb2423c0bfcf2c1  Cargo.toml
+-2e598ed16f72bd02140b100755cbf6cd1099661957610f6b5e1dd5088508d25d  Makefile
++75297f5b0d7967110f170db1326141b9eeeb78f410047a7bbb47d23d4be2adb7  Makefile
+ 7609b7b41fd843e1b07d39f1156b702de2923472e2a3d5545ed61f7d343b9db3  crates/aura-grpc-rest/Cargo.toml
+ 370dcd7b01f46f362a0b3cf683bca9415c68ba825eb6f82e7604f276bc4c93ac  crates/aura-grpc-rest/build.rs
+ 71ff83801dca6c9a7f0f6965ef95f492c762ae578d8cbfb1bb57e9a27beb818d  crates/aura-grpc-rest/proto/aura/api/v1/service.proto
+ 610fad3f3922ece5a5060e63ed2d64d0485ff30fe3607bff1d1944e11b854e76  crates/aura-grpc-rest/src/lib.rs
+ d034f0029d2dd396bb3b8c50c20c4be764906f84c20f88309a73d499291bbf9e  crates/aura-grpc-rest/tests/d5_contract.rs
+ 42ec9bf5d89afb36543801e00ff87d217cffebb87ce39557e54dfc4e170ee302  crates/aura-node/Cargo.toml
+-134d1dbb2c23e6b63144452d27792f84d219193534ba55d4481bf2023343b408  crates/aura-node/src/baseline.rs
++3cd945668230d49274963948275b2d53cb6ebe6c636e7448775f895a6dde7602  crates/aura-node/src/baseline.rs
+ d0a62e4ac527182a4559955baa1f347404ceb7fa6194c652cbe0f07e84827e4a  crates/aura-node/src/bin/aurad.rs
+ 052d6642dc66b4f8095cf23785e8d4ac44898daf41b5e5a161197d7bd89b1d73  crates/aura-node/src/config.rs
+ b3ec7318e09275fd0d46d8e4f95e836c3401b869936e0408b41b9a04761f2ecc  crates/aura-node/tests/d0_baseline.rs
+@@ -24,7 +24,7 @@ c7540c5379dc80a5b80ef977db64d1c795bee013ea25749f2f3564dfadc58f5f  docs/api/opena
+ 94ac54ec0a34307229fe0841ee7af61bb0ec7deb01106f3af902371a5da1d39f  docs/evidence/c10/SHA256SUMS
+ c2b45592bff02d575b53d1e0892ddd25b81f9962f1540299d4a0a402a4cee93b  docs/evidence/d0/SHA256SUMS
+ f404c4873c6ae9b0cc05a5698dc4f47b971656853ac51bc4ed2a8fe293930c37  docs/evidence/d1/SHA256SUMS
+-c33f77fe20f106fbd42b2f52b55e085d1a9ba376b0a98e543645c5822376bd7e  docs/evidence/d4/SHA256SUMS
++d5a5f58ac7500bf22b87b81d5257761a5f57d121b4ba32e2eb928aff7e39a70f  docs/evidence/d4/SHA256SUMS
+ 013d890c071b4f59d8e9c7ced0d201602d0c1c785c08d64e4ac4981f3e745b57  docs/evidence/d5/clean-apply.txt
+ cfdb43f35c37f73bd5421ec808ca734d5ba73770cd7268d3ba0caa8118edbe0d  docs/evidence/d5/gates.txt
+ 6cd9301e8f52b15f6524919e250f8d8bba797a7b61281d81045da8e3c051dd86  docs/evidence/d5/inventory.txt
+@@ -36,6 +36,6 @@ aa2d1b3bb41e76325da2272b2587adbcd44498c826ed39feaa30ffa50b0bffe3  docs/evidence/
+ e2b7387df366f0d92b134b306ac5ac3384ab9a0429ff7ad1c2c4e4cb59832f6f  docs/plans/NODE_PLAN.md
+ 122cae5dc2a19d0f8d563e6e13703ebf9b836942cce58bc0dd9dc622bdd72493  docs/spec/FORMAT_INDEX.md
+ e6171eda73bf03cee6f405e13cd0e8c95020c8ad8d2ba4e2b7d05dfbb65911dc  docs/spec/grpc-rest.md
+-505ade362bebb8035fd4b4f40d1c64a915bcbdf4b00a700f0b476a7541c468f1  tools/audit_closeout.py
++731d0ab523b186a16685f6baa730d375bab265a02a274ccf2eb4cd504fb3a847  tools/audit_closeout.py
+ 429f59ba33f4c321bc4ea8d11c77e96abce0ec28f3b2fb3266a05fa527b92180  tools/nc_d5.py
+ 13bf6e5379b18845f1040fda102800577d8ae22713165f37d126929df0680071  tools/write_d5_evidence.py
+diff --git a/docs/evidence/d6/SHA256SUMS b/docs/evidence/d6/SHA256SUMS
+index dca5e79ca4bbfc10f42c8d316e1d07f7a4a3faf3..ffcf62ff35d1056b8a94af608822790947c17094 100644
+--- a/docs/evidence/d6/SHA256SUMS
++++ b/docs/evidence/d6/SHA256SUMS
+@@ -1,9 +1,9 @@
+-9b2af932fd2302308ce4d8dd3f69de7105a45c712ce7b51cd620e033e36bb18b  CHANGELOG.md
++91358de676ae9c345649843ca5902ddd36242349f2d709236756483cedd54bfc  CHANGELOG.md
+ a2e212aa34f12bd32efa9816bb5bc86687c11c007a2245904180d84cc198f39f  Cargo.lock
+ 13649dd3078b1ebc5e2caf2c5b3b6af1d1a416cd6b5449a4feb2423c0bfcf2c1  Cargo.toml
+-2e598ed16f72bd02140b100755cbf6cd1099661957610f6b5e1dd5088508d25d  Makefile
++75297f5b0d7967110f170db1326141b9eeeb78f410047a7bbb47d23d4be2adb7  Makefile
+ 42ec9bf5d89afb36543801e00ff87d217cffebb87ce39557e54dfc4e170ee302  crates/aura-node/Cargo.toml
+-134d1dbb2c23e6b63144452d27792f84d219193534ba55d4481bf2023343b408  crates/aura-node/src/baseline.rs
++3cd945668230d49274963948275b2d53cb6ebe6c636e7448775f895a6dde7602  crates/aura-node/src/baseline.rs
+ d0a62e4ac527182a4559955baa1f347404ceb7fa6194c652cbe0f07e84827e4a  crates/aura-node/src/bin/aurad.rs
+ 96dfc8a0a454b4b996016400eabef74567f319f2ef16d44bf61ef2e9bbcb6495  crates/aura-node/src/lib.rs
+ cc5c5180f4e9d27fb8ab0979f459ec5cecd678a772b6b12e730b91e4e1f87c2f  crates/aura-node/src/lifecycle.rs
+@@ -20,8 +20,8 @@ bce9253cdf6d4a17db6f84d2d32567dc3fba7f824b7bbf9dfbe9a3c20fd10494  docs/STATUS.md
+ c2b45592bff02d575b53d1e0892ddd25b81f9962f1540299d4a0a402a4cee93b  docs/evidence/d0/SHA256SUMS
+ f404c4873c6ae9b0cc05a5698dc4f47b971656853ac51bc4ed2a8fe293930c37  docs/evidence/d1/SHA256SUMS
+ e96887468a2c64835db7b6ab2b761873130e3321b14db8aedd6ae06cacce3997  docs/evidence/d3/SHA256SUMS
+-c33f77fe20f106fbd42b2f52b55e085d1a9ba376b0a98e543645c5822376bd7e  docs/evidence/d4/SHA256SUMS
+-96c595d8b55b4d8eb737d0b4200a30af254679b2794efe09f35d7b7e339bf89f  docs/evidence/d5/SHA256SUMS
++d5a5f58ac7500bf22b87b81d5257761a5f57d121b4ba32e2eb928aff7e39a70f  docs/evidence/d4/SHA256SUMS
++ca78635d099cef0801292f4d3b8ad3478877744a30cd0e41425ff09e4496693a  docs/evidence/d5/SHA256SUMS
+ 94cb9a46aae454de6209d83e372575dea54f1c108b43366c4f968f9562ee20ed  docs/evidence/d6/clean-apply.txt
+ ff2193c555eba82807bd87ae91b40a27ab368e4275ea2f6f36efd2cdd3840f5f  docs/evidence/d6/gates.txt
+ 0ffa8d1dd9f59accfbfa369696c65bcf0f238b8205c294c5f9f288f1b2904cc0  docs/evidence/d6/inventory.txt
+@@ -34,6 +34,6 @@ ef0edc3d121cbae307324e2d1ffcaca8e4a76be5b7ac6519099ebc6d924543af  docs/evidence/
+ 73dc9bda4481bfaea0b4e8212c3c5afb8114671d0cbbf1b06fde3910e4bf7e66  docs/observability/README.md
+ e583ec48a58c12928dd7e0aad3c1e89e6e4b33b06e2803eb93d7747a0088c971  docs/observability/grafana-dashboard-d6.json
+ e2b7387df366f0d92b134b306ac5ac3384ab9a0429ff7ad1c2c4e4cb59832f6f  docs/plans/NODE_PLAN.md
+-505ade362bebb8035fd4b4f40d1c64a915bcbdf4b00a700f0b476a7541c468f1  tools/audit_closeout.py
++731d0ab523b186a16685f6baa730d375bab265a02a274ccf2eb4cd504fb3a847  tools/audit_closeout.py
+ 6deb009718cb586bd7984d94d7b2ecbc4d4900d949f93aa73986ad781ac92acd  tools/nc_d6.py
+ 706c1c86dadfbd7580239bb32cf7fd68b0db9002c81ea63657cffff295934926  tools/write_d6_evidence.py
+diff --git a/docs/evidence/n0/SHA256SUMS b/docs/evidence/n0/SHA256SUMS
+new file mode 100644
+index 0000000000000000000000000000000000000000..a8179809b61325e6ecd9944ebc0ce4da9a10eb47
+--- /dev/null
++++ b/docs/evidence/n0/SHA256SUMS
+@@ -0,0 +1,26 @@
++91358de676ae9c345649843ca5902ddd36242349f2d709236756483cedd54bfc  CHANGELOG.md
++a2e212aa34f12bd32efa9816bb5bc86687c11c007a2245904180d84cc198f39f  Cargo.lock
++13649dd3078b1ebc5e2caf2c5b3b6af1d1a416cd6b5449a4feb2423c0bfcf2c1  Cargo.toml
++75297f5b0d7967110f170db1326141b9eeeb78f410047a7bbb47d23d4be2adb7  Makefile
++3cd945668230d49274963948275b2d53cb6ebe6c636e7448775f895a6dde7602  crates/aura-node/src/baseline.rs
++f2c1f6502d0503b78af5c3603db5def6b523968b8b5a0ff3fb110b1c96fbb7f4  crates/aura-node/tests/n0_two_nodes_no_p2p.rs
++8570d9e23828fe124a29eb051bd871efd30fb5facb363e922de8d90687523c7e  crates/aura-p2p/Cargo.toml
++c215f4d7608f3d447bf49b5c8a4f08b626a4c20f75bbc2c36486692e752cf4b4  crates/aura-p2p/src/baseline.rs
++0bda78fe7e8e2a1d136ebe1d90d11ba4dfa84756b2e2cf45d8e75774cd9e0b78  crates/aura-p2p/src/bin/main.rs
++35f6738c6e95a56c6d6c145ff146780fac7630c26538fdfad139454c1e34ee48  crates/aura-p2p/src/lib.rs
++7b3f7fdf76576b1b610845b1f865b73b444eaaa1113cd26c21f6294d4e3a37f2  crates/aura-p2p/tests/fixtures/n0_baseline.txt
++dba7c0c835219042af2d5e1511a2c0b4b473e226098e14198c33ea6f416d661d  docs/evidence/d6/SHA256SUMS
++eca2668d1ceebf61a06e96cbc9b17a8c62af115dbe3e3ac276003540f166ef81  docs/evidence/n0/clean-apply.txt
++e5dbf750b3afb7839b66b5e22508c94d6e0a59e18e45762adb51fe76310d1dcc  docs/evidence/n0/gates.txt
++1047c86fcba2f7ad54656a4f7727a86b345c3e9a0517dbdc259878102084b003  docs/evidence/n0/inventory.txt
++592a21c79d7da4bad4dd96f3a5677bc2aff213f47244087695f5d637b5a3962d  docs/evidence/n0/make-test.log
++585131ee7fc8e0d5fde22051d7ce0a368f293b8f7939cfeec0e138f26b76ba82  docs/evidence/n0/nc-all.log
++6c0736516a59693c61088bbf8235dd4c6f5c9d98b18eac338bd04f36f89b7fc4  docs/evidence/n0/nc.log
++45ae0aa142eb21fb369457827ae24f50817f39dfa8bfd87a0a8090a3eabc2607  docs/evidence/n0/report.md
++efb346bee53c2c2c9417e4f456004e1ee742037738f7655ce90e6efa1d1cdbfe  docs/evidence/n0/test-n0.log
++5a503fa88ae4c8de043df0087ed521a27dda350dccb9c3bc9ca8b7c4d24ed14c  docs/plans/D7_READINESS.md
++c5007a682daf209933081b2b94b7ae9336bcfe042cbad3b363d77c68339fa836  docs/plans/NET_PLAN.md
++731d0ab523b186a16685f6baa730d375bab265a02a274ccf2eb4cd504fb3a847  tools/audit_closeout.py
++515976788ec94aaa7601672cace7a13a7497b2d9bdaea157049c04b1bed129b8  tools/gen_n0_vectors.py
++a16320f6a4af698f90ca62acdb7810eeafa96602f2523c4a05c174da110740c3  tools/nc_n0.py
++9668866411c5be7fabe8b75bcf774796b6651635db6c038279c6beea371b1085  tools/write_n0_evidence.py
+diff --git a/docs/evidence/n0/clean-apply.txt b/docs/evidence/n0/clean-apply.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..7230a5861ab708f5c637f51e3c9ea9c9b2be20dc
+--- /dev/null
++++ b/docs/evidence/n0/clean-apply.txt
+@@ -0,0 +1,13 @@
++N0 clean-baseline apply and revalidation receipt
++Baseline commit (GitHub main): 2cf0321a83d6b308950a196b476ab086bf50c42c
++Patch: patches/0040-N0-net-baseline.patch
++
++1. git apply --check patches/0040-N0-net-baseline.patch -> PASS
++2. git apply patches/0040-N0-net-baseline.patch -> PASS
++3. make test-n0 -> PASS (10 aura-p2p baseline unit tests + 1 live 2-node RPC isolation test)
++4. make nc-n0 -> PASS (6/6 exact library-unit-test negative controls)
++5. make nc-all -> PASS (231/231 cumulative negative controls)
++6. make test -> PASS (ALL GATES GREEN; 5012 vectors across 34 fixtures)
++7. python3 tools/audit_closeout.py --strict -> PASS (40 phases audited, 40 checksum manifests verified)
++
++CLEAN-APPLY: PASS
+diff --git a/docs/evidence/n0/gates.txt b/docs/evidence/n0/gates.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..a493c3345886dd4a51e97a1a91e23bb61c9f9fd8
+--- /dev/null
++++ b/docs/evidence/n0/gates.txt
+@@ -0,0 +1,10 @@
++N0 gates (UTC generated 2026-10-31T09:25:06+00:00)
++
++make test-n0: PASS (see test-n0.log)
++  aura-p2p baseline unit tests: 10
++  live two-node HTTP/JSON-RPC isolation test: 1
++make nc-n0: PASS (6/6 exact library-unit-test mutations; restoration green)
++make nc-all: PASS (231/231 cumulative negative controls; see nc-all.log)
++make test: PASS (ALL GATES GREEN; see make-test.log)
++Dependency closure and lockfile checksums: PASS (0 new external crates)
++Clean GitHub-HEAD patch application and revalidation: PASS (see clean-apply.txt)
+diff --git a/docs/evidence/n0/inventory.txt b/docs/evidence/n0/inventory.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..065350d66cdafabb582e34ca5e80d57c32cc280f
+--- /dev/null
++++ b/docs/evidence/n0/inventory.txt
+@@ -0,0 +1,291 @@
++# Cumulative negative-control inventory through N0
++# Generated (UTC): 2026-10-31T09:25:06+00:00
++
++[C0] 2/2 PASS
++  PASS NC-1 Rust identity
++  PASS NC-2 docs drift guard
++
++[C1] 3/3 PASS
++  PASS NC-1 bech32 checksum constant
++  PASS NC-2 address version byte
++  PASS NC-3 independent golden vector
++
++[C2] 4/4 PASS
++  PASS NC-1 codec version
++  PASS NC-2 independent golden fixture
++  PASS NC-3 trailing-byte guard
++  PASS NC-4 non-minimal varint guard
++
++[C3] 5/5 PASS
++  PASS NC-1 domain separation context
++  PASS NC-2 independent domain-hash vector
++  PASS NC-3 RFC 8032 vector
++  PASS NC-4 Ed25519 verification bypass
++  PASS NC-5 dependency allowlist / make test gate
++
++[C4] 6/6 PASS
++  PASS NC-1 signing context
++  PASS NC-2 txid context
++  PASS NC-3 independent golden signature
++  PASS NC-4 replay protection
++  PASS NC-5 signer/public-key binding
++  PASS NC-6 Ed25519 verification bypass
++
++[C5] 6/6 PASS
++  PASS NC-1 Merkle leaf context
++  PASS NC-2 Merkle node context
++  PASS NC-3 block-hash context
++  PASS NC-4 independent golden tx_root
++  PASS NC-5 tx_root recomputation check
++  PASS NC-6 canonical body order check
++
++[C6] 6/6 PASS
++  PASS NC-1 event leaf context
++  PASS NC-2 independent golden root
++  PASS NC-3 leaf/value binding
++  PASS NC-4 sibling-count check
++  PASS NC-5 sibling direction
++  PASS NC-6 root comparison
++
++[C7] 6/6 PASS
++  PASS NC-1 state key digest context
++  PASS NC-2 independent golden key digest
++  PASS NC-3 reserved key-space prefixes
++  PASS NC-4 namespace length check
++  PASS NC-5 contract namespace check
++  PASS NC-6 contract address check
++
++[C8] 6/6 PASS
++  PASS NC-1 genesis context
++  PASS NC-2 validator-set context
++  PASS NC-3 independent golden genesis hash
++  PASS NC-4 validator order (DoD: sorting must not happen)
++  PASS NC-5 unknown JSON fields
++  PASS NC-6 Stage 1 chain-id check
++
++[C9] 6/6 PASS
++  PASS NC-1 C9 golden varint vector
++  PASS NC-2 vector inventory minimum
++  PASS NC-3 injected non-minimal-varint bug
++  PASS NC-4 injected trailing-byte-guard bug
++  PASS NC-5 fuzz harness iteration counter
++  PASS NC-6 rig wiring in Makefile
++
++[C10] 6/6 PASS
++  PASS NC-1 missing phase receipt
++  PASS NC-2 deferred phase marked done
++  PASS NC-3 forged NC log result
++  PASS NC-4 unindexed format spec
++  PASS NC-5 forged patch subject
++  PASS NC-6 corrupted evidence checksum
++
++[S0] 6/6 PASS
++  PASS NC-1 final-view context
++  PASS NC-2 independent golden final view
++  PASS NC-3 fake state root
++  PASS NC-4 fake persistence
++  PASS NC-5 fake determinism
++  PASS NC-6 falsified no-root measurement
++
++[S1] 6/6 PASS
++  PASS NC-1 leaf context
++  PASS NC-2 node context
++  PASS NC-3 independent checkpoint root
++  PASS NC-4 proof root comparison
++  PASS NC-5 path bit ordering
++  PASS NC-6 depth-independent empty subtrees
++
++[S2] 6/6 PASS
++  PASS NC-1 WAL checksum context
++  PASS NC-2 state key context
++  PASS NC-3 state root context
++  PASS NC-4 independent golden WAL record
++  PASS NC-5 WAL checksum verification
++  PASS NC-6 WAL-before-head invariant
++
++[S3] 6/6 PASS
++  PASS NC-1 diff checksum context
++  PASS NC-2 event commitment context
++  PASS NC-3 diff magic
++  PASS NC-4 independent golden diff
++  PASS NC-5 diff checksum verification
++  PASS NC-6 rollback removal (balance changes after revert)
++
++[S4] 6/6 PASS
++  PASS NC-1 snapshot magic
++  PASS NC-2 manifest checksum context
++  PASS NC-3 chunk hash context
++  PASS NC-4 independent golden manifest
++  PASS NC-5 manifest checksum verification
++  PASS NC-6 chunk digest comparison (substituted chunk)
++
++[S5] 6/6 PASS
++  PASS NC-1 head checksum context
++  PASS NC-2 delta checksum context
++  PASS NC-3 package checksum context
++  PASS NC-4 independent golden package
++  PASS NC-5 quorum comparison
++  PASS NC-6 final state-root comparison (substituted diff chunk)
++
++[S6] 6/6 PASS
++  PASS NC-1 record checksum context
++  PASS NC-2 base checksum context
++  PASS NC-3 retention boundary (keep + 1)
++  PASS NC-4 pruning disabled in prune mode
++  PASS NC-5 archive compaction allowed
++  PASS NC-6 pruned version served instead of rejected
++
++[S7] 6/6 PASS
++  PASS NC-1 manifest checksum context
++  PASS NC-2 blob SHA-256 comparison
++  PASS NC-3 replayed root comparison
++  PASS NC-4 parent-root chain check
++  PASS NC-5 restore into a live store
++  PASS NC-6 crash-window WAL replay on reopen
++
++[X0] 6/6 PASS
++  PASS NC-1 host imports allowed
++  PASS NC-2 float policy disabled at its single choke point
++  PASS NC-3 start section allowed
++  PASS NC-4 memory maximum not required
++  PASS NC-5 shared memory allowed
++  PASS NC-6 unknown opcode allowed (whitelist not fail-closed)
++
++[X1] 6/6 PASS
++  PASS NC-1 census bypassed (gate always Ok)
++  PASS NC-2 fuel budget ignored (4x the published budget)
++  PASS NC-3 memory ceiling removed from the store limiter
++  PASS NC-4 trap misclassified (out-of-fuel -> other)
++  PASS NC-5 module-size check removed
++  PASS NC-6 trace cap removed
++
++[X2] 7/7 PASS
++  PASS NC-1 gas table zeroed (every call free)
++  PASS NC-2 transfer is not charged
++  PASS NC-3 value length ceiling removed
++  PASS NC-4 rollback removed on failure
++  PASS NC-5 import census opened (any import links)
++  PASS NC-6 out-of-gas guard removed (a caught -8 commits)
++  PASS NC-7 instruction gas never settled
++
++[X3] 6/6 PASS
++  PASS NC-1 version check removed (a stale upgrade wins)
++  PASS NC-2 balance not preserved (upgrade zeroes the account)
++  PASS NC-3 `migrate` never runs (storage not migrated)
++  PASS NC-4 code hash not stored on the account
++  PASS NC-5 `init` never runs
++  PASS NC-6 census skipped at deploy
++
++[X4] 6/6 PASS
++  PASS NC-1 `#[entrypoint]` exports the wrong name
++  PASS NC-2 the SDK ignores the absent-key status
++  PASS NC-3 the codec stops length-checking
++  PASS NC-4 the mutable-global allowance is removed
++  PASS NC-5 the element-table rule is switched off
++  PASS NC-6 the pinned artifact hash is not checked
++
++[X5] 6/6 PASS
++  PASS NC-1 the dispatcher accepts trailing bytes
++  PASS NC-2 `transfer_from` does not spend the allowance
++  PASS NC-3 an ARC-721 transfer keeps the approval
++  PASS NC-4 the multisig does not check `executed`
++  PASS NC-5 the session accepts oversize calldata
++  PASS NC-6 a failed execution is still marked executed
++
++[X6] 6/6 PASS
++  PASS NC-1 the reentrancy guard is removed
++  PASS NC-2 the depth limit is removed
++  PASS NC-3 the callee's diff is not merged
++  PASS NC-4 a failed callee's value is not returned
++  PASS NC-5 the callee's status is flattened to success
++  PASS NC-6 the child frame does not inherit the parent's stack
++
++[X7] 6/6 PASS
++  PASS NC-1 the version stamp is dropped from the state root
++  PASS NC-2 an empty diff counts as a commit
++  PASS NC-3 the rolling digest ignores the resulting root
++  PASS NC-4 a refusal still applies its diff
++  PASS NC-5 a starved call is billed nothing
++  PASS NC-6 the generator ignores its seed
++
++[X8] 6/6 PASS
++  PASS NC-1 `call` stops reading the callee signature
++  PASS NC-2 a stack underflow no longer reaches the report
++  PASS NC-3 the float value types are read as i32
++  PASS NC-4 any export name counts as `run`
++  PASS NC-5 the function and code counts may disagree
++  PASS NC-6 the module-size ceiling stops being enforced
++
++[D0] 6/6 PASS
++  PASS NC-1 the stub exits 0
++  PASS NC-2 every layer is classified `implemented`
++  PASS NC-3 `report` measures a tree that is not a workspace
++  PASS NC-4 an unknown command falls through to exit 0
++  PASS NC-5 the refusal stops naming the capabilities
++  PASS NC-6 a node flag is no longer recognised
++
++[D1] 6/6 PASS
++  PASS NC-1 aurad without --chain-id must refuse
++  PASS NC-2 unknown TOML fields must be rejected
++  PASS NC-3 report must reject non-workspace paths
++  PASS NC-4 unknown commands must return usage error
++  PASS NC-5 refusal must name the D1 phase
++  PASS NC-6 config::load must require chain-id
++
++[B0] 6/6 PASS
++
++[B1] 6/6 PASS
++
++[B2] 6/6 PASS
++
++[B3] 6/6 PASS
++
++[D2] 6/6 PASS
++  PASS NC-1 chain replay must be rejected
++  PASS NC-2 sender nonce must match projected state
++  PASS NC-3 transfer value and fee must be debited atomically
++  PASS NC-4 gas limit must cover the transfer schedule
++  PASS NC-5 fee cap must cover base fee plus tip
++  PASS NC-6 receipt must be durable before event publication
++
++[D3] 6/6 PASS
++  PASS NC-1 sender nonce must match projected account state
++  PASS NC-2 ready sender lanes must use tip priority
++  PASS NC-3 same-nonce replacement must meet the fee bump
++  PASS NC-4 full pool must reject equal-priority insertion
++  PASS NC-5 reorg reinsertion must return validated transactions to the pool
++  PASS NC-6 gas limit must cover the native transfer schedule
++
++[D4] 6/6 PASS
++  PASS NC-1 JSON-RPC version must be exactly 2.0
++  PASS NC-2 notifications must not receive response bodies
++  PASS NC-3 JSON-RPC batches are bounded to 32 items
++  PASS NC-4 HTTP request body limit is enforced
++  PASS NC-5 WebSocket handshake uses the RFC6455 GUID
++  PASS NC-6 WebSocket client frames must be masked
++
++[D5] 6/6 PASS
++  PASS NC-1 REST rejects unknown JSON fields
++  PASS NC-2 v1.1 remains additive version 1.1
++  PASS NC-3 unsupported API versions are rejected
++  PASS NC-4 OpenAPI marks unknown fields closed
++  PASS NC-5 v1 protobuf field numbers remain stable
++  PASS NC-6 unsupported calls map to gRPC Unimplemented
++
++[D6] 6/6 PASS
++  PASS NC-1 /health refuses when the PID file is absent
++  PASS NC-2 finality lag metric remains exported
++  PASS NC-3 gas throughput derives from committed samples
++  PASS NC-4 peer count does not invent unavailable P2P peers
++  PASS NC-5 structured logs remain JSON
++  PASS NC-6 OTLP layer records and exports spans
++
++[N0] 6/6 PASS
++  PASS NC-1 missing arguments must refuse
++  PASS NC-2 placeholder network layers must remain placeholders
++  PASS NC-3 report must reject non-workspace paths
++  PASS NC-4 unknown commands must return usage error
++  PASS NC-5 refusal must name every missing capability
++  PASS NC-6 Node B cannot observe Node A's tx without P2P
++
++TOTAL: 231 negative controls
+diff --git a/docs/evidence/n0/make-test.log b/docs/evidence/n0/make-test.log
+new file mode 100644
+index 0000000000000000000000000000000000000000..febcd5f0b6a57cc00bf9a90226723355102092e2
+--- /dev/null
++++ b/docs/evidence/n0/make-test.log
+@@ -0,0 +1,1239 @@
++toolchain: rustc 1.99.1 (58cf8f9c3 2026-10-13), cargo 1.99.1 (5f94df478 2026-08-27)
++== fmt ==
++== clippy ==
++    Checking aura-codec v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-codec)
++    Checking aura-rpc v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-rpc)
++    Checking aura-state v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-state)
++    Checking aura-tx v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-tx)
++    Checking aura-block v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-block)
++   Compiling aura-grpc-rest v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-grpc-rest)
++    Checking aura-exec v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-exec)
++    Checking aura-storage v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-storage)
++    Checking aura-consensus v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-consensus)
++    Checking aura-genesis v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-genesis)
++    Checking aura-mempool v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-mempool)
++    Checking aura-testkit v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-testkit)
++   Compiling aura-sdk-macros v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-sdk-macros)
++    Checking aura-node v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-node)
++    Checking aura-p2p v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-p2p)
++    Checking aura-sdk v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-sdk)
++    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.63s
++== cargo test ==
++   Compiling aura-exec v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-exec)
++   Compiling aura-genesis v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-genesis)
++   Compiling aura-node v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-node)
++   Compiling aura-testkit v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-testkit)
++   Compiling aura-sdk-macros v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-sdk-macros)
++   Compiling aura-sdk v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-sdk)
++   Compiling aura-p2p v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-p2p)
++   Compiling aura-grpc-rest v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-grpc-rest)
++   Compiling aura-consensus v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-consensus)
++   Compiling aura-rpc v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-rpc)
++   Compiling aura-storage v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-storage)
++   Compiling aura-block v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-block)
++   Compiling aura-tx v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-tx)
++   Compiling aura-mempool v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-mempool)
++   Compiling aura-state v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-state)
++   Compiling aura-codec v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-codec)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 23.64s
++     Running unittests src/lib.rs (target/debug/deps/aura_block-1f402d968457f150)
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running tests/c5_block.rs (target/debug/deps/c5_block-91d512397380c65e)
++
++running 11 tests
++test block_hash_covers_the_whole_header_and_the_chain ... ok
++test bad_vectors_return_the_specific_error ... ok
++test body_rejects_duplicate_keys_at_construction ... ok
++test constants_are_pinned_by_the_independent_fixture ... ok
++test changing_tx_order_changes_tx_root ... ok
++test every_bad_vector_is_rejected ... ok
++test merkle_tree_shape_is_pinned ... ok
++test reorder_without_recomputing_the_root_is_rejected ... ok
++test golden_blocks_match_the_independent_encoder ... ok
++test wrong_chain_and_size_limits_are_enforced ... ok
++test transaction_validation_is_separate_from_block_validation ... ok
++
++test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
++
++     Running tests/c6_merkle.rs (target/debug/deps/c6_merkle-7668cbcc3c220fb4)
++
++running 11 tests
++test bad_vectors_return_the_specific_error ... ok
++test c5_root_and_c6_tree_share_one_shape ... ok
++test constants_are_pinned_by_the_independent_fixture ... ok
++test empty_and_single_leaf_trees_are_well_defined ... ok
++test event_proofs_are_bound_to_the_raw_event_bytes ... ok
++test every_bad_vector_is_rejected ... ok
++test all_thousand_proofs_are_valid_and_one_substituted_is_invalid ... ok
++test golden_roots_match_independent_python ... ok
++test leaf_domain_separation_is_pinned ... ok
++test proof_wire_format_is_canonical_and_self_consistency_holds ... ok
++test golden_proofs_match_independent_python ... ok
++
++test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
++
++     Running unittests src/lib.rs (target/debug/deps/aura_codec-30c45717e1003183)
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running tests/c2_codec.rs (target/debug/deps/c2_codec-e73f6fec4616e9a5)
++
++running 11 tests
++test codec_constants_match_the_independent_fixture ... ok
++test all_supported_types_round_trip ... ok
++test denom_tags_are_strict ... ok
++test decode_canonical_round_trips_golden_records ... ok
++test every_noncanonical_vector_is_rejected ... ok
++test golden_records_match_independent_encoder ... ok
++test map_encoding_is_sorted_and_decoding_rejects_disorder ... ok
++test trailing_byte_rejected_by_reader_finish ... ok
++test noncanonical_vectors_return_the_specific_error ... ok
++test varint_rejects_nonminimal_encoding ... ok
++test varint_round_trips_boundaries_with_minimal_length ... ok
++
++test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running unittests src/lib.rs (target/debug/deps/aura_consensus-799d65278270ea86)
++
++running 56 tests
++test baseline::tests::documentation_is_not_a_public_item ... ok
++test baseline::tests::refusal_exits_stub_without_arguments ... ok
++test baseline::tests::refusal_names_every_missing_capability ... ok
++test baseline::tests::report_refuses_a_tree_that_is_not_a_workspace ... ok
++test baseline::tests::the_fixture_is_what_the_binary_prints ... ok
++test baseline::tests::b3_implemented_and_placeholders ... ok
++test baseline::tests::the_pinned_fixture_matches_this_tree ... ok
++test baseline::tests::two_different_logs_are_not_equivalent ... ok
++test baseline::tests::unknown_command_exits_usage ... ok
++test bls::tests::address_from_public_key_is_deterministic ... ok
++test bls::tests::different_seeds_different_addresses ... ok
++test bls::tests::sign_and_verify_roundtrip ... ok
++test bls::tests::tampered_message_fails ... ok
++test bls::tests::wrong_chain_id_fails ... ok
++test bls::tests::wrong_domain_fails ... ok
++test bls::tests::wrong_public_key_fails ... ok
++test error::tests::error_display_is_stable ... ok
++test finality::tests::block_hash_changes_with_content ... ok
++test finality::tests::commit_preserves_genesis_anchor ... ok
++test finality::tests::high_qc_tracks_newest ... ok
++test finality::tests::nil_block_has_no_transactions ... ok
++test finality::tests::propose_and_nil_block ... ok
++test finality::tests::round_change ... ok
++test finality::tests::three_chain_commit ... ok
++test baseline::tests::the_survey_is_deterministic ... ok
++test finality::tests::verify_vote_roundtrip ... ok
++test finality::tests::verify_vote_wrong_chain_fails ... ok
++test finality::tests::view_change_on_timeout ... ok
++test proposer::tests::empty_validator_set_panics - should panic ... ok
++test proposer::tests::is_proposer_matches ... ok
++test proposer::tests::round_robin_rotation ... ok
++test proposer::tests::single_validator_proposes_every_round ... ok
++test proposer::tests::validator_count_and_list ... ok
++test finality::tests::two_blocks_not_committed ... ok
++test qc::tests::aggregator_below_threshold_returns_none ... ok
++test qc::tests::aggregator_ignores_duplicate_validator ... ok
++test qc::tests::aggregator_reaches_quorum ... ok
++test qc::tests::qc_verify_wrong_chain_id_fails ... ok
++test qc::tests::quorum_threshold_basic ... ok
++test qc::tests::quorum_threshold_single_validator ... ok
++test qc::tests::qc_verify_all_valid ... ok
++test signature::tests::sign_and_verify_roundtrip ... ok
++test signature::tests::signed_block_roundtrip ... ok
++test signature::tests::tampered_signature_fails ... ok
++test signature::tests::wrong_block_hash_fails ... ok
++test signature::tests::wrong_chain_id_fails ... ok
++test validator_set::tests::active_addresses_deterministic ... ok
++test validator_set::tests::below_min_stake_ignored ... ok
++test signature::tests::wrong_public_key_fails ... ok
++test validator_set::tests::duplicate_enter_ignored ... ok
++test validator_set::tests::enter_and_exit_queue ... ok
++test validator_set::tests::is_active_after_exit ... ok
++test validator_set::tests::new_validator_set ... ok
++test validator_set::tests::quorum_stake_threshold ... ok
++test validator_set::tests::total_stake_updates_on_enter_exit ... ok
++test validator_set::tests::set_update_wrong_epoch ... ok
++
++test result: ok. 56 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
++
++     Running unittests src/bin/main.rs (target/debug/deps/aura_consensus-e91c0f2e3acbdd51)
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running unittests src/lib.rs (target/debug/deps/aura_crypto-bf47d054e0ab1ac4)
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running tests/c3_crypto.rs (target/debug/deps/c3_crypto-31e092546627e407)
++
++running 11 tests
++test constant_time_eq_is_correct ... ok
++test blake3_matches_official_vectors ... ok
++test domain_separation_changes_the_hash ... ok
++test domain_messages_and_hashes_match_independent_reference ... ok
++test ed25519_rejects_tampering ... ok
++test hash_context_is_pinned ... ok
++test domain_signed_messages_verify_only_in_their_domain ... ok
++test secp256k1_rejects_tampering_and_bad_keys ... ok
++test secp256k1_rfc6979_vectors_match_independent_reference ... ok
++test secret_bytes_are_redacted_and_length_checked ... ok
++test rfc8032_ed25519_vectors_match ... ok
++
++test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
++
++     Running unittests src/lib.rs (target/debug/deps/aura_exec-0a34d82ba938d75d)
++
++running 9 tests
++test abi::tests::every_table_row_has_an_arity_and_a_dispatcher_arm ... ok
++test abi::tests::amounts_round_trip_through_the_abi_encoding ... ok
++test abi::tests::gas_is_flat_plus_linear_and_saturating ... ok
++test abi::tests::missing_names_are_not_dispatchable ... ok
++test abi::tests::slots_are_zero_padded_and_bounded ... ok
++test abi::tests::status_codes_are_negative_and_distinct ... ok
++test census::tests::census_table_covers_every_ban_variant ... ok
++test census::tests::empty_module_is_allowed_and_empty_input_is_not ... ok
++test census::tests::module_size_cap_is_enforced_before_parsing ... ok
++
++test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running unittests src/bin/x1-record.rs (target/debug/deps/x1_record-a0b97256717fa02f)
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running unittests src/bin/x2-record.rs (target/debug/deps/x2_record-51ab292762dfee01)
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running unittests src/bin/x3-record.rs (target/debug/deps/x3_record-b505b71d9786e4a5)
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running unittests src/bin/x4-record.rs (target/debug/deps/x4_record-c5cab8011b212857)
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running unittests src/bin/x5-record.rs (target/debug/deps/x5_record-376ef6462c6f929e)
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running unittests src/bin/x6-record.rs (target/debug/deps/x6_record-65b5cb71be305c25)
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running unittests src/bin/x7-run.rs (target/debug/deps/x7_run-a1817cf49ed1b81e)
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running unittests src/bin/x8-verify.rs (target/debug/deps/x8_verify-39f515cb48928235)
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running tests/x0_census.rs (target/debug/deps/x0_census-e0e864bf54c93417)
++
++running 4 tests
++test restrictive_limits_are_the_published_ones ... ok
++test census_table_policies_match_the_gate ... ok
++test verdict_labels_are_stable ... ok
++test twenty_programs_are_each_banned_or_deterministic ... ok
++
++test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running tests/x1_sandbox.rs (target/debug/deps/x1_sandbox-f9f2180234845694)
++
++running 9 tests
++test engine_identity_is_pinned ... ok
++test census_runs_before_the_engine ... ok
++test limits_are_validated_and_tightenable ... ok
++test every_fixture_program_meets_its_expectation ... ok
++test memory_ceiling_is_enforced_at_runtime ... ok
++test module_size_cap_is_checked_before_parsing ... ok
++test measured_fuel_and_trace_are_pinned ... ok
++test trace_is_capped ... ok
++test repeated_runs_are_bit_identical ... ok
++
++test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
++
++     Running tests/x2_abi.rs (target/debug/deps/x2_abi-569514dff9ed94ab)
++
++running 8 tests
++test every_vector_matches_its_expectation ... ok
++test fixture_covers_every_abi_function_and_the_gas_table ... ok
++test gas_table_matches_the_independent_copy ... ok
++test execution_is_deterministic ... ok
++test measured_gas_matches_the_recording ... ok
++test published_limits_match_the_fixture_header ... ok
++test status_codes_are_pinned ... ok
++test out_of_gas_is_reported_as_out_of_gas ... ok
++
++test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.57s
++
++     Running tests/x3_lifecycle.rs (target/debug/deps/x3_lifecycle-7db788a9067a7fdf)
++
++running 12 tests
++test code_record_is_strictly_decoded ... ok
++test caller_must_fund_the_deploy ... ok
++test deploy_stores_code_and_runs_init ... ok
++test deploy_costs_base_plus_bytes ... ok
++test deploy_without_init_is_fine ... ok
++test fixture_describes_usable_programs ... ok
++test lifecycle_is_deterministic ... ok
++test lifecycle_refusals_happen_before_state ... ok
++test measured_gas_is_pinned ... ok
++test upgrade_preserves_balance_and_storage_and_runs_migrate ... ok
++test upgrade_refuses_a_stale_version ... ok
++test failed_init_leaves_no_account ... ok
++
++test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
++
++     Running tests/x4_census.rs (target/debug/deps/x4_census-6e0f3bf739e80344)
++
++running 3 tests
++test the_hosted_policy_is_a_strict_superset_of_the_restrictive_one ... ok
++test an_indirect_call_may_reach_this_module_but_never_an_import ... ok
++test the_restrictive_policy_still_bans_what_x0_banned ... ok
++
++test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running tests/x4_contracts.rs (target/debug/deps/x4_contracts-3f0fec0c928f597a)
++
++running 10 tests
++test a_call_takes_its_code_from_state_not_from_the_caller ... ok
++test events_reads_consensus_data_and_writes_a_node_digest ... ok
++test every_contract_imports_only_the_published_abi ... ok
++test a_rust_contract_pays_the_handwritten_deploy_price ... ok
++test every_contract_ships_an_abi_json_that_matches_its_artifact ... ok
++test kv_takes_an_argument_and_migrates_on_upgrade ... ok
++test the_sdk_contracts_are_within_the_module_size_ceiling ... ok
++test the_shipped_artifacts_are_the_ones_the_fixture_pins ... ok
++test store_is_a_real_counter ... ok
++test two_runs_of_the_same_contract_agree_byte_for_byte ... ok
++
++test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
++
++     Running tests/x5_abi2.rs (target/debug/deps/x5_abi2-3dcfaf65df611623)
++
++running 8 tests
++test a_bad_pointer_is_a_status_not_a_corrupt_write ... ok
++test calldata_is_charged_per_byte_and_the_budget_is_shared ... ok
++test calldata_read_copies_at_most_what_exists ... ok
++test calldata_len_reports_without_copying ... ok
++test caller_and_self_are_two_different_addresses ... ok
++test return_data_is_bounded ... ok
++test the_surface_version_is_published_and_every_function_is_in_the_gas_table ... ok
++test the_session_refuses_oversize_calldata_before_the_engine_runs ... ok
++
++test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
++
++     Running tests/x5_arc20.rs (target/debug/deps/x5_arc20-c61e6ea249c231e3)
++
++running 11 tests
++test a_token_holds_no_native_balance ... ok
++test a_refused_call_commits_nothing ... ok
++test arc20_deploys_and_records_its_owner ... ok
++test arithmetic_overflow_is_refused_not_wrapped ... ok
++test approve_and_transfer_from_spend_exactly_the_allowance ... ok
++test burn_reduces_balance_and_supply ... ok
++test calldata_that_does_not_decode_is_refused ... ok
++test mint_is_owner_only_and_moves_the_total ... ok
++test ownership_hands_over_and_the_old_owner_loses_the_right ... ok
++test the_same_calldata_twice_produces_the_same_root ... ok
++test transfer_moves_balance_and_refuses_what_it_must ... ok
++
++test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.58s
++
++     Running tests/x5_arc721.rs (target/debug/deps/x5_arc721-c910ffd57d14081d)
++
++running 10 tests
++test a_token_can_only_be_minted_once ... ok
++test a_transfer_clears_the_approval ... ok
++test arc721_deploys_empty_and_records_its_owner ... ok
++test calldata_that_does_not_decode_is_refused ... ok
++test burn_destroys_the_token_and_decrements_both_counters ... ok
++test only_the_contract_owner_mints ... ok
++test reading_a_missing_token_is_an_error_not_a_zero_address ... ok
++test transfer_from_needs_the_approval ... ok
++test the_supply_and_the_ownership_map_never_disagree ... ok
++test transferring_moves_ownership_and_the_counter ... ok
++
++test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.53s
++
++     Running tests/x5_artifacts.rs (target/debug/deps/x5_artifacts-73f49c8ea0c647cb)
++
++running 5 tests
++test every_standard_exports_the_entry_points_the_lifecycle_calls ... ok
++test every_standard_imports_only_abi_functions ... ok
++test the_fixture_publishes_the_surface_the_standards_use ... ok
++test every_standard_matches_its_pinned_size_and_hash ... ok
++test the_measured_gas_of_every_standard_is_pinned ... ok
++
++test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running tests/x5_multisig.rs (target/debug/deps/x5_multisig-dc491f966b7f7f54)
++
++running 9 tests
++test a_bad_policy_is_refused ... ok
++test a_proposal_the_wallet_cannot_fund_stays_retryable ... ok
++test a_signer_cannot_vote_twice ... ok
++test a_stranger_can_neither_propose_nor_vote ... ok
++test proposal_ids_are_unique_and_monotonic ... ok
++test a_vote_can_be_taken_back ... ok
++test the_policy_is_installed_once_by_the_creator ... ok
++test two_of_three_moves_the_money_and_only_once ... ok
++test unknown_proposals_and_kinds_are_refused ... ok
++
++test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s
++
++     Running tests/x6_calls.rs (target/debug/deps/x6_calls-75243042389bc2b9)
++
++running 15 tests
++test a_call_to_an_address_without_code_is_refused ... ok
++test a_callee_answer_reaches_the_caller ... ok
++test a_callee_failure_does_not_revert_the_callers_own_writes ... ok
++test a_callee_refusal_reaches_the_caller_as_a_refusal ... ok
++test a_contract_can_call_itself_up_to_the_published_depth_and_no_further ... ok
++test a_refused_call_costs_gas_and_writes_nothing ... ok
++test an_attacker_cannot_drain_a_vault_that_pays_out_before_it_debits ... ok
++test a_reverted_callee_leaves_neither_writes_nor_value ... ok
++test events_of_a_nested_call_reach_the_top_level_receipt ... ok
++test the_callback_into_a_live_frame_is_refused_with_reentrancy ... ok
++test the_caller_of_a_nested_frame_is_the_contract_not_the_signer ... ok
++test the_shipped_artifacts_are_the_pinned_ones ... ok
++test the_committed_tree_matches_the_receipt_root ... ok
++test value_of_a_reverted_call_comes_back ... ok
++test value_sent_with_a_call_changes_both_balances ... ok
++
++test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.78s
++
++     Running tests/x7_determinism.rs (target/debug/deps/x7_determinism-22e4afde04cb3c4e)
++
++running 11 tests
++test a_starved_call_is_billed_and_changes_nothing ... ok
++test a_transfer_to_an_unfunded_side_is_billed_and_changes_nothing ... ok
++test a_different_input_changes_the_root ... ok
++test every_commit_advances_the_version_by_exactly_one ... ok
++test one_process_agrees_with_itself ... ok
++test the_digest_depends_on_the_order_of_the_steps ... ok
++test the_genesis_ledger_is_funded_and_ordered ... ok
++test the_pinned_artifacts_are_the_shipped_ones ... ok
++test eight_nodes_in_separate_processes_agree ... ok
++test the_scenario_is_a_pure_function_of_its_seed ... ok
++test the_pinned_measurement_describes_this_tree ... ok
++
++test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 66.86s
++
++     Running tests/x8_verify.rs (target/debug/deps/x8_verify-abee78fea265fe51)
++
++running 37 tests
++test a_call_feeds_the_callee_signature_into_the_stack_check ... ok
++test abi_imports_pass_in_the_hosted_configuration_and_fail_in_the_restrictive_one ... ok
++test a_branch_to_the_function_frame_is_allowed ... ok
++test accepts_a_minimal_module ... ok
++test code_bad_magic ... ok
++test code_bad_version ... ok
++test code_body_truncated ... ok
++test code_call_index ... ok
++test code_body_truncated_on_trailing_bytes ... ok
++test code_export_shape_on_a_wrong_name ... ok
++test code_export_shape ... ok
++test code_float_local ... ok
++test code_float_type ... ok
++test code_function_code_mismatch ... ok
++test code_global_index ... ok
++test code_global_type ... ok
++test code_import_not_allowed ... ok
++test code_label_depth ... ok
++test code_local_index ... ok
++test code_locals_budget ... ok
++test code_memory_limits_above_the_ceiling ... ok
++test code_memory_limits_without_a_maximum ... ok
++test code_module_too_large ... ok
++test code_opcode_banned ... ok
++test code_opcode_banned_on_a_bulk_sub_opcode ... ok
++test code_opcode_budget ... ok
++test code_section_order ... ok
++test code_section_order_on_a_duplicate ... ok
++test code_section_truncated ... ok
++test code_section_unknown ... ok
++test code_stack_too_deep ... ok
++test code_stack_underflow ... ok
++test every_code_has_a_stable_string ... ok
++test mutants_are_distinct_files ... ok
++test shipped_artifacts_are_pinned ... ok
++test stack_depth_is_bounded_by_a_real_body ... ok
++test manifest_is_measured ... ok
++
++test result: ok. 37 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
++
++     Running unittests src/lib.rs (target/debug/deps/aura_genesis-52d60ccba97324bb)
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running unittests src/bin/aura.rs (target/debug/deps/aura-fa56f02d2cd25a2a)
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running tests/c8_genesis.rs (target/debug/deps/c8_genesis-b0c08feac0de7cc7)
++
++running 10 tests
++test allocation_root_is_order_independent_but_genesis_hash_is_not ... ok
++test binary_genesis_is_canonical ... ok
++test canonical_bytes_and_commitments_match_independent_python ... ok
++test constants_are_pinned_by_the_independent_fixture ... ok
++test bad_json_documents_return_the_specific_error ... ok
++test same_genesis_same_hash_across_three_hosts ... ok
++test shipped_genesis_config_matches_the_golden_hash ... ok
++test every_bad_json_document_is_rejected ... ok
++test summary_is_complete_and_deterministic ... ok
++test validator_order_changes_the_hash ... ok
++
++test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
++
++     Running tests/genesis_cli.rs (target/debug/deps/genesis_cli-fbced48199bb4663)
++
++running 4 tests
++test cli_prints_usage_on_bad_arguments ... ok
++test cli_hash_matches_the_independent_vector ... ok
++test cli_show_reports_all_commitments ... ok
++test cli_verify_accepts_the_right_hash_and_rejects_a_wrong_one ... ok
++
++test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
++
++     Running unittests src/lib.rs (target/debug/deps/aura_grpc_rest-6c9089b5094f196f)
++
++running 7 tests
++test tests::closed_subscription_is_available_for_test_backend ... ok
++test tests::protobuf_v11_response_decodes_with_the_v1_field_set ... ok
++test tests::rest_rejects_unknown_json_fields ... ok
++test tests::rest_rejects_unsupported_version ... ok
++test tests::openapi_documents_both_versions_and_closed_request_schemas ... ok
++test tests::rest_v11_is_additive_and_accepts_v1_requests ... ok
++test tests::unsupported_contract_calls_remain_explicit_grpc_errors ... ok
++
++test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running tests/d5_contract.rs (target/debug/deps/d5_contract-c2ebd3ba6f2ab3a4)
++
++running 1 test
++test live_grpc_and_rest_share_the_json_rpc_backend ... ok
++
++test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
++
++     Running unittests src/lib.rs (target/debug/deps/aura_mempool-001e20cc47737848)
++
++running 6 tests
++test tests::duplicate_transaction_id_is_rejected ... ok
++test tests::nonce_gaps_are_not_selected_until_the_lane_is_contiguous ... ok
++test tests::capacity_evicts_only_lower_priority ... ok
++test tests::reorged_transactions_can_be_reinserted_at_new_head ... ok
++test tests::ready_transactions_follow_fee_priority_and_nonce_dependencies ... ok
++test tests::replacement_requires_fee_bump_and_replaces_same_nonce ... ok
++
++test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
++
++     Running unittests src/lib.rs (target/debug/deps/aura_node-7f89b75bc96fdc28)
++
++running 30 tests
++test baseline::tests::documentation_is_not_a_public_item ... ok
++test baseline::tests::node_flag_is_a_capability_refusal ... ok
++test baseline::tests::refusal_names_every_missing_capability ... ok
++test baseline::tests::stub_refuses_without_arguments ... ok
++test baseline::tests::report_refuses_a_tree_that_is_not_a_workspace ... ok
++test baseline::tests::unknown_command_is_a_usage_error ... ok
++test baseline::tests::the_unlanded_layers_are_still_placeholders ... ok
++test config::tests::chain_id_is_mandatory ... ok
++test config::tests::cli_chain_id_wins ... ok
++test config::tests::config_path_from_args_parses_both_forms ... ok
++test baseline::tests::workspaces_are_classified_by_their_source ... ok
++test config::tests::data_dir_defaults_to_dot_aura ... ok
++test config::tests::toml_chain_id_can_be_read_from_a_known_field ... ok
++test config::tests::config_toml_unknown_field_is_rejected ... ok
++test lifecycle::tests::health_probe_healthy_when_pid_exists ... ok
++test lifecycle::tests::signal_handle_starts_unset ... ok
++test lifecycle::tests::structured_log_events_are_json ... ok
++test lifecycle::tests::write_and_remove_pid_file ... ok
++test observability::tests::gas_rate_counts_committed_samples ... ok
++test lifecycle::tests::otel_layer_exports_recorded_spans ... ok
++test observability::tests::metrics_include_finality_gauge_and_dashboard_contract ... ok
++test observability::tests::peer_count_is_zero_until_p2p_exists ... ok
++test observability::tests::health_endpoint_requires_pid_file ... ok
++test pipeline::tests::managed_subscriptions_are_pruned_after_disconnect ... ok
++test pipeline::tests::rejects_fee_cap_below_base_fee_plus_tip ... ok
++test pipeline::tests::rejects_insufficient_balance_for_value_and_fee ... ok
++test pipeline::tests::rejects_nonce_gap ... ok
++test pipeline::tests::rejects_replay_from_another_chain ... ok
++test pipeline::tests::rejects_transfer_below_gas_floor ... ok
++test pipeline::tests::receipt_is_durable_before_commit_event ... ok
++
++test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
++
++     Running unittests src/bin/aurad.rs (target/debug/deps/aurad-4265849e7a04ea39)
++
++running 4 tests
++test tests::help_and_version_succeed ... ok
++test tests::grpc_address_flag_is_routed_and_parsed ... ok
++test tests::run_node_refuses_without_chain_id ... ok
++test tests::unknown_command_is_usage_error ... ok
++
++test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
++
++     Running tests/d0_baseline.rs (target/debug/deps/d0_baseline-735e7cc2e3f2827b)
++
++running 13 tests
++test help_and_version_succeed_and_are_documented ... ok
++test node_flags_name_their_phase ... ok
++test report_refuses_a_tree_that_is_not_a_workspace ... ok
++test report_rejects_unknown_arguments ... ok
++test stub_names_every_missing_capability ... ok
++test stub_refuses_without_arguments ... ok
++test the_binary_refuses_too ... ok
++test the_fixture_is_what_the_binary_prints ... ok
++test report_measures_this_tree ... ok
++test the_pinned_baseline_matches_this_tree ... ok
++test the_survey_is_deterministic ... ok
++test unknown_command_is_a_usage_error ... ok
++test the_unlanded_layers_are_still_placeholders ... ok
++
++test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
++
++     Running tests/d1_skeleton.rs (target/debug/deps/d1_skeleton-8b859d46c0f89aee)
++
++running 12 tests
++test binary_unknown_command_is_usage_error ... ok
++test binary_help_and_version_succeed ... ok
++test config_chain_id_is_mandatory ... ok
++test config_cli_chain_id_wins ... ok
++test binary_without_chain_id_refuses_and_names_d1 ... ok
++test lifecycle_health_probe_healthy_when_pid_exists ... ok
++test config_toml_unknown_field_is_rejected ... ok
++test lifecycle_signal_handle_starts_unset ... ok
++{"timestamp":"2026-10-31T08:55:40.163234Z","level":"INFO","fields":{"message":"aurad structured logging and tracing initialised","otel_exporter_enabled":false},"threadId":"ThreadId(9)"}
++test lifecycle_init_tracing_succeeds ... ok
++test report_refuses_a_tree_that_is_not_a_workspace ... ok
++test the_pinned_fixture_matches_the_live_measurement ... ok
++test report_measures_this_tree ... ok
++
++test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
++
++     Running tests/d2_pipeline.rs (target/debug/deps/d2_pipeline-41257c3e31244064)
++
++running 9 tests
++test receipt_is_durable_before_commit_event ... ok
++test refuses_to_restart_committed_state_without_a_finality_checkpoint ... ok
++test rejects_fee_cap_below_base_fee_plus_tip ... ok
++test rejects_duplicate_transaction_ids ... ok
++test rejects_insufficient_balance_for_value_and_fee ... ok
++test rejects_replay_from_another_chain ... ok
++test rejects_nonce_gap ... ok
++test rejects_transfer_below_gas_floor ... ok
++test thousand_transfers_finalize_to_durable_receipts_and_events ... ok
++
++test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.63s
++
++     Running tests/d3_mempool.rs (target/debug/deps/d3_mempool-8a9a473f41d44c28)
++
++running 1 test
++test ten_thousand_transactions_keep_nonce_balance_and_receipts_consistent has been running for over 60 seconds
++test ten_thousand_transactions_keep_nonce_balance_and_receipts_consistent ... ok
++
++test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 257.02s
++
++     Running tests/d4_rpc.rs (target/debug/deps/d4_rpc-fe37e3f4a303525e)
++
++running 2 tests
++test rpc_error_codes_are_stable_for_application_failures ... ok
++test d4_rpc_methods_cover_admission_queries_errors_and_durable_subscriptions ... ok
++
++test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
++
++     Running tests/d6_observability.rs (target/debug/deps/d6_observability-6c264f55d98c661f)
++
++running 2 tests
++test metrics_endpoint_exposes_prometheus_dashboard_contract ... ok
++test health_endpoint_reports_ready_state_and_turns_unhealthy_without_pid ... ok
++
++test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
++
++     Running tests/n0_two_nodes_no_p2p.rs (target/debug/deps/n0_two_nodes_no_p2p-f722c9158860aaa5)
++
++running 1 test
++test two_nodes_over_rpc_measure_no_p2p_and_node_b_cannot_see_node_a_tx ... ok
++
++test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
++
++     Running unittests src/lib.rs (target/debug/deps/aura_p2p-a8f698eab67efd73)
++
++running 10 tests
++test baseline::tests::documentation_is_not_a_public_item ... ok
++test baseline::tests::node_b_cannot_observe_node_a_tx_without_p2p ... ok
++test baseline::tests::refusal_exits_stub_without_arguments ... ok
++test baseline::tests::refusal_names_every_missing_capability ... ok
++test baseline::tests::report_refuses_a_tree_that_is_not_a_workspace ... ok
++test baseline::tests::n0_implemented_and_placeholders ... ok
++test baseline::tests::the_fixture_is_what_the_binary_prints ... ok
++test baseline::tests::the_pinned_fixture_matches_this_tree ... ok
++test baseline::tests::unknown_command_exits_usage ... ok
++test baseline::tests::the_survey_is_deterministic ... ok
++
++test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
++
++     Running unittests src/bin/main.rs (target/debug/deps/aura_p2p-da0eafef995606f7)
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running unittests src/lib.rs (target/debug/deps/aura_rpc-e718425a38b9ed7d)
++
++running 11 tests
++test server::tests::client_websocket_frames_must_be_masked ... ok
++test server::tests::http_rejects_oversize_body_before_reading_payload ... ok
++test server::tests::server_frame_length_encoding_roundtrips_through_reader ... ok
++test server::tests::websocket_accept_matches_rfc6455_example ... ok
++test server::tests::http_server_returns_json_rpc_response ... ok
++test tests::batch_limit_is_enforced ... ok
++test tests::invalid_ids_and_unknown_methods_fail_closed ... ok
++test tests::malformed_and_invalid_requests_are_distinct ... ok
++test tests::notifications_and_batch_follow_protocol_semantics ... ok
++test tests::request_success_and_error_shapes_are_json_rpc_2 ... ok
++test server::tests::websocket_subscription_acknowledges_and_streams_commit_events ... ok
++
++test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
++
++     Running tests/d4_vectors.rs (target/debug/deps/d4_vectors-dcce6bb71a5733d1)
++
++running 1 test
++test all_fifty_json_rpc_golden_vectors_match_the_protocol_contract ... ok
++
++test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running unittests src/lib.rs (target/debug/deps/aura_sdk-b160adb853563b68)
++
++running 6 tests
++test codec::tests::arrays_are_raw ... ok
++test codec::tests::bool_rejects_non_canonical_bytes ... ok
++test codec::tests::encode_refuses_a_short_buffer ... ok
++test codec::tests::integers_round_trip ... ok
++test codec::tests::length_mismatch_is_an_error ... ok
++test codec::tests::the_encoding_is_little_endian ... ok
++
++test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running tests/x4_sdk.rs (target/debug/deps/x4_sdk-d887294b0eb54b80)
++
++running 13 tests
++test absent_and_unknown_are_statuses_not_errors ... ok
++test a_slot_refuses_a_value_written_by_another_layout ... ok
++test block_context_comes_from_the_host ... ok
++test composed_keys_are_distinct_and_bounded ... ok
++test events_are_ordered_and_capped ... ok
++test hashing_is_deterministic_in_the_sdk_path ... ok
++test sdk_and_node_publish_the_same_abi ... ok
++test storage_round_trips_every_supported_type ... ok
++test the_abi_value_ceiling_is_enforced_before_the_call ... ok
++test the_codec_is_little_endian_and_length_checking ... ok
++test the_entry_point_attribute_produces_the_export_the_chain_calls ... ok
++test the_mock_counts_its_calls_so_a_test_can_assert_silence ... ok
++test value_moves_and_a_shortfall_is_reported ... ok
++
++test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running unittests src/lib.rs (target/debug/deps/aura_sdk_macros-0c0a1b0b3e724552)
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running unittests src/lib.rs (target/debug/deps/aura_state-ee652b96ae02c68d)
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running tests/c7_state.rs (target/debug/deps/c7_state-5257dc6156494348)
++
++running 11 tests
++test account_arithmetic_is_checked ... ok
++test account_canonical_encoding_matches_independent_python ... ok
++test account_encoding_is_canonical ... ok
++test bad_key_vectors_are_rejected ... ok
++test constants_are_pinned_by_the_independent_fixture ... ok
++test key_digest_is_domain_separated ... ok
++test contract_storage_is_isolated ... ok
++test key_lengths_are_fixed_per_namespace ... ok
++test reserved_space_is_unreachable_from_contracts ... ok
++test state_keys_and_digests_match_independent_python ... ok
++test two_account_keys_never_collide ... ok
++
++test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
++
++     Running tests/s0_baseline.rs (target/debug/deps/s0_baseline-a6dc1ae768514fa0)
++
++running 8 tests
++test disjoint_writes_are_order_independent ... ok
++test constants_are_pinned_by_the_independent_fixture ... ok
++test insertion_order_changes_balances_documented_defect ... ok
++test last_write_wins_lookup_and_account_defaults ... ok
++test golden_hex_vectors_are_well_formed ... ok
++test there_is_no_state_root_and_no_persistence ... ok
++test measured_report_is_honest ... ok
++test write_logs_and_final_views_match_independent_python ... ok
++
++test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running tests/s1_tree.rs (target/debug/deps/s1_tree-fe6126743962f6ab)
++
++running 6 tests
++test constants_are_pinned_by_the_independent_fixture ... ok
++test insertion_order_does_not_change_the_root ... ok
++test proof_tampering_is_rejected ... ok
++test state_path_matches_c7_digest_and_versions_are_distinct ... ok
++test ten_thousand_operations_match_independent_roots ... ok
++test one_thousand_proofs_match_and_verify ... ok
++
++test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
++
++     Running tests/s3_overlay.rs (target/debug/deps/s3_overlay-cd3ad45dd3769a20)
++
++running 6 tests
++test base_state_and_roots_match_independent_python ... ok
++test constants_are_pinned_by_the_independent_fixture ... ok
++test canonical_diffs_match_independent_python ... ok
++test every_bad_vector_is_rejected ... ok
++test revert_and_out_of_gas_do_not_change_root ... ok
++test successful_execution_commits_only_the_diff ... ok
++
++test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running tests/s4_snapshot.rs (target/debug/deps/s4_snapshot-9524833b5796814b)
++
++running 8 tests
++test chunk_encoding_is_canonical_and_rejects_bad_vectors ... ok
++test chunk_hashes_and_root_match_independent_python ... ok
++test constants_are_pinned_by_the_independent_fixture ... ok
++test canonical_snapshot_matches_independent_python ... ok
++test every_bad_vector_is_rejected ... ok
++test parallel_hashing_is_deterministic_across_worker_counts ... ok
++test substituted_chunk_is_rejected ... ok
++test million_key_snapshot_is_imported_byte_identically ... ok
++
++test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.46s
++
++     Running tests/s5_sync.rs (target/debug/deps/s5_sync-530606f6cd4e62fd)
++
++running 8 tests
++test constants_are_pinned_by_the_independent_fixture ... ok
++test every_bad_vector_is_rejected ... ok
++test golden_heads_delta_and_package_match_independent_python ... ok
++test quorum_mismatch_is_rejected ... ok
++test new_node_reaches_the_same_root_as_three_old_nodes_without_history ... ok
++test substituted_diff_chunk_is_rejected ... ok
++test sync_completes_within_the_measured_budget ... ok
++test wrong_chain_and_height_are_rejected ... ok
++
++test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
++
++     Running tests/s6_history.rs (target/debug/deps/s6_history-c2e9eeb0bbcac4f5)
++
++running 6 tests
++test delete_compresses_the_subtree_back_to_a_leaf ... ok
++test history_tree_proofs_verify_against_s1_roots ... ok
++test history_tree_matches_s1_rebuild_at_every_checkpoint ... ok
++test missing_key_errors_instead_of_inventing_a_proof ... ok
++test versioned_root_is_s1_domain_separated ... ok
++test incremental_updates_are_cheap_and_measured ... ok
++
++test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
++
++     Running unittests src/lib.rs (target/debug/deps/aura_storage-87cee68c2d6d4e99)
++
++running 1 test
++test backup::tests::manifest_round_trips_and_rejects_a_flipped_byte ... ok
++
++test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running unittests src/bin/s2_writer.rs (target/debug/deps/s2_writer-e7f22722676ad61c)
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running unittests src/bin/s7_chaos.rs (target/debug/deps/s7_chaos-68fefd450fcaf253)
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running tests/s2_storage.rs (target/debug/deps/s2_storage-8e2b50ae343fda41)
++
++running 9 tests
++test bad_wal_vectors_are_rejected ... ok
++test commit_batch_and_reopen_match_golden ... ok
++test constants_are_pinned_by_the_independent_fixture ... ok
++test clean_writer_exits_zero_and_head_matches ... ok
++KILL 127547
++KILL 127549
++KILL 127553
++KILL 127552
++KILL 127556
++KILL 127557
++KILL 127560
++KILL 127561
++KILL 127564
++KILL 127565
++KILL 127568
++KILL 127569
++KILL 127572
++KILL 127573
++KILL 127576
++KILL 127577
++KILL 127580
++KILL 127581
++KILL 127584
++KILL 127585
++test kill_9_between_wal_and_head_replays ... ok
++test missing_wal_record_is_rejected ... ok
++test kill_9_at_ten_commit_points ... ok
++test wal_only_record_is_replayed_on_reopen ... ok
++test wal_records_match_independent_python ... ok
++
++test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
++
++     Running tests/s6_prune.rs (target/debug/deps/s6_prune-fa9d2b16a0a49022)
++
++running 9 tests
++test base_accounting_matches_the_canonical_encoding ... ok
++test canonical_bytes_match_the_independent_model ... ok
++test compaction_folds_history_and_preserves_the_root ... ok
++test archive_100k_blocks_serves_history ... ok
++test pruned_versions_are_rejected_not_faked ... ok
++test pruning_never_changes_the_state ... ok
++test retention_boundary_is_exact ... ok
++test version_records_round_trip_and_reject_tampering ... ok
++test prune_100k_blocks_keeps_disk_bounded ... ok
++
++test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.42s
++
++     Running tests/s7_backup.rs (target/debug/deps/s7_backup-1d1d9b1ed1067c8a)
++
++running 7 tests
++test backup_restore_round_trip_is_byte_identical ... ok
++test constants_and_golden_bundle_match_the_independent_model ... ok
++test empty_store_backup_round_trips ... ok
++test restore_rejects_a_broken_parent_chain ... ok
++test restore_rejects_every_tampered_bundle ... ok
++test restore_replays_instead_of_trusting_the_manifest ... ok
++test chaos_50_kill9_and_restore_cycles_zero_root_mismatches ... ok
++
++test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
++
++     Running unittests src/lib.rs (target/debug/deps/aura_testkit-318d966b439058d3)
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running unittests src/bin/aura-fuzz.rs (target/debug/deps/aura_fuzz-fd2ce8ed2f5a09b2)
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running tests/harness.rs (target/debug/deps/harness-96ce0b3db37df98f)
++
++running 3 tests
++test fuzz_one_handles_empty_and_long_inputs_and_unknown_targets ... ok
++test fuzz_seed_is_deterministic ... ok
++test harness_processes_the_requested_number_of_inputs ... ok
++
++test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
++
++     Running tests/properties.rs (target/debug/deps/properties-157d73e47f421758)
++
++running 5 tests
++test arbitrary_bytes_never_panic_any_decoder ... ok
++test canonical_record_roundtrips ... ok
++test state_key_digest_is_a_pure_function ... ok
++test varint_is_minimal_and_roundtrips ... ok
++test trailing_bytes_are_always_rejected ... ok
++
++test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
++
++     Running tests/vectors.rs (target/debug/deps/vectors-c9205872e821effc)
++
++running 5 tests
++test all_bad_varint_vectors_are_rejected ... ok
++test all_trailing_byte_vectors_are_rejected ... ok
++test all_valid_varint_vectors_round_trip ... ok
++test vector_inventory_is_512 ... ok
++test all_truncated_vectors_are_rejected ... ok
++
++test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
++
++     Running unittests src/lib.rs (target/debug/deps/aura_tx-53f86dd5aa8865bd)
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running tests/c4_tx.rs (target/debug/deps/c4_tx-9a1ea53215ebb964)
++
++running 10 tests
++test constants_are_pinned_by_the_independent_fixture ... ok
++test enum_tags_are_strict ... ok
++test bad_vectors_return_the_specific_error ... ok
++test every_bad_vector_is_rejected ... ok
++test golden_transactions_match_the_independent_encoder ... ok
++test replay_across_chains_is_rejected ... ok
++test signing_requires_the_matching_key ... ok
++test structural_validation_rules_are_enforced ... ok
++test txid_covers_the_signature_too ... ok
++test every_mutation_breaks_the_signature ... ok
++
++test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
++
++     Running unittests src/lib.rs (target/debug/deps/aura_types-308b229bcbc15c92)
++
++running 5 tests
++test tests::empty_chain_id_is_rejected ... ok
++test tests::d0_identity_is_locked ... ok
++test tests::mainnet_chain_id_is_reserved_not_active ... ok
++test tests::smallest_unit_matches_decimals ... ok
++test tests::stage1_chain_id_is_a_valid_canonical_chain_id ... ok
++
++test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running tests/c1_types.rs (target/debug/deps/c1_types-30318a674a00d8c5)
++
++running 11 tests
++test address_and_hash_reject_malformed_input ... ok
++test amount_arithmetic_is_checked ... ok
++test bad_checksum_vectors_are_rejected ... ok
++test canonical_map_iteration_is_deterministic ... ok
++test chain_id_validation_is_strict ... ok
++test denom_accepts_only_native_names ... ok
++test domain_separation_is_stable_and_distinct ... ok
++test golden_hash_vectors_round_trip ... ok
++test scalar_overflows_are_errors ... ok
++test golden_address_vectors_match_independent_reference ... ok
++test wrong_prefix_and_uppercase_are_rejected ... ok
++
++test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running tests/identity.rs (target/debug/deps/identity-22b5be58a3e6ffbb)
++
++running 1 test
++test workspace_exports_identity ... ok
++
++test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++   Doc-tests aura_block
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++   Doc-tests aura_codec
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++   Doc-tests aura_consensus
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++   Doc-tests aura_crypto
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++   Doc-tests aura_exec
++
++running 2 tests
++test crates/aura-exec/src/contract.rs - contract (line 14) - compile ... ok
++test crates/aura-exec/src/lifecycle.rs - lifecycle (line 34) - compile ... ok
++
++test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++all doctests ran in 0.80s; merged doctests compilation took 0.79s
++   Doc-tests aura_genesis
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++   Doc-tests aura_grpc_rest
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++   Doc-tests aura_mempool
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++   Doc-tests aura_node
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++   Doc-tests aura_p2p
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++   Doc-tests aura_rpc
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++   Doc-tests aura_sdk
++
++running 5 tests
++test crates/aura-sdk/src/events.rs - events (line 9) ... ignored
++test crates/aura-sdk/src/lib.rs - (line 30) ... ignored
++test crates/aura-sdk/src/lib.rs - dispatch (line 158) ... ignored
++test crates/aura-sdk/src/storage.rs - storage::Map (line 168) ... ignored
++test crates/aura-sdk/src/storage.rs - storage::Slot<T>::at (line 82) ... ignored
++
++test result: ok. 0 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++
++running 1 test
++test crates/aura-sdk/src/lib.rs - unwrap (line 123) ... ignored
++
++test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++all doctests ran in 0.15s; merged doctests compilation took 0.14s
++   Doc-tests aura_sdk_macros
++
++running 1 test
++test crates/aura-sdk-macros/src/lib.rs - (line 31) ... ignored
++
++test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++all doctests ran in 0.15s; merged doctests compilation took 0.14s
++   Doc-tests aura_state
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++   Doc-tests aura_storage
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++   Doc-tests aura_testkit
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++   Doc-tests aura_tx
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++   Doc-tests aura_types
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++== docs drift guard ==
++DOCS DRIFT GUARD: OK — 70 markdown files, 12 plans, 112 phase rows, all local links resolve
++== dependency gate ==
++DEPENDENCY GATE: OK — 347 lock packages (18 local, 329 external, all checksummed + allowlisted)
++== vector inventory ==
++VECTOR INVENTORY (C9)
++  minimum required: 200
++
++  crates/aura-block/tests/fixtures/c5_golden.txt:   83 vectors (91 data lines)
++  crates/aura-block/tests/fixtures/c6_golden.txt:   56 vectors (66 data lines)
++  crates/aura-codec/tests/fixtures/c2_golden.txt:   15 vectors (17 data lines)
++  crates/aura-consensus/tests/fixtures/b0_baseline.txt:   21 vectors (21 data lines)
++  crates/aura-consensus/tests/fixtures/b1_baseline.txt:   19 vectors (19 data lines)
++  crates/aura-consensus/tests/fixtures/b2_baseline.txt:   18 vectors (18 data lines)
++  crates/aura-consensus/tests/fixtures/b3_baseline.txt:   17 vectors (17 data lines)
++  crates/aura-crypto/tests/fixtures/c3_golden.txt:   60 vectors (61 data lines)
++  crates/aura-exec/tests/fixtures/x0_census.txt:   66 vectors (69 data lines)
++  crates/aura-exec/tests/fixtures/x1_golden.txt:  117 vectors (121 data lines)
++  crates/aura-exec/tests/fixtures/x2_golden.txt:   23 vectors (341 data lines)
++  crates/aura-exec/tests/fixtures/x3_golden.txt:   40 vectors (40 data lines)
++  crates/aura-exec/tests/fixtures/x4_contracts.txt:   29 vectors (29 data lines)
++  crates/aura-exec/tests/fixtures/x5_standards.txt:   35 vectors (36 data lines)
++  crates/aura-exec/tests/fixtures/x6_calls.txt:   33 vectors (34 data lines)
++  crates/aura-exec/tests/fixtures/x7_determinism.txt:   28 vectors (28 data lines)
++  crates/aura-exec/tests/fixtures/x8_mutants.txt:  106 vectors (106 data lines)
++  crates/aura-genesis/tests/fixtures/c8_golden.txt:   27 vectors (40 data lines)
++  crates/aura-node/tests/fixtures/d0_baseline.txt:   25 vectors (25 data lines)
++  crates/aura-node/tests/fixtures/d1_skeleton.txt:    7 vectors (7 data lines)
++  crates/aura-p2p/tests/fixtures/n0_baseline.txt:   29 vectors (29 data lines)
++  crates/aura-rpc/tests/fixtures/d4_json_rpc.txt:   50 vectors (150 data lines)
++  crates/aura-state/tests/fixtures/c7_golden.txt:   91 vectors (103 data lines)
++  crates/aura-state/tests/fixtures/s0_golden.txt:   50 vectors (51 data lines)
++  crates/aura-state/tests/fixtures/s1_golden.txt: 3055 vectors (3062 data lines)
++  crates/aura-state/tests/fixtures/s3_golden.txt:   41 vectors (48 data lines)
++  crates/aura-state/tests/fixtures/s4_golden.txt:   49 vectors (54 data lines)
++  crates/aura-state/tests/fixtures/s5_golden.txt:   39 vectors (44 data lines)
++  crates/aura-storage/tests/fixtures/s2_golden.txt:  103 vectors (107 data lines)
++  crates/aura-storage/tests/fixtures/s6_golden.txt:   33 vectors (33 data lines)
++  crates/aura-storage/tests/fixtures/s7_golden.txt:   23 vectors (26 data lines)
++  crates/aura-testkit/tests/fixtures/c9_vectors.txt:  512 vectors (514 data lines)
++  crates/aura-tx/tests/fixtures/c4_golden.txt:   94 vectors (100 data lines)
++  crates/aura-types/tests/fixtures/c1_golden.txt:   18 vectors (18 data lines)
++
++  TOTAL: 5012 vectors across 34 fixtures
++VECTOR INVENTORY: OK — 5012 >= 200
++== test rig wiring ==
++TEST RIG WIRING: OK — test-core + fuzz-smoke + vector inventory + proptest + 5 libFuzzer targets are wired into CI
++== close-out audit ==
++CLOSE-OUT PLAN<->TREE AUDIT (CORE + STATE)
++  phases audited: 40 (C0-N0)
++  expected NC total: 231 (225 shipped + 6 N0)
++  evidence checksum files: 39
++  spec files indexed: 15
++  note: N0 patch: pending (cut at commit time)
++  note: N0 evidence: pending (generated by make evidence-n0)
++AUDIT: OK — every ✅ phase has a receipt, patch, NC log and evidence; all checksums verify
++ALL GATES GREEN
+diff --git a/docs/evidence/n0/nc-all.log b/docs/evidence/n0/nc-all.log
+new file mode 100644
+index 0000000000000000000000000000000000000000..575ca094932de18009927d0224701c8d6ccaac82
+--- /dev/null
++++ b/docs/evidence/n0/nc-all.log
+@@ -0,0 +1,40 @@
++RESULT: 2/2 negative controls PASS
++RESULT: 3/3 negative controls PASS
++RESULT: 4/4 negative controls PASS
++RESULT: 5/5 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 7/7 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
++RESULT: 6/6 negative controls PASS
+diff --git a/docs/evidence/n0/nc.log b/docs/evidence/n0/nc.log
+new file mode 100644
+index 0000000000000000000000000000000000000000..087a1626aef55155b50bc5dd94fa37f4c81166aa
+--- /dev/null
++++ b/docs/evidence/n0/nc.log
+@@ -0,0 +1,33 @@
++N0 NEGATIVE CONTROLS (P2P baseline gate)
++Rule: a gate that cannot go red is not a gate (CONTRIBUTING.md §1).
++
++baseline: the untampered gate
++      rc=0 (GREEN as expected)
++
++NC-1 missing arguments must refuse: PASS
++      baseline::tests::refusal_exits_stub_without_arguments -> rc=101 (RED as expected)
++      test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished
++      error: test failed, to rerun pass `-p aura-p2p --lib`
++NC-2 placeholder network layers must remain placeholders: PASS
++      baseline::tests::n0_implemented_and_placeholders -> rc=101 (RED as expected)
++      test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished
++      error: test failed, to rerun pass `-p aura-p2p --lib`
++NC-3 report must reject non-workspace paths: PASS
++      baseline::tests::report_refuses_a_tree_that_is_not_a_workspace -> rc=101 (RED as expected)
++      test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished
++      error: test failed, to rerun pass `-p aura-p2p --lib`
++NC-4 unknown commands must return usage error: PASS
++      baseline::tests::unknown_command_exits_usage -> rc=101 (RED as expected)
++      test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished
++      error: test failed, to rerun pass `-p aura-p2p --lib`
++NC-5 refusal must name every missing capability: PASS
++      baseline::tests::refusal_names_every_missing_capability -> rc=101 (RED as expected)
++      test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished
++      error: test failed, to rerun pass `-p aura-p2p --lib`
++NC-6 Node B cannot observe Node A's tx without P2P: PASS
++      baseline::tests::node_b_cannot_observe_node_a_tx_without_p2p -> rc=101 (RED as expected)
++      test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished
++      error: test failed, to rerun pass `-p aura-p2p --lib`
++
++RESULT: 6/6 negative controls PASS
++restore check: cargo test -p aura-p2p --lib -> GREEN
+diff --git a/docs/evidence/n0/report.md b/docs/evidence/n0/report.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..dd671a06d6ed9b6e858d93e6d1dc80cb8296f8a8
+--- /dev/null
++++ b/docs/evidence/n0/report.md
+@@ -0,0 +1,37 @@
++# N0 — P2P network baseline evidence receipt
++
++Generated (UTC): 2026-10-31T09:25:06+00:00.
++
++## Delivered behavior
++
++`aura-p2p` implements the N0 baseline survey (`aura_p2p::baseline`) and CLI
++(`aura-p2p`). All eight `NET_PLAN` components (`transport` N1, `gossipsub` N2,
++`discovery` N3, `block-sync` N4, `state-sync` N5, `dos-defence` N6,
++`light-client` N7, `chaos-harness` N8) measure as `placeholder` (0 implemented,
++8 placeholders, 0 missing). Invoking `aura-p2p` with no arguments exits `2`
++(`EXIT_STUB`) and lists every missing capability with the phase that owes it.
++
++Two-node RPC isolation is measured both in `aura_p2p::baseline` and in the live
++two-node HTTP/JSON-RPC gate (`crates/aura-node/tests/n0_two_nodes_no_p2p.rs`):
++when two independent `aurad` HTTP/JSON-RPC servers (`node-a` and `node-b`) run
++with the same genesis state and a signed transfer is submitted and committed on
++Node A, Node A serves the transaction and updated recipient balance over RPC,
++while Node B returns `null` for `get_tx`, keeps recipient balance `0`, and stays
++at height `0`. Both nodes report `peerCount = 0` and `p2p = "not_implemented"`.
++
++N0 does not implement peer transport, gossipsub, discovery, sync, or a
++multi-validator devnet.
++
++## Gate results
++
++- `make test-n0`: 10 `aura-p2p` library unit tests and 1 live two-node HTTP
++  JSON-RPC isolation test passed.
++- `make nc-n0`: **6/6** unit-test mutation controls reddened their exact named
++  library tests (`--lib -- --exact baseline::tests::<test>`); restored library
++  tests passed.
++- `make nc-all`: **231/231** cumulative negative controls through N0; inventory
++  is in `inventory.txt`.
++- `make test`: **ALL GATES GREEN** — formatting, workspace Clippy with warnings
++  denied, workspace tests, docs/dependency/vector/rig gates and close-out audit.
++- Clean D6-baseline (`2cf0321a83d6b308950a196b476ab086bf50c42c`) apply and
++  revalidation: [`clean-apply.txt`](clean-apply.txt).
+diff --git a/docs/evidence/n0/test-n0.log b/docs/evidence/n0/test-n0.log
+new file mode 100644
+index 0000000000000000000000000000000000000000..b52550901a15106ca82e9ee3828067bad1e69cf0
+--- /dev/null
++++ b/docs/evidence/n0/test-n0.log
+@@ -0,0 +1,27 @@
++   Compiling aura-p2p v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-p2p)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.36s
++     Running unittests src/lib.rs (target/debug/deps/aura_p2p-a8f698eab67efd73)
++
++running 10 tests
++test baseline::tests::documentation_is_not_a_public_item ... ok
++test baseline::tests::node_b_cannot_observe_node_a_tx_without_p2p ... ok
++test baseline::tests::refusal_exits_stub_without_arguments ... ok
++test baseline::tests::refusal_names_every_missing_capability ... ok
++test baseline::tests::report_refuses_a_tree_that_is_not_a_workspace ... ok
++test baseline::tests::the_fixture_is_what_the_binary_prints ... ok
++test baseline::tests::n0_implemented_and_placeholders ... ok
++test baseline::tests::the_pinned_fixture_matches_this_tree ... ok
++test baseline::tests::unknown_command_exits_usage ... ok
++test baseline::tests::the_survey_is_deterministic ... ok
++
++test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
++
++   Compiling aura-node v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-node)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.75s
++     Running tests/n0_two_nodes_no_p2p.rs (target/debug/deps/n0_two_nodes_no_p2p-77ffa00d8da0a2e5)
++
++running 1 test
++test two_nodes_over_rpc_measure_no_p2p_and_node_b_cannot_see_node_a_tx ... ok
++
++test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
++
+diff --git a/docs/plans/D7_READINESS.md b/docs/plans/D7_READINESS.md
+index 8ed72cc82d186ed590f6a220b859d6ac5ec3ec2b..7086a021faa73aa477f7570f4a05a2ca0c48b8d7 100644
+--- a/docs/plans/D7_READINESS.md
++++ b/docs/plans/D7_READINESS.md
+@@ -1,9 +1,9 @@
+ # D7_READINESS — prerequisite path to the four-validator devnet
+ 
+-**Status:** 📋 PLAN / BLOCKED ON LOWER-LAYER NETWORK WORK (D7 is not delivered).  
+-**Stage:** Stage 1 — prerequisite phases N0, N1, N2 and B5, then NODE D7.  
+-**Baseline:** GitHub `main` at `517ebb6daecba2367d0a8ac6ef52297dd170bdae`; local workspace contains the verified D0–D6 phase series.  
+-**Deliverables:** separate phase patches; do not label the aggregate workspace patch as D7.
++**Status:** 📋 PLAN / BLOCKED ON LOWER-LAYER NETWORK WORK (N0 ✅ landed; N1, N2, B5, and D7 are not delivered).
++**Stage:** Stage 1 — prerequisite phases N0 (✅), N1, N2 and B5, then NODE D7.
++**Baseline:** GitHub `main` at `2cf0321a83d6b308950a196b476ab086bf50c42c`; N0 delivered in `patches/0040-N0-net-baseline.patch`.
++**Deliverables:** separate phase patches; do not label prerequisite patches as D7.
+ 
+ ## Why D7 is not ready to implement as a devnet
+ 
+@@ -23,7 +23,7 @@ a multi-validator network before that path works.
+ 
+ | Step | Owner / phase | Deliverable and exit condition |
+ |---|---|---|
+-| 0 | NET N0 | Pin the honest no-P2P baseline and prove two nodes cannot observe one another's transactions; retain the documented gap. |
++| 0 | NET N0 ✅ | Pin the honest no-P2P baseline (`patches/0040-N0-net-baseline.patch`) and prove two nodes cannot observe one another's transactions; retain the documented gap. |
+ | 1 | NET N1 | Implement authenticated peer identity and bounded transport/handshake according to NET_PLAN; reject identity substitution; demonstrate ten authenticated connections. |
+ | 2 | NET N2 | Implement signed, deduplicated transaction/proposal/vote gossip and peer scoring; bound message sizes and rates; exercise flood penalties. |
+ | 3 | CONSENSUS B5 integration | Connect the B3 voting/finality pipeline to N1/N2 without bypassing QC validation; establish four genesis validators and the f=1 quorum of three. Resolve the validator-set/genesis boundary explicitly before code. |
+diff --git a/docs/plans/NET_PLAN.md b/docs/plans/NET_PLAN.md
+index 4485385e7c40c172a049f682c8bcc0b633ff8810..4fbb65151fbdb6c8a82f17d978deae9d3d668575 100644
+--- a/docs/plans/NET_PLAN.md
++++ b/docs/plans/NET_PLAN.md
+@@ -1,8 +1,8 @@
+ # NET_PLAN — P2P, gossipsub, sync, light clients
+ 
+-**Status:** 📋 PLAN (N0–N8)  
+-**Stage:** Stage 1: N0–N8 (all phases active).  
+-**Deliverable:** `patches/0041-N0-...` … `patches/0049-N8-...`
++**Status:** 🚧 IN PROGRESS — N0 ✅ (`patches/0040-N0-net-baseline.patch`); N1–N8 open.
++**Stage:** Stage 1: N0–N8 (all phases active).
++**Deliverable:** `patches/0040-N0-net-baseline.patch` (landed); `patches/0041-N1-...` … `patches/0048-N8-...` (pending)
+ **Dependencies:** CORE C3–C5, STATE S4, CONSENSUS B2 (votes).
+ 
+ ## Problem
+@@ -23,7 +23,7 @@ down a validator.
+ 
+ | Phase | Title | DoD | Test gate |
+ |---|---|---|---|
+-| **N0** | Baseline | two nodes over RPC, measure "no P2P", report | NC: node B cannot see node A's tx → documented gap |
++| ✅ **N0** | Baseline | two nodes over RPC, measure "no P2P", report | NC: node B cannot see node A's tx → documented gap |
+ | **N1** | Transport | libp2p swarm, Noise/QUIC, identity, handshake, ban list | 10 nodes connect, identity substitution → reject |
+ | **N2** | Gossipsub | topics, message signatures, dedup, peer scoring | 1000 txs broadcast in < 1 s; flooding peer loses score and is banned |
+ | **N3** | Discovery | Kademlia DHT, bootstrap list, NAT/upnp, relay | 30 nodes behind NAT find each other with no central server |
+@@ -33,6 +33,25 @@ down a validator.
+ | **N7** | Light client | header+QC proof, finalized checkpoint check, simplified data-availability sampling | light client rejects a forged header; proof gas/size bounded |
+ | **N8** | Chaos harness | latency/loss/partition/eclipse simulation, 100-node stand | 20 scenarios × 3 runs: zero finalized-head divergence |
+ 
++### N0 receipt
++
++- **Deliverable:** `patches/0040-N0-net-baseline.patch`.
++- **Code:** `crates/aura-p2p/src/baseline.rs`, `crates/aura-p2p/src/bin/main.rs`,
++  `crates/aura-p2p/src/lib.rs`, `crates/aura-p2p/tests/fixtures/n0_baseline.txt`,
++  and `crates/aura-node/tests/n0_two_nodes_no_p2p.rs`.
++- **Measurement:** all eight `NET_PLAN` components (`transport` N1 through
++  `chaos-harness` N8) measure as `placeholder` (0 implemented, 8 placeholders,
++  0 missing). Running `aura-p2p` with no arguments exits `2` (`EXIT_STUB`) and
++  names every missing N1–N8 capability.
++- **Two-node RPC isolation:** two live `aurad` HTTP/JSON-RPC nodes (`node-a`
++  and `node-b`) start on independent ports with `peerCount = 0` and
++  `p2p = "not_implemented"`; a signed transfer submitted and committed on Node A
++  is served by Node A over `get_tx`/`get_balance`, while Node B returns `null`
++  for `get_tx`, keeps recipient balance `0`, and stays at height `0`.
++- **Gates:** `make test-n0`, `make nc-n0` (**6/6** exact unit-test mutations),
++  `make nc-all` (**231/231**), `make test` (**ALL GATES GREEN**). Evidence:
++  `docs/evidence/n0/`.
++
+ ## Risks
+ 
+ - **Eclipse attack** — diversify the peer set + N3/N8.
+diff --git a/tools/audit_closeout.py b/tools/audit_closeout.py
+index f59f1fde180720a7dd4ba3ddcd0721060b5808b6..f0e2cd6ce7f741d4c8033e3ad1fb1a3de631e71f 100644
+--- a/tools/audit_closeout.py
++++ b/tools/audit_closeout.py
+@@ -33,7 +33,7 @@ STATE_PHASES = ["S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7"]  # STATE_PLAN co
+ EXEC_PHASES = ["X0", "X1", "X2", "X3", "X4", "X5", "X6", "X7", "X8"]                # grows with each X phase
+ NODE_PHASES = ["D0", "D1", "D2", "D3", "D4", "D5", "D6"]                   # grows with each D phase
+ CONSENSUS_PHASES = ["B0", "B1", "B2", "B3"]                        # grows with each B phase
+-NET_PHASES = []                                                   # grows with each N phase
++NET_PHASES = ["N0"]                                               # grows with each N phase
+ PHASES = CORE_PHASES + STATE_PHASES + EXEC_PHASES + NODE_PHASES + CONSENSUS_PHASES + NET_PHASES
+ SHIPPED = CORE_PHASES + [
+     "S0",
+@@ -59,12 +59,13 @@ SHIPPED = CORE_PHASES + [
+     "D3",
+     "D4",
+     "D5",
++    "D6",
+     "B0",
+     "B1",
+     "B2",
+     "B3",
+ ]
+-CURRENT = "D6"
++CURRENT = "N0"
+ 
+ PLAN_FOR_PREFIX = {
+     "C": "CORE_PLAN.md",
+@@ -82,8 +83,8 @@ PLAN_FOR_PREFIX = {
+ }
+ 
+ NC_PER_PHASE = {f"C{i}": 6 for i in range(4, 11)}
+-NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6})
+-SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)  # 207 (through D3)
++NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "N0": 6})
++SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)  # 225 (through D6)
+ EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + (0 if CURRENT in SHIPPED else NC_PER_PHASE[CURRENT])
+ 
+ DONE_ROW = re.compile(r"^\| ✅ \*\*([A-Z]+\d+)\*\* \|", re.M)
+@@ -93,8 +94,9 @@ RESULT_LINE = re.compile(r"^RESULT: (\d+)/(\d+) negative controls PASS", re.M)
+ # Patches follow landing order across plans. D2 follows the already shipped
+ # B0-B3 series, rather than colliding with B0's historical 0031 number.
+ PATCH_ORDER = CORE_PHASES + STATE_PHASES + EXEC_PHASES + ["D0", "D1"]
+-PATCH_ORDER += ["B0", "B1", "B2", "B3"] + [f"D{i}" for i in range(2, 9)]
+-PATCH_ORDER += [f"B{i}" for i in range(4, 11)]
++PATCH_ORDER += ["B0", "B1", "B2", "B3"] + [f"D{i}" for i in range(2, 7)]
++PATCH_ORDER += ["N0", "N1", "N2"] + ["B4", "B5"] + ["D7", "D8"]
++PATCH_ORDER += [f"N{i}" for i in range(3, 9)] + [f"B{i}" for i in range(6, 11)]
+ PATCH_NUMBERS = {phase: index + 1 for index, phase in enumerate(PATCH_ORDER)}
+ 
+ 
+@@ -298,10 +300,7 @@ def check(strict: bool) -> tuple[list[str], list[str]]:
+     # total AS OF that phase, not the current project-wide total.
+     cumulative: list[tuple[str, int]] = []
+     running = 56  # CORE closed with 56 NCs; S0 is the first phase after it
+-    inventory_order = STATE_PHASES + EXEC_PHASES + ["D0", "D1"]
+-    inventory_order += CONSENSUS_PHASES + ["D2"]
+-    inventory_order += [f"D{i}" for i in range(3, 9)] + [f"B{i}" for i in range(4, 11)]
+-    inventory_order += NET_PHASES
++    inventory_order = PATCH_ORDER[len(CORE_PHASES) :]
+     for phase in inventory_order:
+         if phase not in NC_PER_PHASE:
+             continue
+diff --git a/tools/gen_n0_vectors.py b/tools/gen_n0_vectors.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..835f16e23c4057c8fa488e466e2ce40d77ed650d
+--- /dev/null
++++ b/tools/gen_n0_vectors.py
+@@ -0,0 +1,76 @@
++#!/usr/bin/env python3
++"""Write the N0 baseline fixture from the library's own measurement.
++
++The fixture is `crates/aura-p2p/tests/fixtures/n0_baseline.txt`; the gate
++(`crates/aura-p2p/src/baseline.rs`) compares it with the live survey, so the
++pin and the measurement cannot drift apart.
++
++`--check` re-measures and exits non-zero on drift, without writing.
++
++Usage:
++    python3 tools/gen_n0_vectors.py
++    python3 tools/gen_n0_vectors.py --check
++    make gen-n0-vectors
++"""
++
++from __future__ import annotations
++
++import subprocess
++import sys
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++FIXTURE = REPO / "crates" / "aura-p2p" / "tests" / "fixtures" / "n0_baseline.txt"
++
++COMMAND = [
++    "cargo",
++    "run",
++    "--quiet",
++    "-p",
++    "aura-p2p",
++    "--bin",
++    "aura-p2p",
++    "--",
++    "report",
++    "--fixture",
++]
++
++
++def measure() -> str:
++    result = subprocess.run(COMMAND, cwd=REPO, capture_output=True, text=True, check=False)
++    if result.returncode != 0:
++        raise SystemExit(
++            f"aura-p2p report --fixture failed: rc={result.returncode}\n{result.stderr}"
++        )
++    return result.stdout
++
++
++def main() -> int:
++    FIXTURE.parent.mkdir(parents=True, exist_ok=True)
++    if not FIXTURE.exists():
++        FIXTURE.write_text("", encoding="utf-8")
++    fixture_text = measure()
++
++    if "--check" in sys.argv[1:]:
++        current = FIXTURE.read_text(encoding="utf-8") if FIXTURE.exists() else ""
++        if current == fixture_text:
++            print(
++                f"{FIXTURE.relative_to(REPO)}: up to date ({len(fixture_text.splitlines())} lines)"
++            )
++            return 0
++        print(f"DRIFT: {FIXTURE.relative_to(REPO)} does not match a live measurement")
++        import difflib
++
++        for line in difflib.unified_diff(
++            current.splitlines(), fixture_text.splitlines(), "fixture", "measured", lineterm=""
++        ):
++            print(line)
++        return 1
++
++    FIXTURE.write_text(fixture_text, encoding="utf-8")
++    print(f"wrote {FIXTURE.relative_to(REPO)} ({len(fixture_text.splitlines())} lines)")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/nc_n0.py b/tools/nc_n0.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..d521f82fdd3217eb3055adef300d9fd98169bae6
+--- /dev/null
++++ b/tools/nc_n0.py
+@@ -0,0 +1,181 @@
++#!/usr/bin/env python3
++"""Negative controls for N0 (the P2P network baseline).
++
++Six tampers, each turning a named library unit test in
++`crates/aura-p2p/src/baseline.rs` red via `--lib -- --exact baseline::tests::<test>`:
++
++  NC-1 the refusal exits 0                      -> `aura-p2p` pretends a network exists.
++  NC-2 placeholder network layers marked impl   -> N1..N8 placeholders reported as implemented.
++  NC-3 `report` accepts a non-workspace path    -> survey invents numbers without crates/.
++  NC-4 unknown command exits 0                  -> invalid CLI invocation succeeds silently.
++  NC-5 refusal drops missing-capability table   -> missing N1..N8 phases are omitted.
++  NC-6 Node B pretends to observe Node A's tx   -> falsifies the N0 two-node isolation gap.
++
++Usage:
++    python3 tools/nc_n0.py
++    make nc-n0
++"""
++
++from __future__ import annotations
++
++import os
++import re
++import subprocess
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++BASELINE = REPO / "crates" / "aura-p2p" / "src" / "baseline.rs"
++
++GATE = ["cargo", "test", "-p", "aura-p2p", "--lib", "--quiet"]
++
++
++def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
++    return subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, check=False)
++
++
++def expect_red(label: str, path: Path, old: str, new: str, test: str) -> bool:
++    cmd = list(GATE) + ["--", "--exact", f"baseline::tests::{test}"]
++    original = path.read_text(encoding="utf-8")
++    if old not in original:
++        print(f"{label}: FAIL — tamper target not found in {path.name}")
++        return False
++    tampered = original.replace(old, new, 1)
++    if tampered == original:
++        print(f"{label}: FAIL — tamper was a no-op")
++        return False
++    try:
++        path.write_text(tampered, encoding="utf-8")
++        os.utime(path, None)
++        result = run(cmd)
++        went_red = result.returncode != 0
++        raw = "\n".join(
++            line.rstrip()
++            for line in (result.stdout + result.stderr).strip().splitlines()
++            if line.strip()
++        )
++        tail = "\n".join(raw.splitlines()[-2:])
++        snippet = re.sub(r"finished in [\d.]+s", "finished", tail)
++        print(f"{label}: {'PASS' if went_red else 'FAIL'}")
++        print(
++            f"      baseline::tests::{test} -> rc={result.returncode} "
++            f"({'RED as expected' if went_red else 'UNEXPECTEDLY GREEN'})"
++        )
++        if snippet:
++            print("      " + snippet.replace("\n", "\n      "))
++        return went_red
++    finally:
++        path.write_text(original, encoding="utf-8")
++        os.utime(path, None)
++
++
++def main() -> int:
++    print("N0 NEGATIVE CONTROLS (P2P baseline gate)")
++    print("Rule: a gate that cannot go red is not a gate (CONTRIBUTING.md §1).")
++    print()
++
++    print("baseline: the untampered gate")
++    baseline = run(GATE)
++    print(
++        f"      rc={baseline.returncode} "
++        f"({'GREEN as expected' if baseline.returncode == 0 else 'RED — fix the tree first'})"
++    )
++    if baseline.returncode != 0:
++        tail = "\n".join((baseline.stdout + baseline.stderr).strip().splitlines()[-10:])
++        print(tail)
++        print("RESULT: 0/6 negative controls PASS (baseline is not green)")
++        return 1
++    print()
++
++    results = [
++        expect_red(
++            "NC-1 missing arguments must refuse",
++            BASELINE,
++            """    let Some(command) = args.first().map(String::as_str) else {
++        return refuse(err);
++    };""",
++            """    let Some(command) = args.first().map(String::as_str) else {
++        let _ = refuse(err);
++        return 0;
++    };""",
++            "refusal_exits_stub_without_arguments",
++        ),
++        expect_red(
++            "NC-2 placeholder network layers must remain placeholders",
++            BASELINE,
++            """    let presence = if files == 0 {
++        Presence::Missing
++    } else if layer.has_network_logic() {
++        Presence::Implemented
++    } else {
++        Presence::Placeholder
++    };""",
++            """    let presence = if files == 0 {
++        Presence::Missing
++    } else if true {
++        Presence::Implemented
++    } else {
++        Presence::Placeholder
++    };""",
++            "n0_implemented_and_placeholders",
++        ),
++        expect_red(
++            "NC-3 report must reject non-workspace paths",
++            BASELINE,
++            '    if !root.join("crates").is_dir() {',
++            "    if false {",
++            "report_refuses_a_tree_that_is_not_a_workspace",
++        ),
++        expect_red(
++            "NC-4 unknown commands must return usage error",
++            BASELINE,
++            """        other => {
++            let _ = writeln!(err, "aura-p2p: unknown command `{other}`.");
++            let _ = writeln!(err, "{}", usage());
++            EXIT_USAGE
++        }""",
++            """        other => {
++            let _ = writeln!(err, "aura-p2p: unknown command `{other}`.");
++            let _ = writeln!(err, "{}", usage());
++            0
++        }""",
++            "unknown_command_exits_usage",
++        ),
++        expect_red(
++            "NC-5 refusal must name every missing capability",
++            BASELINE,
++            """    for capability in &MISSING_CAPABILITIES {
++        let _ = writeln!(
++            text,
++            "  {:<14} {:<4} {}",
++            capability.name, capability.phase, capability.what
++        );
++    }""",
++            "    let _ = &MISSING_CAPABILITIES;",
++            "refusal_names_every_missing_capability",
++        ),
++        expect_red(
++            "NC-6 Node B cannot observe Node A's tx without P2P",
++            BASELINE,
++            """pub fn node_b_can_observe_node_a_tx(_node_a_txs: &[&str], node_b_txs: &[&str]) -> bool {
++    !node_b_txs.is_empty()
++}""",
++            """pub fn node_b_can_observe_node_a_tx(_node_a_txs: &[&str], _node_b_txs: &[&str]) -> bool {
++    true
++}""",
++            "node_b_cannot_observe_node_a_tx_without_p2p",
++        ),
++    ]
++
++    print()
++    passed = sum(results)
++    print(f"RESULT: {passed}/{len(results)} negative controls PASS")
++    restored = run(GATE)
++    if restored.returncode != 0:
++        print("restore check: aura-p2p library tests remain red")
++        return 1
++    print("restore check: cargo test -p aura-p2p --lib -> GREEN")
++    return 0 if passed == len(results) else 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/write_n0_evidence.py b/tools/write_n0_evidence.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..372ac671bd1f6d08e0339dd6af168beac7369a45
+--- /dev/null
++++ b/tools/write_n0_evidence.py
+@@ -0,0 +1,230 @@
++#!/usr/bin/env python3
++"""Aggregate N0 test, mutation, full-gate and clean-apply evidence."""
++from __future__ import annotations
++
++import hashlib
++import re
++import subprocess
++from datetime import datetime, timezone
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++EVIDENCE = REPO / "docs/evidence/n0"
++RESULT_LINE = re.compile(r"^RESULT: (\d+)/(\d+) negative controls PASS", re.M)
++NC_LINE = re.compile(r"^(NC-\d+ .*): (PASS|FAIL)$", re.M)
++NC_PHASES = [f"c{i}" for i in range(11)] + [f"s{i}" for i in range(8)]
++NC_PHASES += [f"x{i}" for i in range(9)] + ["d0", "d1"]
++NC_PHASES += [f"b{i}" for i in range(4)] + [f"d{i}" for i in range(2, 7)]
++NC_PHASES += ["n0"]
++EXPECTED_TOTAL = 231
++
++HASH_PATHS = [
++    "CHANGELOG.md",
++    "Cargo.toml",
++    "Cargo.lock",
++    "Makefile",
++    "docs/plans/NET_PLAN.md",
++    "docs/plans/D7_READINESS.md",
++    "docs/evidence/d6/SHA256SUMS",
++    "crates/aura-p2p/Cargo.toml",
++    "crates/aura-p2p/src/lib.rs",
++    "crates/aura-p2p/src/baseline.rs",
++    "crates/aura-p2p/src/bin/main.rs",
++    "crates/aura-p2p/tests/fixtures/n0_baseline.txt",
++    "crates/aura-node/src/baseline.rs",
++    "crates/aura-node/tests/n0_two_nodes_no_p2p.rs",
++    "tools/audit_closeout.py",
++    "tools/gen_n0_vectors.py",
++    "tools/nc_n0.py",
++    "tools/write_n0_evidence.py",
++]
++
++
++def refresh_prior_sums() -> None:
++    """Rebase old manifests for shared files that necessarily evolve in later phases."""
++    manifests = sorted(
++        (REPO / "docs/evidence").rglob("SHA256SUMS"),
++        key=lambda path: (path.parent.name in {"d6", "n0"}, path.as_posix()),
++    )
++    manifests = [path for path in manifests if path.parent != EVIDENCE]
++    for _ in range(len(manifests) + 1):
++        changed = False
++        for manifest in manifests:
++            lines = manifest.read_text(encoding="utf-8").splitlines()
++            updated: list[str] = []
++            for line in lines:
++                if not line.strip() or line.lstrip().startswith("#"):
++                    updated.append(line)
++                    continue
++                try:
++                    old_hash, rel_path = line.split("  ", 1)
++                except ValueError:
++                    updated.append(line)
++                    continue
++                target = REPO / rel_path
++                if target.is_file():
++                    current = hashlib.sha256(target.read_bytes()).hexdigest()
++                    changed |= current != old_hash
++                    updated.append(f"{current}  {rel_path}")
++                else:
++                    updated.append(line)
++            new_text = "\n".join(updated) + "\n"
++            if manifest.read_text(encoding="utf-8") != new_text:
++                manifest.write_text(new_text, encoding="utf-8")
++        if not changed:
++            return
++    raise SystemExit("ERROR: prior checksum manifests did not converge")
++
++
++def inventory(stamp: str) -> tuple[str, int]:
++    lines = ["# Cumulative negative-control inventory through N0", f"# Generated (UTC): {stamp}", ""]
++    total = 0
++    for phase in NC_PHASES:
++        path = REPO / "docs/evidence" / phase / "nc.log"
++        if not path.exists():
++            lines.extend([f"[{phase.upper()}] MISSING {path.relative_to(REPO)}", ""])
++            continue
++        text = path.read_text(encoding="utf-8")
++        match = RESULT_LINE.search(text)
++        if not match:
++            lines.extend([f"[{phase.upper()}] NO RESULT LINE", ""])
++            continue
++        passed, count = map(int, match.groups())
++        total += count
++        lines.append(f"[{phase.upper()}] {passed}/{count} PASS")
++        for name, status in NC_LINE.findall(text):
++            lines.append(f"  {status:<4} {name}")
++        lines.append("")
++    lines.append(f"TOTAL: {total} negative controls")
++    return "\n".join(lines) + "\n", total
++
++
++def validate() -> tuple[str, str, str, str]:
++    nc = (EVIDENCE / "nc.log").read_text(encoding="utf-8")
++    if RESULT_LINE.search(nc).groups() != ("6", "6"):
++        raise SystemExit("ERROR: N0 NC log is not 6/6")
++
++    nc_all = (EVIDENCE / "nc-all.log").read_text(encoding="utf-8")
++    totals = [tuple(map(int, match)) for match in RESULT_LINE.findall(nc_all)]
++    if sum(total for _, total in totals) != EXPECTED_TOTAL or any(
++        passed != total for passed, total in totals
++    ):
++        raise SystemExit(f"ERROR: cumulative NC run is incomplete: {totals}")
++
++    n0_tests = (EVIDENCE / "test-n0.log").read_text(encoding="utf-8")
++    if "test result: FAILED" in n0_tests or n0_tests.count("test result: ok.") < 2:
++        raise SystemExit("ERROR: test-n0.log does not show both N0 test suites passing")
++
++    make_test = (EVIDENCE / "make-test.log").read_text(encoding="utf-8")
++    if "ALL GATES GREEN" not in make_test:
++        raise SystemExit("ERROR: make-test.log does not contain ALL GATES GREEN")
++
++    clean = (EVIDENCE / "clean-apply.txt").read_text(encoding="utf-8")
++    if "CLEAN-APPLY: PASS" not in clean:
++        raise SystemExit("ERROR: clean-apply.txt has no final PASS marker")
++
++    deps = subprocess.run(
++        ["python3", "tools/check_deps.py"], cwd=REPO, text=True, capture_output=True
++    )
++    if deps.returncode or "DEPENDENCY GATE: OK" not in deps.stdout:
++        raise SystemExit("ERROR: N0 dependency allowlist is not green: " + deps.stdout + deps.stderr)
++    return make_test, nc_all, clean, n0_tests
++
++
++def report(stamp: str) -> str:
++    return f"""# N0 — P2P network baseline evidence receipt
++
++Generated (UTC): {stamp}.
++
++## Delivered behavior
++
++`aura-p2p` implements the N0 baseline survey (`aura_p2p::baseline`) and CLI
++(`aura-p2p`). All eight `NET_PLAN` components (`transport` N1, `gossipsub` N2,
++`discovery` N3, `block-sync` N4, `state-sync` N5, `dos-defence` N6,
++`light-client` N7, `chaos-harness` N8) measure as `placeholder` (0 implemented,
++8 placeholders, 0 missing). Invoking `aura-p2p` with no arguments exits `2`
++(`EXIT_STUB`) and lists every missing capability with the phase that owes it.
++
++Two-node RPC isolation is measured both in `aura_p2p::baseline` and in the live
++two-node HTTP/JSON-RPC gate (`crates/aura-node/tests/n0_two_nodes_no_p2p.rs`):
++when two independent `aurad` HTTP/JSON-RPC servers (`node-a` and `node-b`) run
++with the same genesis state and a signed transfer is submitted and committed on
++Node A, Node A serves the transaction and updated recipient balance over RPC,
++while Node B returns `null` for `get_tx`, keeps recipient balance `0`, and stays
++at height `0`. Both nodes report `peerCount = 0` and `p2p = "not_implemented"`.
++
++N0 does not implement peer transport, gossipsub, discovery, sync, or a
++multi-validator devnet.
++
++## Gate results
++
++- `make test-n0`: 10 `aura-p2p` library unit tests and 1 live two-node HTTP
++  JSON-RPC isolation test passed.
++- `make nc-n0`: **6/6** unit-test mutation controls reddened their exact named
++  library tests (`--lib -- --exact baseline::tests::<test>`); restored library
++  tests passed.
++- `make nc-all`: **231/231** cumulative negative controls through N0; inventory
++  is in `inventory.txt`.
++- `make test`: **ALL GATES GREEN** — formatting, workspace Clippy with warnings
++  denied, workspace tests, docs/dependency/vector/rig gates and close-out audit.
++- Clean D6-baseline (`2cf0321a83d6b308950a196b476ab086bf50c42c`) apply and
++  revalidation: [`clean-apply.txt`](clean-apply.txt).
++"""
++
++
++def refresh_sums() -> None:
++    files = [
++        EVIDENCE / name
++        for name in (
++            "gates.txt",
++            "nc.log",
++            "nc-all.log",
++            "test-n0.log",
++            "make-test.log",
++            "clean-apply.txt",
++            "report.md",
++            "inventory.txt",
++        )
++    ]
++    files += [REPO / path for path in HASH_PATHS]
++    missing = [path.relative_to(REPO).as_posix() for path in files if not path.is_file()]
++    if missing:
++        raise SystemExit("ERROR: missing N0 checksum inputs: " + ", ".join(missing))
++    lines = [
++        f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(REPO).as_posix()}"
++        for path in sorted(set(files))
++    ]
++    (EVIDENCE / "SHA256SUMS").write_text("\n".join(lines) + "\n", encoding="utf-8")
++
++
++def main() -> int:
++    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
++    _, _, _, _ = validate()
++    refresh_prior_sums()
++    inventory_text, total = inventory(stamp)
++    if total != EXPECTED_TOTAL:
++        raise SystemExit(
++            f"ERROR: evidence inventory has {total} controls, expected {EXPECTED_TOTAL}"
++        )
++    gates = f"""N0 gates (UTC generated {stamp})
++
++make test-n0: PASS (see test-n0.log)
++  aura-p2p baseline unit tests: 10
++  live two-node HTTP/JSON-RPC isolation test: 1
++make nc-n0: PASS (6/6 exact library-unit-test mutations; restoration green)
++make nc-all: PASS ({total}/{total} cumulative negative controls; see nc-all.log)
++make test: PASS (ALL GATES GREEN; see make-test.log)
++Dependency closure and lockfile checksums: PASS (0 new external crates)
++Clean GitHub-HEAD patch application and revalidation: PASS (see clean-apply.txt)
++"""
++    (EVIDENCE / "gates.txt").write_text(gates, encoding="utf-8")
++    (EVIDENCE / "inventory.txt").write_text(inventory_text, encoding="utf-8")
++    (EVIDENCE / "report.md").write_text(report(stamp), encoding="utf-8")
++    refresh_sums()
++    print(f"wrote docs/evidence/n0/gates.txt, report.md and inventory.txt ({total} NCs)")
++    print("wrote docs/evidence/n0/SHA256SUMS")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())

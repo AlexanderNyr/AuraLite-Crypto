@@ -10,7 +10,7 @@
 //! exit requests and epoch transitions, every node arrives at the same
 //! validator set. No slashing or rewards yet — those arrive at B6–B7.
 
-use crate::qc::QuorumCertificate;
+use crate::qc::{QuorumCertificate, quorum_threshold};
 use aura_types::{Address, Hash};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -96,6 +96,94 @@ pub struct SetUpdate {
     pub validators: Vec<Validator>,
     /// QC from 2f+1 of the previous validator set authorizing the change.
     pub qc: QuorumCertificate,
+}
+
+/// Staking ledger managing validator self-stakes, delegations, and epoch-boundary
+/// [`ValidatorSet`] transitions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StakingContract {
+    /// Underlying active validator set and enter/exit queues.
+    validator_set: ValidatorSet,
+    /// Delegations indexed by `(delegator, validator)`.
+    delegations: BTreeMap<(Address, Address), StakeEntry>,
+}
+
+impl StakingContract {
+    /// Initialize a [`StakingContract`] from the genesis validator set and epoch length.
+    pub fn new(genesis_validators: Vec<Validator>, epoch_length: u64) -> Self {
+        let mut delegations = BTreeMap::new();
+        for v in &genesis_validators {
+            delegations.insert(
+                (v.address, v.address),
+                StakeEntry {
+                    delegator: v.address,
+                    validator: v.address,
+                    amount: v.stake,
+                    epoch: 0,
+                },
+            );
+        }
+        Self {
+            validator_set: ValidatorSet::new(genesis_validators, epoch_length),
+            delegations,
+        }
+    }
+
+    /// Borrow the underlying [`ValidatorSet`].
+    pub const fn validator_set(&self) -> &ValidatorSet {
+        &self.validator_set
+    }
+
+    /// Mutably borrow the underlying [`ValidatorSet`].
+    pub fn validator_set_mut(&mut self) -> &mut ValidatorSet {
+        &mut self.validator_set
+    }
+
+    /// Stake `amount` to register `validator` in the enter queue for the next epoch.
+    pub fn stake_and_enter(
+        &mut self,
+        validator: Address,
+        amount: u64,
+    ) -> Result<(), SetUpdateError> {
+        if amount < self.validator_set.min_stake() {
+            return Err(SetUpdateError::InsufficientStake);
+        }
+        let epoch = self.validator_set.epoch();
+        self.delegations.insert(
+            (validator, validator),
+            StakeEntry {
+                delegator: validator,
+                validator,
+                amount,
+                epoch,
+            },
+        );
+        self.validator_set.request_enter(validator, amount, epoch);
+        Ok(())
+    }
+
+    /// Delegate `amount` from `delegator` to an existing or entering `validator`.
+    pub fn delegate(&mut self, delegator: Address, validator: Address, amount: u64) {
+        let epoch = self.validator_set.epoch();
+        let entry = self
+            .delegations
+            .entry((delegator, validator))
+            .or_insert(StakeEntry {
+                delegator,
+                validator,
+                amount: 0,
+                epoch,
+            });
+        entry.amount = entry.amount.saturating_add(amount);
+    }
+
+    /// Total delegated stake recorded for `(delegator, validator)`.
+    pub fn delegated_amount(&self, delegator: &Address, validator: &Address) -> u64 {
+        self.delegations
+            .get(&(*delegator, *validator))
+            .map(|e| e.amount)
+            .unwrap_or(0)
+    }
 }
 
 /// The validator set: active validators, pending enters/exits, and epoch
@@ -219,13 +307,29 @@ impl ValidatorSet {
             .collect()
     }
 
+    /// Slash a validator's active stake by `penalty_amount` and optionally jail/remove
+    /// it from active duty (`B6`).
+    pub fn slash_validator(&mut self, address: &Address, penalty_amount: u64, jail: bool) {
+        if let Some(val) = self.validators.get_mut(address) {
+            let deducted = penalty_amount.min(val.stake);
+            val.stake = val.stake.saturating_sub(deducted);
+            self.total_stake = self.total_stake.saturating_sub(deducted);
+            if jail {
+                self.total_stake = self.total_stake.saturating_sub(val.stake);
+                val.status = ValidatorStatus::Exiting;
+            }
+        }
+    }
+
     /// Request to enter the validator set. Added to the enter queue;
     /// processed at the next epoch boundary.
     pub fn request_enter(&mut self, address: Address, stake: u64, epoch: u64) {
         if stake < self.min_stake {
             return;
         }
-        if self.validators.contains_key(&address) {
+        if self.validators.contains_key(&address)
+            || self.enter_queue.iter().any(|r| r.address == address)
+        {
             return;
         }
         self.enter_queue.push_back(EnterRequest {
@@ -238,7 +342,9 @@ impl ValidatorSet {
     /// Request to exit the validator set. Added to the exit queue;
     /// processed at the next epoch boundary.
     pub fn request_exit(&mut self, address: Address, epoch: u64) {
-        if !self.validators.contains_key(&address) {
+        if !self.validators.contains_key(&address)
+            || self.exit_queue.iter().any(|r| r.address == address)
+        {
             return;
         }
         self.exit_queue.push_back(ExitRequest { address, epoch });
@@ -290,13 +396,25 @@ impl ValidatorSet {
     pub fn apply_set_update(
         &mut self,
         update: SetUpdate,
-        _current_tip_hash: &Hash,
+        current_tip_hash: &Hash,
     ) -> Result<(), SetUpdateError> {
         if update.epoch != self.epoch.number + 1 {
             return Err(SetUpdateError::WrongEpoch(
                 update.epoch,
                 self.epoch.number + 1,
             ));
+        }
+        if update.validators.is_empty()
+            || update.validators.iter().any(|v| v.stake < self.min_stake)
+        {
+            return Err(SetUpdateError::InsufficientStake);
+        }
+        let required_sigs = quorum_threshold(self.validators.len().max(1) as u64) as usize;
+        if update.qc.block_hash != *current_tip_hash
+            || update.qc.signatures.len() < required_sigs
+            || update.qc.signatures.len() != update.qc.public_keys.len()
+        {
+            return Err(SetUpdateError::InvalidQc);
         }
 
         self.validators = update
@@ -312,6 +430,20 @@ impl ValidatorSet {
         self.set_updates.insert(update.epoch, update);
 
         Ok(())
+    }
+
+    /// Verify the QC cryptographically under `chain_id` and apply the [`SetUpdate`].
+    pub fn apply_verified_set_update(
+        &mut self,
+        update: SetUpdate,
+        current_tip_hash: &Hash,
+        chain_id: &str,
+    ) -> Result<(), SetUpdateError> {
+        update
+            .qc
+            .verify(chain_id, aura_types::Domain::Vote)
+            .map_err(|_| SetUpdateError::InvalidQc)?;
+        self.apply_set_update(update, current_tip_hash)
     }
 
     /// Record a set update for historical lookup.
@@ -353,8 +485,10 @@ impl std::error::Error for SetUpdateError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bls::BlsSecretKey;
-    use crate::qc::VoteType;
+    use crate::bls::{BlsSecretKey, address_from_public_key};
+    use crate::finality::FinalityEngine;
+    use crate::proposer::Proposer;
+    use crate::qc::{QcAggregator, VoteType};
 
     fn test_address(index: u8) -> Address {
         Address::from_bytes([index; 20])
@@ -468,8 +602,37 @@ mod tests {
             validators: vec![test_validator(1, DEFAULT_MIN_STAKE)],
             qc,
         };
-        let err = set.apply_set_update(update, &Hash::from_bytes([0; 32]));
+        let err = set.apply_set_update(update, &Hash::from_bytes([0x42; 32]));
         assert!(matches!(err, Err(SetUpdateError::WrongEpoch(5, 1))));
+    }
+
+    #[test]
+    fn set_update_rejects_insufficient_stake() {
+        let mut set = ValidatorSet::new(vec![test_validator(0, DEFAULT_MIN_STAKE)], 100);
+        let tip = Hash::from_bytes([0x42; 32]);
+        let qc = make_qc(tip, 0, 0);
+        let update = SetUpdate {
+            epoch: 1,
+            validators: vec![test_validator(1, DEFAULT_MIN_STAKE - 1)],
+            qc,
+        };
+        let err = set.apply_set_update(update, &tip);
+        assert_eq!(err, Err(SetUpdateError::InsufficientStake));
+    }
+
+    #[test]
+    fn set_update_rejects_invalid_qc() {
+        let mut set = ValidatorSet::new(vec![test_validator(0, DEFAULT_MIN_STAKE)], 100);
+        let tip = Hash::from_bytes([0x42; 32]);
+        let wrong_tip = Hash::from_bytes([0x99; 32]);
+        let qc = make_qc(wrong_tip, 0, 0);
+        let update = SetUpdate {
+            epoch: 1,
+            validators: vec![test_validator(1, DEFAULT_MIN_STAKE)],
+            qc,
+        };
+        let err = set.apply_set_update(update, &tip);
+        assert_eq!(err, Err(SetUpdateError::InvalidQc));
     }
 
     #[test]
@@ -501,5 +664,101 @@ mod tests {
         assert!(set.is_active(&test_address(0)));
         set.advance_block();
         assert!(!set.is_active(&test_address(0)));
+    }
+
+    #[test]
+    fn four_to_seven_validator_change_at_height_h_without_stopping_network() {
+        const CHAIN: &str = "auralite-devnet-1";
+        const HEIGHT_H: u64 = 50;
+
+        let keys: Vec<BlsSecretKey> = (0..7u8)
+            .map(|i| BlsSecretKey::from_seed(&[i + 1; 32]))
+            .collect();
+        let addrs: Vec<Address> = keys
+            .iter()
+            .map(|k| address_from_public_key(&k.public_key()))
+            .collect();
+
+        let genesis_validators: Vec<Validator> = (0..4)
+            .map(|i| Validator {
+                address: addrs[i],
+                stake: DEFAULT_MIN_STAKE,
+                status: ValidatorStatus::Active,
+                epoch: 0,
+            })
+            .collect();
+
+        let mut staking = StakingContract::new(genesis_validators, HEIGHT_H);
+        assert_eq!(staking.validator_set().len(), 4);
+
+        // Queue 3 additional validators (4, 5, 6) to enter at epoch boundary H = 50.
+        for addr in &addrs[4..7] {
+            staking
+                .stake_and_enter(*addr, DEFAULT_MIN_STAKE * 2)
+                .expect("valid stake enters queue");
+        }
+
+        let genesis_hash = Hash::from_bytes([0u8; 32]);
+        let mut engine = FinalityEngine::new(CHAIN, 0, genesis_hash);
+
+        // Run 100 continuous blocks across height H = 50 without stopping the network.
+        for height in 1..=100u64 {
+            let active_list: Vec<Address> = staking
+                .validator_set()
+                .active_addresses()
+                .into_iter()
+                .collect();
+            let proposer_rot = Proposer::new(active_list);
+            let _leader = proposer_rot.propose(height - 1);
+
+            let block = engine.propose_at(
+                1_700_000_000_000 + height * 100,
+                vec![format!("tx-h-{height}").into_bytes()],
+            );
+
+            // Collect 2f+1 precommit votes from the active validator set (3 of 4 before H, 5 of 7 after H).
+            let n_active = staking.validator_set().len() as u64;
+            let needed = quorum_threshold(n_active) as usize;
+            let mut agg = QcAggregator::new(quorum_threshold(n_active));
+            let mut qc_opt = None;
+            for (idx, addr) in addrs.iter().enumerate() {
+                if !staking.validator_set().is_active(addr) {
+                    continue;
+                }
+                let vote = engine.vote_for(&keys[idx], *addr, &block, VoteType::Precommit);
+                let (maybe_qc, _newly_finalized) =
+                    engine.aggregate_and_commit(&mut agg, keys[idx].public_key(), vote);
+                if let Some(qc) = maybe_qc {
+                    assert_eq!(qc.signatures.len(), needed);
+                    qc_opt = Some(qc);
+                    break;
+                }
+            }
+            let qc = qc_opt.expect("2f+1 quorum reached");
+            qc.verify(CHAIN, aura_types::Domain::Vote)
+                .expect("QC verifies");
+            engine.change_round();
+
+            let crossed = staking.validator_set_mut().advance_block();
+            if height < HEIGHT_H {
+                assert!(crossed.is_none());
+                assert_eq!(staking.validator_set().len(), 4);
+            } else if height == HEIGHT_H {
+                let info = crossed.expect("epoch boundary crossed at height H");
+                assert_eq!(info.number, 1);
+                assert_eq!(info.start_height, HEIGHT_H);
+                assert_eq!(staking.validator_set().len(), 7);
+            } else if height == 2 * HEIGHT_H {
+                let info = crossed.expect("epoch boundary crossed at height 2*H");
+                assert_eq!(info.number, 2);
+                assert_eq!(staking.validator_set().len(), 7);
+            } else {
+                assert!(crossed.is_none());
+                assert_eq!(staking.validator_set().len(), 7);
+            }
+        }
+
+        // Verify the network finalized blocks continuously across the 4 -> 7 transition.
+        assert!(engine.commit_rule.finalized_count() >= 95);
     }
 }

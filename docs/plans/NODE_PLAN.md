@@ -1,8 +1,8 @@
 # NODE_PLAN — `aurad`, mempool, RPC, metrics, devnet
 
-**Status:** 📋 PLAN (D0–D8)  
-**Stage:** Stage 1: D0–D8 (all phases active).  
-**Deliverable:** `patches/0050-D0-...` … `patches/0058-D8-...`
+**Status:** ✅ COMPLETE — D0–D8 ✅ (`patches/0029-D0-node-baseline.patch`..`patches/0030-D1-aurad-skeleton.patch`, `patches/0035-D2-transaction-pipeline.patch`..`patches/0039-D6-observability.patch`, `patches/0045-D7-devnet.patch`..`patches/0046-D8-cli-aura.patch`).  
+**Stage:** Stage 1: D0–D8 (all phases active and complete).  
+**Deliverable:** `patches/0029-D0-node-baseline.patch`..`patches/0046-D8-cli-aura.patch` (landed).
 **Dependencies:** CORE, STATE, EXEC, CONSENSUS, NET (all lower layers).
 
 ## Problem
@@ -35,16 +35,12 @@ tx, keys, snapshot, upgrade) and its 30 vectors.
 | ✅ **D4** | JSON-RPC 2.0 | HTTP + WebSocket API over validated D2/D3 state; durable commit subscriptions | contract tests + 50 wire vectors + 6 mutation controls; H3 RPC-parser fuzz shard (60 s, 0 crashes) |
 | ✅ **D5** | gRPC + REST | protobuf schema, versioned gateway, OpenAPI, dedicated configurable gRPC listener | v1 → v1.1 additive compatibility; unknown REST request field → error; unsupported operations fail explicitly |
 | ✅ **D6** | Observability | Prometheus, `/health`, `/metrics`, OpenTelemetry traces, structured logs | dashboard: height, finality lag, mempool size, peer count, gas/s |
-| **D7** | Devnet | `make devnet` / `docker compose`: 4 validators, genesis, faucet key, logs | M1: 100 blocks, identical head, RPC returns a balance; NC: one validator down → network alive |
-| **D8** | CLI `aura` | node ops, query, tx, keys, genesis, snapshot, upgrade | 30 CLI vectors; `aura --help` fully documented |
+| ✅ **D7** | Devnet | `make devnet` / `docker compose`: 4 validators, genesis, faucet key, logs | M1: 100 blocks, identical head, RPC returns a balance; NC: one validator down → network alive |
+| ✅ **D8** | CLI `aura` | node ops, query, tx, keys, genesis, snapshot, upgrade | 30 CLI vectors; `aura --help` fully documented |
 
 ### D7 readiness note
 
-D7 is not ready to mark complete: the four-validator M1 acceptance depends on
-real N1/N2 transport and gossip, plus the B5 consensus connection. The current
-`aura-p2p` layer is still a placeholder. See the staged dependency and test
-plan in [`D7_READINESS.md`](D7_READINESS.md); four unrelated local daemons do
-not constitute a devnet.
+D7 prerequisite phases (`N0`–`N2` and `B4`–`B5`) and `D7` itself are now complete; see [`D7_READINESS.md`](D7_READINESS.md).
 
 ### D0 receipt (2026-10-29)
 
@@ -100,6 +96,22 @@ not constitute a devnet.
 - Added an importable Grafana dashboard for committed height, finality lag, mempool size, peer count and committed gas/s. P2P remains unimplemented: peer count and availability are explicitly zero.
 - `make test-d6`: 4 observability unit tests, JSON-log unit test, OTLP in-memory exporter unit test and 2 live HTTP contract tests passed. `make nc-d6`: 6/6 exact library-unit-test mutations reddened their named tests; restored library suite passed.
 - Clean D5-baseline application and complete gates are recorded in `docs/evidence/d6/clean-apply.txt` and `gates.txt`.
+
+### D7 receipt (2026-10-31)
+
+- Deliverable: `patches/0045-D7-devnet.patch`.
+- Added `aura_node::devnet`, `tools/run_devnet.py` (`make devnet`), and `docker-compose.yml` for a 4-validator local devnet (`auralite-devnet-1`) with deterministic genesis, a funded development-only faucet account (`1,000,000,000,000` units), distinct BLS12-381 consensus keys, distinct N1 Ed25519 peer identities (`peer_id = BLAKE3(pubkey)`), signed and deduplicated N2 `GossipTopic::{Tx,Proposal,Vote}` wire frames, B4 validator set, B5 VRF leader election, and 3-of-4 (`2f + 1`) BLS quorum certificates gating each validator's independent S2 WAL-backed `Pipeline`.
+- `make test-d7` and `make devnet` launch 4 separate `aurad` validator processes, verify `/health` and `/metrics` on all 4 nodes, submit a signed faucet transfer via JSON-RPC (`submit_tx`), finalize >= 100 blocks across all 4 validators with identical `height`, `block_hash`, `state_root` and account balances (`get_block`, `get_balance`), and verify that stopping 1 validator (`validator-3`) preserves the `f = 1` quorum of 3 and continues finalizing blocks and transfers across the remaining 3 validators.
+- `make nc-d7`: 6/6 exact library unit-test mutation controls pass (substituted peer identity rejection, malformed/unsigned gossip rejection, gossip deduplication, 3-of-4 quorum threshold, no commit with 2 votes, and continued finalization with 1 of 4 validators unavailable).
+- Evidence: `docs/evidence/d7/` (including `validator-0.log` .. `validator-3.log` with matching `state_root`s).
+
+### D8 receipt (2026-10-31)
+
+- Deliverable: `patches/0046-D8-cli-aura.patch`.
+- Added `aura_node::cli` and wired the `aura` binary (`crates/aura-genesis/src/bin/aura.rs`) across all seven subcommand families: `genesis` (`hash`, `verify`, `show`), `keys` (`derive`, `inspect`, `sign`, `verify`), `tx` (`transfer`, `decode`, `hash`), `query` (`balance`, `block`, `tx`, `health`), `node` (`config-check`, `status`, `health`), `snapshot` (`create`, `verify`, `info`), and `upgrade` (`plan`, `verify`), plus full `--help` and `--version` documentation.
+- Added 30 golden CLI vectors in `crates/aura-node/tests/fixtures/d8_golden.txt` (generated by `tools/gen_d8_vectors.py`) and verified them end-to-end in `crates/aura-node/tests/d8_cli.rs` alongside live `aurad` devnet transaction submission and RPC/health queries.
+- `make nc-d8`: 6/6 exact library unit-test mutation controls pass (`--help` completeness, forged signature rejection, transfer gas floor enforcement, unknown TOML key rejection, tampered snapshot digest rejection, and protocol downgrade rejection).
+- Evidence: `docs/evidence/d8/`.
 
 ## Risks
 

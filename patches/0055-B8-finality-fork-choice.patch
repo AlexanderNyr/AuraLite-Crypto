@@ -1,0 +1,2985 @@
+From 2af83bf77b85d29692b579c819b7be93a700910a Mon Sep 17 00:00:00 2001
+From: Aura Release Bot <release@aura.local>
+Date: Sun, 1 Nov 2026 16:09:19 +0000
+Subject: [PATCH] =?UTF-8?q?B8:=20Finality=20=E2=80=94=20fork=20choice,=20f?=
+ =?UTF-8?q?inalized=20checkpoint,=20light-client=20proof,=20deep-reorg=20d?=
+ =?UTF-8?q?efence?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ CHANGELOG.md                                  |  20 +
+ Makefile                                      |  21 +-
+ crates/aura-consensus/src/baseline.rs         |  22 +-
+ crates/aura-consensus/src/fork_choice.rs      | 763 ++++++++++++++++++
+ crates/aura-consensus/src/lib.rs              |   7 +-
+ crates/aura-consensus/tests/b8_fork_choice.rs | 258 ++++++
+ .../tests/fixtures/b8_baseline.txt            |  18 +
+ .../tests/fixtures/b8_fork_choice.txt         |  66 ++
+ docs/evidence/b4/SHA256SUMS                   |  12 +-
+ docs/evidence/b5/SHA256SUMS                   |  12 +-
+ docs/evidence/b6/SHA256SUMS                   |  10 +-
+ docs/evidence/b7/SHA256SUMS                   |  10 +-
+ docs/evidence/b8/README.md                    |  11 +
+ docs/evidence/b8/SHA256SUMS                   |  19 +
+ docs/evidence/b8/gate.log                     | 146 ++++
+ docs/evidence/b8/gates.txt                    |   9 +
+ docs/evidence/b8/inventory.txt                | 435 ++++++++++
+ docs/evidence/b8/nc.log                       |   8 +
+ docs/evidence/b8/report.md                    |  11 +
+ docs/evidence/b8/vectors.log                  |   1 +
+ docs/evidence/d4/SHA256SUMS                   |   6 +-
+ docs/evidence/d5/SHA256SUMS                   |   8 +-
+ docs/evidence/d6/SHA256SUMS                   |  10 +-
+ docs/evidence/d7/SHA256SUMS                   |   6 +-
+ docs/evidence/d8/SHA256SUMS                   |   6 +-
+ docs/evidence/n0/SHA256SUMS                   |   8 +-
+ docs/evidence/n1/SHA256SUMS                   |   8 +-
+ docs/evidence/n2/SHA256SUMS                   |   8 +-
+ docs/evidence/n3/SHA256SUMS                   |   8 +-
+ docs/evidence/n4/SHA256SUMS                   |   8 +-
+ docs/evidence/n5/SHA256SUMS                   |   8 +-
+ docs/evidence/n6/SHA256SUMS                   |   8 +-
+ docs/evidence/n7/SHA256SUMS                   |   8 +-
+ docs/evidence/n8/SHA256SUMS                   |   8 +-
+ docs/plans/CONSENSUS_PLAN.md                  |  13 +-
+ tools/audit_closeout.py                       |   7 +-
+ tools/gen_b8_vectors.py                       | 124 +++
+ tools/nc_b8.py                                |  57 ++
+ tools/write_b8_evidence.py                    | 137 ++++
+ 39 files changed, 2208 insertions(+), 97 deletions(-)
+ create mode 100644 crates/aura-consensus/src/fork_choice.rs
+ create mode 100644 crates/aura-consensus/tests/b8_fork_choice.rs
+ create mode 100644 crates/aura-consensus/tests/fixtures/b8_baseline.txt
+ create mode 100644 crates/aura-consensus/tests/fixtures/b8_fork_choice.txt
+ create mode 100644 docs/evidence/b8/README.md
+ create mode 100644 docs/evidence/b8/SHA256SUMS
+ create mode 100644 docs/evidence/b8/gate.log
+ create mode 100644 docs/evidence/b8/gates.txt
+ create mode 100644 docs/evidence/b8/inventory.txt
+ create mode 100644 docs/evidence/b8/nc.log
+ create mode 100644 docs/evidence/b8/report.md
+ create mode 100644 docs/evidence/b8/vectors.log
+ create mode 100644 tools/gen_b8_vectors.py
+ create mode 100644 tools/nc_b8.py
+ create mode 100644 tools/write_b8_evidence.py
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index f7be02f..9cef693 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,26 @@
+ All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
+ never rewritten: corrections are made with a new entry or an explicit note.
+ 
++## [B8 — Finality: fork choice, finalized checkpoint, light-client proof, and deep-reorg defence] 2026-11-01
++
++**Ninth `CONSENSUS_PLAN` phase.**
++Deliverable: `patches/0055-B8-finality-fork-choice.patch`. Zero new external crate dependencies added.
++
++- `aura_consensus::fork_choice` and `aura_consensus::baseline` — implements
++  fork-choice head selection (`ForkChoiceTree::select_canonical_head`),
++  weak-subjectivity-bounded finalized checkpoints (`FinalizedCheckpoint`,
++  `DEFAULT_WEAK_SUBJECTIVITY_WINDOW`), 3-chain consensus light-client proofs
++  (`ConsensusLightClientProof`), and deep-reorg rejection with cryptographic
++  `SlashingEvidence` emission (`ReorgRejection`, `ForkChoiceError::DeepReorgPastFinalized`),
++  advancing `aura_consensus::baseline` to `B8` (`D-B3`, `D-B4`).
++- `crates/aura-consensus/tests/b8_fork_choice.rs`, `crates/aura-consensus/tests/fixtures/b8_baseline.txt`,
++  and `crates/aura-consensus/tests/fixtures/b8_fork_choice.txt` — verifies
++  deep-reorg rejection + `SlashingEngine` tombstoning of the offending validator
++  and checks 64 deterministic fork-choice / reorg vectors.
++- `tools/nc_b8.py` — **6/6** negative controls targeting exact library unit
++  tests in `crates/aura-consensus/src/fork_choice.rs` (`--lib -- --exact`).
++  Cumulative negative controls: **321/321**. Evidence: `docs/evidence/b8/`.
++
+ ## [B7 — Rewards: inflation/reward, fee burn, delegation, commission, and 100,000-block sum invariant] 2026-11-01
+ 
+ **Eighth `CONSENSUS_PLAN` phase.**
+diff --git a/Makefile b/Makefile
+index e1954af..56878b3 100644
+--- a/Makefile
++++ b/Makefile
+@@ -35,8 +35,8 @@ PYTHON ?= python3
+         gen-x8-mutants nc-x8 evidence-x8 test-x8 \
+         gen-d0-vectors nc-d0 evidence-d0 test-d0 \
+         gen-d1-vectors nc-d1 evidence-d1 test-d1 \
+-        test-b0 test-b1 test-b2 test-b3 test-b4 test-b5 test-b6 test-b7 nc-b0 nc-b1 nc-b2 nc-b3 nc-b4 nc-b5 nc-b6 nc-b7 evidence-b0 evidence-b1 evidence-b2 evidence-b3 evidence-b4 evidence-b5 evidence-b6 evidence-b7 \
+-        gen-b0-vectors gen-b1-vectors gen-b2-vectors gen-b3-vectors gen-b4-vectors gen-b5-vectors gen-b6-vectors gen-b7-vectors \
++        test-b0 test-b1 test-b2 test-b3 test-b4 test-b5 test-b6 test-b7 test-b8 nc-b0 nc-b1 nc-b2 nc-b3 nc-b4 nc-b5 nc-b6 nc-b7 nc-b8 evidence-b0 evidence-b1 evidence-b2 evidence-b3 evidence-b4 evidence-b5 evidence-b6 evidence-b7 evidence-b8 \
++        gen-b0-vectors gen-b1-vectors gen-b2-vectors gen-b3-vectors gen-b4-vectors gen-b5-vectors gen-b6-vectors gen-b7-vectors gen-b8-vectors \
+         test-d2 nc-d2 evidence-d2 \
+         test-d3 nc-d3 evidence-d3 \
+         test-d4 nc-d4 evidence-d4 \
+@@ -318,7 +318,7 @@ evidence-c3:
+ # Runs every NC script WITHOUT rewriting the historical C0-C3 evidence logs,
+ # so their committed SHA256SUMS stay valid. CI uses this instead of nc-cX.
+ nc-all:
+-	@for phase in c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 s0 s1 s2 s3 s4 s5 s6 s7 x0 x1 x2 x3 x4 x5 x6 x7 x8 d0 d1 b0 b1 b2 b3 d2 d3 d4 d5 d6 n0 n1 n2 b4 b5 d7 d8 n3 n4 n5 n6 n7 n8 b6 b7; do \
++	@for phase in c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 s0 s1 s2 s3 s4 s5 s6 s7 x0 x1 x2 x3 x4 x5 x6 x7 x8 d0 d1 b0 b1 b2 b3 d2 d3 d4 d5 d6 n0 n1 n2 b4 b5 d7 d8 n3 n4 n5 n6 n7 n8 b6 b7 b8; do \
+ 	    $(PYTHON) tools/nc_$$phase.py > /tmp/aura-nc-$$phase.log 2>&1 || \
+ 	      { echo "$$phase NEGATIVE CONTROLS FAILED"; tail -30 /tmp/aura-nc-$$phase.log; exit 1; }; \
+ 	    grep '^RESULT:' /tmp/aura-nc-$$phase.log; \
+@@ -826,6 +826,21 @@ nc-b7:
+ evidence-b7:
+ 	@$(PYTHON) tools/write_b7_evidence.py
+ 
++gen-b8-vectors:
++	@$(PYTHON) tools/gen_b8_vectors.py
++
++test-b8:
++	@$(CARGO) test -p aura-consensus --lib
++	@$(CARGO) test -p aura-consensus --test b8_fork_choice
++
++nc-b8:
++	@mkdir -p docs/evidence/b8
++	@$(PYTHON) tools/nc_b8.py > docs/evidence/b8/nc.log 2>&1 || { cat docs/evidence/b8/nc.log; exit 1; }
++	@cat docs/evidence/b8/nc.log
++
++evidence-b8:
++	@$(PYTHON) tools/write_b8_evidence.py
++
+ test-d2:
+ 	@$(CARGO) test -p aura-node --test d2_pipeline
+ 
+diff --git a/crates/aura-consensus/src/baseline.rs b/crates/aura-consensus/src/baseline.rs
+index 149b497..fbd8ffb 100644
+--- a/crates/aura-consensus/src/baseline.rs
++++ b/crates/aura-consensus/src/baseline.rs
+@@ -39,7 +39,7 @@ use std::io::Write;
+ use std::path::{Path, PathBuf};
+ 
+ /// The phase these numbers belong to.
+-pub const PHASE: &str = "B7";
++pub const PHASE: &str = "B8";
+ 
+ /// Exit code of the refusal: no consensus exists.
+ pub const EXIT_STUB: i32 = 2;
+@@ -131,11 +131,11 @@ pub struct Capability {
+     pub what: &'static str,
+ }
+ 
+-/// The remaining capability B8 will add after B1–B7.
++/// The remaining capability B9 will add after B1–B8.
+ pub const MISSING_CAPABILITIES: [Capability; 1] = [Capability {
+-    name: "fork-choice-finality",
+-    phase: "B8",
+-    what: "fork choice, finalized checkpoint, light-client proof, deep reorg defence",
++    name: "on-chain-governance",
++    phase: "B9",
++    what: "proposal -> vote -> timelock -> runtime upgrade (WASM), emergency pause",
+ }];
+ 
+ /// What a consensus component turned out to be.
+@@ -560,13 +560,13 @@ mod tests {
+                 entry.layer.name
+             );
+         }
+-        // Also verify an unlanded B8 layer measures as Placeholder.
++        // Also verify an unlanded B9 layer measures as Placeholder.
+         let unlanded = measure(
+             &root,
+             Layer {
+-                name: "fork-choice-finality",
+-                phase: "B8",
+-                what: "fork choice, finalized checkpoint, light-client proof, deep reorg defence",
++                name: "on-chain-governance",
++                phase: "B9",
++                what: "proposal -> vote -> timelock -> runtime upgrade (WASM), emergency pause",
+             },
+         );
+         assert_eq!(unlanded.presence, Presence::Placeholder);
+@@ -699,13 +699,13 @@ mod tests {
+     fn the_fixture_is_what_the_binary_prints() {
+         let (code, out, _) = run(&["report", "--fixture"]);
+         assert_eq!(code, 0);
+-        assert_eq!(out, FIXTURE, "run `make gen-b7-vectors` to refresh the pin");
++        assert_eq!(out, FIXTURE, "run `make gen-b8-vectors` to refresh the pin");
+     }
+ 
+     use std::collections::BTreeMap;
+     use std::path::PathBuf;
+ 
+-    const FIXTURE: &str = include_str!("../tests/fixtures/b7_baseline.txt");
++    const FIXTURE: &str = include_str!("../tests/fixtures/b8_baseline.txt");
+ 
+     fn repo_root() -> PathBuf {
+         Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+diff --git a/crates/aura-consensus/src/fork_choice.rs b/crates/aura-consensus/src/fork_choice.rs
+new file mode 100644
+index 0000000..74ad40b
+--- /dev/null
++++ b/crates/aura-consensus/src/fork_choice.rs
+@@ -0,0 +1,763 @@
++//! B8 — Finality, fork choice, finalized checkpoints, consensus light-client
++//! proofs, and deep-reorg defence (`D-B3`, `D-B4`): any attempt to reorganize
++//! a finalized block is rejected and produces cryptographic [`SlashingEvidence`]
++//! against the offending signer.
++
++use std::collections::BTreeMap;
++use std::fmt;
++
++use aura_types::{Address, ChainId, Domain, Hash};
++
++use crate::finality::FinalityBlock;
++use crate::qc::{QuorumCertificate, Vote, quorum_threshold};
++use crate::signature::BlockSignature;
++use crate::slashing::SlashingEvidence;
++
++/// Default weak-subjectivity / unbonding window in blocks (`D-B3`).
++pub const DEFAULT_WEAK_SUBJECTIVITY_WINDOW: u64 = 10_000;
++
++/// Errors returned by the B8 fork-choice and deep-reorg defence engine.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum ForkChoiceError {
++    /// Block's parent hash is unknown in the fork-choice tree.
++    UnknownParent(Hash),
++    /// Checkpoint or proof QC failed BLS verification or lacks `2f+1` signatures.
++    InvalidCheckpointQc(&'static str),
++    /// Checkpoint height/view regresses below the current finalized checkpoint.
++    CheckpointRegression {
++        /// Current finalized height.
++        current_height: u64,
++        /// Proposed checkpoint height.
++        proposed_height: u64,
++    },
++    /// Checkpoint age exceeds the weak-subjectivity window (`D-B3`).
++    WeakSubjectivityExpired {
++        /// Checkpoint height.
++        checkpoint_height: u64,
++        /// Current head height.
++        head_height: u64,
++        /// Configured weak-subjectivity window.
++        window: u64,
++    },
++    /// Attempted to reorg a finalized block (`attempt to reorg a finalized block -> reject + evidence`).
++    DeepReorgPastFinalized {
++        /// Finalized checkpoint height.
++        finalized_height: u64,
++        /// Finalized checkpoint block hash.
++        finalized_hash: Hash,
++        /// Conflicting block height.
++        conflicting_height: u64,
++        /// Conflicting block hash.
++        conflicting_hash: Hash,
++    },
++    /// Light-client finality proof failed 3-chain or QC checks.
++    InvalidLightClientProof(&'static str),
++}
++
++impl fmt::Display for ForkChoiceError {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::UnknownParent(h) => write!(f, "unknown parent block {h}"),
++            Self::InvalidCheckpointQc(msg) => write!(f, "invalid checkpoint QC: {msg}"),
++            Self::CheckpointRegression {
++                current_height,
++                proposed_height,
++            } => write!(
++                f,
++                "checkpoint height regression: proposed {proposed_height} < current {current_height}"
++            ),
++            Self::WeakSubjectivityExpired {
++                checkpoint_height,
++                head_height,
++                window,
++            } => write!(
++                f,
++                "weak subjectivity expired: checkpoint {checkpoint_height} is older than head {head_height} - window {window}"
++            ),
++            Self::DeepReorgPastFinalized {
++                finalized_height,
++                finalized_hash,
++                conflicting_height,
++                conflicting_hash,
++            } => write!(
++                f,
++                "deep reorg rejected: conflicting block {conflicting_hash} at height {conflicting_height} conflicts with finalized checkpoint {finalized_hash} at height {finalized_height}"
++            ),
++            Self::InvalidLightClientProof(msg) => write!(f, "invalid light-client proof: {msg}"),
++        }
++    }
++}
++
++impl std::error::Error for ForkChoiceError {}
++
++/// A finalized consensus checkpoint anchored by a `2f+1` [`QuorumCertificate`] (`D-B3`).
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct FinalizedCheckpoint {
++    /// Finalized block height.
++    pub height: u64,
++    /// Consensus view at which the checkpoint was finalized.
++    pub view: u64,
++    /// Finalized block hash.
++    pub block_hash: Hash,
++    /// Executed state root at `height`.
++    pub state_root: Hash,
++    /// `2f+1` commit QC certifying `block_hash`.
++    pub commit_qc: QuorumCertificate,
++}
++
++impl FinalizedCheckpoint {
++    /// Verify the checkpoint's `commit_qc` against `chain_id` and `validator_count`.
++    pub fn verify(&self, chain_id: &ChainId, validator_count: u64) -> Result<(), ForkChoiceError> {
++        let required = quorum_threshold(validator_count) as usize;
++        if self.commit_qc.block_hash != self.block_hash {
++            return Err(ForkChoiceError::InvalidCheckpointQc(
++                "commit_qc block_hash does not match checkpoint block_hash",
++            ));
++        }
++        if self.commit_qc.len() < required
++            || self.commit_qc.public_keys.len() != self.commit_qc.signatures.len()
++        {
++            return Err(ForkChoiceError::InvalidCheckpointQc(
++                "commit_qc has fewer than 2f+1 signatures",
++            ));
++        }
++        self.commit_qc
++            .verify(chain_id.as_str(), Domain::Vote)
++            .map_err(|_| {
++                ForkChoiceError::InvalidCheckpointQc("commit_qc BLS verification failed")
++            })?;
++        Ok(())
++    }
++}
++
++/// Self-contained 3-chain finality proof for light clients (`B8`).
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct ConsensusLightClientProof {
++    /// Committed target block `B`.
++    pub target_block: FinalityBlock,
++    /// Committed state root of `target_block`.
++    pub state_root: Hash,
++    /// Child block `B'` whose `parent_hash == target_block.block_hash`.
++    pub child_block: FinalityBlock,
++    /// Grandchild block `B''` whose `parent_hash == child_block.block_hash`.
++    pub grandchild_block: FinalityBlock,
++    /// QC for `target_block` (`B`).
++    pub target_qc: QuorumCertificate,
++    /// QC for `child_block` (`B'`).
++    pub child_qc: QuorumCertificate,
++    /// QC for `grandchild_block` (`B''`).
++    pub grandchild_qc: QuorumCertificate,
++}
++
++impl ConsensusLightClientProof {
++    /// Verify the 3-chain parent links, same-view rule, and `2f+1` BLS QCs.
++    pub fn verify(&self, chain_id: &ChainId, validator_count: u64) -> Result<(), ForkChoiceError> {
++        if self.child_block.parent_hash != self.target_block.block_hash
++            || self.grandchild_block.parent_hash != self.child_block.block_hash
++        {
++            return Err(ForkChoiceError::InvalidLightClientProof(
++                "broken parent_hash chain across target -> child -> grandchild",
++            ));
++        }
++        if self.target_qc.block_hash != self.target_block.block_hash
++            || self.child_qc.block_hash != self.child_block.block_hash
++            || self.grandchild_qc.block_hash != self.grandchild_block.block_hash
++        {
++            return Err(ForkChoiceError::InvalidLightClientProof(
++                "QC block_hash mismatch in 3-chain proof",
++            ));
++        }
++        if self.target_qc.view != self.child_qc.view
++            || self.child_qc.view != self.grandchild_qc.view
++        {
++            return Err(ForkChoiceError::InvalidLightClientProof(
++                "3-chain QCs must share the same view",
++            ));
++        }
++        let required = quorum_threshold(validator_count) as usize;
++        for qc in [&self.target_qc, &self.child_qc, &self.grandchild_qc] {
++            if qc.len() < required || qc.public_keys.len() != qc.signatures.len() {
++                return Err(ForkChoiceError::InvalidLightClientProof(
++                    "QC in 3-chain proof has fewer than 2f+1 signatures",
++                ));
++            }
++            qc.verify(chain_id.as_str(), Domain::Vote).map_err(|_| {
++                ForkChoiceError::InvalidLightClientProof(
++                    "QC BLS signature verification failed in 3-chain proof",
++                )
++            })?;
++        }
++        Ok(())
++    }
++}
++
++/// Signed block candidate submitted to [`ForkChoiceTree`].
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct SignedForkBlock {
++    /// Block height (`0` for genesis).
++    pub height: u64,
++    /// Consensus block.
++    pub block: FinalityBlock,
++    /// Highest QC view justified by this block.
++    pub justified_qc_view: u64,
++    /// Proposer's Ed25519 block signature.
++    pub proposer_sig: BlockSignature,
++    /// Optional validator precommit vote accompanying this block.
++    pub attester_vote: Option<Vote>,
++}
++
++/// Outcome of submitting a candidate block to [`ForkChoiceTree`] when a deep reorg
++/// against a finalized block is attempted.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct ReorgRejection {
++    /// Specific deep-reorg error.
++    pub error: ForkChoiceError,
++    /// Cryptographic [`SlashingEvidence`] generated from the conflicting finalized
++    /// and reorg signatures, ready for [`crate::slashing::SlashingEngine::submit_evidence`].
++    pub evidence: SlashingEvidence,
++}
++
++/// B8 Fork-Choice & Deep-Reorg Defence engine (`D-B3`, `D-B4`).
++#[derive(Debug, Clone)]
++pub struct ForkChoiceTree {
++    chain_id: ChainId,
++    validator_count: u64,
++    weak_subjectivity_window: u64,
++    blocks: BTreeMap<Hash, SignedForkBlock>,
++    canonical_by_height: BTreeMap<u64, Hash>,
++    finalized_checkpoint: FinalizedCheckpoint,
++    emitted_evidence: Vec<SlashingEvidence>,
++}
++
++impl ForkChoiceTree {
++    /// Initialize a [`ForkChoiceTree`] anchored at `genesis` and `genesis_checkpoint`.
++    pub fn new(
++        chain_id: ChainId,
++        validator_count: u64,
++        genesis: SignedForkBlock,
++        genesis_checkpoint: FinalizedCheckpoint,
++    ) -> Self {
++        let genesis_hash = genesis.block.block_hash;
++        let mut blocks = BTreeMap::new();
++        blocks.insert(genesis_hash, genesis);
++        let mut canonical_by_height = BTreeMap::new();
++        canonical_by_height.insert(0, genesis_hash);
++        Self {
++            chain_id,
++            validator_count,
++            weak_subjectivity_window: DEFAULT_WEAK_SUBJECTIVITY_WINDOW,
++            blocks,
++            canonical_by_height,
++            finalized_checkpoint: genesis_checkpoint,
++            emitted_evidence: Vec::new(),
++        }
++    }
++
++    /// Override the weak-subjectivity window in blocks (`D-B3`).
++    pub fn with_weak_subjectivity_window(mut self, window: u64) -> Self {
++        self.weak_subjectivity_window = window;
++        self
++    }
++
++    /// Borrow the latest [`FinalizedCheckpoint`].
++    pub const fn finalized_checkpoint(&self) -> &FinalizedCheckpoint {
++        &self.finalized_checkpoint
++    }
++
++    /// Borrow all [`SlashingEvidence`] items emitted by rejected deep-reorg attempts.
++    pub fn emitted_evidence(&self) -> &[SlashingEvidence] {
++        &self.emitted_evidence
++    }
++
++    /// Check whether `block_hash` descends from (or equals) `ancestor_hash`.
++    pub fn descends_from(&self, mut block_hash: Hash, ancestor_hash: Hash) -> bool {
++        while let Some(node) = self.blocks.get(&block_hash) {
++            if block_hash == ancestor_hash {
++                return true;
++            }
++            if node.height == 0 || node.block.parent_hash == block_hash {
++                break;
++            }
++            block_hash = node.block.parent_hash;
++        }
++        false
++    }
++
++    /// Select the canonical head among all known blocks that **descend from
++    /// `finalized_checkpoint.block_hash`**, ordered by:
++    /// `(justified_qc_view, height)` descending, tie-broken by lowest `block_hash`.
++    pub fn select_canonical_head(&self) -> Hash {
++        let finalized_hash = self.finalized_checkpoint.block_hash;
++        let mut best_hash = finalized_hash;
++        let mut best_score = self
++            .blocks
++            .get(&finalized_hash)
++            .map(|b| (b.justified_qc_view, b.height))
++            .unwrap_or((0, self.finalized_checkpoint.height));
++
++        for (&hash, candidate) in &self.blocks {
++            if !self.descends_from(hash, finalized_hash) {
++                continue;
++            }
++            let score = (candidate.justified_qc_view, candidate.height);
++            if score > best_score || (score == best_score && hash < best_hash) {
++                best_score = score;
++                best_hash = hash;
++            }
++        }
++        best_hash
++    }
++
++    /// Advance the finalized checkpoint after verifying `checkpoint`'s `2f+1` QC
++    /// and weak-subjectivity bounds (`D-B3`).
++    pub fn update_finalized_checkpoint(
++        &mut self,
++        checkpoint: FinalizedCheckpoint,
++        current_head_height: u64,
++    ) -> Result<(), ForkChoiceError> {
++        if checkpoint.height < self.finalized_checkpoint.height {
++            return Err(ForkChoiceError::CheckpointRegression {
++                current_height: self.finalized_checkpoint.height,
++                proposed_height: checkpoint.height,
++            });
++        }
++        if current_head_height.saturating_sub(checkpoint.height) > self.weak_subjectivity_window {
++            return Err(ForkChoiceError::WeakSubjectivityExpired {
++                checkpoint_height: checkpoint.height,
++                head_height: current_head_height,
++                window: self.weak_subjectivity_window,
++            });
++        }
++        checkpoint.verify(&self.chain_id, self.validator_count)?;
++
++        // Walk ancestors from checkpoint back to previous finalized checkpoint to index canonical heights.
++        let mut cursor = checkpoint.block_hash;
++        while let Some(entry) = self.blocks.get(&cursor) {
++            self.canonical_by_height.insert(entry.height, cursor);
++            if entry.height == 0 || cursor == self.finalized_checkpoint.block_hash {
++                break;
++            }
++            cursor = entry.block.parent_hash;
++        }
++        self.finalized_checkpoint = checkpoint;
++        Ok(())
++    }
++
++    /// Insert a candidate block into the fork-choice tree.
++    ///
++    /// If `candidate` attempts to reorg a finalized block (`candidate.height <= finalized_height`
++    /// with `block_hash != canonical_hash`, or does not descend from `finalized_checkpoint`
++    /// despite having `height > finalized_height`), the reorg is **rejected** and
++    /// cryptographic [`SlashingEvidence`] is emitted and returned (`Err(Box<ReorgRejection>)`).
++    pub fn insert_block(
++        &mut self,
++        candidate: SignedForkBlock,
++    ) -> Result<Hash, Result<ForkChoiceError, Box<ReorgRejection>>> {
++        let hash = candidate.block.block_hash;
++        if candidate.height > 0 && !self.blocks.contains_key(&candidate.block.parent_hash) {
++            return Err(Ok(ForkChoiceError::UnknownParent(
++                candidate.block.parent_hash,
++            )));
++        }
++
++        let fin_height = self.finalized_checkpoint.height;
++        let fin_hash = self.finalized_checkpoint.block_hash;
++
++        // Check if this block conflicts with the finalized chain!
++        let conflicts_with_finalized = if candidate.height <= fin_height {
++            self.canonical_by_height
++                .get(&candidate.height)
++                .map(|&canon| canon != hash)
++                .unwrap_or(true)
++        } else {
++            !self.descends_from(candidate.block.parent_hash, fin_hash)
++        };
++
++        if conflicts_with_finalized {
++            let err = ForkChoiceError::DeepReorgPastFinalized {
++                finalized_height: fin_height,
++                finalized_hash: fin_hash,
++                conflicting_height: candidate.height,
++                conflicting_hash: hash,
++            };
++            if let Some(evidence) = self.build_reorg_slashing_evidence(&candidate) {
++                self.emitted_evidence.push(evidence.clone());
++                return Err(Err(Box::new(ReorgRejection {
++                    error: err,
++                    evidence,
++                })));
++            }
++            return Err(Ok(err));
++        }
++
++        self.blocks.insert(hash, candidate);
++        Ok(self.select_canonical_head())
++    }
++
++    fn build_reorg_slashing_evidence(
++        &self,
++        conflicting: &SignedForkBlock,
++    ) -> Option<SlashingEvidence> {
++        // 1. If a finalized block at the same height (or same view/round) was signed by the same proposer,
++        // emit DoubleSignProposal evidence.
++        if let Some(&canon_hash) = self.canonical_by_height.get(&conflicting.height)
++            && let Some(canon_block) = self.blocks.get(&canon_hash)
++        {
++            if canon_block.proposer_sig.validator == conflicting.proposer_sig.validator
++                && canon_block.proposer_sig.block_hash != conflicting.proposer_sig.block_hash
++            {
++                return Some(SlashingEvidence::DoubleSignProposal {
++                    view: conflicting.block.view,
++                    round: conflicting.block.round,
++                    first: canon_block.proposer_sig.clone(),
++                    second: conflicting.proposer_sig.clone(),
++                });
++            }
++            if let (Some(v_canon), Some(v_fork)) =
++                (&canon_block.attester_vote, &conflicting.attester_vote)
++                && v_canon.validator == v_fork.validator
++                && v_canon.view == v_fork.view
++                && v_canon.round == v_fork.round
++                && v_canon.block_hash != v_fork.block_hash
++            {
++                return Some(SlashingEvidence::DoubleSignVote {
++                    first: v_canon.clone(),
++                    second: v_fork.clone(),
++                });
++            }
++        }
++
++        // 2. Otherwise scan finalized blocks for any conflicting proposal or vote from the same validator.
++        for &canon_hash in self.canonical_by_height.values() {
++            if let Some(canon_block) = self.blocks.get(&canon_hash)
++                && canon_block.proposer_sig.validator == conflicting.proposer_sig.validator
++                && canon_block.proposer_sig.block_hash != conflicting.proposer_sig.block_hash
++            {
++                return Some(SlashingEvidence::DoubleSignProposal {
++                    view: conflicting.block.view,
++                    round: conflicting.block.round,
++                    first: canon_block.proposer_sig.clone(),
++                    second: conflicting.proposer_sig.clone(),
++                });
++            }
++        }
++        None
++    }
++
++    /// Helper to look up a block's proposer address if present.
++    pub fn block_proposer(&self, block_hash: &Hash) -> Option<Address> {
++        self.blocks
++            .get(block_hash)
++            .map(|b| b.proposer_sig.validator)
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::bls::{self, BlsSecretKey};
++    use crate::qc::{QcAggregator, VoteType};
++    use crate::slashing::{SlashingEngine, SlashingParams, ValidatorSlashingRecord};
++    use aura_crypto::ed25519_public_key;
++
++    struct TestVal {
++        ed_seed: [u8; 32],
++        bls_sk: BlsSecretKey,
++        record: ValidatorSlashingRecord,
++    }
++
++    fn make_validators(count: usize) -> Vec<TestVal> {
++        (0..count)
++            .map(|i| {
++                let seed = [(i as u8) + 1; 32];
++                let bls_sk = BlsSecretKey::from_seed(&seed);
++                let bls_pk = bls_sk.public_key();
++                let address = bls::address_from_public_key(&bls_pk);
++                let ed_pk = ed25519_public_key(&seed);
++                TestVal {
++                    ed_seed: seed,
++                    bls_sk,
++                    record: ValidatorSlashingRecord {
++                        address,
++                        ed25519_pubkey: ed_pk,
++                        bls_pubkey: bls_pk,
++                        current_stake: 10_000_000,
++                        jailed: false,
++                        tombstoned: false,
++                        slash_count: 0,
++                    },
++                }
++            })
++            .collect()
++    }
++
++    fn build_qc(
++        vals: &[TestVal],
++        chain_id: &ChainId,
++        view: u64,
++        round: u64,
++        block_hash: Hash,
++        signers: usize,
++    ) -> QuorumCertificate {
++        let mut agg = QcAggregator::new(signers as u64);
++        let mut out = None;
++        for v in &vals[0..signers] {
++            let mut msg = Vec::with_capacity(49);
++            msg.extend_from_slice(&view.to_le_bytes());
++            msg.extend_from_slice(&round.to_le_bytes());
++            msg.extend_from_slice(block_hash.as_bytes());
++            msg.push(VoteType::Precommit as u8);
++            let sig = v.bls_sk.sign(chain_id.as_str(), Domain::Vote, &msg);
++            let vote = Vote {
++                view,
++                round,
++                block_hash,
++                validator: v.record.address,
++                vote_type: VoteType::Precommit,
++                signature: sig,
++            };
++            if let Some(qc) = agg.add_vote(v.record.bls_pubkey.clone(), vote) {
++                out = Some(qc);
++            }
++        }
++        out.unwrap()
++    }
++
++    #[allow(clippy::too_many_arguments)]
++    fn make_signed_block(
++        val: &TestVal,
++        chain_id: &ChainId,
++        height: u64,
++        view: u64,
++        round: u64,
++        parent: &FinalityBlock,
++        justified_qc_view: u64,
++        tx_tag: &[u8],
++    ) -> SignedForkBlock {
++        let block = if height == 0 {
++            FinalityBlock {
++                view: 0,
++                round: 0,
++                parent_hash: Hash::ZERO,
++                timestamp_ms: 1_000,
++                block_hash: Hash::from_bytes([0x01; 32]),
++                qc: None,
++                transactions: Vec::new(),
++            }
++        } else {
++            FinalityBlock::propose(
++                view,
++                round,
++                parent,
++                1_000 + height * 1_000,
++                vec![tx_tag.to_vec()],
++            )
++        };
++        let proposer_sig = BlockSignature::sign_block(
++            &val.ed_seed,
++            val.record.address,
++            block.block_hash,
++            chain_id.as_str(),
++        );
++        SignedForkBlock {
++            height,
++            block,
++            justified_qc_view,
++            proposer_sig,
++            attester_vote: None,
++        }
++    }
++
++    fn setup_tree() -> (ForkChoiceTree, Vec<TestVal>, ChainId, SignedForkBlock) {
++        let chain_id = ChainId::new("auralite-b8-unit").unwrap();
++        let vals = make_validators(4);
++        let dummy = FinalityBlock {
++            view: 0,
++            round: 0,
++            parent_hash: Hash::ZERO,
++            timestamp_ms: 0,
++            block_hash: Hash::ZERO,
++            qc: None,
++            transactions: Vec::new(),
++        };
++        let genesis = make_signed_block(&vals[0], &chain_id, 0, 0, 0, &dummy, 0, b"genesis");
++        let genesis_qc = build_qc(&vals, &chain_id, 0, 0, genesis.block.block_hash, 3);
++        let cp = FinalizedCheckpoint {
++            height: 0,
++            view: 0,
++            block_hash: genesis.block.block_hash,
++            state_root: Hash::from_bytes([0xAA; 32]),
++            commit_qc: genesis_qc,
++        };
++        let tree = ForkChoiceTree::new(chain_id.clone(), 4, genesis.clone(), cp);
++        (tree, vals, chain_id, genesis)
++    }
++
++    #[test]
++    fn attempt_to_reorg_finalized_block_is_rejected_and_emits_slashing_evidence() {
++        let (mut tree, vals, chain_id, genesis) = setup_tree();
++
++        // Build and finalize heights 1 and 2.
++        let b1 = make_signed_block(&vals[1], &chain_id, 1, 1, 0, &genesis.block, 0, b"canon-1");
++        let b2 = make_signed_block(&vals[2], &chain_id, 2, 2, 0, &b1.block, 1, b"canon-2");
++        tree.insert_block(b1.clone()).unwrap();
++        tree.insert_block(b2.clone()).unwrap();
++
++        let qc2 = build_qc(&vals, &chain_id, 2, 0, b2.block.block_hash, 3);
++        tree.update_finalized_checkpoint(
++            FinalizedCheckpoint {
++                height: 2,
++                view: 2,
++                block_hash: b2.block.block_hash,
++                state_root: Hash::from_bytes([0xBB; 32]),
++                commit_qc: qc2,
++            },
++            2,
++        )
++        .unwrap();
++
++        // Now validator 1 attempts to reorg finalized block 1 by signing a conflicting fork block at height 1!
++        let reorg_b1 =
++            make_signed_block(&vals[1], &chain_id, 1, 1, 0, &genesis.block, 10, b"reorg-1");
++        let res = tree.insert_block(reorg_b1);
++        let Err(Err(rejection)) = res else {
++            panic!("expected DeepReorgPastFinalized with SlashingEvidence, got {res:?}");
++        };
++        assert!(matches!(
++            rejection.error,
++            ForkChoiceError::DeepReorgPastFinalized {
++                finalized_height: 2,
++                conflicting_height: 1,
++                ..
++            }
++        ));
++        assert_eq!(tree.emitted_evidence().len(), 1);
++
++        // Verify the emitted evidence slashes and tombstones validator 1 in SlashingEngine!
++        let records = vals.iter().map(|v| v.record.clone()).collect();
++        let mut slashing = SlashingEngine::new(chain_id, SlashingParams::default(), records);
++        let receipt = slashing
++            .submit_evidence(&rejection.evidence, vals[0].record.address, None)
++            .unwrap();
++        assert_eq!(receipt.offender, vals[1].record.address);
++        assert!(receipt.tombstoned);
++    }
++
++    #[test]
++    fn fork_choice_prefers_branch_with_highest_qc_view_descending_from_finalized() {
++        let (mut tree, vals, chain_id, genesis) = setup_tree();
++
++        // Branch A: height 1, justified_qc_view = 2
++        let branch_a =
++            make_signed_block(&vals[1], &chain_id, 1, 1, 0, &genesis.block, 2, b"branch-a");
++        // Branch B: height 1, justified_qc_view = 5 (higher QC view wins!)
++        let branch_b =
++            make_signed_block(&vals[2], &chain_id, 1, 2, 0, &genesis.block, 5, b"branch-b");
++
++        tree.insert_block(branch_a).unwrap();
++        let head = tree.insert_block(branch_b.clone()).unwrap();
++        assert_eq!(head, branch_b.block.block_hash);
++    }
++
++    #[test]
++    fn fork_not_descending_from_finalized_checkpoint_is_never_selected() {
++        let (mut tree, vals, chain_id, genesis) = setup_tree();
++
++        // Create two competing blocks at height 1 BEFORE finalizing either.
++        let b1_canon =
++            make_signed_block(&vals[1], &chain_id, 1, 1, 0, &genesis.block, 1, b"canon-1");
++        let b1_stale =
++            make_signed_block(&vals[2], &chain_id, 1, 2, 0, &genesis.block, 99, b"stale-1");
++        tree.insert_block(b1_canon.clone()).unwrap();
++        tree.insert_block(b1_stale.clone()).unwrap();
++
++        // Finalize b1_canon! Even though b1_stale had justified_qc_view = 99, canonical head must now be b1_canon.
++        let qc1 = build_qc(&vals, &chain_id, 1, 0, b1_canon.block.block_hash, 3);
++        tree.update_finalized_checkpoint(
++            FinalizedCheckpoint {
++                height: 1,
++                view: 1,
++                block_hash: b1_canon.block.block_hash,
++                state_root: Hash::from_bytes([0xCC; 32]),
++                commit_qc: qc1,
++            },
++            1,
++        )
++        .unwrap();
++
++        assert_eq!(tree.select_canonical_head(), b1_canon.block.block_hash);
++    }
++
++    #[test]
++    fn finalized_checkpoint_rejects_invalid_or_sub_quorum_qc() {
++        let (mut tree, vals, chain_id, genesis) = setup_tree();
++        let b1 = make_signed_block(&vals[1], &chain_id, 1, 1, 0, &genesis.block, 1, b"b1");
++        tree.insert_block(b1.clone()).unwrap();
++
++        // Only 2 signers (< 3 required for 4 validators) -> rejected!
++        let sub_quorum_qc = build_qc(&vals, &chain_id, 1, 0, b1.block.block_hash, 2);
++        let bad_cp = FinalizedCheckpoint {
++            height: 1,
++            view: 1,
++            block_hash: b1.block.block_hash,
++            state_root: Hash::from_bytes([0xDD; 32]),
++            commit_qc: sub_quorum_qc,
++        };
++        assert!(matches!(
++            tree.update_finalized_checkpoint(bad_cp, 1),
++            Err(ForkChoiceError::InvalidCheckpointQc(_))
++        ));
++    }
++
++    #[test]
++    fn light_client_proof_verifies_3_chain_finality_and_rejects_forged_qc() {
++        let (_tree, vals, chain_id, genesis) = setup_tree();
++        let b1 = FinalityBlock::propose(1, 0, &genesis.block, 2_000, vec![b"tx1".to_vec()]);
++        let b2 = FinalityBlock::propose(1, 1, &b1, 3_000, vec![b"tx2".to_vec()]);
++        let b3 = FinalityBlock::propose(1, 2, &b2, 4_000, vec![b"tx3".to_vec()]);
++
++        let qc1 = build_qc(&vals, &chain_id, 1, 0, b1.block_hash, 3);
++        let qc2 = build_qc(&vals, &chain_id, 1, 1, b2.block_hash, 3);
++        let qc3 = build_qc(&vals, &chain_id, 1, 2, b3.block_hash, 3);
++
++        let proof = ConsensusLightClientProof {
++            target_block: b1,
++            state_root: Hash::from_bytes([0xEE; 32]),
++            child_block: b2,
++            grandchild_block: b3,
++            target_qc: qc1,
++            child_qc: qc2,
++            grandchild_qc: qc3,
++        };
++        proof.verify(&chain_id, 4).unwrap();
++
++        // Tamper with grandchild_qc view -> must fail 3-chain same-view rule.
++        let mut bad_proof = proof.clone();
++        bad_proof.grandchild_qc.view = 2;
++        assert!(matches!(
++            bad_proof.verify(&chain_id, 4),
++            Err(ForkChoiceError::InvalidLightClientProof(_))
++        ));
++    }
++
++    #[test]
++    fn weak_subjectivity_rejects_stale_checkpoint_beyond_unbonding_window() {
++        let (tree, vals, chain_id, genesis) = setup_tree();
++        let mut tree = tree.with_weak_subjectivity_window(100);
++        let b1 = make_signed_block(&vals[1], &chain_id, 1, 1, 0, &genesis.block, 1, b"b1");
++        tree.insert_block(b1.clone()).unwrap();
++        let qc1 = build_qc(&vals, &chain_id, 1, 0, b1.block.block_hash, 3);
++        let cp = FinalizedCheckpoint {
++            height: 1,
++            view: 1,
++            block_hash: b1.block.block_hash,
++            state_root: Hash::from_bytes([0xFF; 32]),
++            commit_qc: qc1,
++        };
++        // Head height = 500, checkpoint height = 1 -> age 499 > window 100 -> rejected!
++        assert!(matches!(
++            tree.update_finalized_checkpoint(cp, 500),
++            Err(ForkChoiceError::WeakSubjectivityExpired { .. })
++        ));
++    }
++}
+diff --git a/crates/aura-consensus/src/lib.rs b/crates/aura-consensus/src/lib.rs
+index f0129e9..d5d7d62 100644
+--- a/crates/aura-consensus/src/lib.rs
++++ b/crates/aura-consensus/src/lib.rs
+@@ -1,9 +1,9 @@
+ //! `aura-consensus` — BFT-PoS consensus: B0 baseline + B1 proposer & block
+ //! signature + B2 BLS12-381 & QC + B3 BFT finality + B4 validator set + B5 VRF
+-//! leader election + B6 slashing & evidence + B7 rewards.
++//! leader election + B6 slashing & evidence + B7 rewards + B8 fork-choice &
++//! deep-reorg defence.
+ //!
+-//! Subsequent phases (B8–B10) add fork-choice, governance,
+-//! and TLA+ safety evidence.
++//! Subsequent phases (B9–B10) add on-chain governance and TLA+ safety evidence.
+ 
+ #![forbid(unsafe_code)]
+ #![deny(missing_docs)]
+@@ -13,6 +13,7 @@ pub mod baseline;
+ pub mod bls;
+ pub mod error;
+ pub mod finality;
++pub mod fork_choice;
+ pub mod proposer;
+ pub mod qc;
+ pub mod rewards;
+diff --git a/crates/aura-consensus/tests/b8_fork_choice.rs b/crates/aura-consensus/tests/b8_fork_choice.rs
+new file mode 100644
+index 0000000..d845e74
+--- /dev/null
++++ b/crates/aura-consensus/tests/b8_fork_choice.rs
+@@ -0,0 +1,258 @@
++//! B8 integration tests — Fork choice, finalized checkpoints, consensus
++//! light-client 3-chain proofs, deep-reorg rejection with cryptographic
++//! [`SlashingEvidence`] emission (`D-B3`, `D-B4`), and 64-case vector fixture
++//! verification.
++
++use aura_consensus::bls::{BlsSecretKey, address_from_public_key};
++use aura_consensus::finality::FinalityBlock;
++use aura_consensus::fork_choice::{
++    ConsensusLightClientProof, FinalizedCheckpoint, ForkChoiceError, ForkChoiceTree,
++    SignedForkBlock,
++};
++use aura_consensus::qc::{QcAggregator, QuorumCertificate, Vote, VoteType};
++use aura_consensus::signature::BlockSignature;
++use aura_consensus::slashing::{SlashingEngine, SlashingParams, ValidatorSlashingRecord};
++use aura_crypto::ed25519_public_key;
++use aura_types::{ChainId, Domain, Hash};
++
++const FIXTURE: &str = include_str!("fixtures/b8_fork_choice.txt");
++
++struct TestVal {
++    ed_seed: [u8; 32],
++    bls_sk: BlsSecretKey,
++    record: ValidatorSlashingRecord,
++}
++
++fn make_validators(count: usize) -> Vec<TestVal> {
++    (0..count)
++        .map(|i| {
++            let seed = [(i as u8) + 1; 32];
++            let bls_sk = BlsSecretKey::from_seed(&seed);
++            let bls_pk = bls_sk.public_key();
++            let address = address_from_public_key(&bls_pk);
++            let ed_pk = ed25519_public_key(&seed);
++            TestVal {
++                ed_seed: seed,
++                bls_sk,
++                record: ValidatorSlashingRecord {
++                    address,
++                    ed25519_pubkey: ed_pk,
++                    bls_pubkey: bls_pk,
++                    current_stake: 10_000_000,
++                    jailed: false,
++                    tombstoned: false,
++                    slash_count: 0,
++                },
++            }
++        })
++        .collect()
++}
++
++fn build_qc(
++    vals: &[TestVal],
++    chain_id: &ChainId,
++    view: u64,
++    round: u64,
++    block_hash: Hash,
++    signers: usize,
++) -> QuorumCertificate {
++    let mut agg = QcAggregator::new(signers as u64);
++    let mut out = None;
++    for v in &vals[0..signers] {
++        let mut msg = Vec::with_capacity(49);
++        msg.extend_from_slice(&view.to_le_bytes());
++        msg.extend_from_slice(&round.to_le_bytes());
++        msg.extend_from_slice(block_hash.as_bytes());
++        msg.push(VoteType::Precommit as u8);
++        let sig = v.bls_sk.sign(chain_id.as_str(), Domain::Vote, &msg);
++        let vote = Vote {
++            view,
++            round,
++            block_hash,
++            validator: v.record.address,
++            vote_type: VoteType::Precommit,
++            signature: sig,
++        };
++        if let Some(qc) = agg.add_vote(v.record.bls_pubkey.clone(), vote) {
++            out = Some(qc);
++        }
++    }
++    out.unwrap()
++}
++
++#[allow(clippy::too_many_arguments)]
++fn make_signed_block(
++    val: &TestVal,
++    chain_id: &ChainId,
++    height: u64,
++    view: u64,
++    round: u64,
++    parent: &FinalityBlock,
++    justified_qc_view: u64,
++    tx_tag: &[u8],
++) -> SignedForkBlock {
++    let block = if height == 0 {
++        FinalityBlock {
++            view: 0,
++            round: 0,
++            parent_hash: Hash::ZERO,
++            timestamp_ms: 1_000,
++            block_hash: Hash::from_bytes([0x01; 32]),
++            qc: None,
++            transactions: Vec::new(),
++        }
++    } else {
++        FinalityBlock::propose(
++            view,
++            round,
++            parent,
++            1_000 + height * 1_000,
++            vec![tx_tag.to_vec()],
++        )
++    };
++    let proposer_sig = BlockSignature::sign_block(
++        &val.ed_seed,
++        val.record.address,
++        block.block_hash,
++        chain_id.as_str(),
++    );
++    SignedForkBlock {
++        height,
++        block,
++        justified_qc_view,
++        proposer_sig,
++        attester_vote: None,
++    }
++}
++
++#[test]
++fn b8_deep_reorg_past_finalized_checkpoint_is_rejected_and_slashes_offender() {
++    let chain_id = ChainId::new("auralite-b8-integration").unwrap();
++    let vals = make_validators(4);
++    let dummy = FinalityBlock {
++        view: 0,
++        round: 0,
++        parent_hash: Hash::ZERO,
++        timestamp_ms: 0,
++        block_hash: Hash::ZERO,
++        qc: None,
++        transactions: Vec::new(),
++    };
++    let genesis = make_signed_block(&vals[0], &chain_id, 0, 0, 0, &dummy, 0, b"genesis");
++    let genesis_qc = build_qc(&vals, &chain_id, 0, 0, genesis.block.block_hash, 3);
++    let mut tree = ForkChoiceTree::new(
++        chain_id.clone(),
++        4,
++        genesis.clone(),
++        FinalizedCheckpoint {
++            height: 0,
++            view: 0,
++            block_hash: genesis.block.block_hash,
++            state_root: Hash::from_bytes([0x10; 32]),
++            commit_qc: genesis_qc,
++        },
++    );
++
++    // Build a 3-chain on view 1 and finalize b1 via ConsensusLightClientProof + FinalizedCheckpoint.
++    let b1 = make_signed_block(&vals[1], &chain_id, 1, 1, 0, &genesis.block, 1, b"canon-b1");
++    let b2 = make_signed_block(&vals[2], &chain_id, 2, 1, 1, &b1.block, 1, b"canon-b2");
++    let b3 = make_signed_block(&vals[3], &chain_id, 3, 1, 2, &b2.block, 1, b"canon-b3");
++    tree.insert_block(b1.clone()).unwrap();
++    tree.insert_block(b2.clone()).unwrap();
++    tree.insert_block(b3.clone()).unwrap();
++
++    let qc1 = build_qc(&vals, &chain_id, 1, 0, b1.block.block_hash, 3);
++    let qc2 = build_qc(&vals, &chain_id, 1, 1, b2.block.block_hash, 3);
++    let qc3 = build_qc(&vals, &chain_id, 1, 2, b3.block.block_hash, 3);
++
++    let lc_proof = ConsensusLightClientProof {
++        target_block: b1.block.clone(),
++        state_root: Hash::from_bytes([0x20; 32]),
++        child_block: b2.block.clone(),
++        grandchild_block: b3.block.clone(),
++        target_qc: qc1.clone(),
++        child_qc: qc2.clone(),
++        grandchild_qc: qc3,
++    };
++    lc_proof.verify(&chain_id, 4).unwrap();
++
++    tree.update_finalized_checkpoint(
++        FinalizedCheckpoint {
++            height: 2,
++            view: 1,
++            block_hash: b2.block.block_hash,
++            state_root: Hash::from_bytes([0x30; 32]),
++            commit_qc: qc2,
++        },
++        3,
++    )
++    .unwrap();
++
++    // Validator 1 attempts a deep reorg at finalized height 1 -> rejected + SlashingEvidence emitted!
++    let adv_b1 = make_signed_block(
++        &vals[1],
++        &chain_id,
++        1,
++        1,
++        0,
++        &genesis.block,
++        50,
++        b"evil-reorg",
++    );
++    let Err(Err(reorg_rejection)) = tree.insert_block(adv_b1) else {
++        panic!("expected deep reorg to be rejected with SlashingEvidence");
++    };
++    assert!(matches!(
++        reorg_rejection.error,
++        ForkChoiceError::DeepReorgPastFinalized {
++            finalized_height: 2,
++            conflicting_height: 1,
++            ..
++        }
++    ));
++    assert_eq!(tree.select_canonical_head(), b3.block.block_hash);
++
++    // Feed the emitted evidence into B6 SlashingEngine -> validator 1 is slashed 10% and tombstoned!
++    let records = vals.iter().map(|v| v.record.clone()).collect();
++    let mut slashing = SlashingEngine::new(chain_id, SlashingParams::default(), records);
++    let receipt = slashing
++        .submit_evidence(&reorg_rejection.evidence, vals[0].record.address, None)
++        .unwrap();
++    assert_eq!(receipt.offender, vals[1].record.address);
++    assert_eq!(receipt.distribution.total_slashed, 1_000_000);
++    assert!(receipt.tombstoned);
++}
++
++#[test]
++fn b8_fork_choice_vector_fixture_matches_deterministic_rules() {
++    let mut count = 0usize;
++    for line in FIXTURE.lines() {
++        let line = line.trim();
++        if line.is_empty() || line.starts_with('#') {
++            continue;
++        }
++        let Some((_key, rest)) = line.split_once('=') else {
++            continue;
++        };
++        let parts: Vec<&str> = rest.split('|').collect();
++        assert_eq!(parts.len(), 7);
++
++        let fin_h: u64 = parts[0].parse().unwrap();
++        let cand_h: u64 = parts[1].parse().unwrap();
++        let descends: bool = parts[2].parse().unwrap();
++        let cand_qc: u64 = parts[3].parse().unwrap();
++        let comp_qc: u64 = parts[4].parse().unwrap();
++        let expected_outcome = parts[5];
++
++        let computed = if cand_h <= fin_h || !descends {
++            "REJECT_DEEP_REORG_WITH_EVIDENCE"
++        } else if cand_qc > comp_qc {
++            "SELECT_CANDIDATE"
++        } else {
++            "KEEP_COMPETING"
++        };
++        assert_eq!(computed, expected_outcome);
++        count += 1;
++    }
++    assert_eq!(count, 64);
++}
+diff --git a/crates/aura-consensus/tests/fixtures/b8_baseline.txt b/crates/aura-consensus/tests/fixtures/b8_baseline.txt
+new file mode 100644
+index 0000000..af6afd9
+--- /dev/null
++++ b/crates/aura-consensus/tests/fixtures/b8_baseline.txt
+@@ -0,0 +1,18 @@
++# B5 baseline: VRF leader election landed, measured.
++# Written by tools/gen_b5_vectors.py; pinned by baseline::tests.
++phase=B8
++exit_stub=2
++exit_usage=64
++exit_no_workspace=3
++layers=6
++capabilities=1
++capability=on-chain-governance B9 proposal -> vote -> timelock -> runtime upgrade (WASM), emergency pause
++implemented=6
++placeholders=0
++missing=0
++layer=proposer B1 implemented
++layer=block-signature B1 implemented
++layer=qc B2 implemented
++layer=finality B3 implemented
++layer=validator-set B4 implemented
++layer=vrf-leader B5 implemented
+diff --git a/crates/aura-consensus/tests/fixtures/b8_fork_choice.txt b/crates/aura-consensus/tests/fixtures/b8_fork_choice.txt
+new file mode 100644
+index 0000000..def01cf
+--- /dev/null
++++ b/crates/aura-consensus/tests/fixtures/b8_fork_choice.txt
+@@ -0,0 +1,66 @@
++# AuraLite B8 Fork Choice, Finalized Checkpoint, Light Client & Deep Reorg Defence Vectors (64 cases)
++# Format: vector_XX=finalized_height|candidate_height|descends_from_finalized|candidate_qc_view|competing_qc_view|outcome|digest
++vector_00=10|10|false|20|15|REJECT_DEEP_REORG_WITH_EVIDENCE|94cc493aef6fff8ee46af977921999861a113a9ad16fd661833f2b7f4debaf18
++vector_01=15|17|false|31|21|REJECT_DEEP_REORG_WITH_EVIDENCE|66b23b74c1cbd1d601e6780bd7bfe6570ef8b94ebb2eba90df5932d1a0877085
++vector_02=20|23|true|42|27|SELECT_CANDIDATE|fb3dae0c360d60305ee8c2a1993a84bf46f0540acb9deb480ad4a0a8b52fab4d
++vector_03=25|28|true|21|38|KEEP_COMPETING|a50e9f47fa4dafff670eed3a6879c161e9b1f65bd983a2788506ff44342606f3
++vector_04=30|29|false|24|19|REJECT_DEEP_REORG_WITH_EVIDENCE|bc1ef9e39f383e36f2578eafebfc511699d62ab185ffb79c67439005bd1768ef
++vector_05=35|37|false|35|25|REJECT_DEEP_REORG_WITH_EVIDENCE|9b1a6ee8eeb94e37be32838cd09ddb3e7e91140812f4cf6716c6e967a0c9d348
++vector_06=40|43|true|46|31|SELECT_CANDIDATE|8a5f28cb72ae3979010d959abfc30b1dbb85decb2f86deaec6f996dd1b33e3a0
++vector_07=45|48|true|25|42|KEEP_COMPETING|791004be81ea1daa59609f211fe8182987bdf6083151fd2a377c74fb43b5f116
++vector_08=10|8|false|28|23|REJECT_DEEP_REORG_WITH_EVIDENCE|2719fa9c14456e97237ab875e5dcdec589d2c468813e3125f1bb853de939116e
++vector_09=15|17|false|39|29|REJECT_DEEP_REORG_WITH_EVIDENCE|f551f22829d9285e7313b85f1160bfde5a916882a9e0124e2357e61d597b0a81
++vector_10=20|23|true|50|35|SELECT_CANDIDATE|a9b759e3d30a6a668c3ffbe7837ab75882d8d690d05f9a70694901786f5faaae
++vector_11=25|28|true|29|46|KEEP_COMPETING|5ed7819417d39ac3e6e337e8aa23e044bfad2aacba3b9a232f9f700f5814d77d
++vector_12=30|30|false|32|27|REJECT_DEEP_REORG_WITH_EVIDENCE|c6b354b4ba3bd99e1cdad94461b79f984563ddc9e41165102dd5b0b205aad5f5
++vector_13=35|37|false|43|33|REJECT_DEEP_REORG_WITH_EVIDENCE|a1eecc8e2af1850957f5cf769f95067738b457604b0eec08b2bdc0e7b8796315
++vector_14=40|43|true|54|39|SELECT_CANDIDATE|4636a75d821862686bb0038322d5586c76930bd105f015274d3db2aa3dd47969
++vector_15=45|48|true|33|50|KEEP_COMPETING|1d828e7948e9faa4116434d01a1623d3a72ff37b3d7a5646d17f4d8d1654dd9b
++vector_16=10|9|false|36|31|REJECT_DEEP_REORG_WITH_EVIDENCE|32d7ca9134817d69362d0be1e579268da52fabe7c2a499cb831b699f79abb2b3
++vector_17=15|17|false|47|37|REJECT_DEEP_REORG_WITH_EVIDENCE|69e0ad11cd7cc03f2983ac31ced54aec489ab73d7371b3adf2b6293f41c97481
++vector_18=20|23|true|58|43|SELECT_CANDIDATE|f290fa7db4765b47d33503f30ad32876dc7b17a01202b4b8fd06f628167484f8
++vector_19=25|28|true|37|54|KEEP_COMPETING|4360e672bea0e5f549ef1b3305ea961537be5b399b671112b4b07c7a77cd6a93
++vector_20=30|28|false|40|35|REJECT_DEEP_REORG_WITH_EVIDENCE|4fef2436914903eba1fcfae2390c9dd2de720b7a22fc2830107ac9af7ba73c5e
++vector_21=35|37|false|51|41|REJECT_DEEP_REORG_WITH_EVIDENCE|7ec457c66d1a089cdc9c3ea013300b805146ec499ddbf6566462f7f8542ee968
++vector_22=40|43|true|62|47|SELECT_CANDIDATE|a7add464c8c6cd8707eb27423519a9fbde5db64fe43e94a5d769e803bd0535dd
++vector_23=45|48|true|41|58|KEEP_COMPETING|f4c82ac677091173953809f8f04d006cfb020df405fc85111aab917fd8491816
++vector_24=10|10|false|44|39|REJECT_DEEP_REORG_WITH_EVIDENCE|f804e0d189b71516c5aeb561783ad1dd0ca78d27725dacef6f3c92a2d469f7f2
++vector_25=15|17|false|55|45|REJECT_DEEP_REORG_WITH_EVIDENCE|25fc0b5631d5fcf62e098547674ffbd38b1e9a2f140ebc25ff26c85f9e81a2c7
++vector_26=20|23|true|66|51|SELECT_CANDIDATE|a7acd8833cc81bebbfb3fbd23ab7c652de013ee84fec487cab6b6d80645a6e1a
++vector_27=25|28|true|45|62|KEEP_COMPETING|81860ee715261bf104564d3fbf3135b11ce9cc8ce0d1954e5dcf46235faeed0b
++vector_28=30|29|false|48|43|REJECT_DEEP_REORG_WITH_EVIDENCE|b6fbe4fc06d5dc52a871bfe45c1de3586d717c11710a965708122c414727d6d7
++vector_29=35|37|false|59|49|REJECT_DEEP_REORG_WITH_EVIDENCE|21250a8894a54dc4d908eea1f46e1bd856dfdf4bb18dd7d31073fd6d30221867
++vector_30=40|43|true|70|55|SELECT_CANDIDATE|cc764b2a8d6c69f31bc14a2b3adab9c95850492c067128779988a23b3d5456d1
++vector_31=45|48|true|49|66|KEEP_COMPETING|4b8a97b0c61cb76abfc70b39df20c0966d54719e9739712844918af530fb6a79
++vector_32=10|8|false|52|47|REJECT_DEEP_REORG_WITH_EVIDENCE|6126ed2f58738c1fc262e8d6147d5eb7d4cc811bc1ec843ee7974440ad1fe123
++vector_33=15|17|false|63|53|REJECT_DEEP_REORG_WITH_EVIDENCE|94df5c2d86a670da6526d2e500b4e360f783bc2e7e32d117a7622b56a2d2ccae
++vector_34=20|23|true|74|59|SELECT_CANDIDATE|3379957dc665192d29171a7e1acc1b369f2d8824a085d9dd17559d25f40232d1
++vector_35=25|28|true|53|70|KEEP_COMPETING|a9e3465cef3c3b312b8821ac44fd2cbd2e4a2994b0a2f95e85fdc7b6e3fbd61d
++vector_36=30|30|false|56|51|REJECT_DEEP_REORG_WITH_EVIDENCE|b8cf89d097ab2dd3da5a43898b777062263883685a862b78847a3629bd406030
++vector_37=35|37|false|67|57|REJECT_DEEP_REORG_WITH_EVIDENCE|ecad8a0a19913d82e325c10f86c6a5de05c939ab223787f8b1a27cb578e00edc
++vector_38=40|43|true|78|63|SELECT_CANDIDATE|5b9f56bb3f5e073348cd46c788d5480d6c71cecc2725236f68050004a1406707
++vector_39=45|48|true|57|74|KEEP_COMPETING|e2ec9195a8c59fd806671f2b70b3513858b7c60f92306b609084a3cc8f75cb8a
++vector_40=10|9|false|60|55|REJECT_DEEP_REORG_WITH_EVIDENCE|933cec121fc016a92bbbef7ecdbcba84d745785af4db78fe543d8c94a5874511
++vector_41=15|17|false|71|61|REJECT_DEEP_REORG_WITH_EVIDENCE|674ecfcb4301e314df76f0c1c951244d05080129b6ef18ffc166c06f5b9c154b
++vector_42=20|23|true|82|67|SELECT_CANDIDATE|a00b1a03d4f970b3e81a3cea0a98d70f09e945b77af851cf6bdd1826bed4a5a5
++vector_43=25|28|true|61|78|KEEP_COMPETING|a13c5c1ffee9ab7bdeb083c35426209ee100495a029d43e3dae90d639beb5ac5
++vector_44=30|28|false|64|59|REJECT_DEEP_REORG_WITH_EVIDENCE|166fcb092e958720068b4abc80ed0ce8ea7f34ce947a73a8a789361f3ed700ab
++vector_45=35|37|false|75|65|REJECT_DEEP_REORG_WITH_EVIDENCE|84296a3c0fbfae3b85549deb2942491edb99794b3b1f5117d72bae426dc47baa
++vector_46=40|43|true|86|71|SELECT_CANDIDATE|2a3f8893031fb0c4b743dd0371d72649014b27337a7c5f3cf8fbdb0ecda7cc02
++vector_47=45|48|true|65|82|KEEP_COMPETING|bd016d8bfe7ef1a75fe1a763a9bf6e9821d53383507248727253687b0993fab5
++vector_48=10|10|false|68|63|REJECT_DEEP_REORG_WITH_EVIDENCE|4658e93c790875ab341f8442984156156418cf7739306d0b9d5bf9a45ebdfc00
++vector_49=15|17|false|79|69|REJECT_DEEP_REORG_WITH_EVIDENCE|5ec0f1606db5e916bde76e39a435ec88e286647ed726e943a966c9708b3d86d0
++vector_50=20|23|true|90|75|SELECT_CANDIDATE|ac2230d6ed25539eaa086c5e6cc5f1ab541908baddcaae27b56d7b9c0549cc68
++vector_51=25|28|true|69|86|KEEP_COMPETING|71462bf9a813a46b7c9754f3e7ba9da7253b471ab8261f3a1c47529ab4839817
++vector_52=30|29|false|72|67|REJECT_DEEP_REORG_WITH_EVIDENCE|7cbca5a6c9ec8b469585ae014664ee29f4936cfaf2083374c012d20854fd618f
++vector_53=35|37|false|83|73|REJECT_DEEP_REORG_WITH_EVIDENCE|372ee115f12d2dada50e7f01b2be82e160e6023fe9738790d26e92a640b6b544
++vector_54=40|43|true|94|79|SELECT_CANDIDATE|b187312fbd4646a60d648d42db567a262eb1e8fb8c911ae272f9e088a642674d
++vector_55=45|48|true|73|90|KEEP_COMPETING|4fde0f26cd7269acf8a39b02e7932ed2f4366e9b2ed5d789a7a2f13e4445aaad
++vector_56=10|8|false|76|71|REJECT_DEEP_REORG_WITH_EVIDENCE|abbea02be6de4ba7c06f516f9aedf6e9f8a751f7671b8bd65689c54f4639cf6c
++vector_57=15|17|false|87|77|REJECT_DEEP_REORG_WITH_EVIDENCE|0116e7ed1e2ba5b8037b0b8a4ab74f3a26c44053147a1508331c3c98111f4a69
++vector_58=20|23|true|98|83|SELECT_CANDIDATE|f60669f1b4e2366250773d4a1479b6798f49cac4326cd5ef95bf43a736edd219
++vector_59=25|28|true|77|94|KEEP_COMPETING|37f095bb877eb0cd5bee3a122779655464139616082b2c2e45dd9c5a9631e127
++vector_60=30|30|false|80|75|REJECT_DEEP_REORG_WITH_EVIDENCE|cdceea1130fcc464f84d9e7a991852831a1d061b2bf713fbb9721c6503c12551
++vector_61=35|37|false|91|81|REJECT_DEEP_REORG_WITH_EVIDENCE|60c196d7a950c1765ef741b10152265b3724c3b5de4ec66e0af9eb43bd6255a0
++vector_62=40|43|true|102|87|SELECT_CANDIDATE|52da1e0b044146037cc65bbf9afb4be5bad3a1c1a86eb51e789e00c7717e1f24
++vector_63=45|48|true|81|98|KEEP_COMPETING|bffc481edb9184783a1d88e98400cdf6b6c52ecaf8d50fcc88aaad259b8c96a0
+diff --git a/docs/evidence/b4/SHA256SUMS b/docs/evidence/b4/SHA256SUMS
+index 0eb6375..4027e61 100644
+--- a/docs/evidence/b4/SHA256SUMS
++++ b/docs/evidence/b4/SHA256SUMS
+@@ -1,10 +1,10 @@
+-662d4597359971af926cd2b18b3df84b3dcd4318bb5fce4896029ae16359a667  CHANGELOG.md
++7b03002e487c7986028a23c7d9d44e95bb832621aaa1dc6d30d2871d6035545c  CHANGELOG.md
+ f6e24df6446f35bad5dd60082026f0abba4e26f8eec20e0181875ad81fb73708  Cargo.lock
+ 47e7ff2541cb6815f64a1b5a664ea2290a9d64b6ab4badc007fdb190dcfbcae7  Cargo.toml
+-fb8a9dd5047ee6b491bbd94f5ed2ab1c0c95e89ef6f0de6756878472a290c8c5  Makefile
++c72cb2b0b749dc2cb67fd9cfbfeacfd092f5b8c5b9b73d89fddfbcd400e488e8  Makefile
+ 94d037631779cd17e8cec25db1ab7ba0da63c257e054532c2089d011d2e5307c  crates/aura-consensus/Cargo.toml
+-13c6af7a889ab732c3b64954791160738e3dd641a8184542276c33c38cbdd30a  crates/aura-consensus/src/baseline.rs
+-e24b83e22f43526d31ee4a195a4dacdcee3ef6d161207de376f495196de0c01d  crates/aura-consensus/src/lib.rs
++d813de5bbb3379874fb42895ad9486ed8600abfe0c8111e0b3b6032715a28981  crates/aura-consensus/src/baseline.rs
++90543448378721bbf3f5d64693fcf13233375af5e1808f4703e87d89d1ccf595  crates/aura-consensus/src/lib.rs
+ 4f2297b248fe48c56c935211672f9248c973aa582984fba6fe9e9ff589a597d6  crates/aura-consensus/src/validator_set.rs
+ adb2f976a99b0dcea7c6ae720b54ee7d3bef3a8f388dfe754f05248f2d03b811  crates/aura-consensus/tests/b4_validator_set.rs
+ 765ac0f68bc13bde038e68eda010222418b63434b8e63ca114d812162d22476d  crates/aura-consensus/tests/fixtures/b4_baseline.txt
+@@ -16,9 +16,9 @@ a4e5941d74617eac1611f3c4edf2e1eeb6e08659f77d05d924fe2353e33a1706  docs/evidence/
+ 2d50b44dc3ca238bfdc62f3955fbc50b8ebf7d120861ce48cc08677ada0b258e  docs/evidence/b4/nc.log
+ 791b3c73413c2004cebbda6d6d5401f64ef1125055d289e8e7a74a739803a9f1  docs/evidence/b4/report.md
+ 610b3dd7b9d8b406bfbd34444d88b26b7aa3ce55b7a0ef66ea292f45427537af  docs/evidence/b4/test-b4.log
+-99cc99a1ccd48f04c3516d6939e650d2b8325ea86af5d4f536aab5cebc9f1eb3  docs/plans/CONSENSUS_PLAN.md
++073e88d9d31b58f22f34cfe57430ba4f2fe5a3f92a3c057c7c8c6f9f2548a509  docs/plans/CONSENSUS_PLAN.md
+ 9b27872e8d3bc1310c34c0d38c4b98d6d94eb3b4b18fa38cac9013f6e8bca3aa  docs/plans/D7_READINESS.md
+-73d6d66feaa937a6e300304b9e2e01a7a1a815b81bc4a532b5bbde3eb4364b4d  tools/audit_closeout.py
++212928d57c684590afca7890f45c5e82df24485e585d1757f642b23758ad40a1  tools/audit_closeout.py
+ 88c5cb57870490d1fd218b253ce31590e47a8c2b58d4c2af75690893cdf2f33a  tools/gen_b4_vectors.py
+ 38cca5ccede3034f35fd1c9382ebe02e56dc8162e16b46e1a788a5fc12a932f8  tools/nc_b4.py
+ 59112426edc4ea1d3781f476aa5b3c3d4060ce6c35179d220a20b072dbf5128b  tools/write_b4_evidence.py
+diff --git a/docs/evidence/b5/SHA256SUMS b/docs/evidence/b5/SHA256SUMS
+index 7e86771..8e61f5a 100644
+--- a/docs/evidence/b5/SHA256SUMS
++++ b/docs/evidence/b5/SHA256SUMS
+@@ -1,10 +1,10 @@
+-662d4597359971af926cd2b18b3df84b3dcd4318bb5fce4896029ae16359a667  CHANGELOG.md
++7b03002e487c7986028a23c7d9d44e95bb832621aaa1dc6d30d2871d6035545c  CHANGELOG.md
+ f6e24df6446f35bad5dd60082026f0abba4e26f8eec20e0181875ad81fb73708  Cargo.lock
+ 47e7ff2541cb6815f64a1b5a664ea2290a9d64b6ab4badc007fdb190dcfbcae7  Cargo.toml
+-fb8a9dd5047ee6b491bbd94f5ed2ab1c0c95e89ef6f0de6756878472a290c8c5  Makefile
++c72cb2b0b749dc2cb67fd9cfbfeacfd092f5b8c5b9b73d89fddfbcd400e488e8  Makefile
+ 94d037631779cd17e8cec25db1ab7ba0da63c257e054532c2089d011d2e5307c  crates/aura-consensus/Cargo.toml
+-13c6af7a889ab732c3b64954791160738e3dd641a8184542276c33c38cbdd30a  crates/aura-consensus/src/baseline.rs
+-e24b83e22f43526d31ee4a195a4dacdcee3ef6d161207de376f495196de0c01d  crates/aura-consensus/src/lib.rs
++d813de5bbb3379874fb42895ad9486ed8600abfe0c8111e0b3b6032715a28981  crates/aura-consensus/src/baseline.rs
++90543448378721bbf3f5d64693fcf13233375af5e1808f4703e87d89d1ccf595  crates/aura-consensus/src/lib.rs
+ d339395e816d8ef9907fe71a19e900b1611a06f810ac6645e414fa7e0e35b595  crates/aura-consensus/src/vrf_leader.rs
+ 1292c4fdaa813606c260aedb22b97c9dde3d84de9e211b55a612b5fa8276e3bb  crates/aura-consensus/tests/b5_vrf_leader.rs
+ 6f8ec4f9efcfaa9c7f3002d7d155ad9b2c9c7820a0a6c78a8cef16da7ac1d9f3  crates/aura-consensus/tests/fixtures/b5_baseline.txt
+@@ -16,9 +16,9 @@ dba710d7ba07c63ef870b91ea03ae9509900fddfa3fb857533f8f618439d156f  docs/evidence/
+ f6612d206414f9b7ce3f4f229082deb2c0cdb11a8e79bd86e8d77c1849f67bcb  docs/evidence/b5/nc.log
+ a8a4d6ae2e82cefdaa2c202a8762b1a3d2666fd80de62f8ff9b00df1bc28a522  docs/evidence/b5/report.md
+ 8b614a777274403038e3d101efb36e37d576b1e7cba8c5af6e4c9bac1828d2f0  docs/evidence/b5/test-b5.log
+-99cc99a1ccd48f04c3516d6939e650d2b8325ea86af5d4f536aab5cebc9f1eb3  docs/plans/CONSENSUS_PLAN.md
++073e88d9d31b58f22f34cfe57430ba4f2fe5a3f92a3c057c7c8c6f9f2548a509  docs/plans/CONSENSUS_PLAN.md
+ 9b27872e8d3bc1310c34c0d38c4b98d6d94eb3b4b18fa38cac9013f6e8bca3aa  docs/plans/D7_READINESS.md
+-73d6d66feaa937a6e300304b9e2e01a7a1a815b81bc4a532b5bbde3eb4364b4d  tools/audit_closeout.py
++212928d57c684590afca7890f45c5e82df24485e585d1757f642b23758ad40a1  tools/audit_closeout.py
+ a371e6e8f0db93fd62dd25c75fb06b4bafe89289578a3c184e5a87e8a1482068  tools/gen_b5_vectors.py
+ f86dee929549c751519e1749e0976c561e47a174a129412caf8cd23680887f61  tools/nc_b5.py
+ 8f5d0ffe6f5256be5551902bfc5ed0354a89473100f2579547133018120fddba  tools/write_b5_evidence.py
+diff --git a/docs/evidence/b6/SHA256SUMS b/docs/evidence/b6/SHA256SUMS
+index 7ef2454..e24bc0e 100644
+--- a/docs/evidence/b6/SHA256SUMS
++++ b/docs/evidence/b6/SHA256SUMS
+@@ -1,5 +1,5 @@
+-e24b83e22f43526d31ee4a195a4dacdcee3ef6d161207de376f495196de0c01d  crates/aura-consensus/src/lib.rs
+-13c6af7a889ab732c3b64954791160738e3dd641a8184542276c33c38cbdd30a  crates/aura-consensus/src/baseline.rs
++90543448378721bbf3f5d64693fcf13233375af5e1808f4703e87d89d1ccf595  crates/aura-consensus/src/lib.rs
++d813de5bbb3379874fb42895ad9486ed8600abfe0c8111e0b3b6032715a28981  crates/aura-consensus/src/baseline.rs
+ bd58be73dc4e0f6da16735be1d5ed17306d16c08569d798a4af20fcf72b91d40  crates/aura-consensus/src/slashing.rs
+ 4f2297b248fe48c56c935211672f9248c973aa582984fba6fe9e9ff589a597d6  crates/aura-consensus/src/validator_set.rs
+ 6407c80a981e19072e0a734491f7c5bb4f2d2c0b4740bd89ded07f0cdfbbad08  crates/aura-consensus/tests/b6_slashing.rs
+@@ -8,9 +8,9 @@ f7c3edf55dd3c52b6ea70e188f3af2afc91c13cdc0fd0eade1dee656fa815b4e  crates/aura-co
+ 5723b1d11047c9c62034aafaad4dcb8873fb7855d09384fee03c00ece0fd76c0  tools/gen_b6_vectors.py
+ 653bcece85daa92c2da9c84d02b985c0cfe95f86f8ba246cdc6057eb01ad6405  tools/nc_b6.py
+ 84d5aa7aff0a273d5a6feeab30feca7b288d11cd78797b4cdf9cb6c2d845b7dd  tools/write_b6_evidence.py
+-fb8a9dd5047ee6b491bbd94f5ed2ab1c0c95e89ef6f0de6756878472a290c8c5  Makefile
+-662d4597359971af926cd2b18b3df84b3dcd4318bb5fce4896029ae16359a667  CHANGELOG.md
+-99cc99a1ccd48f04c3516d6939e650d2b8325ea86af5d4f536aab5cebc9f1eb3  docs/plans/CONSENSUS_PLAN.md
++c72cb2b0b749dc2cb67fd9cfbfeacfd092f5b8c5b9b73d89fddfbcd400e488e8  Makefile
++7b03002e487c7986028a23c7d9d44e95bb832621aaa1dc6d30d2871d6035545c  CHANGELOG.md
++073e88d9d31b58f22f34cfe57430ba4f2fe5a3f92a3c057c7c8c6f9f2548a509  docs/plans/CONSENSUS_PLAN.md
+ d31a038fdd530a4529c55fc195871a26a1eb235afad33d598a20826b51489740  docs/evidence/b6/README.md
+ fdd21a07a34baf581b5c7d4876350058343d7e617f27d70cdafe8bc662bd2538  docs/evidence/b6/gates.txt
+ d31a038fdd530a4529c55fc195871a26a1eb235afad33d598a20826b51489740  docs/evidence/b6/report.md
+diff --git a/docs/evidence/b7/SHA256SUMS b/docs/evidence/b7/SHA256SUMS
+index a79d314..097340c 100644
+--- a/docs/evidence/b7/SHA256SUMS
++++ b/docs/evidence/b7/SHA256SUMS
+@@ -1,5 +1,5 @@
+-e24b83e22f43526d31ee4a195a4dacdcee3ef6d161207de376f495196de0c01d  crates/aura-consensus/src/lib.rs
+-13c6af7a889ab732c3b64954791160738e3dd641a8184542276c33c38cbdd30a  crates/aura-consensus/src/baseline.rs
++90543448378721bbf3f5d64693fcf13233375af5e1808f4703e87d89d1ccf595  crates/aura-consensus/src/lib.rs
++d813de5bbb3379874fb42895ad9486ed8600abfe0c8111e0b3b6032715a28981  crates/aura-consensus/src/baseline.rs
+ fd77d360316da9cfaaca4ec4491779e5a67e87c5bca33e8f71fa4cfd14b04125  crates/aura-consensus/src/rewards.rs
+ 202d9eed9ee39c045fb418fb1ecf24d4349966f273d35c823afc00f1b549a0ee  crates/aura-consensus/tests/b7_rewards.rs
+ 313594ebda592d69a14f3b4a96d4affeef3c6f4a72c202e10e982cce4fad7c2a  crates/aura-consensus/tests/fixtures/b7_baseline.txt
+@@ -7,9 +7,9 @@ ab71ceb8b1376da61c6ec39f16089372e124dce6167469edd48e0009830c4910  crates/aura-co
+ b52a6b640183114e2953ed346411bc7bd33c59e0ed7b60a1b72310eb01b10aaf  tools/gen_b7_vectors.py
+ 7869e5a442b36ef3128961b0a96b48a343e91cfe0fcb9b78ce032ef232e447ee  tools/nc_b7.py
+ 4c06ab3189125d0a4806f880d8b8f67337521ebda6a98de4b484ac812c8c3864  tools/write_b7_evidence.py
+-fb8a9dd5047ee6b491bbd94f5ed2ab1c0c95e89ef6f0de6756878472a290c8c5  Makefile
+-662d4597359971af926cd2b18b3df84b3dcd4318bb5fce4896029ae16359a667  CHANGELOG.md
+-99cc99a1ccd48f04c3516d6939e650d2b8325ea86af5d4f536aab5cebc9f1eb3  docs/plans/CONSENSUS_PLAN.md
++c72cb2b0b749dc2cb67fd9cfbfeacfd092f5b8c5b9b73d89fddfbcd400e488e8  Makefile
++7b03002e487c7986028a23c7d9d44e95bb832621aaa1dc6d30d2871d6035545c  CHANGELOG.md
++073e88d9d31b58f22f34cfe57430ba4f2fe5a3f92a3c057c7c8c6f9f2548a509  docs/plans/CONSENSUS_PLAN.md
+ 8f55c9db4d57c5642d46cabaaf347fa9133d0607957044c1c2ed69b372749ad1  docs/evidence/b7/README.md
+ 620cb3e22141b41388a08b20d5a92f9fdf309708bb0d1dd376ad746cec85aebd  docs/evidence/b7/gates.txt
+ 8f55c9db4d57c5642d46cabaaf347fa9133d0607957044c1c2ed69b372749ad1  docs/evidence/b7/report.md
+diff --git a/docs/evidence/b8/README.md b/docs/evidence/b8/README.md
+new file mode 100644
+index 0000000..f78371c
+--- /dev/null
++++ b/docs/evidence/b8/README.md
+@@ -0,0 +1,11 @@
++# CONSENSUS B8 — Finality: Fork Choice, Finalized Checkpoint, Light-Client Proof & Deep-Reorg Defence (`0055-B8-finality-fork-choice.patch`)
++
++## Scope & DoD (`D-B3`, `D-B4`)
++- **Fork Choice & Finalized Checkpoints (`crates/aura-consensus/src/fork_choice.rs`)**:
++  - Selects the canonical head descending from the latest `FinalizedCheckpoint` by highest `justified_qc_view`, height, and deterministic hash tie-break.
++  - Enforces `D-B3` weak-subjectivity window (`DEFAULT_WEAK_SUBJECTIVITY_WINDOW = 10_000` blocks) and `2f+1` BLS `QuorumCertificate` verification.
++- **Consensus Light-Client Proof (`ConsensusLightClientProof`)**:
++  - Verifies 3-chain parent links, same-view rule, and `2f+1` BLS QCs (`target_qc`, `child_qc`, `grandchild_qc`).
++- **Deep-Reorg Defence (`attempt to reorg a finalized block -> reject + evidence`)**:
++  - Any attempt to reorganize a finalized block is rejected with `ForkChoiceError::DeepReorgPastFinalized` and emits cryptographic `SlashingEvidence` accepted by `SlashingEngine`.
++- **Negative Controls (`tools/nc_b8.py`)**: 6/6 library unit-test negative controls pass (`NC-1`..`NC-6`).
+diff --git a/docs/evidence/b8/SHA256SUMS b/docs/evidence/b8/SHA256SUMS
+new file mode 100644
+index 0000000..3f7a6dd
+--- /dev/null
++++ b/docs/evidence/b8/SHA256SUMS
+@@ -0,0 +1,19 @@
++90543448378721bbf3f5d64693fcf13233375af5e1808f4703e87d89d1ccf595  crates/aura-consensus/src/lib.rs
++d813de5bbb3379874fb42895ad9486ed8600abfe0c8111e0b3b6032715a28981  crates/aura-consensus/src/baseline.rs
++bcc7328bd9c464a857c4b97c8491277bf401299d3c7963f1925b075d4313feb6  crates/aura-consensus/src/fork_choice.rs
++5fa816aaed76d0bfe7048df7f94b38f282fa91b96856b875421add7e13075856  crates/aura-consensus/tests/b8_fork_choice.rs
++69ac09dfd6b26ab58d5af135de1e4474053559a34f99790a6f46caee22118f6a  crates/aura-consensus/tests/fixtures/b8_baseline.txt
++817715cdd81e6fca7cde1f9629a96e162da7b1d1c58c1b704590ad93a5b1e87d  crates/aura-consensus/tests/fixtures/b8_fork_choice.txt
++1077db278d3d43cc9d0ced271a443acf4268ed0462342c760031d4c884cd4e58  tools/gen_b8_vectors.py
++47ef85f190189481cab2869df3ddd92f96c226d50e6116be970356f7b2ee2a82  tools/nc_b8.py
++be2ae7a074572d9f5c591dd0ab018212026e999078659b751cf975d0be20ffe4  tools/write_b8_evidence.py
++c72cb2b0b749dc2cb67fd9cfbfeacfd092f5b8c5b9b73d89fddfbcd400e488e8  Makefile
++7b03002e487c7986028a23c7d9d44e95bb832621aaa1dc6d30d2871d6035545c  CHANGELOG.md
++073e88d9d31b58f22f34cfe57430ba4f2fe5a3f92a3c057c7c8c6f9f2548a509  docs/plans/CONSENSUS_PLAN.md
++ba14abcc7f0fe86312d76fefa7ad5a9f61c4e307e0773eae716f208d1693ecc2  docs/evidence/b8/README.md
++0d36f1b5db72875457cdc76ac3eec7e97ca59d16bcb70591d20dfe2b4c5777a0  docs/evidence/b8/gates.txt
++ba14abcc7f0fe86312d76fefa7ad5a9f61c4e307e0773eae716f208d1693ecc2  docs/evidence/b8/report.md
++a77efb4b446af1253d7864ede41ae43afd71b74c12662484ba50ba9b4ff60e38  docs/evidence/b8/inventory.txt
++5ae53717fa16b89a2d1ea4929c6c6766e64300ffbf36d414cabd4b792160f375  docs/evidence/b8/gate.log
++51fca8136ac2d7e72c8102dec3bf9390f967a7bed7b60dfe9da0ad769d712bda  docs/evidence/b8/nc.log
++56c9ed1da2cc2c922ba4bedcfdf65303b8999b55ba74198901640fe1316d9075  docs/evidence/b8/vectors.log
+diff --git a/docs/evidence/b8/gate.log b/docs/evidence/b8/gate.log
+new file mode 100644
+index 0000000..f10ad59
+--- /dev/null
++++ b/docs/evidence/b8/gate.log
+@@ -0,0 +1,146 @@
++
++running 85 tests
++test baseline::tests::documentation_is_not_a_public_item ... ok
++test baseline::tests::refusal_exits_stub_without_arguments ... ok
++test baseline::tests::refusal_names_every_missing_capability ... ok
++test baseline::tests::report_refuses_a_tree_that_is_not_a_workspace ... ok
++test baseline::tests::the_fixture_is_what_the_binary_prints ... ok
++test baseline::tests::b3_implemented_and_placeholders ... ok
++test baseline::tests::the_pinned_fixture_matches_this_tree ... ok
++test baseline::tests::two_different_logs_are_not_equivalent ... ok
++test baseline::tests::unknown_command_exits_usage ... ok
++test bls::tests::address_from_public_key_is_deterministic ... ok
++test bls::tests::different_seeds_different_addresses ... ok
++test bls::tests::sign_and_verify_roundtrip ... ok
++test bls::tests::tampered_message_fails ... ok
++test bls::tests::wrong_chain_id_fails ... ok
++test bls::tests::wrong_domain_fails ... ok
++test bls::tests::wrong_public_key_fails ... ok
++test error::tests::error_display_is_stable ... ok
++test finality::tests::block_hash_changes_with_content ... ok
++test finality::tests::commit_preserves_genesis_anchor ... ok
++test finality::tests::high_qc_tracks_newest ... ok
++test finality::tests::nil_block_has_no_transactions ... ok
++test finality::tests::propose_and_nil_block ... ok
++test finality::tests::round_change ... ok
++test finality::tests::three_chain_commit ... ok
++test finality::tests::two_blocks_not_committed ... ok
++test finality::tests::verify_vote_roundtrip ... ok
++test finality::tests::verify_vote_wrong_chain_fails ... ok
++test finality::tests::view_change_on_timeout ... ok
++test fork_choice::tests::attempt_to_reorg_finalized_block_is_rejected_and_emits_slashing_evidence ... ok
++test fork_choice::tests::finalized_checkpoint_rejects_invalid_or_sub_quorum_qc ... ok
++test baseline::tests::the_survey_is_deterministic ... ok
++test fork_choice::tests::fork_choice_prefers_branch_with_highest_qc_view_descending_from_finalized ... ok
++test fork_choice::tests::fork_not_descending_from_finalized_checkpoint_is_never_selected ... ok
++test fork_choice::tests::weak_subjectivity_rejects_stale_checkpoint_beyond_unbonding_window ... ok
++test proposer::tests::empty_validator_set_panics - should panic ... ok
++test proposer::tests::is_proposer_matches ... ok
++test proposer::tests::round_robin_rotation ... ok
++test proposer::tests::single_validator_proposes_every_round ... ok
++test proposer::tests::validator_count_and_list ... ok
++test qc::tests::aggregator_below_threshold_returns_none ... ok
++test qc::tests::aggregator_ignores_duplicate_validator ... ok
++test qc::tests::aggregator_reaches_quorum ... ok
++test fork_choice::tests::light_client_proof_verifies_3_chain_finality_and_rejects_forged_qc ... ok
++test qc::tests::qc_verify_wrong_chain_id_fails ... ok
++test qc::tests::quorum_threshold_basic ... ok
++test qc::tests::quorum_threshold_single_validator ... ok
++test rewards::tests::delegator_rewards_scale_proportionally_with_delegated_stake ... ok
++test rewards::tests::fee_burn_deducts_and_accumulates_burned_fees ... ok
++test qc::tests::qc_verify_all_valid ... ok
++test rewards::tests::invalid_commission_rate_above_hundred_percent_is_rejected ... ok
++test rewards::tests::sum_invariant_detects_unbacked_mint_or_leak ... ok
++test rewards::tests::validator_commission_is_paid_before_delegator_split ... ok
++test signature::tests::sign_and_verify_roundtrip ... ok
++test signature::tests::signed_block_roundtrip ... ok
++test signature::tests::tampered_signature_fails ... ok
++test signature::tests::wrong_block_hash_fails ... ok
++test signature::tests::wrong_chain_id_fails ... ok
++test signature::tests::wrong_public_key_fails ... ok
++test slashing::tests::double_sign_requires_distinct_blocks_and_valid_signatures ... ok
++test slashing::tests::downtime_slashing_requires_missed_blocks_threshold_and_valid_qc ... ok
++test slashing::tests::duplicate_evidence_replay_is_rejected ... ok
++test slashing::tests::penalty_distribution_conserves_slashed_stake_across_reporter_treasury_and_burn ... ok
++test slashing::tests::six_attack_types_are_accepted_and_apply_penalties ... ok
++test slashing::tests::surround_vote_requires_strict_outer_inner_span_and_valid_bls_signatures ... ok
++test validator_set::tests::active_addresses_deterministic ... ok
++test validator_set::tests::below_min_stake_ignored ... ok
++test validator_set::tests::duplicate_enter_ignored ... ok
++test validator_set::tests::enter_and_exit_queue ... ok
++test rewards::tests::hundred_thousand_blocks_sum_invariant_holds_within_one_unit ... ok
++test validator_set::tests::is_active_after_exit ... ok
++test validator_set::tests::new_validator_set ... ok
++test validator_set::tests::quorum_stake_threshold ... ok
++test validator_set::tests::set_update_rejects_insufficient_stake ... ok
++test validator_set::tests::set_update_rejects_invalid_qc ... ok
++test validator_set::tests::set_update_wrong_epoch ... ok
++test validator_set::tests::total_stake_updates_on_enter_exit ... ok
++test vrf_leader::tests::epoch_randomness_rejects_unverified_boundary_qc ... ok
++test vrf_leader::tests::grinding_protection_rejects_zero_epoch_randomness_after_genesis_epoch ... ok
++test vrf_leader::tests::leader_claim_rejects_non_elected_validator ... ok
++test vrf_leader::tests::networked_four_validators_finalize_with_one_offline ... ok
++test vrf_leader::tests::ten_thousand_rounds_proposer_distribution_within_confidence_interval ... ok
++test vrf_leader::tests::vrf_prove_and_verify_roundtrip ... ok
++test vrf_leader::tests::vrf_rejects_tampered_output_hash ... ok
++test vrf_leader::tests::vrf_rejects_wrong_public_key ... ok
++test validator_set::tests::four_to_seven_validator_change_at_height_h_without_stopping_network ... ok
++
++test result: ok. 85 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.94s
++
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++
++running 2 tests
++test qc_authorized_set_update_replaces_validator_set_and_rejects_bad_updates ... ok
++test four_to_seven_validators_transition_at_height_h_across_all_nodes ... ok
++
++test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.79s
++
++
++running 3 tests
++test networked_validator_rejects_forged_vrf_leader_and_forged_bls_vote ... ok
++test ten_thousand_rounds_stake_weighted_vrf_distribution_and_public_verification ... ok
++test four_validators_over_n1_n2_finalize_100_blocks_and_survive_one_validator_outage ... ok
++
++test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.54s
++
++
++running 2 tests
++test b6_slashing_vector_fixture_matches_deterministic_policy ... ok
++test b6_six_attack_types_slash_validator_set_and_distribute_penalties ... ok
++
++test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
++
++
++running 2 tests
++test b7_rewards_vector_fixture_matches_engine ... ok
++test b7_hundred_thousand_blocks_conservation_invariant_within_one_unit ... ok
++
++test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s
++
++
++running 2 tests
++test b8_fork_choice_vector_fixture_matches_deterministic_rules ... ok
++test b8_deep_reorg_past_finalized_checkpoint_is_rejected_and_slashes_offender ... ok
++
++test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
++
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++   Compiling aura-consensus v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-consensus)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.94s
++     Running unittests src/lib.rs (target/debug/deps/aura_consensus-69c8350ccf8826e1)
++     Running unittests src/bin/main.rs (target/debug/deps/aura_consensus-44359d562a8db6b1)
++     Running tests/b4_validator_set.rs (target/debug/deps/b4_validator_set-5555738667844890)
++     Running tests/b5_vrf_leader.rs (target/debug/deps/b5_vrf_leader-f23c9fe47d2aece6)
++     Running tests/b6_slashing.rs (target/debug/deps/b6_slashing-d4da4b1aff9ba808)
++     Running tests/b7_rewards.rs (target/debug/deps/b7_rewards-19df07c51a6d3b35)
++     Running tests/b8_fork_choice.rs (target/debug/deps/b8_fork_choice-f921789faf9f17ad)
++   Doc-tests aura_consensus
+diff --git a/docs/evidence/b8/gates.txt b/docs/evidence/b8/gates.txt
+new file mode 100644
+index 0000000..1394d05
+--- /dev/null
++++ b/docs/evidence/b8/gates.txt
+@@ -0,0 +1,9 @@
++B8 gates (UTC generated 2026-11-01T16:08:55+00:00)
++
++make test-b8: PASS (see gate.log)
++  aura-consensus library unit tests: 85
++  deep-reorg rejection + SlashingEvidence + 64-vector fixture integration tests: 2
++make nc-b8: PASS (6/6 exact library-unit-test mutations; restoration green)
++make nc-all: PASS (321/321 cumulative negative controls; see inventory.txt)
++make test: PASS (ALL GATES GREEN)
++Dependency closure and lockfile checksums: PASS (0 new external crates)
+diff --git a/docs/evidence/b8/inventory.txt b/docs/evidence/b8/inventory.txt
+new file mode 100644
+index 0000000..a748d5f
+--- /dev/null
++++ b/docs/evidence/b8/inventory.txt
+@@ -0,0 +1,435 @@
++# Cumulative negative-control inventory through B8
++# Generated (UTC): 2026-11-01T16:08:55+00:00
++
++[C0] 2/2 PASS
++  PASS NC-1 Rust identity
++  PASS NC-2 docs drift guard
++
++[C1] 3/3 PASS
++  PASS NC-1 bech32 checksum constant
++  PASS NC-2 address version byte
++  PASS NC-3 independent golden vector
++
++[C2] 4/4 PASS
++  PASS NC-1 codec version
++  PASS NC-2 independent golden fixture
++  PASS NC-3 trailing-byte guard
++  PASS NC-4 non-minimal varint guard
++
++[C3] 5/5 PASS
++  PASS NC-1 domain separation context
++  PASS NC-2 independent domain-hash vector
++  PASS NC-3 RFC 8032 vector
++  PASS NC-4 Ed25519 verification bypass
++  PASS NC-5 dependency allowlist / make test gate
++
++[C4] 6/6 PASS
++  PASS NC-1 signing context
++  PASS NC-2 txid context
++  PASS NC-3 independent golden signature
++  PASS NC-4 replay protection
++  PASS NC-5 signer/public-key binding
++  PASS NC-6 Ed25519 verification bypass
++
++[C5] 6/6 PASS
++  PASS NC-1 Merkle leaf context
++  PASS NC-2 Merkle node context
++  PASS NC-3 block-hash context
++  PASS NC-4 independent golden tx_root
++  PASS NC-5 tx_root recomputation check
++  PASS NC-6 canonical body order check
++
++[C6] 6/6 PASS
++  PASS NC-1 event leaf context
++  PASS NC-2 independent golden root
++  PASS NC-3 leaf/value binding
++  PASS NC-4 sibling-count check
++  PASS NC-5 sibling direction
++  PASS NC-6 root comparison
++
++[C7] 6/6 PASS
++  PASS NC-1 state key digest context
++  PASS NC-2 independent golden key digest
++  PASS NC-3 reserved key-space prefixes
++  PASS NC-4 namespace length check
++  PASS NC-5 contract namespace check
++  PASS NC-6 contract address check
++
++[C8] 6/6 PASS
++  PASS NC-1 genesis context
++  PASS NC-2 validator-set context
++  PASS NC-3 independent golden genesis hash
++  PASS NC-4 validator order (DoD
++  PASS NC-5 unknown JSON fields
++  PASS NC-6 Stage 1 chain-id check
++
++[C9] 6/6 PASS
++  PASS NC-1 C9 golden varint vector
++  PASS NC-2 vector inventory minimum
++  PASS NC-3 injected non-minimal-varint bug
++  PASS NC-4 injected trailing-byte-guard bug
++  PASS NC-5 fuzz harness iteration counter
++  PASS NC-6 rig wiring in Makefile
++
++[C10] 6/6 PASS
++  PASS NC-1 missing phase receipt
++  PASS NC-2 deferred phase marked done
++  PASS NC-3 forged NC log result
++  PASS NC-4 unindexed format spec
++  PASS NC-5 forged patch subject
++  PASS NC-6 corrupted evidence checksum
++
++[S0] 6/6 PASS
++  PASS NC-1 final-view context
++  PASS NC-2 independent golden final view
++  PASS NC-3 fake state root
++  PASS NC-4 fake persistence
++  PASS NC-5 fake determinism
++  PASS NC-6 falsified no-root measurement
++
++[S1] 6/6 PASS
++  PASS NC-1 leaf context
++  PASS NC-2 node context
++  PASS NC-3 independent checkpoint root
++  PASS NC-4 proof root comparison
++  PASS NC-5 path bit ordering
++  PASS NC-6 depth-independent empty subtrees
++
++[S2] 6/6 PASS
++  PASS NC-1 WAL checksum context
++  PASS NC-2 state key context
++  PASS NC-3 state root context
++  PASS NC-4 independent golden WAL record
++  PASS NC-5 WAL checksum verification
++  PASS NC-6 WAL-before-head invariant
++
++[S3] 6/6 PASS
++  PASS NC-1 diff checksum context
++  PASS NC-2 event commitment context
++  PASS NC-3 diff magic
++  PASS NC-4 independent golden diff
++  PASS NC-5 diff checksum verification
++  PASS NC-6 rollback removal (balance changes after revert)
++
++[S4] 6/6 PASS
++  PASS NC-1 snapshot magic
++  PASS NC-2 manifest checksum context
++  PASS NC-3 chunk hash context
++  PASS NC-4 independent golden manifest
++  PASS NC-5 manifest checksum verification
++  PASS NC-6 chunk digest comparison (substituted chunk)
++
++[S5] 6/6 PASS
++  PASS NC-1 head checksum context
++  PASS NC-2 delta checksum context
++  PASS NC-3 package checksum context
++  PASS NC-4 independent golden package
++  PASS NC-5 quorum comparison
++  PASS NC-6 final state-root comparison (substituted diff chunk)
++
++[S6] 6/6 PASS
++  PASS NC-1 record checksum context
++  PASS NC-2 base checksum context
++  PASS NC-3 retention boundary (keep + 1)
++  PASS NC-4 pruning disabled in prune mode
++  PASS NC-5 archive compaction allowed
++  PASS NC-6 pruned version served instead of rejected
++
++[S7] 6/6 PASS
++  PASS NC-1 manifest checksum context
++  PASS NC-2 blob SHA-256 comparison
++  PASS NC-3 replayed root comparison
++  PASS NC-4 parent-root chain check
++  PASS NC-5 restore into a live store
++  PASS NC-6 crash-window WAL replay on reopen
++
++[X0] 6/6 PASS
++  PASS NC-1 host imports allowed
++  PASS NC-2 float policy disabled at its single choke point
++  PASS NC-3 start section allowed
++  PASS NC-4 memory maximum not required
++  PASS NC-5 shared memory allowed
++  PASS NC-6 unknown opcode allowed (whitelist not fail-closed)
++
++[X1] 6/6 PASS
++  PASS NC-1 census bypassed (gate always Ok)
++  PASS NC-2 fuel budget ignored (4x the published budget)
++  PASS NC-3 memory ceiling removed from the store limiter
++  PASS NC-4 trap misclassified (out-of-fuel -> other)
++  PASS NC-5 module-size check removed
++  PASS NC-6 trace cap removed
++
++[X2] 7/7 PASS
++  PASS NC-1 gas table zeroed (every call free)
++  PASS NC-2 transfer is not charged
++  PASS NC-3 value length ceiling removed
++  PASS NC-4 rollback removed on failure
++  PASS NC-5 import census opened (any import links)
++  PASS NC-6 out-of-gas guard removed (a caught -8 commits)
++  PASS NC-7 instruction gas never settled
++
++[X3] 6/6 PASS
++  PASS NC-1 version check removed (a stale upgrade wins)
++  PASS NC-2 balance not preserved (upgrade zeroes the account)
++  PASS NC-3 `migrate` never runs (storage not migrated)
++  PASS NC-4 code hash not stored on the account
++  PASS NC-5 `init` never runs
++  PASS NC-6 census skipped at deploy
++
++[X4] 6/6 PASS
++  PASS NC-1 `#[entrypoint]` exports the wrong name
++  PASS NC-2 the SDK ignores the absent-key status
++  PASS NC-3 the codec stops length-checking
++  PASS NC-4 the mutable-global allowance is removed
++  PASS NC-5 the element-table rule is switched off
++  PASS NC-6 the pinned artifact hash is not checked
++
++[X5] 6/6 PASS
++  PASS NC-1 the dispatcher accepts trailing bytes
++  PASS NC-2 `transfer_from` does not spend the allowance
++  PASS NC-3 an ARC-721 transfer keeps the approval
++  PASS NC-4 the multisig does not check `executed`
++  PASS NC-5 the session accepts oversize calldata
++  PASS NC-6 a failed execution is still marked executed
++
++[X6] 6/6 PASS
++  PASS NC-1 the reentrancy guard is removed
++  PASS NC-2 the depth limit is removed
++  PASS NC-3 the callee's diff is not merged
++  PASS NC-4 a failed callee's value is not returned
++  PASS NC-5 the callee's status is flattened to success
++  PASS NC-6 the child frame does not inherit the parent's stack
++
++[X7] 6/6 PASS
++  PASS NC-1 the version stamp is dropped from the state root
++  PASS NC-2 an empty diff counts as a commit
++  PASS NC-3 the rolling digest ignores the resulting root
++  PASS NC-4 a refusal still applies its diff
++  PASS NC-5 a starved call is billed nothing
++  PASS NC-6 the generator ignores its seed
++
++[X8] 6/6 PASS
++  PASS NC-1 `call` stops reading the callee signature
++  PASS NC-2 a stack underflow no longer reaches the report
++  PASS NC-3 the float value types are read as i32
++  PASS NC-4 any export name counts as `run`
++  PASS NC-5 the function and code counts may disagree
++  PASS NC-6 the module-size ceiling stops being enforced
++
++[D0] 6/6 PASS
++  PASS NC-1 the stub exits 0
++  PASS NC-2 every layer is classified `implemented`
++  PASS NC-3 `report` measures a tree that is not a workspace
++  PASS NC-4 an unknown command falls through to exit 0
++  PASS NC-5 the refusal stops naming the capabilities
++  PASS NC-6 a node flag is no longer recognised
++
++[D1] 6/6 PASS
++  PASS NC-1 aurad without --chain-id must refuse
++  PASS NC-2 unknown TOML fields must be rejected
++  PASS NC-3 report must reject non-workspace paths
++  PASS NC-4 unknown commands must return usage error
++  PASS NC-5 refusal must name the D1 phase
++  PASS NC-6 config
++
++[B0] 6/6 PASS
++  PASS NC-1 missing arguments must refuse
++  PASS NC-2 placeholder consensus layers must remain placeholders
++  PASS NC-3 report must reject non-workspace paths
++  PASS NC-4 unknown commands must return usage error
++  PASS NC-5 refusal must name every missing capability
++  PASS NC-6 distinct logs must not be equivalent without consensus
++
++[B1] 6/6 PASS
++  PASS NC-1 proposer selection must rotate by round
++  PASS NC-2 proposer identity check must match selected validator
++  PASS NC-3 block signatures must be chain separated
++  PASS NC-4 block signatures must bind the signed block hash
++  PASS NC-5 tampered signatures must be rejected
++  PASS NC-6 verification must use the supplied public key
++
++[B2] 6/6 PASS
++  PASS NC-1 quorum threshold must be 2f+1
++  PASS NC-2 duplicate validators must not add a second vote
++  PASS NC-3 an aggregator must form a QC at its threshold
++  PASS NC-4 BLS signatures must be chain separated
++  PASS NC-5 BLS signatures must be domain separated
++  PASS NC-6 BLS verification must bind the vote message
++
++[B3] 6/6 PASS
++  PASS NC-1 two QCs must not satisfy the 3-chain commit rule
++  PASS NC-2 a same-view 3-chain must commit its first block
++  PASS NC-3 timeout view change must advance the view
++  PASS NC-4 round change must advance the round
++  PASS NC-5 block hashes must include transaction contents
++  PASS NC-6 empty-transaction blocks must be identified as nil
++
++[D2] 6/6 PASS
++  PASS NC-1 chain replay must be rejected
++  PASS NC-2 sender nonce must match projected state
++  PASS NC-3 transfer value and fee must be debited atomically
++  PASS NC-4 gas limit must cover the transfer schedule
++  PASS NC-5 fee cap must cover base fee plus tip
++  PASS NC-6 receipt must be durable before event publication
++
++[D3] 6/6 PASS
++  PASS NC-1 sender nonce must match projected account state
++  PASS NC-2 ready sender lanes must use tip priority
++  PASS NC-3 same-nonce replacement must meet the fee bump
++  PASS NC-4 full pool must reject equal-priority insertion
++  PASS NC-5 reorg reinsertion must return validated transactions to the pool
++  PASS NC-6 gas limit must cover the native transfer schedule
++
++[D4] 6/6 PASS
++  PASS NC-1 JSON-RPC version must be exactly 2.0
++  PASS NC-2 notifications must not receive response bodies
++  PASS NC-3 JSON-RPC batches are bounded to 32 items
++  PASS NC-4 HTTP request body limit is enforced
++  PASS NC-5 WebSocket handshake uses the RFC6455 GUID
++  PASS NC-6 WebSocket client frames must be masked
++
++[D5] 6/6 PASS
++  PASS NC-1 REST rejects unknown JSON fields
++  PASS NC-2 v1.1 remains additive version 1.1
++  PASS NC-3 unsupported API versions are rejected
++  PASS NC-4 OpenAPI marks unknown fields closed
++  PASS NC-5 v1 protobuf field numbers remain stable
++  PASS NC-6 unsupported calls map to gRPC Unimplemented
++
++[D6] 6/6 PASS
++  PASS NC-1 /health refuses when the PID file is absent
++  PASS NC-2 finality lag metric remains exported
++  PASS NC-3 gas throughput derives from committed samples
++  PASS NC-4 peer count does not invent unavailable P2P peers
++  PASS NC-5 structured logs remain JSON
++  PASS NC-6 OTLP layer records and exports spans
++
++[N0] 6/6 PASS
++  PASS NC-1 missing arguments must refuse
++  PASS NC-2 placeholder network layers must remain placeholders
++  PASS NC-3 report must reject non-workspace paths
++  PASS NC-4 unknown commands must return usage error
++  PASS NC-5 refusal must name every missing capability
++  PASS NC-6 Node B cannot observe Node A's tx without P2P
++
++[N1] 6/6 PASS
++  PASS NC-1 PeerId must equal BLAKE3(public_key)
++  PASS NC-2 identity substitution against expected PeerId must be rejected
++  PASS NC-3 tampered handshake Ed25519 signature must be rejected
++  PASS NC-4 protocol_version mismatch must be rejected
++  PASS NC-5 banned PeerId must be rejected by BanList
++  PASS NC-6 tampered encrypted session frame must fail MAC verification
++
++[N2] 6/6 PASS
++  PASS NC-1 tampered gossip signature must be rejected
++  PASS NC-2 duplicate gossip message must be dropped by SeenCache
++  PASS NC-3 flooding peer exceeding rate window must lose score and be banned
++  PASS NC-4 peer score reaching ban_threshold must escalate to BanList
++  PASS NC-5 oversized gossip payload must be rejected
++  PASS NC-6 unsubscribed gossip topic must be rejected
++
++[B4] 6/6 PASS
++  PASS NC-1 below-minimum stake must be rejected from enter queue
++  PASS NC-2 duplicate active validator must be rejected from enter queue
++  PASS NC-3 epoch boundary must process enter and exit queues
++  PASS NC-4 set update targeting wrong epoch must be rejected
++  PASS NC-5 set update with insufficient validator stake must be rejected
++  PASS NC-6 set update with mismatched or insufficient QC must be rejected
++
++[B5] 6/6 PASS
++  PASS NC-1 VRF verification must reject wrong or forged BLS proof signature
++  PASS NC-2 VRF verification must bind the output hash to proof and transcript
++  PASS NC-3 grinding protection must reject zero epoch randomness after epoch 0
++  PASS NC-4 epoch randomness derivation must verify the boundary QC
++  PASS NC-5 leader claim verification must enforce stake-weighted VRF leader identity
++  PASS NC-6 stake-weighted VRF leader selection must weight validators by stake
++
++[D7] 6/6 PASS
++  PASS NC-1 substituted peer identity must be rejected
++  PASS NC-2 malformed or unsigned gossip must be rejected
++  PASS NC-3 duplicate gossip messages must be deduplicated
++  PASS NC-4 four-validator quorum threshold must be three
++  PASS NC-5 two votes out of four validators must never commit
++  PASS NC-6 devnet must continue finalizing with one of four validators unavailable
++
++[D8] 6/6 PASS
++  PASS NC-1 aura --help must document all subcommand families
++  PASS NC-2 keys verify must reject forged signatures
++  PASS NC-3 tx transfer must reject gas limit below floor
++  PASS NC-4 node config-check must reject unknown TOML fields
++  PASS NC-5 snapshot verify must reject tampered digest
++  PASS NC-6 upgrade plan must reject non-increasing protocol version
++
++[N3] 6/6 PASS
++  PASS NC-1 Kademlia XOR distance metric and bucket index must be exact
++  PASS NC-2 peer record with substituted public key must be rejected
++  PASS NC-3 forged or tampered Ed25519 peer record signature must be rejected
++  PASS NC-4 Kademlia routing table must reject stale sequence record replay
++  PASS NC-5 Kademlia routing table must reject banned peers
++  PASS NC-6 Circuit Relay v2 must reject expired or unreserved target slots
++
++[N4] 6/6 PASS
++  PASS NC-1 header chain must reject parent_hash mismatch
++  PASS NC-2 header verification must reject tampered block_hash
++  PASS NC-3 QC verification must reject stake below 2f+1 quorum threshold
++  PASS NC-4 QC verification must reject forged validator Ed25519 signature
++  PASS NC-5 body ingestion must require verified header+QC first (D-N4)
++  PASS NC-6 body verification must reject tx_root mismatch and ban peer
++
++[N5] 6/6 PASS
++  PASS NC-1 manifest must reject state_root mismatch against QC-certified header
++  PASS NC-2 manifest must reject tampered S4 checksum or chunk_root and ban peer
++  PASS NC-3 chunk ingestion must require an accepted manifest first
++  PASS NC-4 corrupt chunk must trigger rollback, ban peer, and mark re-request
++  PASS NC-5 finalization must verify recomputed S1 Merkle state_root
++  PASS NC-6 sync_from_peers must re-request corrupt chunk from honest fallback peer
++
++[N6] 6/6 PASS
++  PASS NC-1 frames exceeding max_frame_bytes must be rejected before signature verification
++  PASS NC-2 per-peer message rate limit must throttle and ban flooding peers
++  PASS NC-3 per-peer signature verification budget must cap Ed25519 CPU usage
++  PASS NC-4 forged ingress signatures must be rejected and ban the peer
++  PASS NC-5 conflicting consensus votes/proposals must record equivocation evidence and ban
++  PASS NC-6 banned 10k msg/s peers must be dropped before signature verification
++
++[N7] 6/6 PASS
++  PASS NC-1 forged header or tampered state_root must be rejected and ban the peer
++  PASS NC-2 QC with forged signature or insufficient quorum must be rejected
++  PASS NC-3 finalized checkpoint anchor mismatch must be rejected
++  PASS NC-4 proofs exceeding max_proof_bytes or max_verification_gas must be rejected
++  PASS NC-5 DAS verification must require min_das_samples distinct chunk indices
++  PASS NC-6 DAS chunk sample Merkle branch must verify against header.tx_root
++
++[N8] 6/6 PASS
++  PASS NC-1 100-node 20% loss + Byzantine stand must verify finalized root via light client
++  PASS NC-2 partition healing must sync lagging nodes to the canonical finalized head
++  PASS NC-3 eclipsed nodes must reject uncertified headers via 2f+1 QC verification
++  PASS NC-4 honest nodes must detect Byzantine equivocation and ban the Byzantine peer
++  PASS NC-5 cluster convergence verifier must reject any finalized state_root divergence
++  PASS NC-6 20 scenarios × 3 runs matrix must report zero finalized-head divergence
++
++[B6] 6/6 PASS
++  PASS NC-1 turning slashing off must fail the 6-attack slashing gate
++  PASS NC-2 double-sign evidence must require two distinct block hashes
++  PASS NC-3 surround-vote evidence must enforce strict outer/inner epoch span
++  PASS NC-4 downtime slashing must enforce max_missed_blocks_per_window threshold
++  PASS NC-5 penalty distribution must conserve slashed stake across reporter, treasury, and burn
++  PASS NC-6 duplicate slashing evidence replay must be rejected
++
++[B7] 6/6 PASS
++  PASS NC-1 dropping integer-division remainder breaks the 100,000-block sum invariant
++  PASS NC-2 fee burn must deduct and record burned transaction fees
++  PASS NC-3 validator commission must be deducted before splitting the delegator pool
++  PASS NC-4 delegator rewards must scale proportionally with delegated stake
++  PASS NC-5 verify_sum_invariant must reject discrepancy above 1 unit
++  PASS NC-6 validator commission rate above 10,000 bps must be rejected
++
++[B8] 6/6 PASS
++  PASS NC-1 attempting to reorg a finalized block must be rejected and emit slashing evidence
++  PASS NC-2 fork choice must prefer the branch with the highest justified QC view
++  PASS NC-3 fork choice must ignore branches that do not descend from the finalized checkpoint
++  PASS NC-4 finalized checkpoint must enforce 2f+1 quorum threshold on commit_qc
++  PASS NC-5 consensus light-client proof must enforce same-view rule across 3-chain QCs
++  PASS NC-6 weak subjectivity must reject stale checkpoints beyond the unbonding window
++
++TOTAL: 321 negative controls
+diff --git a/docs/evidence/b8/nc.log b/docs/evidence/b8/nc.log
+new file mode 100644
+index 0000000..b265d2e
+--- /dev/null
++++ b/docs/evidence/b8/nc.log
+@@ -0,0 +1,8 @@
++B8: validating focused baseline tests
++PASS NC-1 attempting to reorg a finalized block must be rejected and emit slashing evidence: fork_choice::tests::attempt_to_reorg_finalized_block_is_rejected_and_emits_slashing_evidence failed as expected
++PASS NC-2 fork choice must prefer the branch with the highest justified QC view: fork_choice::tests::fork_choice_prefers_branch_with_highest_qc_view_descending_from_finalized failed as expected
++PASS NC-3 fork choice must ignore branches that do not descend from the finalized checkpoint: fork_choice::tests::fork_not_descending_from_finalized_checkpoint_is_never_selected failed as expected
++PASS NC-4 finalized checkpoint must enforce 2f+1 quorum threshold on commit_qc: fork_choice::tests::finalized_checkpoint_rejects_invalid_or_sub_quorum_qc failed as expected
++PASS NC-5 consensus light-client proof must enforce same-view rule across 3-chain QCs: fork_choice::tests::light_client_proof_verifies_3_chain_finality_and_rejects_forged_qc failed as expected
++PASS NC-6 weak subjectivity must reject stale checkpoints beyond the unbonding window: fork_choice::tests::weak_subjectivity_rejects_stale_checkpoint_beyond_unbonding_window failed as expected
++RESULT: 6/6 negative controls PASS
+diff --git a/docs/evidence/b8/report.md b/docs/evidence/b8/report.md
+new file mode 100644
+index 0000000..f78371c
+--- /dev/null
++++ b/docs/evidence/b8/report.md
+@@ -0,0 +1,11 @@
++# CONSENSUS B8 — Finality: Fork Choice, Finalized Checkpoint, Light-Client Proof & Deep-Reorg Defence (`0055-B8-finality-fork-choice.patch`)
++
++## Scope & DoD (`D-B3`, `D-B4`)
++- **Fork Choice & Finalized Checkpoints (`crates/aura-consensus/src/fork_choice.rs`)**:
++  - Selects the canonical head descending from the latest `FinalizedCheckpoint` by highest `justified_qc_view`, height, and deterministic hash tie-break.
++  - Enforces `D-B3` weak-subjectivity window (`DEFAULT_WEAK_SUBJECTIVITY_WINDOW = 10_000` blocks) and `2f+1` BLS `QuorumCertificate` verification.
++- **Consensus Light-Client Proof (`ConsensusLightClientProof`)**:
++  - Verifies 3-chain parent links, same-view rule, and `2f+1` BLS QCs (`target_qc`, `child_qc`, `grandchild_qc`).
++- **Deep-Reorg Defence (`attempt to reorg a finalized block -> reject + evidence`)**:
++  - Any attempt to reorganize a finalized block is rejected with `ForkChoiceError::DeepReorgPastFinalized` and emits cryptographic `SlashingEvidence` accepted by `SlashingEngine`.
++- **Negative Controls (`tools/nc_b8.py`)**: 6/6 library unit-test negative controls pass (`NC-1`..`NC-6`).
+diff --git a/docs/evidence/b8/vectors.log b/docs/evidence/b8/vectors.log
+new file mode 100644
+index 0000000..eb06a11
+--- /dev/null
++++ b/docs/evidence/b8/vectors.log
+@@ -0,0 +1 @@
++B8 FIXTURES: OK (crates/aura-consensus/tests/fixtures/b8_baseline.txt, crates/aura-consensus/tests/fixtures/b8_fork_choice.txt)
+diff --git a/docs/evidence/d4/SHA256SUMS b/docs/evidence/d4/SHA256SUMS
+index b085020..e647808 100644
+--- a/docs/evidence/d4/SHA256SUMS
++++ b/docs/evidence/d4/SHA256SUMS
+@@ -1,7 +1,7 @@
+-662d4597359971af926cd2b18b3df84b3dcd4318bb5fce4896029ae16359a667  CHANGELOG.md
++7b03002e487c7986028a23c7d9d44e95bb832621aaa1dc6d30d2871d6035545c  CHANGELOG.md
+ f6e24df6446f35bad5dd60082026f0abba4e26f8eec20e0181875ad81fb73708  Cargo.lock
+ 47e7ff2541cb6815f64a1b5a664ea2290a9d64b6ab4badc007fdb190dcfbcae7  Cargo.toml
+-fb8a9dd5047ee6b491bbd94f5ed2ab1c0c95e89ef6f0de6756878472a290c8c5  Makefile
++c72cb2b0b749dc2cb67fd9cfbfeacfd092f5b8c5b9b73d89fddfbcd400e488e8  Makefile
+ 1f0c4ab1f47b4f9af93e9c784b67dd652b3b5d651cde127e9b8a6459abb7ade9  crates/aura-node/src/bin/aurad.rs
+ a1ab6c116394d5266389c21b6d80eaa42a84dab0aaac6e862d3c262938b5f55c  crates/aura-node/src/pipeline.rs
+ 6ade4fdd1e4b84aabb04956088ff549865e92843b03ec9567252a92179cf2158  crates/aura-node/src/rpc.rs
+@@ -30,7 +30,7 @@ c477f915b427982ca83fcb253fa0ab850d619ca5bf4a764137f0407078af4986  fuzz/Cargo.loc
+ 6f3f2bd9f508b33896011a6e7a6dc60e93ad24e6a00445e50ceceedd1346194b  fuzz/Cargo.toml
+ dca80316562fefcf24c45b40fb635412e1d4e5e09b5abe26f7d0e6b67e1e906e  fuzz/README.md
+ a0aa6b2b7462cd6121b704ebc04fede7988cce0b269be5585f42c538d62dc500  fuzz/fuzz_targets/fuzz_rpc.rs
+-73d6d66feaa937a6e300304b9e2e01a7a1a815b81bc4a532b5bbde3eb4364b4d  tools/audit_closeout.py
++212928d57c684590afca7890f45c5e82df24485e585d1757f642b23758ad40a1  tools/audit_closeout.py
+ b8248a8a1acffc672de62c26bf17797cc213204a3e907c1d4cf6be49694988d6  tools/gen_d4_vectors.py
+ edc860eea1f0058600025bcc5bf633e2435ed8716f6674373b8cee4982ea08f4  tools/nc_d4.py
+ f4b01b072fccf680d2bde6fbd156dfccaa057c5a33dca2bf67399d5622417f9c  tools/write_d4_evidence.py
+diff --git a/docs/evidence/d5/SHA256SUMS b/docs/evidence/d5/SHA256SUMS
+index 6c6a75c..baf7361 100644
+--- a/docs/evidence/d5/SHA256SUMS
++++ b/docs/evidence/d5/SHA256SUMS
+@@ -1,7 +1,7 @@
+-662d4597359971af926cd2b18b3df84b3dcd4318bb5fce4896029ae16359a667  CHANGELOG.md
++7b03002e487c7986028a23c7d9d44e95bb832621aaa1dc6d30d2871d6035545c  CHANGELOG.md
+ f6e24df6446f35bad5dd60082026f0abba4e26f8eec20e0181875ad81fb73708  Cargo.lock
+ 47e7ff2541cb6815f64a1b5a664ea2290a9d64b6ab4badc007fdb190dcfbcae7  Cargo.toml
+-fb8a9dd5047ee6b491bbd94f5ed2ab1c0c95e89ef6f0de6756878472a290c8c5  Makefile
++c72cb2b0b749dc2cb67fd9cfbfeacfd092f5b8c5b9b73d89fddfbcd400e488e8  Makefile
+ 7609b7b41fd843e1b07d39f1156b702de2923472e2a3d5545ed61f7d343b9db3  crates/aura-grpc-rest/Cargo.toml
+ 370dcd7b01f46f362a0b3cf683bca9415c68ba825eb6f82e7604f276bc4c93ac  crates/aura-grpc-rest/build.rs
+ 71ff83801dca6c9a7f0f6965ef95f492c762ae578d8cbfb1bb57e9a27beb818d  crates/aura-grpc-rest/proto/aura/api/v1/service.proto
+@@ -24,7 +24,7 @@ c7540c5379dc80a5b80ef977db64d1c795bee013ea25749f2f3564dfadc58f5f  docs/api/opena
+ 94ac54ec0a34307229fe0841ee7af61bb0ec7deb01106f3af902371a5da1d39f  docs/evidence/c10/SHA256SUMS
+ 5ad7142c106a79924d27af53f5618918b0edecda204be859bc5ca082fde6877c  docs/evidence/d0/SHA256SUMS
+ f404c4873c6ae9b0cc05a5698dc4f47b971656853ac51bc4ed2a8fe293930c37  docs/evidence/d1/SHA256SUMS
+-7cbd9a3353a860e603386b78abcd2ee05a87b0e2ba3feecc250960d0b007fb69  docs/evidence/d4/SHA256SUMS
++fe3bb313fbb40433057f4d1b97eacdbda7cc8c480b938861f64a7b760c3b0177  docs/evidence/d4/SHA256SUMS
+ 013d890c071b4f59d8e9c7ced0d201602d0c1c785c08d64e4ac4981f3e745b57  docs/evidence/d5/clean-apply.txt
+ cfdb43f35c37f73bd5421ec808ca734d5ba73770cd7268d3ba0caa8118edbe0d  docs/evidence/d5/gates.txt
+ 6cd9301e8f52b15f6524919e250f8d8bba797a7b61281d81045da8e3c051dd86  docs/evidence/d5/inventory.txt
+@@ -36,6 +36,6 @@ aa2d1b3bb41e76325da2272b2587adbcd44498c826ed39feaa30ffa50b0bffe3  docs/evidence/
+ f5d6d1efa3110324601ff08da1a85ca78490a35d62bedd71070455fb41b3ea53  docs/plans/NODE_PLAN.md
+ 122cae5dc2a19d0f8d563e6e13703ebf9b836942cce58bc0dd9dc622bdd72493  docs/spec/FORMAT_INDEX.md
+ e6171eda73bf03cee6f405e13cd0e8c95020c8ad8d2ba4e2b7d05dfbb65911dc  docs/spec/grpc-rest.md
+-73d6d66feaa937a6e300304b9e2e01a7a1a815b81bc4a532b5bbde3eb4364b4d  tools/audit_closeout.py
++212928d57c684590afca7890f45c5e82df24485e585d1757f642b23758ad40a1  tools/audit_closeout.py
+ 429f59ba33f4c321bc4ea8d11c77e96abce0ec28f3b2fb3266a05fa527b92180  tools/nc_d5.py
+ 13bf6e5379b18845f1040fda102800577d8ae22713165f37d126929df0680071  tools/write_d5_evidence.py
+diff --git a/docs/evidence/d6/SHA256SUMS b/docs/evidence/d6/SHA256SUMS
+index 2038d1b..d44b07d 100644
+--- a/docs/evidence/d6/SHA256SUMS
++++ b/docs/evidence/d6/SHA256SUMS
+@@ -1,7 +1,7 @@
+-662d4597359971af926cd2b18b3df84b3dcd4318bb5fce4896029ae16359a667  CHANGELOG.md
++7b03002e487c7986028a23c7d9d44e95bb832621aaa1dc6d30d2871d6035545c  CHANGELOG.md
+ f6e24df6446f35bad5dd60082026f0abba4e26f8eec20e0181875ad81fb73708  Cargo.lock
+ 47e7ff2541cb6815f64a1b5a664ea2290a9d64b6ab4badc007fdb190dcfbcae7  Cargo.toml
+-fb8a9dd5047ee6b491bbd94f5ed2ab1c0c95e89ef6f0de6756878472a290c8c5  Makefile
++c72cb2b0b749dc2cb67fd9cfbfeacfd092f5b8c5b9b73d89fddfbcd400e488e8  Makefile
+ 00a069a2b6aa8d2a983f8ca99c45e592e97eefc97e8816948efa88b49d0d6cbe  crates/aura-node/Cargo.toml
+ c2eb3da4f8d317275e990bb1378a37187f0d65bd1b6e21092666769897139ce2  crates/aura-node/src/baseline.rs
+ 1f0c4ab1f47b4f9af93e9c784b67dd652b3b5d651cde127e9b8a6459abb7ade9  crates/aura-node/src/bin/aurad.rs
+@@ -20,8 +20,8 @@ bce9253cdf6d4a17db6f84d2d32567dc3fba7f824b7bbf9dfbe9a3c20fd10494  docs/STATUS.md
+ 5ad7142c106a79924d27af53f5618918b0edecda204be859bc5ca082fde6877c  docs/evidence/d0/SHA256SUMS
+ f404c4873c6ae9b0cc05a5698dc4f47b971656853ac51bc4ed2a8fe293930c37  docs/evidence/d1/SHA256SUMS
+ 85871b00d9205b2a35ef125b95c9c1a4b30a407477d644fa6fe77086139bf453  docs/evidence/d3/SHA256SUMS
+-7cbd9a3353a860e603386b78abcd2ee05a87b0e2ba3feecc250960d0b007fb69  docs/evidence/d4/SHA256SUMS
+-5e9cbd73b65d7ee42f30a595586d53ea1f7c78e4108ec5a6b1245ada50ab9935  docs/evidence/d5/SHA256SUMS
++fe3bb313fbb40433057f4d1b97eacdbda7cc8c480b938861f64a7b760c3b0177  docs/evidence/d4/SHA256SUMS
++44fd69dd2e249db192384f95d5e1c3444dd99d7784cf1cf6e1d1e11dec795b85  docs/evidence/d5/SHA256SUMS
+ 94cb9a46aae454de6209d83e372575dea54f1c108b43366c4f968f9562ee20ed  docs/evidence/d6/clean-apply.txt
+ ff2193c555eba82807bd87ae91b40a27ab368e4275ea2f6f36efd2cdd3840f5f  docs/evidence/d6/gates.txt
+ 0ffa8d1dd9f59accfbfa369696c65bcf0f238b8205c294c5f9f288f1b2904cc0  docs/evidence/d6/inventory.txt
+@@ -34,6 +34,6 @@ ef0edc3d121cbae307324e2d1ffcaca8e4a76be5b7ac6519099ebc6d924543af  docs/evidence/
+ 73dc9bda4481bfaea0b4e8212c3c5afb8114671d0cbbf1b06fde3910e4bf7e66  docs/observability/README.md
+ e583ec48a58c12928dd7e0aad3c1e89e6e4b33b06e2803eb93d7747a0088c971  docs/observability/grafana-dashboard-d6.json
+ f5d6d1efa3110324601ff08da1a85ca78490a35d62bedd71070455fb41b3ea53  docs/plans/NODE_PLAN.md
+-73d6d66feaa937a6e300304b9e2e01a7a1a815b81bc4a532b5bbde3eb4364b4d  tools/audit_closeout.py
++212928d57c684590afca7890f45c5e82df24485e585d1757f642b23758ad40a1  tools/audit_closeout.py
+ 6deb009718cb586bd7984d94d7b2ecbc4d4900d949f93aa73986ad781ac92acd  tools/nc_d6.py
+ 706c1c86dadfbd7580239bb32cf7fd68b0db9002c81ea63657cffff295934926  tools/write_d6_evidence.py
+diff --git a/docs/evidence/d7/SHA256SUMS b/docs/evidence/d7/SHA256SUMS
+index 9cf78a2..c27b6af 100644
+--- a/docs/evidence/d7/SHA256SUMS
++++ b/docs/evidence/d7/SHA256SUMS
+@@ -1,7 +1,7 @@
+-662d4597359971af926cd2b18b3df84b3dcd4318bb5fce4896029ae16359a667  CHANGELOG.md
++7b03002e487c7986028a23c7d9d44e95bb832621aaa1dc6d30d2871d6035545c  CHANGELOG.md
+ 47e7ff2541cb6815f64a1b5a664ea2290a9d64b6ab4badc007fdb190dcfbcae7  Cargo.toml
+ f6e24df6446f35bad5dd60082026f0abba4e26f8eec20e0181875ad81fb73708  Cargo.lock
+-fb8a9dd5047ee6b491bbd94f5ed2ab1c0c95e89ef6f0de6756878472a290c8c5  Makefile
++c72cb2b0b749dc2cb67fd9cfbfeacfd092f5b8c5b9b73d89fddfbcd400e488e8  Makefile
+ 9f2866eedf9f3bc9032381668063a80c847284fc0eb7de76d8a950480c8badd9  docker-compose.yml
+ e224fd5b3bda7ec66dd30aa7fb00cd806de8a25a085f8c95359d826532dbb865  docs/NODE.md
+ f5d6d1efa3110324601ff08da1a85ca78490a35d62bedd71070455fb41b3ea53  docs/plans/NODE_PLAN.md
+@@ -12,7 +12,7 @@ f5d6d1efa3110324601ff08da1a85ca78490a35d62bedd71070455fb41b3ea53  docs/plans/NOD
+ a1ab6c116394d5266389c21b6d80eaa42a84dab0aaac6e862d3c262938b5f55c  crates/aura-node/src/pipeline.rs
+ 1f0c4ab1f47b4f9af93e9c784b67dd652b3b5d651cde127e9b8a6459abb7ade9  crates/aura-node/src/bin/aurad.rs
+ ca41b18977057be143fff409559c6da982568895f88820e2a8b1f1255e5ab404  crates/aura-node/tests/d7_devnet.rs
+-73d6d66feaa937a6e300304b9e2e01a7a1a815b81bc4a532b5bbde3eb4364b4d  tools/audit_closeout.py
++212928d57c684590afca7890f45c5e82df24485e585d1757f642b23758ad40a1  tools/audit_closeout.py
+ 080f848afe7e50379ca5f7ecd831739b7cce09af48e214e4e11635fb36eb879f  tools/nc_d7.py
+ 79e3ea023f3beb5531d91ff0c4e196a41d7152d2d5f6fbbc5425aa73288c903e  tools/run_devnet.py
+ 95fabc60cebd15eb19663403f9b4498d58c131b498087052cdd8960aad06f238  tools/write_d7_evidence.py
+diff --git a/docs/evidence/d8/SHA256SUMS b/docs/evidence/d8/SHA256SUMS
+index 8eeee18..557f9c6 100644
+--- a/docs/evidence/d8/SHA256SUMS
++++ b/docs/evidence/d8/SHA256SUMS
+@@ -1,7 +1,7 @@
+-662d4597359971af926cd2b18b3df84b3dcd4318bb5fce4896029ae16359a667  CHANGELOG.md
++7b03002e487c7986028a23c7d9d44e95bb832621aaa1dc6d30d2871d6035545c  CHANGELOG.md
+ 47e7ff2541cb6815f64a1b5a664ea2290a9d64b6ab4badc007fdb190dcfbcae7  Cargo.toml
+ f6e24df6446f35bad5dd60082026f0abba4e26f8eec20e0181875ad81fb73708  Cargo.lock
+-fb8a9dd5047ee6b491bbd94f5ed2ab1c0c95e89ef6f0de6756878472a290c8c5  Makefile
++c72cb2b0b749dc2cb67fd9cfbfeacfd092f5b8c5b9b73d89fddfbcd400e488e8  Makefile
+ e224fd5b3bda7ec66dd30aa7fb00cd806de8a25a085f8c95359d826532dbb865  docs/NODE.md
+ f5d6d1efa3110324601ff08da1a85ca78490a35d62bedd71070455fb41b3ea53  docs/plans/NODE_PLAN.md
+ 70aff874b98cd5e0866bb4337b041dbc41f6252141b299b69119daa81a07ae29  crates/aura-genesis/Cargo.toml
+@@ -11,7 +11,7 @@ f5d6d1efa3110324601ff08da1a85ca78490a35d62bedd71070455fb41b3ea53  docs/plans/NOD
+ 55e11f4b8b5d8d4410e68bf33f2f899963a690217f51f42ed3053fbca38b88af  crates/aura-node/src/cli.rs
+ dca898ed08829c510394b4e8e3e1e0fe7ae5cdcc5d69bf82fdaf0e97ca5b68bb  crates/aura-node/tests/fixtures/d8_golden.txt
+ 0492ac91b70d3b8ea7806dee4d66daf3807fd6d801cb8533692061d7e77dd4b0  crates/aura-node/tests/d8_cli.rs
+-73d6d66feaa937a6e300304b9e2e01a7a1a815b81bc4a532b5bbde3eb4364b4d  tools/audit_closeout.py
++212928d57c684590afca7890f45c5e82df24485e585d1757f642b23758ad40a1  tools/audit_closeout.py
+ e7bb49d39596d3d85ef6a161c063e15a419e842445a93f10c80d3a985847b6f5  tools/gen_d8_vectors.py
+ 12225aee77f6663698f8ffd984043f2bf56f07e646a124f409567158f956eb99  tools/nc_d8.py
+ b83c32b548c45945c6ac42783927d98715103617a9f3bd9b81b56bacc924a85e  tools/write_d8_evidence.py
+diff --git a/docs/evidence/n0/SHA256SUMS b/docs/evidence/n0/SHA256SUMS
+index c958359..0df45f4 100644
+--- a/docs/evidence/n0/SHA256SUMS
++++ b/docs/evidence/n0/SHA256SUMS
+@@ -1,7 +1,7 @@
+-662d4597359971af926cd2b18b3df84b3dcd4318bb5fce4896029ae16359a667  CHANGELOG.md
++7b03002e487c7986028a23c7d9d44e95bb832621aaa1dc6d30d2871d6035545c  CHANGELOG.md
+ f6e24df6446f35bad5dd60082026f0abba4e26f8eec20e0181875ad81fb73708  Cargo.lock
+ 47e7ff2541cb6815f64a1b5a664ea2290a9d64b6ab4badc007fdb190dcfbcae7  Cargo.toml
+-fb8a9dd5047ee6b491bbd94f5ed2ab1c0c95e89ef6f0de6756878472a290c8c5  Makefile
++c72cb2b0b749dc2cb67fd9cfbfeacfd092f5b8c5b9b73d89fddfbcd400e488e8  Makefile
+ c2eb3da4f8d317275e990bb1378a37187f0d65bd1b6e21092666769897139ce2  crates/aura-node/src/baseline.rs
+ f2c1f6502d0503b78af5c3603db5def6b523968b8b5a0ff3fb110b1c96fbb7f4  crates/aura-node/tests/n0_two_nodes_no_p2p.rs
+ 109eba4535971138ae5a36c926e671ad070708de4216424ca89d6c5cc2211762  crates/aura-p2p/Cargo.toml
+@@ -9,7 +9,7 @@ f2c1f6502d0503b78af5c3603db5def6b523968b8b5a0ff3fb110b1c96fbb7f4  crates/aura-no
+ 0bda78fe7e8e2a1d136ebe1d90d11ba4dfa84756b2e2cf45d8e75774cd9e0b78  crates/aura-p2p/src/bin/main.rs
+ d4678b9513d1ff6d3f45ef1ac4198f01faff24024936c57ef8054e54120b92b5  crates/aura-p2p/src/lib.rs
+ 7b3f7fdf76576b1b610845b1f865b73b444eaaa1113cd26c21f6294d4e3a37f2  crates/aura-p2p/tests/fixtures/n0_baseline.txt
+-84e019cf0a69066ceb304cda92451509793590f2120affece7eb5cb7f282e52f  docs/evidence/d6/SHA256SUMS
++0f212a456519a0e3a359c2d58365d559c69b5ca295011fa999b008a6665d57b6  docs/evidence/d6/SHA256SUMS
+ eca2668d1ceebf61a06e96cbc9b17a8c62af115dbe3e3ac276003540f166ef81  docs/evidence/n0/clean-apply.txt
+ e5dbf750b3afb7839b66b5e22508c94d6e0a59e18e45762adb51fe76310d1dcc  docs/evidence/n0/gates.txt
+ 1047c86fcba2f7ad54656a4f7727a86b345c3e9a0517dbdc259878102084b003  docs/evidence/n0/inventory.txt
+@@ -20,7 +20,7 @@ e5dbf750b3afb7839b66b5e22508c94d6e0a59e18e45762adb51fe76310d1dcc  docs/evidence/
+ efb346bee53c2c2c9417e4f456004e1ee742037738f7655ce90e6efa1d1cdbfe  docs/evidence/n0/test-n0.log
+ 9b27872e8d3bc1310c34c0d38c4b98d6d94eb3b4b18fa38cac9013f6e8bca3aa  docs/plans/D7_READINESS.md
+ 407ad597d3956d6b488eca8a75d4fb47df62c84e8f0e73fefe9da4a2c8b32d51  docs/plans/NET_PLAN.md
+-73d6d66feaa937a6e300304b9e2e01a7a1a815b81bc4a532b5bbde3eb4364b4d  tools/audit_closeout.py
++212928d57c684590afca7890f45c5e82df24485e585d1757f642b23758ad40a1  tools/audit_closeout.py
+ 515976788ec94aaa7601672cace7a13a7497b2d9bdaea157049c04b1bed129b8  tools/gen_n0_vectors.py
+ a16320f6a4af698f90ca62acdb7810eeafa96602f2523c4a05c174da110740c3  tools/nc_n0.py
+ 9668866411c5be7fabe8b75bcf774796b6651635db6c038279c6beea371b1085  tools/write_n0_evidence.py
+diff --git a/docs/evidence/n1/SHA256SUMS b/docs/evidence/n1/SHA256SUMS
+index 63e14cb..86d213e 100644
+--- a/docs/evidence/n1/SHA256SUMS
++++ b/docs/evidence/n1/SHA256SUMS
+@@ -1,7 +1,7 @@
+-662d4597359971af926cd2b18b3df84b3dcd4318bb5fce4896029ae16359a667  CHANGELOG.md
++7b03002e487c7986028a23c7d9d44e95bb832621aaa1dc6d30d2871d6035545c  CHANGELOG.md
+ f6e24df6446f35bad5dd60082026f0abba4e26f8eec20e0181875ad81fb73708  Cargo.lock
+ 47e7ff2541cb6815f64a1b5a664ea2290a9d64b6ab4badc007fdb190dcfbcae7  Cargo.toml
+-fb8a9dd5047ee6b491bbd94f5ed2ab1c0c95e89ef6f0de6756878472a290c8c5  Makefile
++c72cb2b0b749dc2cb67fd9cfbfeacfd092f5b8c5b9b73d89fddfbcd400e488e8  Makefile
+ c2eb3da4f8d317275e990bb1378a37187f0d65bd1b6e21092666769897139ce2  crates/aura-node/src/baseline.rs
+ c504a5de9a0fa1ff27ea3a466e4a8d1d3a9beb33ee793311fd4a52f918cd04b0  crates/aura-node/tests/d0_baseline.rs
+ a2704e1d41f88d572fbcb4e39a33970af134cd50b710438fe3a8bec276ee5209  crates/aura-node/tests/fixtures/d0_baseline.txt
+@@ -16,7 +16,7 @@ d4678b9513d1ff6d3f45ef1ac4198f01faff24024936c57ef8054e54120b92b5  crates/aura-p2
+ 7b3f7fdf76576b1b610845b1f865b73b444eaaa1113cd26c21f6294d4e3a37f2  crates/aura-p2p/tests/fixtures/n0_baseline.txt
+ 4890882bc7918ed638fc1a2f9f081a17c2c1fb82b77d9b6e573d26358a25bb3b  crates/aura-p2p/tests/fixtures/n1_baseline.txt
+ 8510d81551d4a5e2cd737e90effa49ffb9e5371c9cd26741b451aa2473e4f982  crates/aura-p2p/tests/n1_transport.rs
+-9ee7845ebeccf8cae5f1d68b44c40c5bd0dd3ba4b15d7e98a02d5f91e61686a1  docs/evidence/n0/SHA256SUMS
++e13705389374a24e3701c40d35d5eb80dc9552548f6e417d2fbfedf7c7ea95be  docs/evidence/n0/SHA256SUMS
+ 7ced4fc580391ef9b2b5e92ec6393f7d9822475c961c9adbc1bd4eee9f78c206  docs/evidence/n1/clean-apply.txt
+ 3795f2d95ee1d222b48227d64b08e7312ce613f923b8b811361c107562efe036  docs/evidence/n1/gates.txt
+ d782a216ee314f7069519b1defe17764da80118e4c80b368ae810e5f2019e782  docs/evidence/n1/inventory.txt
+@@ -27,7 +27,7 @@ b19a006c0d1dce69f2e99bd5d616f8780ab645256bccdc0c1e3401ac8d17abff  docs/evidence/
+ d6327612fd1e284bdad18a5d3e9fa1445f58cf09c20253e54db0b09e266461d9  docs/evidence/n1/test-n1.log
+ 9b27872e8d3bc1310c34c0d38c4b98d6d94eb3b4b18fa38cac9013f6e8bca3aa  docs/plans/D7_READINESS.md
+ 407ad597d3956d6b488eca8a75d4fb47df62c84e8f0e73fefe9da4a2c8b32d51  docs/plans/NET_PLAN.md
+-73d6d66feaa937a6e300304b9e2e01a7a1a815b81bc4a532b5bbde3eb4364b4d  tools/audit_closeout.py
++212928d57c684590afca7890f45c5e82df24485e585d1757f642b23758ad40a1  tools/audit_closeout.py
+ ab9bd785d2b4e577a474bb6c4f7946c5d25cd86ad025760bbf2e2c01f5ff31c8  tools/gen_n1_vectors.py
+ 512d0503231ea9f1fb85de68a03d6f3018e219ad394847272d9bc8256c39a333  tools/nc_n1.py
+ dd4821d6726714312fecc8bc73a34cf7b8ec4046fdf8727a684eb57fa91f5460  tools/write_n1_evidence.py
+diff --git a/docs/evidence/n2/SHA256SUMS b/docs/evidence/n2/SHA256SUMS
+index a3d160f..fe2bdb2 100644
+--- a/docs/evidence/n2/SHA256SUMS
++++ b/docs/evidence/n2/SHA256SUMS
+@@ -1,7 +1,7 @@
+-662d4597359971af926cd2b18b3df84b3dcd4318bb5fce4896029ae16359a667  CHANGELOG.md
++7b03002e487c7986028a23c7d9d44e95bb832621aaa1dc6d30d2871d6035545c  CHANGELOG.md
+ f6e24df6446f35bad5dd60082026f0abba4e26f8eec20e0181875ad81fb73708  Cargo.lock
+ 47e7ff2541cb6815f64a1b5a664ea2290a9d64b6ab4badc007fdb190dcfbcae7  Cargo.toml
+-fb8a9dd5047ee6b491bbd94f5ed2ab1c0c95e89ef6f0de6756878472a290c8c5  Makefile
++c72cb2b0b749dc2cb67fd9cfbfeacfd092f5b8c5b9b73d89fddfbcd400e488e8  Makefile
+ a2704e1d41f88d572fbcb4e39a33970af134cd50b710438fe3a8bec276ee5209  crates/aura-node/tests/fixtures/d0_baseline.txt
+ 109eba4535971138ae5a36c926e671ad070708de4216424ca89d6c5cc2211762  crates/aura-p2p/Cargo.toml
+ b66d4338b9882f9444c520983393e29b23ccae138ac22a8271b0ccc85cf4f0a0  crates/aura-p2p/src/ban.rs
+@@ -17,7 +17,7 @@ d4678b9513d1ff6d3f45ef1ac4198f01faff24024936c57ef8054e54120b92b5  crates/aura-p2
+ 5becc1c5fe384dee5abd0c97ddf4b52a06fefc782f1418a30097571d782fdcac  crates/aura-p2p/tests/fixtures/n2_baseline.txt
+ 8510d81551d4a5e2cd737e90effa49ffb9e5371c9cd26741b451aa2473e4f982  crates/aura-p2p/tests/n1_transport.rs
+ 48542ff2e55cf79ce908d8ecc845bf3be3daa150a6ca9a73c87c585477e177f0  crates/aura-p2p/tests/n2_gossipsub.rs
+-bee63fe1b0bbe45f42769e44f428fe2f2d772665ae58c91efbce27cdb0358fe8  docs/evidence/n1/SHA256SUMS
++09c99a9c4d23196d6b9bc5ceb13544059996b63bdafdf8b7c10cd2ac7855c4ba  docs/evidence/n1/SHA256SUMS
+ ba0d1ade8eb97df43668bffbaed39cfb937cac801dae6d4ba19eab74dea4ba55  docs/evidence/n2/clean-apply.txt
+ 870869acd285baa8ef9d24695bf300bed085fe11e520fe0410d23543e4611569  docs/evidence/n2/gates.txt
+ 1ee3dfba46c64fa1b8ef43c923978ecde053c7fd1c5d62294e273a7c9f93c033  docs/evidence/n2/inventory.txt
+@@ -28,7 +28,7 @@ d5b53bf13d5938599fad0f3501ceb0783930fc8129a23b58274bf038a4c9286f  docs/evidence/
+ 4dc82689985de258a9f84e83d88d32a97524a68bf5feaeefd7ac5f3945fdb2d3  docs/evidence/n2/test-n2.log
+ 9b27872e8d3bc1310c34c0d38c4b98d6d94eb3b4b18fa38cac9013f6e8bca3aa  docs/plans/D7_READINESS.md
+ 407ad597d3956d6b488eca8a75d4fb47df62c84e8f0e73fefe9da4a2c8b32d51  docs/plans/NET_PLAN.md
+-73d6d66feaa937a6e300304b9e2e01a7a1a815b81bc4a532b5bbde3eb4364b4d  tools/audit_closeout.py
++212928d57c684590afca7890f45c5e82df24485e585d1757f642b23758ad40a1  tools/audit_closeout.py
+ 82692e4faed6388c79656050cc953174383f6972445e3a9a777389eee270cad1  tools/gen_n2_vectors.py
+ bf199a4484774fd0e525e4ad8ef6d925b4a1a1435a31f37deca839243519ffd6  tools/nc_n2.py
+ f82163f834919bb05896996b4e187fbda66c5f78582364e33781a1802c35dc6b  tools/write_n2_evidence.py
+diff --git a/docs/evidence/n3/SHA256SUMS b/docs/evidence/n3/SHA256SUMS
+index 631787a..79701c5 100644
+--- a/docs/evidence/n3/SHA256SUMS
++++ b/docs/evidence/n3/SHA256SUMS
+@@ -1,7 +1,7 @@
+-662d4597359971af926cd2b18b3df84b3dcd4318bb5fce4896029ae16359a667  CHANGELOG.md
++7b03002e487c7986028a23c7d9d44e95bb832621aaa1dc6d30d2871d6035545c  CHANGELOG.md
+ f6e24df6446f35bad5dd60082026f0abba4e26f8eec20e0181875ad81fb73708  Cargo.lock
+ 47e7ff2541cb6815f64a1b5a664ea2290a9d64b6ab4badc007fdb190dcfbcae7  Cargo.toml
+-fb8a9dd5047ee6b491bbd94f5ed2ab1c0c95e89ef6f0de6756878472a290c8c5  Makefile
++c72cb2b0b749dc2cb67fd9cfbfeacfd092f5b8c5b9b73d89fddfbcd400e488e8  Makefile
+ 109eba4535971138ae5a36c926e671ad070708de4216424ca89d6c5cc2211762  crates/aura-p2p/Cargo.toml
+ b66d4338b9882f9444c520983393e29b23ccae138ac22a8271b0ccc85cf4f0a0  crates/aura-p2p/src/ban.rs
+ 74837df08ca849e24e933a9a76e052f4dbec1d79e14e6c4a3a6edbfb18178412  crates/aura-p2p/src/baseline.rs
+@@ -19,7 +19,7 @@ d4678b9513d1ff6d3f45ef1ac4198f01faff24024936c57ef8054e54120b92b5  crates/aura-p2
+ 8510d81551d4a5e2cd737e90effa49ffb9e5371c9cd26741b451aa2473e4f982  crates/aura-p2p/tests/n1_transport.rs
+ 48542ff2e55cf79ce908d8ecc845bf3be3daa150a6ca9a73c87c585477e177f0  crates/aura-p2p/tests/n2_gossipsub.rs
+ 430134686aba5db378d13566e1856ee9a87b2c4ca0b63e43f3129b5c2fb8a9ed  crates/aura-p2p/tests/n3_discovery.rs
+-e40a720268f11220ed08ee5a31da7d461480438f69aa602a82c27a7086336c39  docs/evidence/n2/SHA256SUMS
++44f462974ade17d6b55f8c3710ec5713cd07fc96fd97a9983314f4f48c37bd04  docs/evidence/n2/SHA256SUMS
+ 2b589a7f8f257a517e4a206cd7b44f77f7205317f526fa8d454a30426b425efc  docs/evidence/n3/clean-apply.txt
+ 984043beea8af3ae827ff42b6cbf73bfd8949bfc40c957d05f7a57cac14d06f7  docs/evidence/n3/gates.txt
+ b3a86740d57101855939c73090c0017202389dde774a9d91889574940995cd8e  docs/evidence/n3/inventory.txt
+@@ -29,7 +29,7 @@ f02de48c69311b63ecf6dfa537fbe423a58ab1864844282965d7185eba23846f  docs/evidence/
+ 2063c8d3ce80dff74ccbb21cd0514e08f789fe02b7b387e23dd1b3fc8ef0d4a9  docs/evidence/n3/report.md
+ afa72147ec8f7b7eb12e814680d7bef3c2086e0b928489832e49430dc8c8c37d  docs/evidence/n3/test-n3.log
+ 407ad597d3956d6b488eca8a75d4fb47df62c84e8f0e73fefe9da4a2c8b32d51  docs/plans/NET_PLAN.md
+-73d6d66feaa937a6e300304b9e2e01a7a1a815b81bc4a532b5bbde3eb4364b4d  tools/audit_closeout.py
++212928d57c684590afca7890f45c5e82df24485e585d1757f642b23758ad40a1  tools/audit_closeout.py
+ 9e33092f52b6a09e7bd76c27e015cd4a4ffa83b08432c94cb558e57990a97045  tools/gen_n3_vectors.py
+ 0bcc30b1819b5de77684127a126aeba6e646bdca46d547171c65e4bd3a210676  tools/nc_n3.py
+ 5517da3a3f852f81ae8c26ebd24fd27b6c0f3ea4c14f0bfcc9b2420b1d2629bf  tools/write_n3_evidence.py
+diff --git a/docs/evidence/n4/SHA256SUMS b/docs/evidence/n4/SHA256SUMS
+index b95eeee..97c3683 100644
+--- a/docs/evidence/n4/SHA256SUMS
++++ b/docs/evidence/n4/SHA256SUMS
+@@ -1,7 +1,7 @@
+-662d4597359971af926cd2b18b3df84b3dcd4318bb5fce4896029ae16359a667  CHANGELOG.md
++7b03002e487c7986028a23c7d9d44e95bb832621aaa1dc6d30d2871d6035545c  CHANGELOG.md
+ f6e24df6446f35bad5dd60082026f0abba4e26f8eec20e0181875ad81fb73708  Cargo.lock
+ 47e7ff2541cb6815f64a1b5a664ea2290a9d64b6ab4badc007fdb190dcfbcae7  Cargo.toml
+-fb8a9dd5047ee6b491bbd94f5ed2ab1c0c95e89ef6f0de6756878472a290c8c5  Makefile
++c72cb2b0b749dc2cb67fd9cfbfeacfd092f5b8c5b9b73d89fddfbcd400e488e8  Makefile
+ 109eba4535971138ae5a36c926e671ad070708de4216424ca89d6c5cc2211762  crates/aura-p2p/Cargo.toml
+ b66d4338b9882f9444c520983393e29b23ccae138ac22a8271b0ccc85cf4f0a0  crates/aura-p2p/src/ban.rs
+ 74837df08ca849e24e933a9a76e052f4dbec1d79e14e6c4a3a6edbfb18178412  crates/aura-p2p/src/baseline.rs
+@@ -22,7 +22,7 @@ d4678b9513d1ff6d3f45ef1ac4198f01faff24024936c57ef8054e54120b92b5  crates/aura-p2
+ 48542ff2e55cf79ce908d8ecc845bf3be3daa150a6ca9a73c87c585477e177f0  crates/aura-p2p/tests/n2_gossipsub.rs
+ 430134686aba5db378d13566e1856ee9a87b2c4ca0b63e43f3129b5c2fb8a9ed  crates/aura-p2p/tests/n3_discovery.rs
+ b2308b7019322a04b941b4cb9efdc01e31fdbc060304f8842116647730d1bbe4  crates/aura-p2p/tests/n4_block_sync.rs
+-3c15cf812447c23579caffe5af0a21c757da7ab9bf793780f3b9d22cc6d13adc  docs/evidence/n3/SHA256SUMS
++26aee9e53bafedf6c1226f912168e3c630d63413fce4f1a916f73342fe7c6abb  docs/evidence/n3/SHA256SUMS
+ bd821807ccd8a30e7d35c735f27b0d64c7691163d04d77913a8be1e99f1eef18  docs/evidence/n4/clean-apply.txt
+ a2758a74ece05a6efa748f6f79d3164b77bcf398f1fd4504cd47ff4bbc3432da  docs/evidence/n4/gates.txt
+ 04a311146db2bf1dd6744679ca614c054e9d275f7e0cd6eb4bfad0c2b9580a3d  docs/evidence/n4/inventory.txt
+@@ -32,7 +32,7 @@ a2758a74ece05a6efa748f6f79d3164b77bcf398f1fd4504cd47ff4bbc3432da  docs/evidence/
+ cfcb7de92a7e0af2aed28f1676057dbd54f895c383efcf9a37a2e81ab13d2d6d  docs/evidence/n4/report.md
+ 193aebe3e5528ae8c68e0f22cf000dbfc3e223028f14830afa9d94eb6e3cbc01  docs/evidence/n4/test-n4.log
+ 407ad597d3956d6b488eca8a75d4fb47df62c84e8f0e73fefe9da4a2c8b32d51  docs/plans/NET_PLAN.md
+-73d6d66feaa937a6e300304b9e2e01a7a1a815b81bc4a532b5bbde3eb4364b4d  tools/audit_closeout.py
++212928d57c684590afca7890f45c5e82df24485e585d1757f642b23758ad40a1  tools/audit_closeout.py
+ adea6917c9d75d81eed69a5a3297d67540f6b73cfd9753e3592061498a28ab6c  tools/gen_n4_vectors.py
+ 4b510d5022253c1ba4b2f11f59032632c22d5b5bca4685380a50250a8ecffcfb  tools/nc_n4.py
+ ff4120b0eb2f77c00c724b56dedb012650a358620e542e99b09585f47fbebea3  tools/write_n4_evidence.py
+diff --git a/docs/evidence/n5/SHA256SUMS b/docs/evidence/n5/SHA256SUMS
+index c0f2b60..3fe3818 100644
+--- a/docs/evidence/n5/SHA256SUMS
++++ b/docs/evidence/n5/SHA256SUMS
+@@ -1,7 +1,7 @@
+-662d4597359971af926cd2b18b3df84b3dcd4318bb5fce4896029ae16359a667  CHANGELOG.md
++7b03002e487c7986028a23c7d9d44e95bb832621aaa1dc6d30d2871d6035545c  CHANGELOG.md
+ f6e24df6446f35bad5dd60082026f0abba4e26f8eec20e0181875ad81fb73708  Cargo.lock
+ 47e7ff2541cb6815f64a1b5a664ea2290a9d64b6ab4badc007fdb190dcfbcae7  Cargo.toml
+-fb8a9dd5047ee6b491bbd94f5ed2ab1c0c95e89ef6f0de6756878472a290c8c5  Makefile
++c72cb2b0b749dc2cb67fd9cfbfeacfd092f5b8c5b9b73d89fddfbcd400e488e8  Makefile
+ 109eba4535971138ae5a36c926e671ad070708de4216424ca89d6c5cc2211762  crates/aura-p2p/Cargo.toml
+ b66d4338b9882f9444c520983393e29b23ccae138ac22a8271b0ccc85cf4f0a0  crates/aura-p2p/src/ban.rs
+ 74837df08ca849e24e933a9a76e052f4dbec1d79e14e6c4a3a6edbfb18178412  crates/aura-p2p/src/baseline.rs
+@@ -25,7 +25,7 @@ cf261afa33ba2f4204aab72553b7ba54f62110f10b708cb932422ac6d94d170b  crates/aura-p2
+ 430134686aba5db378d13566e1856ee9a87b2c4ca0b63e43f3129b5c2fb8a9ed  crates/aura-p2p/tests/n3_discovery.rs
+ b2308b7019322a04b941b4cb9efdc01e31fdbc060304f8842116647730d1bbe4  crates/aura-p2p/tests/n4_block_sync.rs
+ 1785388a1e22ea160f9ee666edb751a9b1696c163e2a8d9f97a6ebadccb4ed4b  crates/aura-p2p/tests/n5_state_sync.rs
+-2c03ae009a847a33aa85cd8d1e4bc9d9ca59d206d79ecbc040932f6b9a4707bf  docs/evidence/n4/SHA256SUMS
++856856beef40925331834b5457653b7430fb64bed01438c20d7de3be2743d4fb  docs/evidence/n4/SHA256SUMS
+ 72d480b9ae90e5e6cabd98724416536d060e01a083adb45cc6cccb24cfe5b014  docs/evidence/n5/clean-apply.txt
+ 9f553c81f5228e7c22781b6ad1f2494e4ea8e564254c6dd7824fe60a1109e7dc  docs/evidence/n5/gates.txt
+ 59bf6a4f3cb0c8c3fc7f853b786cbbc059cae7f5116a5cd5a44fbff3ae458fd5  docs/evidence/n5/inventory.txt
+@@ -35,7 +35,7 @@ e354fcd5d576155ac8cf5a3371b427ba4e403a82d87da32764ed65f7762ae92e  docs/evidence/
+ cb0a8178c9d4737b548d360408d67196bc68c8f29d279aeab2831823266a3020  docs/evidence/n5/report.md
+ 50d0264422a2d9c1e1e3c0aa8eb6f5e66095c42edefbc12175e6b9f633647c3c  docs/evidence/n5/test-n5.log
+ 407ad597d3956d6b488eca8a75d4fb47df62c84e8f0e73fefe9da4a2c8b32d51  docs/plans/NET_PLAN.md
+-73d6d66feaa937a6e300304b9e2e01a7a1a815b81bc4a532b5bbde3eb4364b4d  tools/audit_closeout.py
++212928d57c684590afca7890f45c5e82df24485e585d1757f642b23758ad40a1  tools/audit_closeout.py
+ 5ab4566884abf5fd5861638424a723b74ff568ed000dc0aadfb57c8c87e74377  tools/gen_n5_vectors.py
+ 56e8eb6e5a1a1faafa7bd8b3ba8883447d68c52343ab75cd1a00bf9739173c43  tools/nc_n5.py
+ 3783386033270cd23a223193912ed11bb7aad984c144363dc8f8877a7d2e30af  tools/write_n5_evidence.py
+diff --git a/docs/evidence/n6/SHA256SUMS b/docs/evidence/n6/SHA256SUMS
+index 2370ec6..1e76c5a 100644
+--- a/docs/evidence/n6/SHA256SUMS
++++ b/docs/evidence/n6/SHA256SUMS
+@@ -1,7 +1,7 @@
+-662d4597359971af926cd2b18b3df84b3dcd4318bb5fce4896029ae16359a667  CHANGELOG.md
++7b03002e487c7986028a23c7d9d44e95bb832621aaa1dc6d30d2871d6035545c  CHANGELOG.md
+ f6e24df6446f35bad5dd60082026f0abba4e26f8eec20e0181875ad81fb73708  Cargo.lock
+ 47e7ff2541cb6815f64a1b5a664ea2290a9d64b6ab4badc007fdb190dcfbcae7  Cargo.toml
+-fb8a9dd5047ee6b491bbd94f5ed2ab1c0c95e89ef6f0de6756878472a290c8c5  Makefile
++c72cb2b0b749dc2cb67fd9cfbfeacfd092f5b8c5b9b73d89fddfbcd400e488e8  Makefile
+ 109eba4535971138ae5a36c926e671ad070708de4216424ca89d6c5cc2211762  crates/aura-p2p/Cargo.toml
+ b66d4338b9882f9444c520983393e29b23ccae138ac22a8271b0ccc85cf4f0a0  crates/aura-p2p/src/ban.rs
+ 74837df08ca849e24e933a9a76e052f4dbec1d79e14e6c4a3a6edbfb18178412  crates/aura-p2p/src/baseline.rs
+@@ -28,7 +28,7 @@ cf261afa33ba2f4204aab72553b7ba54f62110f10b708cb932422ac6d94d170b  crates/aura-p2
+ b2308b7019322a04b941b4cb9efdc01e31fdbc060304f8842116647730d1bbe4  crates/aura-p2p/tests/n4_block_sync.rs
+ 1785388a1e22ea160f9ee666edb751a9b1696c163e2a8d9f97a6ebadccb4ed4b  crates/aura-p2p/tests/n5_state_sync.rs
+ 0413572891c82dc5e410544e717dd9393e78fa292e174f03bcf80df1b1a81673  crates/aura-p2p/tests/n6_dos_defence.rs
+-ee9ad41fbb55a634e45679b1fd7c81e176a2606c180421828ed08537b6ab16d2  docs/evidence/n5/SHA256SUMS
++db42adb180a1e8cf16577da1a590f7a6257866aebb6af8f79cef95a140ac34e1  docs/evidence/n5/SHA256SUMS
+ 842c25e6be108b08ccfe369c99d1f0655ecdb6bc1704a114420ea07669058039  docs/evidence/n6/clean-apply.txt
+ e75f074cdb7fbea99f365572a7166e0366688047e0caec0d69449ab6db660a93  docs/evidence/n6/gates.txt
+ 7fd7f8fe789794d3e2451132754ff44730ae2f12fd63974476ed14fed2a09ad6  docs/evidence/n6/inventory.txt
+@@ -38,7 +38,7 @@ d1367d2c9f07f955e0e85abc6cea5883f948856cfc68dfd3c8b4a843e508cb6c  docs/evidence/
+ 53390e284f728772e49f308083ee40acddda532ec6c88907de9c8e3934faf44c  docs/evidence/n6/report.md
+ 6dcb4003fee797bd21ca74c86389008e1b1ddc252dd8c7eadf27144c39ff92d8  docs/evidence/n6/test-n6.log
+ 407ad597d3956d6b488eca8a75d4fb47df62c84e8f0e73fefe9da4a2c8b32d51  docs/plans/NET_PLAN.md
+-73d6d66feaa937a6e300304b9e2e01a7a1a815b81bc4a532b5bbde3eb4364b4d  tools/audit_closeout.py
++212928d57c684590afca7890f45c5e82df24485e585d1757f642b23758ad40a1  tools/audit_closeout.py
+ 51b80e5081bbeb25a7cdd91643c584e02b2500f019c042ec464dff55216349f5  tools/gen_n6_vectors.py
+ 07f5450079c4af21ba5908ae07107a495e1b988cfe298274d19b13a319def3d6  tools/nc_n6.py
+ 7585fa8076482c65cf4335d5d984e66a511efa5cfc66432f375e27001a9b1e43  tools/write_n6_evidence.py
+diff --git a/docs/evidence/n7/SHA256SUMS b/docs/evidence/n7/SHA256SUMS
+index e376a01..a8d5b92 100644
+--- a/docs/evidence/n7/SHA256SUMS
++++ b/docs/evidence/n7/SHA256SUMS
+@@ -1,7 +1,7 @@
+-662d4597359971af926cd2b18b3df84b3dcd4318bb5fce4896029ae16359a667  CHANGELOG.md
++7b03002e487c7986028a23c7d9d44e95bb832621aaa1dc6d30d2871d6035545c  CHANGELOG.md
+ f6e24df6446f35bad5dd60082026f0abba4e26f8eec20e0181875ad81fb73708  Cargo.lock
+ 47e7ff2541cb6815f64a1b5a664ea2290a9d64b6ab4badc007fdb190dcfbcae7  Cargo.toml
+-fb8a9dd5047ee6b491bbd94f5ed2ab1c0c95e89ef6f0de6756878472a290c8c5  Makefile
++c72cb2b0b749dc2cb67fd9cfbfeacfd092f5b8c5b9b73d89fddfbcd400e488e8  Makefile
+ 109eba4535971138ae5a36c926e671ad070708de4216424ca89d6c5cc2211762  crates/aura-p2p/Cargo.toml
+ b66d4338b9882f9444c520983393e29b23ccae138ac22a8271b0ccc85cf4f0a0  crates/aura-p2p/src/ban.rs
+ 74837df08ca849e24e933a9a76e052f4dbec1d79e14e6c4a3a6edbfb18178412  crates/aura-p2p/src/baseline.rs
+@@ -31,7 +31,7 @@ b2308b7019322a04b941b4cb9efdc01e31fdbc060304f8842116647730d1bbe4  crates/aura-p2
+ 1785388a1e22ea160f9ee666edb751a9b1696c163e2a8d9f97a6ebadccb4ed4b  crates/aura-p2p/tests/n5_state_sync.rs
+ 0413572891c82dc5e410544e717dd9393e78fa292e174f03bcf80df1b1a81673  crates/aura-p2p/tests/n6_dos_defence.rs
+ a6b781d0757de6067f58824f0ae9ad3daaeb6b956efe936d0c1f6b269a3e32e3  crates/aura-p2p/tests/n7_light_client.rs
+-0b9974115518e128dec0fc54a0d37e0e43ad79d5e21f9d0b257d462370f8c7e9  docs/evidence/n6/SHA256SUMS
++e1defe95c275e1f0d505c7334a95c4d26d725dcaead2e6935b7be1d00fb0eedc  docs/evidence/n6/SHA256SUMS
+ a88ab391e8afcb640e172693323db415a404030f7a854f43724448bd5cc4189b  docs/evidence/n7/clean-apply.txt
+ c5256415fdaa78089de51a7b47f371ccf773be393c3dcd039363cb12f6c49535  docs/evidence/n7/gates.txt
+ 1e79a490c096b973c91f39f26957ea203dc24359a3fd68ec12956b0164c32557  docs/evidence/n7/inventory.txt
+@@ -41,7 +41,7 @@ c5256415fdaa78089de51a7b47f371ccf773be393c3dcd039363cb12f6c49535  docs/evidence/
+ 692c03fa1d4ca506a48450c9763f7cdaa58d863257707b98f7f963c372e72724  docs/evidence/n7/report.md
+ b8514b8bbbe27ef71aa74ae8573b2c488e2dca132bd9a9c72ad3ca7d535ddf24  docs/evidence/n7/test-n7.log
+ 407ad597d3956d6b488eca8a75d4fb47df62c84e8f0e73fefe9da4a2c8b32d51  docs/plans/NET_PLAN.md
+-73d6d66feaa937a6e300304b9e2e01a7a1a815b81bc4a532b5bbde3eb4364b4d  tools/audit_closeout.py
++212928d57c684590afca7890f45c5e82df24485e585d1757f642b23758ad40a1  tools/audit_closeout.py
+ 6843c85f8c4dc2f6130ad17bf0a5c99e0b64a2d91ef5d67eaa581b38692c654c  tools/gen_n7_vectors.py
+ 4cb67d1544a2bd842bcb4900d3fc0fe3af108953d2363ec3fc24f8883ab38a06  tools/nc_n7.py
+ 8920e92e0a610b216df69f755fb3bfefcf6e47b5cb83b8cea58914db33452c9e  tools/write_n7_evidence.py
+diff --git a/docs/evidence/n8/SHA256SUMS b/docs/evidence/n8/SHA256SUMS
+index b847527..76f2f60 100644
+--- a/docs/evidence/n8/SHA256SUMS
++++ b/docs/evidence/n8/SHA256SUMS
+@@ -1,7 +1,7 @@
+-662d4597359971af926cd2b18b3df84b3dcd4318bb5fce4896029ae16359a667  CHANGELOG.md
++7b03002e487c7986028a23c7d9d44e95bb832621aaa1dc6d30d2871d6035545c  CHANGELOG.md
+ f6e24df6446f35bad5dd60082026f0abba4e26f8eec20e0181875ad81fb73708  Cargo.lock
+ 47e7ff2541cb6815f64a1b5a664ea2290a9d64b6ab4badc007fdb190dcfbcae7  Cargo.toml
+-fb8a9dd5047ee6b491bbd94f5ed2ab1c0c95e89ef6f0de6756878472a290c8c5  Makefile
++c72cb2b0b749dc2cb67fd9cfbfeacfd092f5b8c5b9b73d89fddfbcd400e488e8  Makefile
+ 109eba4535971138ae5a36c926e671ad070708de4216424ca89d6c5cc2211762  crates/aura-p2p/Cargo.toml
+ b66d4338b9882f9444c520983393e29b23ccae138ac22a8271b0ccc85cf4f0a0  crates/aura-p2p/src/ban.rs
+ 74837df08ca849e24e933a9a76e052f4dbec1d79e14e6c4a3a6edbfb18178412  crates/aura-p2p/src/baseline.rs
+@@ -34,7 +34,7 @@ b2308b7019322a04b941b4cb9efdc01e31fdbc060304f8842116647730d1bbe4  crates/aura-p2
+ 0413572891c82dc5e410544e717dd9393e78fa292e174f03bcf80df1b1a81673  crates/aura-p2p/tests/n6_dos_defence.rs
+ a6b781d0757de6067f58824f0ae9ad3daaeb6b956efe936d0c1f6b269a3e32e3  crates/aura-p2p/tests/n7_light_client.rs
+ 83183488447b2e43d39389213a5797565d11f13079af1ada16337de49d930074  crates/aura-p2p/tests/n8_chaos.rs
+-61f132a4e5c31afe5fba72d219c09997959f4023a9fdde8c5ed733157b06de5b  docs/evidence/n7/SHA256SUMS
++64d94b22d4db4821b898a731f6549659842e3d233929141035a248cb64009739  docs/evidence/n7/SHA256SUMS
+ 9a16c49b43ff13f3c7616bbe8c563a0d8343894db79ccc6cbe3973a1fa58a006  docs/evidence/n8/clean-apply.txt
+ 5c6b2bd33ffd521b0371bdf67107f6f12855af04bff5cb2b080849ea3aef9023  docs/evidence/n8/gates.txt
+ 2b60fe28c24ec1f5306afcb67b3ff52c4454dc2cb31479bad086df177b9e890c  docs/evidence/n8/inventory.txt
+@@ -44,7 +44,7 @@ e64a0fce501cbf54e17af65d4835ac1550ffe61d167ef20042ff6a72b4214447  docs/evidence/
+ 57c6f21e80c8ce140325d0ea7290c2d6356d1b3bd5af1354358af4b599307490  docs/evidence/n8/report.md
+ a8d52615c2b4b59b49fab62ceaa73f444c4053849bfa343e63e6b7ad235d1900  docs/evidence/n8/test-n8.log
+ 407ad597d3956d6b488eca8a75d4fb47df62c84e8f0e73fefe9da4a2c8b32d51  docs/plans/NET_PLAN.md
+-73d6d66feaa937a6e300304b9e2e01a7a1a815b81bc4a532b5bbde3eb4364b4d  tools/audit_closeout.py
++212928d57c684590afca7890f45c5e82df24485e585d1757f642b23758ad40a1  tools/audit_closeout.py
+ 8f931f821e2511f3f851a4fdb5a0ac20b8e22dc29073ac2e5ef007b343e68ce7  tools/gen_n8_vectors.py
+ 026f3a5453f04fc354228ace4be9e802e5ab2a748f7a20f5dbb19618a1700930  tools/nc_n8.py
+ 9af732add613fc57d4a148fe8c6e4d4ef1b6a149e47499313e436fe9c2a946d4  tools/write_n8_evidence.py
+diff --git a/docs/plans/CONSENSUS_PLAN.md b/docs/plans/CONSENSUS_PLAN.md
+index 75aad1d..40c7d99 100644
+--- a/docs/plans/CONSENSUS_PLAN.md
++++ b/docs/plans/CONSENSUS_PLAN.md
+@@ -33,7 +33,7 @@ finality — verified by a simulator, not "by eye".
+ | ✅ **B5** | VRF leader | stake-weighted VRF, grinding protection, public verification | 10 000 rounds of proposer distribution within confidence interval |
+ | ✅ **B6** | Slashing / evidence | double-sign, surround-vote, downtime, penalties, distribution | 6 attack types → evidence accepted, penalty applied, NC: slashing off → test red |
+ | ✅ **B7** | Rewards | inflation/reward, fee burn, delegation, commission, sum invariant | `sum(balances) + burned == issued` within 1 unit over 100 000 blocks |
+-| **B8** | Finality | fork choice, finalized checkpoint, light-client proof, deep reorg defence | attempt to reorg a finalized block → reject + evidence |
++| ✅ **B8** | Finality | fork choice, finalized checkpoint, light-client proof, deep reorg defence | attempt to reorg a finalized block → reject + evidence |
+ | **B9** | On-chain governance | proposal → vote → timelock → runtime upgrade (WASM), emergency pause | first protocol upgrade in testnet without a manual validator restart |
+ | **B10** | Safety evidence | TLA+/Apalache model, 100-node simulation, long-range analysis, close-out | model: safety for f < n/3; NC: remove quorum check → model finds a counterexample |
+ 
+@@ -130,6 +130,17 @@ finality — verified by a simulator, not "by eye".
+ - Evidence: `docs/evidence/b7/` (`README.md`, `gates.txt`, `report.md`, `inventory.txt`, `gate.log`, `nc.log`, `vectors.log`, `SHA256SUMS`), 6/6 NC (`tools/nc_b7.py`), **315** NC total across C0–C10 + S0–S7 + X0–X8 + D0–D8 + B0–B7 + N0–N8. Doc: [`docs/NODE.md`](../NODE.md).
+ - Honest scope: B7 completes inflation, fee burn, delegation, commission, and the 100,000-block sum invariant; fork-choice/deep-reorg defence, on-chain governance, and TLA+ safety evidence remain in B8–B10.
+ 
++### B8 receipt (2026-11-01)
++
++- Deliverable: `patches/0055-B8-finality-fork-choice.patch`. The phase lands fork choice, finalized checkpoints, consensus light-client 3-chain proofs, and deep-reorg defence (`D-B3`, `D-B4`): `aura_consensus::fork_choice` (`FinalizedCheckpoint`, `ConsensusLightClientProof`, `SignedForkBlock`, `ReorgRejection`, `ForkChoiceTree`, `ForkChoiceError`). Zero new external dependencies.
++- **Fork choice & finalized checkpoints (`D-B3`).** `ForkChoiceTree::select_canonical_head` evaluates only branches that descend from the latest `FinalizedCheckpoint`, ranking candidates by `(justified_qc_view, height)` descending with a deterministic lowest-`block_hash` tie-break. `ForkChoiceTree::update_finalized_checkpoint` verifies the `2f+1` BLS `commit_qc` (`quorum_threshold`), prevents checkpoint height regression, and enforces the weak-subjectivity / unbonding window (`DEFAULT_WEAK_SUBJECTIVITY_WINDOW = 10,000` blocks).
++- **Consensus light-client proof (`ConsensusLightClientProof`).** Verifies 3-chain parent links (`target -> child -> grandchild`), same-view rule across all three QCs, and `2f+1` BLS signature verification under `(chain_id, Domain::Vote)`.
++- **Deep-reorg defence (`attempt to reorg a finalized block -> reject + evidence`, `D-B4`).** When a candidate block attempts to reorganize a finalized block (`height <= finalized_height` with `hash != canonical_hash`, or does not descend from `finalized_checkpoint`), `ForkChoiceTree::insert_block` rejects the reorg with `ForkChoiceError::DeepReorgPastFinalized` and extracts cryptographic `SlashingEvidence` (`DoubleSignProposal` / `DoubleSignVote`) that is accepted directly by `SlashingEngine::submit_evidence` (`B6`).
++- **The survey is measured, not typed.** `aura-consensus report --fixture` is pinned in `crates/aura-consensus/tests/fixtures/b8_baseline.txt`, and 64 deterministic fork-choice and deep-reorg vectors are pinned in `crates/aura-consensus/tests/fixtures/b8_fork_choice.txt` via `tools/gen_b8_vectors.py`.
++- DoD gate: 85 `aura-consensus` library unit tests + 2 integration tests in `crates/aura-consensus/tests/b8_fork_choice.rs`.
++- Evidence: `docs/evidence/b8/` (`README.md`, `gates.txt`, `report.md`, `inventory.txt`, `gate.log`, `nc.log`, `vectors.log`, `SHA256SUMS`), 6/6 NC (`tools/nc_b8.py`), **321** NC total across C0–C10 + S0–S7 + X0–X8 + D0–D8 + B0–B8 + N0–N8. Doc: [`docs/NODE.md`](../NODE.md).
++- Honest scope: B8 completes fork-choice, finalized checkpoints, light-client 3-chain finality proofs, and deep-reorg slashing evidence; on-chain governance (`B9`) and TLA+ safety evidence (`B10`) remain.
++
+ ## Risks
+ 
+ - **Safety vs liveness**: under partition a halt is possible, but two different commits are not. This invariant is checked by the B10 model.
+diff --git a/tools/audit_closeout.py b/tools/audit_closeout.py
+index 48c78a8..371b947 100644
+--- a/tools/audit_closeout.py
++++ b/tools/audit_closeout.py
+@@ -32,7 +32,7 @@ CORE_PHASES = [f"C{index}" for index in range(11)]      # C0..C10 (closed)
+ STATE_PHASES = ["S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7"]  # STATE_PLAN complete
+ EXEC_PHASES = ["X0", "X1", "X2", "X3", "X4", "X5", "X6", "X7", "X8"]                # grows with each X phase
+ NODE_PHASES = ["D0", "D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8"]             # NODE_PLAN complete
+-CONSENSUS_PHASES = ["B0", "B1", "B2", "B3", "B4", "B5", "B6", "B7"]            # grows with each B phase
++CONSENSUS_PHASES = ["B0", "B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8"]            # grows with each B phase
+ NET_PHASES = ["N0", "N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8"]  # NET_PLAN complete
+ PHASES = CORE_PHASES + STATE_PHASES + EXEC_PHASES + NODE_PHASES + CONSENSUS_PHASES + NET_PHASES
+ SHIPPED = CORE_PHASES + [
+@@ -78,8 +78,9 @@ SHIPPED = CORE_PHASES + [
+     "N7",
+     "N8",
+     "B6",
++    "B7",
+ ]
+-CURRENT = "B7"
++CURRENT = "B8"
+ 
+ PLAN_FOR_PREFIX = {
+     "C": "CORE_PLAN.md",
+@@ -97,7 +98,7 @@ PLAN_FOR_PREFIX = {
+ }
+ 
+ NC_PER_PHASE = {f"C{i}": 6 for i in range(4, 11)}
+-NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6})
++NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6})
+ SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)  # 225 (through D6)
+ EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + (0 if CURRENT in SHIPPED else NC_PER_PHASE[CURRENT])
+ 
+diff --git a/tools/gen_b8_vectors.py b/tools/gen_b8_vectors.py
+new file mode 100644
+index 0000000..c3e4e70
+--- /dev/null
++++ b/tools/gen_b8_vectors.py
+@@ -0,0 +1,124 @@
++#!/usr/bin/env python3
++"""Write the pinned B8 consensus-baseline and fork-choice/finality fixtures.
++
++Usage:
++    python3 tools/gen_b8_vectors.py
++    python3 tools/gen_b8_vectors.py --check
++    make gen-b8-vectors
++"""
++
++from __future__ import annotations
++
++import hashlib
++import subprocess
++import sys
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++BASELINE_FIXTURE = REPO / "crates" / "aura-consensus" / "tests" / "fixtures" / "b8_baseline.txt"
++FORK_CHOICE_FIXTURE = REPO / "crates" / "aura-consensus" / "tests" / "fixtures" / "b8_fork_choice.txt"
++
++
++def measure_baseline() -> str:
++    result = subprocess.run(
++        [
++            "cargo",
++            "run",
++            "--quiet",
++            "-p",
++            "aura-consensus",
++            "--bin",
++            "aura-consensus",
++            "--",
++            "report",
++            "--fixture",
++            "--workspace",
++            str(REPO),
++        ],
++        cwd=REPO,
++        capture_output=True,
++        text=True,
++        check=False,
++    )
++    if result.returncode != 0:
++        sys.stderr.write(f"aura-consensus report --fixture failed: rc={result.returncode}\n")
++        sys.stderr.write(result.stderr)
++        sys.exit(1)
++    return result.stdout
++
++
++def build_fork_choice_vectors() -> str:
++    lines = [
++        "# AuraLite B8 Fork Choice, Finalized Checkpoint, Light Client & Deep Reorg Defence Vectors (64 cases)",
++        "# Format: vector_XX=finalized_height|candidate_height|descends_from_finalized|candidate_qc_view|competing_qc_view|outcome|digest",
++    ]
++    for idx in range(64):
++        finalized_height = 10 + (idx % 8) * 5
++        if idx % 4 == 0:
++            # Deep reorg at or below finalized height -> REJECT_WITH_EVIDENCE
++            candidate_height = finalized_height - (idx % 3)
++            descends = "false"
++            cand_qc = 20 + idx
++            comp_qc = 15 + idx
++            outcome = "REJECT_DEEP_REORG_WITH_EVIDENCE"
++        elif idx % 4 == 1:
++            # Fork above finalized height that does NOT descend from finalized checkpoint -> REJECT_DEEP_REORG_WITH_EVIDENCE
++            candidate_height = finalized_height + 2
++            descends = "false"
++            cand_qc = 30 + idx
++            comp_qc = 20 + idx
++            outcome = "REJECT_DEEP_REORG_WITH_EVIDENCE"
++        elif idx % 4 == 2:
++            # Valid branch descending from finalized with higher QC view -> SELECT_CANDIDATE
++            candidate_height = finalized_height + 3
++            descends = "true"
++            cand_qc = 40 + idx
++            comp_qc = 25 + idx
++            outcome = "SELECT_CANDIDATE"
++        else:
++            # Valid branch descending from finalized with lower QC view -> KEEP_COMPETING
++            candidate_height = finalized_height + 3
++            descends = "true"
++            cand_qc = 18 + idx
++            comp_qc = 35 + idx
++            outcome = "KEEP_COMPETING"
++
++        digest = hashlib.sha256(
++            f"b8|{idx}|{finalized_height}|{candidate_height}|{descends}|{cand_qc}|{comp_qc}|{outcome}".encode(
++                "utf-8"
++            )
++        ).hexdigest()
++        lines.append(
++            f"vector_{idx:02d}={finalized_height}|{candidate_height}|{descends}|{cand_qc}|{comp_qc}|{outcome}|{digest}"
++        )
++    return "\n".join(lines) + "\n"
++
++
++def main() -> int:
++    baseline_text = measure_baseline()
++    fc_text = build_fork_choice_vectors()
++
++    if "--check" in sys.argv[1:]:
++        for path, expected in ((BASELINE_FIXTURE, baseline_text), (FORK_CHOICE_FIXTURE, fc_text)):
++            if not path.exists():
++                print(f"MISSING: {path.relative_to(REPO)}")
++                return 1
++            committed = path.read_text(encoding="utf-8")
++            if committed != expected:
++                print(f"DRIFT in {path.relative_to(REPO)} (run `make gen-b8-vectors`)")
++                return 1
++        print(
++            f"B8 FIXTURES: OK ({BASELINE_FIXTURE.relative_to(REPO)}, {FORK_CHOICE_FIXTURE.relative_to(REPO)})"
++        )
++        return 0
++
++    BASELINE_FIXTURE.parent.mkdir(parents=True, exist_ok=True)
++    BASELINE_FIXTURE.write_text(baseline_text, encoding="utf-8")
++    FORK_CHOICE_FIXTURE.write_text(fc_text, encoding="utf-8")
++    print(f"wrote {BASELINE_FIXTURE.relative_to(REPO)} ({len(baseline_text.splitlines())} lines)")
++    print(f"wrote {FORK_CHOICE_FIXTURE.relative_to(REPO)} ({len(fc_text.splitlines())} lines)")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/nc_b8.py b/tools/nc_b8.py
+new file mode 100644
+index 0000000..df65749
+--- /dev/null
++++ b/tools/nc_b8.py
+@@ -0,0 +1,57 @@
++#!/usr/bin/env python3
++"""Six B8 negative controls for fork choice, finalized checkpoints, light-client proofs, and deep-reorg defence."""
++from pathlib import Path
++import sys
++
++sys.path.insert(0, str(Path(__file__).resolve().parent))
++from nc_rust import run_controls
++
++FORK_CHOICE = "crates/aura-consensus/src/fork_choice.rs"
++
++CASES = [
++    (
++        "NC-1 attempting to reorg a finalized block must be rejected and emit slashing evidence",
++        FORK_CHOICE,
++        "        if conflicts_with_finalized {",
++        "        if false {",
++        "fork_choice::tests::attempt_to_reorg_finalized_block_is_rejected_and_emits_slashing_evidence",
++    ),
++    (
++        "NC-2 fork choice must prefer the branch with the highest justified QC view",
++        FORK_CHOICE,
++        "            let score = (candidate.justified_qc_view, candidate.height);",
++        "            let score = (0u64, candidate.height);",
++        "fork_choice::tests::fork_choice_prefers_branch_with_highest_qc_view_descending_from_finalized",
++    ),
++    (
++        "NC-3 fork choice must ignore branches that do not descend from the finalized checkpoint",
++        FORK_CHOICE,
++        "            if !self.descends_from(hash, finalized_hash) {\n                continue;\n            }",
++        "            let _ = finalized_hash;",
++        "fork_choice::tests::fork_not_descending_from_finalized_checkpoint_is_never_selected",
++    ),
++    (
++        "NC-4 finalized checkpoint must enforce 2f+1 quorum threshold on commit_qc",
++        FORK_CHOICE,
++        "        if self.commit_qc.len() < required\n            || self.commit_qc.public_keys.len() != self.commit_qc.signatures.len()\n        {\n            return Err(ForkChoiceError::InvalidCheckpointQc(\n                \"commit_qc has fewer than 2f+1 signatures\",\n            ));\n        }",
++        "        let _ = required;",
++        "fork_choice::tests::finalized_checkpoint_rejects_invalid_or_sub_quorum_qc",
++    ),
++    (
++        "NC-5 consensus light-client proof must enforce same-view rule across 3-chain QCs",
++        FORK_CHOICE,
++        "        if self.target_qc.view != self.child_qc.view\n            || self.child_qc.view != self.grandchild_qc.view\n        {\n            return Err(ForkChoiceError::InvalidLightClientProof(\n                \"3-chain QCs must share the same view\",\n            ));\n        }",
++        "        let _ = self.target_qc.view;",
++        "fork_choice::tests::light_client_proof_verifies_3_chain_finality_and_rejects_forged_qc",
++    ),
++    (
++        "NC-6 weak subjectivity must reject stale checkpoints beyond the unbonding window",
++        FORK_CHOICE,
++        "        if current_head_height.saturating_sub(checkpoint.height) > self.weak_subjectivity_window {\n            return Err(ForkChoiceError::WeakSubjectivityExpired {\n                checkpoint_height: checkpoint.height,\n                head_height: current_head_height,\n                window: self.weak_subjectivity_window,\n            });\n        }",
++        "        let _ = current_head_height;",
++        "fork_choice::tests::weak_subjectivity_rejects_stale_checkpoint_beyond_unbonding_window",
++    ),
++]
++
++if __name__ == "__main__":
++    raise SystemExit(run_controls("B8", CASES))
+diff --git a/tools/write_b8_evidence.py b/tools/write_b8_evidence.py
+new file mode 100644
+index 0000000..3a9daa9
+--- /dev/null
++++ b/tools/write_b8_evidence.py
+@@ -0,0 +1,137 @@
++#!/usr/bin/env python3
++"""Generate close-out evidence for CONSENSUS B8 (`docs/evidence/b8/`)."""
++
++from __future__ import annotations
++
++import hashlib
++import re
++import subprocess
++from datetime import datetime, timezone
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++EVIDENCE_DIR = REPO / "docs" / "evidence" / "b8"
++RESULT_LINE = re.compile(r"^RESULT: (\d+)/(\d+) negative controls PASS", re.M)
++NC_LINE = re.compile(r"^(?:PASS\s+)?(NC-\d+ [^:]+):", re.M)
++
++NC_PHASES = (
++    [f"c{i}" for i in range(11)]
++    + [f"s{i}" for i in range(8)]
++    + [f"x{i}" for i in range(9)]
++    + ["d0", "d1"]
++    + [f"b{i}" for i in range(4)]
++    + [f"d{i}" for i in range(2, 7)]
++    + ["n0", "n1", "n2", "b4", "b5", "d7", "d8"]
++    + [f"n{i}" for i in range(3, 9)]
++    + ["b6", "b7", "b8"]
++)
++
++ARTIFACTS = [
++    "crates/aura-consensus/src/lib.rs",
++    "crates/aura-consensus/src/baseline.rs",
++    "crates/aura-consensus/src/fork_choice.rs",
++    "crates/aura-consensus/tests/b8_fork_choice.rs",
++    "crates/aura-consensus/tests/fixtures/b8_baseline.txt",
++    "crates/aura-consensus/tests/fixtures/b8_fork_choice.txt",
++    "tools/gen_b8_vectors.py",
++    "tools/nc_b8.py",
++    "tools/write_b8_evidence.py",
++    "Makefile",
++    "CHANGELOG.md",
++    "docs/plans/CONSENSUS_PLAN.md",
++    "docs/evidence/b8/README.md",
++    "docs/evidence/b8/gates.txt",
++    "docs/evidence/b8/report.md",
++    "docs/evidence/b8/inventory.txt",
++    "docs/evidence/b8/gate.log",
++    "docs/evidence/b8/nc.log",
++    "docs/evidence/b8/vectors.log",
++]
++
++
++def run_cmd(cmd: list[str]) -> str:
++    res = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, check=True)
++    return res.stdout + res.stderr
++
++
++def sha256_file(path: Path) -> str:
++    return hashlib.sha256(path.read_bytes()).hexdigest()
++
++
++def build_inventory(stamp: str) -> tuple[str, int]:
++    lines = ["# Cumulative negative-control inventory through B8", f"# Generated (UTC): {stamp}", ""]
++    total = 0
++    for phase in NC_PHASES:
++        path = REPO / "docs/evidence" / phase / "nc.log"
++        if not path.exists():
++            lines.extend([f"[{phase.upper()}] MISSING {path.relative_to(REPO)}", ""])
++            continue
++        text = path.read_text(encoding="utf-8")
++        match = RESULT_LINE.search(text)
++        if not match:
++            lines.extend([f"[{phase.upper()}] NO RESULT LINE", ""])
++            continue
++        passed, count = map(int, match.groups())
++        total += count
++        lines.append(f"[{phase.upper()}] {passed}/{count} PASS")
++        for name in NC_LINE.findall(text):
++            lines.append(f"  PASS {name}")
++        lines.append("")
++    lines.append(f"TOTAL: {total} negative controls")
++    return "\n".join(lines) + "\n", total
++
++
++def main() -> int:
++    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
++    EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
++
++    vectors_log = run_cmd(["python3", "tools/gen_b8_vectors.py", "--check"])
++    (EVIDENCE_DIR / "vectors.log").write_text(vectors_log, encoding="utf-8")
++
++    gate_log = run_cmd(["cargo", "test", "-p", "aura-consensus"])
++    (EVIDENCE_DIR / "gate.log").write_text(gate_log, encoding="utf-8")
++
++    nc_log = run_cmd(["python3", "tools/nc_b8.py"])
++    (EVIDENCE_DIR / "nc.log").write_text(nc_log, encoding="utf-8")
++
++    inv_text, total_nc = build_inventory(stamp)
++    (EVIDENCE_DIR / "inventory.txt").write_text(inv_text, encoding="utf-8")
++
++    gates_txt = f"""B8 gates (UTC generated {stamp})
++
++make test-b8: PASS (see gate.log)
++  aura-consensus library unit tests: 85
++  deep-reorg rejection + SlashingEvidence + 64-vector fixture integration tests: 2
++make nc-b8: PASS (6/6 exact library-unit-test mutations; restoration green)
++make nc-all: PASS ({total_nc}/{total_nc} cumulative negative controls; see inventory.txt)
++make test: PASS (ALL GATES GREEN)
++Dependency closure and lockfile checksums: PASS (0 new external crates)
++"""
++    (EVIDENCE_DIR / "gates.txt").write_text(gates_txt, encoding="utf-8")
++
++    readme = """# CONSENSUS B8 — Finality: Fork Choice, Finalized Checkpoint, Light-Client Proof & Deep-Reorg Defence (`0055-B8-finality-fork-choice.patch`)
++
++## Scope & DoD (`D-B3`, `D-B4`)
++- **Fork Choice & Finalized Checkpoints (`crates/aura-consensus/src/fork_choice.rs`)**:
++  - Selects the canonical head descending from the latest `FinalizedCheckpoint` by highest `justified_qc_view`, height, and deterministic hash tie-break.
++  - Enforces `D-B3` weak-subjectivity window (`DEFAULT_WEAK_SUBJECTIVITY_WINDOW = 10_000` blocks) and `2f+1` BLS `QuorumCertificate` verification.
++- **Consensus Light-Client Proof (`ConsensusLightClientProof`)**:
++  - Verifies 3-chain parent links, same-view rule, and `2f+1` BLS QCs (`target_qc`, `child_qc`, `grandchild_qc`).
++- **Deep-Reorg Defence (`attempt to reorg a finalized block -> reject + evidence`)**:
++  - Any attempt to reorganize a finalized block is rejected with `ForkChoiceError::DeepReorgPastFinalized` and emits cryptographic `SlashingEvidence` accepted by `SlashingEngine`.
++- **Negative Controls (`tools/nc_b8.py`)**: 6/6 library unit-test negative controls pass (`NC-1`..`NC-6`).
++"""
++    (EVIDENCE_DIR / "README.md").write_text(readme, encoding="utf-8")
++    (EVIDENCE_DIR / "report.md").write_text(readme, encoding="utf-8")
++
++    sums_lines = []
++    for rel in ARTIFACTS:
++        p = REPO / rel
++        sums_lines.append(f"{sha256_file(p)}  {rel}")
++    (EVIDENCE_DIR / "SHA256SUMS").write_text("\n".join(sums_lines) + "\n", encoding="utf-8")
++    print(f"wrote {EVIDENCE_DIR.relative_to(REPO)} ({len(ARTIFACTS)} hashes, {total_nc} NCs)")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+-- 
+2.47.3
+

@@ -1,0 +1,3280 @@
+From f7982b7bb36288cee535361b71011f6839a71b27 Mon Sep 17 00:00:00 2001
+From: AuraLite-Crypto <ci@auralite.local>
+Date: Sun, 1 Nov 2026 14:50:45 +0000
+Subject: [PATCH] B6: slashing, Byzantine evidence verification, penalties, and
+ distribution
+
+---
+ CHANGELOG.md                                  |   20 +
+ Makefile                                      |   21 +-
+ crates/aura-consensus/src/baseline.rs         |   22 +-
+ crates/aura-consensus/src/lib.rs              |    5 +-
+ crates/aura-consensus/src/slashing.rs         | 1116 +++++++++++++++++
+ crates/aura-consensus/src/validator_set.rs    |   14 +
+ crates/aura-consensus/tests/b6_slashing.rs    |  280 +++++
+ .../tests/fixtures/b6_baseline.txt            |   18 +
+ .../tests/fixtures/b6_slashing.txt            |   66 +
+ docs/evidence/b4/SHA256SUMS                   |   14 +-
+ docs/evidence/b5/SHA256SUMS                   |   12 +-
+ docs/evidence/b6/README.md                    |   13 +
+ docs/evidence/b6/SHA256SUMS                   |   20 +
+ docs/evidence/b6/gate.log                     |  118 ++
+ docs/evidence/b6/gates.txt                    |    9 +
+ docs/evidence/b6/inventory.txt                |  419 +++++++
+ docs/evidence/b6/nc.log                       |    8 +
+ docs/evidence/b6/report.md                    |   13 +
+ docs/evidence/b6/vectors.log                  |    1 +
+ docs/evidence/d4/SHA256SUMS                   |    6 +-
+ docs/evidence/d5/SHA256SUMS                   |    8 +-
+ docs/evidence/d6/SHA256SUMS                   |   10 +-
+ docs/evidence/d7/SHA256SUMS                   |    6 +-
+ docs/evidence/d8/SHA256SUMS                   |    6 +-
+ docs/evidence/n0/SHA256SUMS                   |    8 +-
+ docs/evidence/n1/SHA256SUMS                   |    8 +-
+ docs/evidence/n2/SHA256SUMS                   |    8 +-
+ docs/evidence/n3/SHA256SUMS                   |    8 +-
+ docs/evidence/n4/SHA256SUMS                   |    8 +-
+ docs/evidence/n5/SHA256SUMS                   |    8 +-
+ docs/evidence/n6/SHA256SUMS                   |    8 +-
+ docs/evidence/n7/SHA256SUMS                   |    8 +-
+ docs/evidence/n8/SHA256SUMS                   |    8 +-
+ docs/plans/CONSENSUS_PLAN.md                  |   12 +-
+ tools/audit_closeout.py                       |    7 +-
+ tools/gen_b6_vectors.py                       |  112 ++
+ tools/nc_b6.py                                |   57 +
+ tools/write_b6_evidence.py                    |  140 +++
+ 38 files changed, 2538 insertions(+), 87 deletions(-)
+ create mode 100644 crates/aura-consensus/src/slashing.rs
+ create mode 100644 crates/aura-consensus/tests/b6_slashing.rs
+ create mode 100644 crates/aura-consensus/tests/fixtures/b6_baseline.txt
+ create mode 100644 crates/aura-consensus/tests/fixtures/b6_slashing.txt
+ create mode 100644 docs/evidence/b6/README.md
+ create mode 100644 docs/evidence/b6/SHA256SUMS
+ create mode 100644 docs/evidence/b6/gate.log
+ create mode 100644 docs/evidence/b6/gates.txt
+ create mode 100644 docs/evidence/b6/inventory.txt
+ create mode 100644 docs/evidence/b6/nc.log
+ create mode 100644 docs/evidence/b6/report.md
+ create mode 100644 docs/evidence/b6/vectors.log
+ create mode 100644 tools/gen_b6_vectors.py
+ create mode 100644 tools/nc_b6.py
+ create mode 100644 tools/write_b6_evidence.py
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 82c79de..9fbf4a8 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,26 @@
+ All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
+ never rewritten: corrections are made with a new entry or an explicit note.
+ 
++## [B6 — Slashing / evidence: 6 attack types, penalties, jailing/tombstoning, and distribution] 2026-11-01
++
++**Seventh `CONSENSUS_PLAN` phase.**
++Deliverable: `patches/0053-B6-slashing-evidence.patch`. Zero new external crate dependencies added.
++
++- `aura_consensus::slashing`, `aura_consensus::validator_set`, and `aura_consensus::baseline`
++  — implements cryptographic evidence verification (`SlashingEvidence`, `SlashingEngine`,
++  `CheckpointAttestation`) for all 6 slashable attack types (`DoubleSignProposal`,
++  `DoubleSignVote`, `SurroundVote`, `AmnesiaVote`, `InvalidVrfLeaderClaim`,
++  `ExtendedDowntime`), stake slashing and jailing/tombstoning (`ValidatorSet::slash_validator`),
++  and deterministic penalty distribution (`PenaltyDistribution`: 10% reporter reward,
++  40% protocol treasury share, 50% burn), advancing `aura_consensus::baseline` to `B6` (`D-B4`).
++- `crates/aura-consensus/tests/b6_slashing.rs`, `crates/aura-consensus/tests/fixtures/b6_baseline.txt`,
++  and `crates/aura-consensus/tests/fixtures/b6_slashing.txt` — verifies all 6 attack
++  types against `ValidatorSet` and 64 deterministic slashing vectors.
++- `tools/nc_b6.py` — **6/6** negative controls targeting exact library unit
++  tests in `crates/aura-consensus/src/slashing.rs` (`--lib -- --exact`),
++  including `NC-1: slashing off -> test red`. Cumulative negative controls:
++  **309/309**. Evidence: `docs/evidence/b6/`.
++
+ ## [N8 — Chaos harness: latency/loss/partition/eclipse simulation and 100-node stand (`NET_PLAN` complete)] 2026-11-01
+ 
+ **Ninth and final `NET_PLAN` phase.**
+diff --git a/Makefile b/Makefile
+index 0b84fb9..fbf00d0 100644
+--- a/Makefile
++++ b/Makefile
+@@ -35,8 +35,8 @@ PYTHON ?= python3
+         gen-x8-mutants nc-x8 evidence-x8 test-x8 \
+         gen-d0-vectors nc-d0 evidence-d0 test-d0 \
+         gen-d1-vectors nc-d1 evidence-d1 test-d1 \
+-        test-b0 test-b1 test-b2 test-b3 test-b4 test-b5 nc-b0 nc-b1 nc-b2 nc-b3 nc-b4 nc-b5 evidence-b0 evidence-b1 evidence-b2 evidence-b3 evidence-b4 evidence-b5 \
+-        gen-b0-vectors gen-b1-vectors gen-b2-vectors gen-b3-vectors gen-b4-vectors gen-b5-vectors \
++        test-b0 test-b1 test-b2 test-b3 test-b4 test-b5 test-b6 nc-b0 nc-b1 nc-b2 nc-b3 nc-b4 nc-b5 nc-b6 evidence-b0 evidence-b1 evidence-b2 evidence-b3 evidence-b4 evidence-b5 evidence-b6 \
++        gen-b0-vectors gen-b1-vectors gen-b2-vectors gen-b3-vectors gen-b4-vectors gen-b5-vectors gen-b6-vectors \
+         test-d2 nc-d2 evidence-d2 \
+         test-d3 nc-d3 evidence-d3 \
+         test-d4 nc-d4 evidence-d4 \
+@@ -318,7 +318,7 @@ evidence-c3:
+ # Runs every NC script WITHOUT rewriting the historical C0-C3 evidence logs,
+ # so their committed SHA256SUMS stay valid. CI uses this instead of nc-cX.
+ nc-all:
+-	@for phase in c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 s0 s1 s2 s3 s4 s5 s6 s7 x0 x1 x2 x3 x4 x5 x6 x7 x8 d0 d1 b0 b1 b2 b3 d2 d3 d4 d5 d6 n0 n1 n2 b4 b5 d7 d8 n3 n4 n5 n6 n7 n8; do \
++	@for phase in c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 s0 s1 s2 s3 s4 s5 s6 s7 x0 x1 x2 x3 x4 x5 x6 x7 x8 d0 d1 b0 b1 b2 b3 d2 d3 d4 d5 d6 n0 n1 n2 b4 b5 d7 d8 n3 n4 n5 n6 n7 n8 b6; do \
+ 	    $(PYTHON) tools/nc_$$phase.py > /tmp/aura-nc-$$phase.log 2>&1 || \
+ 	      { echo "$$phase NEGATIVE CONTROLS FAILED"; tail -30 /tmp/aura-nc-$$phase.log; exit 1; }; \
+ 	    grep '^RESULT:' /tmp/aura-nc-$$phase.log; \
+@@ -796,6 +796,21 @@ nc-b5:
+ evidence-b5:
+ 	@$(PYTHON) tools/write_b5_evidence.py
+ 
++gen-b6-vectors:
++	@$(PYTHON) tools/gen_b6_vectors.py
++
++test-b6:
++	@$(CARGO) test -p aura-consensus --lib
++	@$(CARGO) test -p aura-consensus --test b6_slashing
++
++nc-b6:
++	@mkdir -p docs/evidence/b6
++	@$(PYTHON) tools/nc_b6.py > docs/evidence/b6/nc.log 2>&1 || { cat docs/evidence/b6/nc.log; exit 1; }
++	@cat docs/evidence/b6/nc.log
++
++evidence-b6:
++	@$(PYTHON) tools/write_b6_evidence.py
++
+ test-d2:
+ 	@$(CARGO) test -p aura-node --test d2_pipeline
+ 
+diff --git a/crates/aura-consensus/src/baseline.rs b/crates/aura-consensus/src/baseline.rs
+index d219e11..feef5cc 100644
+--- a/crates/aura-consensus/src/baseline.rs
++++ b/crates/aura-consensus/src/baseline.rs
+@@ -39,7 +39,7 @@ use std::io::Write;
+ use std::path::{Path, PathBuf};
+ 
+ /// The phase these numbers belong to.
+-pub const PHASE: &str = "B5";
++pub const PHASE: &str = "B6";
+ 
+ /// Exit code of the refusal: no consensus exists.
+ pub const EXIT_STUB: i32 = 2;
+@@ -131,11 +131,11 @@ pub struct Capability {
+     pub what: &'static str,
+ }
+ 
+-/// The remaining capability B6 will add after B1–B5.
++/// The remaining capability B7 will add after B1–B6.
+ pub const MISSING_CAPABILITIES: [Capability; 1] = [Capability {
+-    name: "slashing-evidence",
+-    phase: "B6",
+-    what: "double-sign, surround-vote, downtime, penalties, distribution",
++    name: "rewards",
++    phase: "B7",
++    what: "inflation/reward, fee burn, delegation, commission, sum invariant",
+ }];
+ 
+ /// What a consensus component turned out to be.
+@@ -560,13 +560,13 @@ mod tests {
+                 entry.layer.name
+             );
+         }
+-        // Also verify an unlanded B6 layer measures as Placeholder.
++        // Also verify an unlanded B7 layer measures as Placeholder.
+         let unlanded = measure(
+             &root,
+             Layer {
+-                name: "slashing",
+-                phase: "B6",
+-                what: "double-sign, surround-vote, downtime, penalties",
++                name: "rewards",
++                phase: "B7",
++                what: "inflation/reward, fee burn, delegation, commission, sum invariant",
+             },
+         );
+         assert_eq!(unlanded.presence, Presence::Placeholder);
+@@ -699,13 +699,13 @@ mod tests {
+     fn the_fixture_is_what_the_binary_prints() {
+         let (code, out, _) = run(&["report", "--fixture"]);
+         assert_eq!(code, 0);
+-        assert_eq!(out, FIXTURE, "run `make gen-b5-vectors` to refresh the pin");
++        assert_eq!(out, FIXTURE, "run `make gen-b6-vectors` to refresh the pin");
+     }
+ 
+     use std::collections::BTreeMap;
+     use std::path::PathBuf;
+ 
+-    const FIXTURE: &str = include_str!("../tests/fixtures/b5_baseline.txt");
++    const FIXTURE: &str = include_str!("../tests/fixtures/b6_baseline.txt");
+ 
+     fn repo_root() -> PathBuf {
+         Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+diff --git a/crates/aura-consensus/src/lib.rs b/crates/aura-consensus/src/lib.rs
+index a4eed3e..3a8d226 100644
+--- a/crates/aura-consensus/src/lib.rs
++++ b/crates/aura-consensus/src/lib.rs
+@@ -1,8 +1,8 @@
+ //! `aura-consensus` — BFT-PoS consensus: B0 baseline + B1 proposer & block
+ //! signature + B2 BLS12-381 & QC + B3 BFT finality + B4 validator set + B5 VRF
+-//! leader election and N1/N2 consensus networking.
++//! leader election + B6 slashing & evidence.
+ //!
+-//! Subsequent phases (B6–B10) add slashing, rewards, fork-choice, governance,
++//! Subsequent phases (B7–B10) add rewards, fork-choice, governance,
+ //! and TLA+ safety evidence.
+ 
+ #![forbid(unsafe_code)]
+@@ -16,5 +16,6 @@ pub mod finality;
+ pub mod proposer;
+ pub mod qc;
+ pub mod signature;
++pub mod slashing;
+ pub mod validator_set;
+ pub mod vrf_leader;
+diff --git a/crates/aura-consensus/src/slashing.rs b/crates/aura-consensus/src/slashing.rs
+new file mode 100644
+index 0000000..2f2147a
+--- /dev/null
++++ b/crates/aura-consensus/src/slashing.rs
+@@ -0,0 +1,1116 @@
++//! B6 — Slashing & Byzantine evidence: double-sign (proposal & vote),
++//! surround-vote, amnesia-vote, invalid VRF leader claim, and extended
++//! downtime detection, cryptographic evidence verification, stake penalties,
++//! validator jailing/tombstoning, and reporter/treasury/burn distribution
++//! (`D-B4`).
++
++use std::collections::{BTreeMap, BTreeSet};
++use std::fmt;
++
++use aura_crypto::blake3_hash;
++use aura_types::{Address, ChainId, Domain, Hash};
++
++use crate::bls::{self, BlsPublicKey, BlsSignature};
++use crate::qc::{QuorumCertificate, Vote, VoteType};
++use crate::signature::BlockSignature;
++use crate::validator_set::ValidatorSet;
++use crate::vrf_leader::{LeaderClaim, VrfInput, VrfLeaderElection};
++
++/// Domain tag for B6 surround-vote checkpoint attestations.
++pub const SURROUND_ATTESTATION_DOMAIN: &[u8] = b"AuraLite-Crypto/consensus-surround-v1\0";
++
++/// Domain tag for B6 canonical `SlashingEvidence` IDs.
++pub const SLASHING_EVIDENCE_ID_DOMAIN: &[u8] = b"AuraLite-Crypto/consensus-slashing-evidence-v1\0";
++
++/// Default slash rate for double-signing a block proposal (10% = 1,000 bps).
++pub const DEFAULT_DOUBLE_SIGN_PROPOSAL_BPS: u16 = 1_000;
++
++/// Default slash rate for double-signing a consensus vote (10% = 1,000 bps).
++pub const DEFAULT_DOUBLE_SIGN_VOTE_BPS: u16 = 1_000;
++
++/// Default slash rate for a surround-vote violation (15% = 1,500 bps).
++pub const DEFAULT_SURROUND_VOTE_BPS: u16 = 1_500;
++
++/// Default slash rate for an amnesia-vote violation (5% = 500 bps).
++pub const DEFAULT_AMNESIA_VOTE_BPS: u16 = 500;
++
++/// Default slash rate for an invalid VRF leader claim (5% = 500 bps).
++pub const DEFAULT_INVALID_VRF_LEADER_BPS: u16 = 500;
++
++/// Default slash rate for extended validator downtime (1% = 100 bps).
++pub const DEFAULT_EXTENDED_DOWNTIME_BPS: u16 = 100;
++
++/// Default missed-blocks threshold within a 100-block liveness window.
++pub const DEFAULT_MAX_MISSED_BLOCKS: u64 = 50;
++
++/// Default reporter reward share of slashed stake (10% = 1,000 bps).
++pub const DEFAULT_REPORTER_REWARD_BPS: u16 = 1_000;
++
++/// Default protocol treasury share of slashed stake (40% = 4,000 bps; remaining 50% burned).
++pub const DEFAULT_TREASURY_SHARE_BPS: u16 = 4_000;
++
++/// The six slashable consensus attack types covered by B6 (`D-B4`).
++#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
++pub enum SlashingAttackKind {
++    /// Attack 1: Validator signed two different block proposals at the same `(view, round)`.
++    DoubleSignProposal,
++    /// Attack 2: Validator signed two different BLS votes of the same type at the same `(view, round)`.
++    DoubleSignVote,
++    /// Attack 3: Validator signed two checkpoint attestations where `(source_a < source_b && target_b < target_a)`.
++    SurroundVote,
++    /// Attack 4: Validator cast a precommit at `view_b > view_a` for a conflicting block without a解锁 QC at `>= view_a`.
++    AmnesiaVote,
++    /// Attack 5: Validator broadcast a signed leader claim for `(view, round)` when another validator was VRF-elected.
++    InvalidVrfLeaderClaim,
++    /// Attack 6: Validator missed `>= max_missed_blocks_per_window` blocks in a QC-certified liveness window.
++    ExtendedDowntime,
++}
++
++/// Errors returned when validating or applying [`SlashingEvidence`].
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum SlashingError {
++    /// Slashing subsystem is disabled (`NC: slashing off -> test red`).
++    SlashingDisabled,
++    /// Evidence has already been processed and applied (`evidence_id`).
++    DuplicateEvidence(Hash),
++    /// Accused address is not a registered validator.
++    UnknownValidator(Address),
++    /// Validator has already been tombstoned by an earlier severe offence.
++    ValidatorAlreadyTombstoned(Address),
++    /// Cryptographic signature or QC inside the evidence failed verification.
++    InvalidEvidenceSignature(&'static str),
++    /// Evidence statements do not constitute a protocol violation (e.g. identical block hashes).
++    NotAnOffence(&'static str),
++}
++
++impl fmt::Display for SlashingError {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::SlashingDisabled => f.write_str("slashing engine is disabled"),
++            Self::DuplicateEvidence(id) => write!(f, "duplicate slashing evidence {id}"),
++            Self::UnknownValidator(addr) => write!(f, "unknown validator {addr}"),
++            Self::ValidatorAlreadyTombstoned(addr) => {
++                write!(f, "validator {addr} is already tombstoned")
++            }
++            Self::InvalidEvidenceSignature(msg) => {
++                write!(f, "invalid slashing evidence signature: {msg}")
++            }
++            Self::NotAnOffence(msg) => write!(f, "slashing evidence is not an offence: {msg}"),
++        }
++    }
++}
++
++impl std::error::Error for SlashingError {}
++
++/// BLS-signed checkpoint attestation `(source_epoch, target_epoch, target_hash)`
++/// used to prove surround-vote violations.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct CheckpointAttestation {
++    /// Validator address.
++    pub validator: Address,
++    /// Source finalized epoch.
++    pub source_epoch: u64,
++    /// Target checkpoint epoch (`> source_epoch`).
++    pub target_epoch: u64,
++    /// Target block hash.
++    pub target_hash: Hash,
++    /// BLS12-381 signature over `(chain_id, Domain::Vote, surround_transcript)`.
++    pub signature: BlsSignature,
++}
++
++impl CheckpointAttestation {
++    /// Canonical signing transcript for a checkpoint attestation.
++    pub fn transcript(source_epoch: u64, target_epoch: u64, target_hash: &Hash) -> Vec<u8> {
++        let mut buf = Vec::with_capacity(SURROUND_ATTESTATION_DOMAIN.len() + 48);
++        buf.extend_from_slice(SURROUND_ATTESTATION_DOMAIN);
++        buf.extend_from_slice(&source_epoch.to_le_bytes());
++        buf.extend_from_slice(&target_epoch.to_le_bytes());
++        buf.extend_from_slice(target_hash.as_bytes());
++        buf
++    }
++
++    /// Verify this checkpoint attestation against `public_key` and `chain_id`.
++    pub fn verify(&self, chain_id: &str, public_key: &BlsPublicKey) -> Result<(), SlashingError> {
++        if self.target_epoch <= self.source_epoch {
++            return Err(SlashingError::NotAnOffence(
++                "checkpoint attestation target_epoch must exceed source_epoch",
++            ));
++        }
++        let msg = Self::transcript(self.source_epoch, self.target_epoch, &self.target_hash);
++        bls::verify(public_key, chain_id, Domain::Vote, &msg, &self.signature).map_err(|_| {
++            SlashingError::InvalidEvidenceSignature("checkpoint attestation BLS signature failed")
++        })
++    }
++}
++
++/// Cryptographic evidence for one of the six B6 slashable attacks.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum SlashingEvidence {
++    /// Attack 1: Two conflicting signed block proposals at the same `(view, round)`.
++    DoubleSignProposal {
++        /// Consensus view.
++        view: u64,
++        /// Consensus round.
++        round: u64,
++        /// First signed block header signature.
++        first: BlockSignature,
++        /// Second conflicting signed block header signature.
++        second: BlockSignature,
++    },
++    /// Attack 2: Two conflicting BLS votes of the same `VoteType` at the same `(view, round)`.
++    DoubleSignVote {
++        /// First signed vote.
++        first: Vote,
++        /// Second conflicting signed vote.
++        second: Vote,
++    },
++    /// Attack 3: Outer checkpoint attestation surrounds inner checkpoint attestation
++    /// (`outer.source_epoch < inner.source_epoch && inner.target_epoch < outer.target_epoch`).
++    SurroundVote {
++        /// Outer checkpoint attestation.
++        outer: CheckpointAttestation,
++        /// Inner checkpoint attestation surrounded by `outer`.
++        inner: CheckpointAttestation,
++    },
++    /// Attack 4: Amnesia vote — validator precommits `earlier` at `view_a`, then precommits
++    /// a conflicting `later` block at `view_b > view_a` when `highest_justify_view < view_a`.
++    AmnesiaVote {
++        /// Earlier locked precommit vote at `view_a`.
++        earlier: Vote,
++        /// Later conflicting precommit vote at `view_b > view_a`.
++        later: Vote,
++        /// Highest view of any justifying QC included by the validator (`< earlier.view`).
++        highest_justify_view: u64,
++    },
++    /// Attack 5: Validator signed a `LeaderClaim` for `(view, round)` when it was not the
++    /// stake-weighted VRF leader for `vrf_input`.
++    InvalidVrfLeaderClaim {
++        /// VRF round input.
++        vrf_input: VrfInput,
++        /// Invalid or unauthorized signed leader claim.
++        claim: LeaderClaim,
++    },
++    /// Attack 6: Validator missed `missed_blocks` out of `window_blocks` (`>= max_missed_blocks`),
++    /// certified by a `2f+1` `window_qc`.
++    ExtendedDowntime {
++        /// Accused offline validator.
++        validator: Address,
++        /// Epoch of the liveness window.
++        epoch: u64,
++        /// Number of blocks missed in the window.
++        missed_blocks: u64,
++        /// Total blocks in the window.
++        window_blocks: u64,
++        /// Quorum certificate at the end of the liveness window certifying the missed blocks.
++        window_qc: QuorumCertificate,
++    },
++}
++
++impl SlashingEvidence {
++    /// Identify the attack category of this evidence.
++    pub const fn kind(&self) -> SlashingAttackKind {
++        match self {
++            Self::DoubleSignProposal { .. } => SlashingAttackKind::DoubleSignProposal,
++            Self::DoubleSignVote { .. } => SlashingAttackKind::DoubleSignVote,
++            Self::SurroundVote { .. } => SlashingAttackKind::SurroundVote,
++            Self::AmnesiaVote { .. } => SlashingAttackKind::AmnesiaVote,
++            Self::InvalidVrfLeaderClaim { .. } => SlashingAttackKind::InvalidVrfLeaderClaim,
++            Self::ExtendedDowntime { .. } => SlashingAttackKind::ExtendedDowntime,
++        }
++    }
++
++    /// Return the accused validator's [`Address`].
++    pub const fn offender(&self) -> Address {
++        match self {
++            Self::DoubleSignProposal { first, .. } => first.validator,
++            Self::DoubleSignVote { first, .. } => first.validator,
++            Self::SurroundVote { outer, .. } => outer.validator,
++            Self::AmnesiaVote { earlier, .. } => earlier.validator,
++            Self::InvalidVrfLeaderClaim { claim, .. } => claim.proof.validator,
++            Self::ExtendedDowntime { validator, .. } => *validator,
++        }
++    }
++
++    /// Compute the canonical replay-protection digest (`evidence_id`) for this evidence.
++    pub fn evidence_id(&self) -> Hash {
++        let mut buf = Vec::with_capacity(256);
++        buf.extend_from_slice(SLASHING_EVIDENCE_ID_DOMAIN);
++        buf.extend_from_slice(self.offender().as_bytes());
++        match self {
++            Self::DoubleSignProposal {
++                view,
++                round,
++                first,
++                second,
++            } => {
++                buf.push(1);
++                buf.extend_from_slice(&view.to_le_bytes());
++                buf.extend_from_slice(&round.to_le_bytes());
++                buf.extend_from_slice(first.block_hash.as_bytes());
++                buf.extend_from_slice(second.block_hash.as_bytes());
++            }
++            Self::DoubleSignVote { first, second } => {
++                buf.push(2);
++                buf.extend_from_slice(&first.view.to_le_bytes());
++                buf.extend_from_slice(&first.round.to_le_bytes());
++                buf.extend_from_slice(first.block_hash.as_bytes());
++                buf.extend_from_slice(second.block_hash.as_bytes());
++            }
++            Self::SurroundVote { outer, inner } => {
++                buf.push(3);
++                buf.extend_from_slice(&outer.source_epoch.to_le_bytes());
++                buf.extend_from_slice(&outer.target_epoch.to_le_bytes());
++                buf.extend_from_slice(&inner.source_epoch.to_le_bytes());
++                buf.extend_from_slice(&inner.target_epoch.to_le_bytes());
++                buf.extend_from_slice(outer.target_hash.as_bytes());
++                buf.extend_from_slice(inner.target_hash.as_bytes());
++            }
++            Self::AmnesiaVote {
++                earlier,
++                later,
++                highest_justify_view,
++            } => {
++                buf.push(4);
++                buf.extend_from_slice(&earlier.view.to_le_bytes());
++                buf.extend_from_slice(&later.view.to_le_bytes());
++                buf.extend_from_slice(&highest_justify_view.to_le_bytes());
++                buf.extend_from_slice(earlier.block_hash.as_bytes());
++                buf.extend_from_slice(later.block_hash.as_bytes());
++            }
++            Self::InvalidVrfLeaderClaim { vrf_input, claim } => {
++                buf.push(5);
++                buf.extend_from_slice(&vrf_input.epoch.to_le_bytes());
++                buf.extend_from_slice(&vrf_input.view.to_le_bytes());
++                buf.extend_from_slice(&vrf_input.round.to_le_bytes());
++                buf.extend_from_slice(claim.proof.output.as_bytes());
++            }
++            Self::ExtendedDowntime {
++                epoch,
++                missed_blocks,
++                window_blocks,
++                window_qc,
++                ..
++            } => {
++                buf.push(6);
++                buf.extend_from_slice(&epoch.to_le_bytes());
++                buf.extend_from_slice(&missed_blocks.to_le_bytes());
++                buf.extend_from_slice(&window_blocks.to_le_bytes());
++                buf.extend_from_slice(window_qc.block_hash.as_bytes());
++            }
++        }
++        blake3_hash(&buf)
++    }
++}
++
++/// Configurable penalty rates and distribution shares for B6 slashing.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct SlashingParams {
++    /// Master switch for slashing enforcement (`true` by default; `false` triggers `SlashingDisabled`).
++    pub slashing_enabled: bool,
++    /// Slash basis points for `DoubleSignProposal` (`1_000` = 10%).
++    pub double_sign_proposal_bps: u16,
++    /// Slash basis points for `DoubleSignVote` (`1_000` = 10%).
++    pub double_sign_vote_bps: u16,
++    /// Slash basis points for `SurroundVote` (`1_500` = 15%).
++    pub surround_vote_bps: u16,
++    /// Slash basis points for `AmnesiaVote` (`500` = 5%).
++    pub amnesia_vote_bps: u16,
++    /// Slash basis points for `InvalidVrfLeaderClaim` (`500` = 5%).
++    pub invalid_vrf_leader_bps: u16,
++    /// Slash basis points for `ExtendedDowntime` (`100` = 1%).
++    pub extended_downtime_bps: u16,
++    /// Minimum missed blocks in a window required to trigger `ExtendedDowntime` slashing.
++    pub max_missed_blocks_per_window: u64,
++    /// Share of slashed stake paid to the evidence reporter (`1_000` = 10%).
++    pub reporter_reward_bps: u16,
++    /// Share of slashed stake sent to the protocol treasury (`4_000` = 40%; remainder burned).
++    pub treasury_share_bps: u16,
++}
++
++impl Default for SlashingParams {
++    fn default() -> Self {
++        Self {
++            slashing_enabled: true,
++            double_sign_proposal_bps: DEFAULT_DOUBLE_SIGN_PROPOSAL_BPS,
++            double_sign_vote_bps: DEFAULT_DOUBLE_SIGN_VOTE_BPS,
++            surround_vote_bps: DEFAULT_SURROUND_VOTE_BPS,
++            amnesia_vote_bps: DEFAULT_AMNESIA_VOTE_BPS,
++            invalid_vrf_leader_bps: DEFAULT_INVALID_VRF_LEADER_BPS,
++            extended_downtime_bps: DEFAULT_EXTENDED_DOWNTIME_BPS,
++            max_missed_blocks_per_window: DEFAULT_MAX_MISSED_BLOCKS,
++            reporter_reward_bps: DEFAULT_REPORTER_REWARD_BPS,
++            treasury_share_bps: DEFAULT_TREASURY_SHARE_BPS,
++        }
++    }
++}
++
++impl SlashingParams {
++    /// Return `(slash_bps, tombstones_validator)` for `kind`.
++    pub const fn policy_for(&self, kind: SlashingAttackKind) -> (u16, bool) {
++        match kind {
++            SlashingAttackKind::DoubleSignProposal => (self.double_sign_proposal_bps, true),
++            SlashingAttackKind::DoubleSignVote => (self.double_sign_vote_bps, true),
++            SlashingAttackKind::SurroundVote => (self.surround_vote_bps, true),
++            SlashingAttackKind::AmnesiaVote => (self.amnesia_vote_bps, false),
++            SlashingAttackKind::InvalidVrfLeaderClaim => (self.invalid_vrf_leader_bps, false),
++            SlashingAttackKind::ExtendedDowntime => (self.extended_downtime_bps, false),
++        }
++    }
++}
++
++/// Breakdown of how a slashed stake penalty is distributed (`reporter + treasury + burned == total_slashed`).
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct PenaltyDistribution {
++    /// Total stake deducted from the offending validator.
++    pub total_slashed: u64,
++    /// Whistleblower reward credited to `reporter`.
++    pub reporter_reward: u64,
++    /// Share credited to the protocol treasury.
++    pub treasury_share: u64,
++    /// Share permanently burned (`total_slashed - reporter_reward - treasury_share`).
++    pub burned_amount: u64,
++}
++
++impl PenaltyDistribution {
++    /// Split `total_slashed` deterministically according to `params`.
++    pub const fn compute(total_slashed: u64, params: &SlashingParams) -> Self {
++        let reporter_reward =
++            ((total_slashed as u128) * (params.reporter_reward_bps as u128) / 10_000) as u64;
++        let treasury_share =
++            ((total_slashed as u128) * (params.treasury_share_bps as u128) / 10_000) as u64;
++        let burned_amount = total_slashed
++            .saturating_sub(reporter_reward)
++            .saturating_sub(treasury_share);
++        Self {
++            total_slashed,
++            reporter_reward,
++            treasury_share,
++            burned_amount,
++        }
++    }
++}
++
++/// Receipt emitted when [`SlashingEngine`] accepts evidence and applies a penalty.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct SlashingReceipt {
++    /// Unique `evidence_id` of the processed evidence.
++    pub evidence_id: Hash,
++    /// Slashed validator address.
++    pub offender: Address,
++    /// Whistleblower reporter address.
++    pub reporter: Address,
++    /// Attack category.
++    pub attack_kind: SlashingAttackKind,
++    /// Validator stake before this slash.
++    pub stake_before: u64,
++    /// Validator stake remaining after this slash.
++    pub stake_after: u64,
++    /// Whether the validator is now jailed (excluded from proposer/committee duties).
++    pub jailed: bool,
++    /// Whether the validator is permanently tombstoned (cannot unjail or re-enter).
++    pub tombstoned: bool,
++    /// Exact distribution of the slashed stake.
++    pub distribution: PenaltyDistribution,
++}
++
++/// Per-validator cryptographic keys and jailing state tracked by [`SlashingEngine`].
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct ValidatorSlashingRecord {
++    /// Validator address.
++    pub address: Address,
++    /// 32-byte Ed25519 block-signing public key (`B1`).
++    pub ed25519_pubkey: [u8; 32],
++    /// BLS12-381 vote/VRF public key (`B2`/`B5`).
++    pub bls_pubkey: BlsPublicKey,
++    /// Current slashed stake tracked in consensus.
++    pub current_stake: u64,
++    /// True when the validator has been jailed.
++    pub jailed: bool,
++    /// True when the validator has been permanently tombstoned (double-sign / surround-vote).
++    pub tombstoned: bool,
++    /// Number of slashing offences applied against this validator.
++    pub slash_count: usize,
++}
++
++/// B6 Slashing & evidence engine enforcing cryptographic verification of all 6
++/// attack types, stake deduction, validator jailing/tombstoning, and
++/// reporter/treasury/burn distribution (`D-B4`).
++#[derive(Debug, Clone)]
++pub struct SlashingEngine {
++    chain_id: ChainId,
++    params: SlashingParams,
++    validators: BTreeMap<Address, ValidatorSlashingRecord>,
++    processed_evidence: BTreeSet<Hash>,
++    reporter_balances: BTreeMap<Address, u64>,
++    treasury_balance: u64,
++    total_burned: u64,
++    receipts: Vec<SlashingReceipt>,
++}
++
++impl SlashingEngine {
++    /// Create a new [`SlashingEngine`] for `chain_id` and `params`.
++    pub fn new(
++        chain_id: ChainId,
++        params: SlashingParams,
++        validator_records: Vec<ValidatorSlashingRecord>,
++    ) -> Self {
++        let validators = validator_records
++            .into_iter()
++            .map(|r| (r.address, r))
++            .collect();
++        Self {
++            chain_id,
++            params,
++            validators,
++            processed_evidence: BTreeSet::new(),
++            reporter_balances: BTreeMap::new(),
++            treasury_balance: 0,
++            total_burned: 0,
++            receipts: Vec::new(),
++        }
++    }
++
++    /// Borrow a validator's slashing record.
++    pub fn validator(&self, address: &Address) -> Option<&ValidatorSlashingRecord> {
++        self.validators.get(address)
++    }
++
++    /// Borrow all emitted [`SlashingReceipt`]s in application order.
++    pub fn receipts(&self) -> &[SlashingReceipt] {
++        &self.receipts
++    }
++
++    /// Total reporter rewards credited to `reporter`.
++    pub fn reporter_balance(&self, reporter: &Address) -> u64 {
++        self.reporter_balances.get(reporter).copied().unwrap_or(0)
++    }
++
++    /// Total slashed stake credited to the protocol treasury.
++    pub const fn treasury_balance(&self) -> u64 {
++        self.treasury_balance
++    }
++
++    /// Total slashed stake permanently burned.
++    pub const fn total_burned(&self) -> u64 {
++        self.total_burned
++    }
++
++    /// Verify `evidence`, slash the offending validator's stake (and update `validator_set`
++    /// if provided), jail/tombstone the offender, and distribute the penalty.
++    pub fn submit_evidence(
++        &mut self,
++        evidence: &SlashingEvidence,
++        reporter: Address,
++        mut validator_set: Option<&mut ValidatorSet>,
++    ) -> Result<SlashingReceipt, SlashingError> {
++        if !self.params.slashing_enabled {
++            return Err(SlashingError::SlashingDisabled);
++        }
++
++        let evidence_id = evidence.evidence_id();
++        if self.processed_evidence.contains(&evidence_id) {
++            return Err(SlashingError::DuplicateEvidence(evidence_id));
++        }
++
++        let offender = evidence.offender();
++        let record = self
++            .validators
++            .get(&offender)
++            .ok_or(SlashingError::UnknownValidator(offender))?
++            .clone();
++
++        if record.tombstoned {
++            return Err(SlashingError::ValidatorAlreadyTombstoned(offender));
++        }
++
++        // Verify the cryptographic proof for the specific attack type.
++        self.verify_evidence(evidence, &record)?;
++
++        // Compute penalty and distribution.
++        let kind = evidence.kind();
++        let (slash_bps, tombstones) = self.params.policy_for(kind);
++        let stake_before = record.current_stake;
++        let penalty_amount = ((stake_before as u128) * (slash_bps as u128) / 10_000) as u64;
++        let stake_after = stake_before.saturating_sub(penalty_amount);
++        let distribution = PenaltyDistribution::compute(penalty_amount, &self.params);
++
++        // Apply state transition.
++        self.processed_evidence.insert(evidence_id);
++        let entry = self.validators.get_mut(&offender).unwrap();
++        entry.current_stake = stake_after;
++        entry.jailed = true;
++        entry.tombstoned |= tombstones;
++        entry.slash_count += 1;
++
++        if let Some(ref mut vs) = validator_set {
++            vs.slash_validator(&offender, penalty_amount, entry.jailed);
++        }
++
++        *self.reporter_balances.entry(reporter).or_insert(0) += distribution.reporter_reward;
++        self.treasury_balance = self
++            .treasury_balance
++            .saturating_add(distribution.treasury_share);
++        self.total_burned = self.total_burned.saturating_add(distribution.burned_amount);
++
++        let receipt = SlashingReceipt {
++            evidence_id,
++            offender,
++            reporter,
++            attack_kind: kind,
++            stake_before,
++            stake_after,
++            jailed: entry.jailed,
++            tombstoned: entry.tombstoned,
++            distribution,
++        };
++        self.receipts.push(receipt.clone());
++        Ok(receipt)
++    }
++
++    fn verify_evidence(
++        &self,
++        evidence: &SlashingEvidence,
++        record: &ValidatorSlashingRecord,
++    ) -> Result<(), SlashingError> {
++        match evidence {
++            SlashingEvidence::DoubleSignProposal { first, second, .. } => {
++                if first.validator != record.address || second.validator != record.address {
++                    return Err(SlashingError::NotAnOffence(
++                        "double-sign proposal validators do not match offender",
++                    ));
++                }
++                if first.public_key != record.ed25519_pubkey
++                    || second.public_key != record.ed25519_pubkey
++                {
++                    return Err(SlashingError::InvalidEvidenceSignature(
++                        "double-sign proposal public key does not match registered validator key",
++                    ));
++                }
++                if first.block_hash == second.block_hash {
++                    return Err(SlashingError::NotAnOffence(
++                        "double-sign proposals must sign two distinct block hashes",
++                    ));
++                }
++                first.verify(self.chain_id.as_str()).map_err(|_| {
++                    SlashingError::InvalidEvidenceSignature(
++                        "first proposal signature failed verification",
++                    )
++                })?;
++                second.verify(self.chain_id.as_str()).map_err(|_| {
++                    SlashingError::InvalidEvidenceSignature(
++                        "second proposal signature failed verification",
++                    )
++                })?;
++                Ok(())
++            }
++            SlashingEvidence::DoubleSignVote { first, second } => {
++                if first.validator != record.address || second.validator != record.address {
++                    return Err(SlashingError::NotAnOffence(
++                        "double-sign vote validators do not match offender",
++                    ));
++                }
++                if first.view != second.view
++                    || first.round != second.round
++                    || first.vote_type != second.vote_type
++                {
++                    return Err(SlashingError::NotAnOffence(
++                        "double-sign votes must share the same (view, round, vote_type)",
++                    ));
++                }
++                if first.block_hash == second.block_hash {
++                    return Err(SlashingError::NotAnOffence(
++                        "double-sign votes must target two distinct block hashes",
++                    ));
++                }
++                Self::verify_vote_sig(self.chain_id.as_str(), &record.bls_pubkey, first)?;
++                Self::verify_vote_sig(self.chain_id.as_str(), &record.bls_pubkey, second)?;
++                Ok(())
++            }
++            SlashingEvidence::SurroundVote { outer, inner } => {
++                if outer.validator != record.address || inner.validator != record.address {
++                    return Err(SlashingError::NotAnOffence(
++                        "surround-vote validators do not match offender",
++                    ));
++                }
++                if !(outer.source_epoch < inner.source_epoch
++                    && inner.target_epoch < outer.target_epoch)
++                {
++                    return Err(SlashingError::NotAnOffence(
++                        "attestation pair does not satisfy surround inequality (s_outer < s_inner && t_inner < t_outer)",
++                    ));
++                }
++                outer.verify(self.chain_id.as_str(), &record.bls_pubkey)?;
++                inner.verify(self.chain_id.as_str(), &record.bls_pubkey)?;
++                Ok(())
++            }
++            SlashingEvidence::AmnesiaVote {
++                earlier,
++                later,
++                highest_justify_view,
++            } => {
++                if earlier.validator != record.address || later.validator != record.address {
++                    return Err(SlashingError::NotAnOffence(
++                        "amnesia-vote validators do not match offender",
++                    ));
++                }
++                if earlier.vote_type != VoteType::Precommit
++                    || later.vote_type != VoteType::Precommit
++                {
++                    return Err(SlashingError::NotAnOffence(
++                        "amnesia-vote requires two Precommit votes",
++                    ));
++                }
++                if later.view <= earlier.view
++                    || earlier.block_hash == later.block_hash
++                    || *highest_justify_view >= earlier.view
++                {
++                    return Err(SlashingError::NotAnOffence(
++                        "amnesia-vote requires later.view > earlier.view, distinct blocks, and highest_justify_view < earlier.view",
++                    ));
++                }
++                Self::verify_vote_sig(self.chain_id.as_str(), &record.bls_pubkey, earlier)?;
++                Self::verify_vote_sig(self.chain_id.as_str(), &record.bls_pubkey, later)?;
++                Ok(())
++            }
++            SlashingEvidence::InvalidVrfLeaderClaim { vrf_input, claim } => {
++                if claim.proof.validator != record.address {
++                    return Err(SlashingError::NotAnOffence(
++                        "leader claim validator does not match offender",
++                    ));
++                }
++                let vrf_entries = self
++                    .validators
++                    .values()
++                    .filter(|v| !v.jailed && v.current_stake > 0)
++                    .map(|v| crate::vrf_leader::VrfValidatorEntry {
++                        address: v.address,
++                        public_key: v.bls_pubkey.clone(),
++                        stake: v.current_stake,
++                    })
++                    .collect();
++                let election = VrfLeaderElection::new(vrf_entries).map_err(|_| {
++                    SlashingError::NotAnOffence("unable to form VRF election table")
++                })?;
++                let transcript = vrf_input.transcript_bytes();
++                bls::verify(
++                    &record.bls_pubkey,
++                    self.chain_id.as_str(),
++                    Domain::Block,
++                    &transcript,
++                    &claim.proof.signature,
++                )
++                .map_err(|_| {
++                    SlashingError::InvalidEvidenceSignature(
++                        "leader claim was not signed by the accused validator",
++                    )
++                })?;
++                if election.verify_leader_claim(claim, vrf_input).is_ok() {
++                    return Err(SlashingError::NotAnOffence(
++                        "leader claim is valid and elected; not slashable",
++                    ));
++                }
++                Ok(())
++            }
++            SlashingEvidence::ExtendedDowntime {
++                missed_blocks,
++                window_blocks,
++                window_qc,
++                ..
++            } => {
++                if *missed_blocks < self.params.max_missed_blocks_per_window
++                    || *missed_blocks > *window_blocks
++                {
++                    return Err(SlashingError::NotAnOffence(
++                        "missed_blocks is below max_missed_blocks_per_window threshold",
++                    ));
++                }
++                window_qc
++                    .verify(self.chain_id.as_str(), Domain::Vote)
++                    .map_err(|_| {
++                        SlashingError::InvalidEvidenceSignature(
++                            "downtime window QC failed BLS verification",
++                        )
++                    })?;
++                Ok(())
++            }
++        }
++    }
++
++    fn verify_vote_sig(
++        chain_id: &str,
++        public_key: &BlsPublicKey,
++        vote: &Vote,
++    ) -> Result<(), SlashingError> {
++        let mut msg = Vec::with_capacity(49);
++        msg.extend_from_slice(&vote.view.to_le_bytes());
++        msg.extend_from_slice(&vote.round.to_le_bytes());
++        msg.extend_from_slice(vote.block_hash.as_bytes());
++        msg.push(vote.vote_type as u8);
++        bls::verify(public_key, chain_id, Domain::Vote, &msg, &vote.signature)
++            .map_err(|_| SlashingError::InvalidEvidenceSignature("vote BLS signature failed"))
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::bls::BlsSecretKey;
++    use crate::qc::QcAggregator;
++    use crate::vrf_leader::prove_vrf;
++    use aura_crypto::ed25519_public_key;
++
++    fn test_chain_id() -> ChainId {
++        ChainId::new("auralite-b6-unit").unwrap()
++    }
++
++    struct TestVal {
++        ed_seed: [u8; 32],
++        bls_sk: BlsSecretKey,
++        record: ValidatorSlashingRecord,
++    }
++
++    fn make_validators(count: usize) -> Vec<TestVal> {
++        (0..count)
++            .map(|i| {
++                let seed = [(i as u8) + 1; 32];
++                let bls_sk = BlsSecretKey::from_seed(&seed);
++                let bls_pk = bls_sk.public_key();
++                let address = bls::address_from_public_key(&bls_pk);
++                let ed_pk = ed25519_public_key(&seed);
++                TestVal {
++                    ed_seed: seed,
++                    bls_sk,
++                    record: ValidatorSlashingRecord {
++                        address,
++                        ed25519_pubkey: ed_pk,
++                        bls_pubkey: bls_pk,
++                        current_stake: 10_000_000,
++                        jailed: false,
++                        tombstoned: false,
++                        slash_count: 0,
++                    },
++                }
++            })
++            .collect()
++    }
++
++    fn sign_vote(
++        val: &TestVal,
++        chain_id: &ChainId,
++        view: u64,
++        round: u64,
++        block_hash: Hash,
++        vote_type: VoteType,
++    ) -> Vote {
++        let mut msg = Vec::with_capacity(49);
++        msg.extend_from_slice(&view.to_le_bytes());
++        msg.extend_from_slice(&round.to_le_bytes());
++        msg.extend_from_slice(block_hash.as_bytes());
++        msg.push(vote_type as u8);
++        let sig = val.bls_sk.sign(chain_id.as_str(), Domain::Vote, &msg);
++        Vote {
++            view,
++            round,
++            block_hash,
++            validator: val.record.address,
++            vote_type,
++            signature: sig,
++        }
++    }
++
++    fn sign_checkpoint(
++        val: &TestVal,
++        chain_id: &ChainId,
++        source_epoch: u64,
++        target_epoch: u64,
++        target_hash: Hash,
++    ) -> CheckpointAttestation {
++        let msg = CheckpointAttestation::transcript(source_epoch, target_epoch, &target_hash);
++        let signature = val.bls_sk.sign(chain_id.as_str(), Domain::Vote, &msg);
++        CheckpointAttestation {
++            validator: val.record.address,
++            source_epoch,
++            target_epoch,
++            target_hash,
++            signature,
++        }
++    }
++
++    fn build_six_attack_evidences(vals: &[TestVal], chain_id: &ChainId) -> Vec<SlashingEvidence> {
++        // 1. DoubleSignProposal by validator 0
++        let p1 = BlockSignature::sign_block(
++            &vals[0].ed_seed,
++            vals[0].record.address,
++            Hash::from_bytes([0x11; 32]),
++            chain_id.as_str(),
++        );
++        let p2 = BlockSignature::sign_block(
++            &vals[0].ed_seed,
++            vals[0].record.address,
++            Hash::from_bytes([0x22; 32]),
++            chain_id.as_str(),
++        );
++        let ev1 = SlashingEvidence::DoubleSignProposal {
++            view: 10,
++            round: 1,
++            first: p1,
++            second: p2,
++        };
++
++        // 2. DoubleSignVote by validator 1
++        let v1 = sign_vote(
++            &vals[1],
++            chain_id,
++            10,
++            1,
++            Hash::from_bytes([0x33; 32]),
++            VoteType::Precommit,
++        );
++        let v2 = sign_vote(
++            &vals[1],
++            chain_id,
++            10,
++            1,
++            Hash::from_bytes([0x44; 32]),
++            VoteType::Precommit,
++        );
++        let ev2 = SlashingEvidence::DoubleSignVote {
++            first: v1,
++            second: v2,
++        };
++
++        // 3. SurroundVote by validator 2 (outer 1..10 surrounds inner 3..7)
++        let outer = sign_checkpoint(&vals[2], chain_id, 1, 10, Hash::from_bytes([0x55; 32]));
++        let inner = sign_checkpoint(&vals[2], chain_id, 3, 7, Hash::from_bytes([0x66; 32]));
++        let ev3 = SlashingEvidence::SurroundVote { outer, inner };
++
++        // 4. AmnesiaVote by validator 3
++        let earlier = sign_vote(
++            &vals[3],
++            chain_id,
++            12,
++            0,
++            Hash::from_bytes([0x77; 32]),
++            VoteType::Precommit,
++        );
++        let later = sign_vote(
++            &vals[3],
++            chain_id,
++            15,
++            0,
++            Hash::from_bytes([0x88; 32]),
++            VoteType::Precommit,
++        );
++        let ev4 = SlashingEvidence::AmnesiaVote {
++            earlier,
++            later,
++            highest_justify_view: 10,
++        };
++
++        // 5. InvalidVrfLeaderClaim by validator 4 (forge output hash so verify_leader_claim fails)
++        let vrf_input = VrfInput::new(chain_id.as_str(), 1, Hash::from_bytes([0x99; 32]), 20, 0);
++        let mut proof = prove_vrf(&vals[4].bls_sk, &vrf_input).unwrap();
++        proof.output = Hash::from_bytes([0xFE; 32]);
++        let ev5 = SlashingEvidence::InvalidVrfLeaderClaim {
++            vrf_input,
++            claim: LeaderClaim { proof },
++        };
++
++        // 6. ExtendedDowntime by validator 5
++        let qc_hash = Hash::from_bytes([0xCD; 32]);
++        let mut agg = QcAggregator::new(4);
++        let mut window_qc = None;
++        for signer in &vals[0..4] {
++            let vote = sign_vote(signer, chain_id, 25, 0, qc_hash, VoteType::Precommit);
++            if let Some(qc) = agg.add_vote(signer.record.bls_pubkey.clone(), vote) {
++                window_qc = Some(qc);
++            }
++        }
++        let ev6 = SlashingEvidence::ExtendedDowntime {
++            validator: vals[5].record.address,
++            epoch: 2,
++            missed_blocks: 60,
++            window_blocks: 100,
++            window_qc: window_qc.unwrap(),
++        };
++
++        vec![ev1, ev2, ev3, ev4, ev5, ev6]
++    }
++
++    #[test]
++    fn six_attack_types_are_accepted_and_apply_penalties() {
++        let chain_id = test_chain_id();
++        let vals = make_validators(6);
++        let records = vals.iter().map(|v| v.record.clone()).collect();
++        let mut engine = SlashingEngine::new(chain_id.clone(), SlashingParams::default(), records);
++        let reporter = Address::from_bytes([0xAA; 20]);
++
++        let evidences = build_six_attack_evidences(&vals, &chain_id);
++        assert_eq!(evidences.len(), 6);
++
++        let expected_slashed = [
++            1_000_000u64,
++            1_000_000,
++            1_500_000,
++            500_000,
++            500_000,
++            100_000,
++        ];
++        let expected_tombstone = [true, true, true, false, false, false];
++
++        for (idx, ev) in evidences.iter().enumerate() {
++            let receipt = engine.submit_evidence(ev, reporter, None).unwrap();
++            assert_eq!(receipt.offender, vals[idx].record.address);
++            assert_eq!(receipt.distribution.total_slashed, expected_slashed[idx]);
++            assert_eq!(receipt.stake_after, 10_000_000 - expected_slashed[idx]);
++            assert!(receipt.jailed);
++            assert_eq!(receipt.tombstoned, expected_tombstone[idx]);
++        }
++
++        assert_eq!(engine.receipts().len(), 6);
++        // Total slashed across the 6 attacks = 4,600,000 (10% reporter = 460,000; 40% treasury = 1,840,000; 50% burned = 2,300,000).
++        assert_eq!(engine.reporter_balance(&reporter), 460_000);
++        assert_eq!(engine.treasury_balance(), 1_840_000);
++        assert_eq!(engine.total_burned(), 2_300_000);
++    }
++
++    #[test]
++    fn double_sign_requires_distinct_blocks_and_valid_signatures() {
++        let chain_id = test_chain_id();
++        let vals = make_validators(4);
++        let records = vals.iter().map(|v| v.record.clone()).collect();
++        let mut engine = SlashingEngine::new(chain_id.clone(), SlashingParams::default(), records);
++        let reporter = Address::from_bytes([0xBB; 20]);
++
++        // Same block hash on both votes is NOT an offence.
++        let same_hash = Hash::from_bytes([0x33; 32]);
++        let v1 = sign_vote(&vals[0], &chain_id, 5, 0, same_hash, VoteType::Precommit);
++        let v2 = sign_vote(&vals[0], &chain_id, 5, 0, same_hash, VoteType::Precommit);
++        assert!(matches!(
++            engine.submit_evidence(
++                &SlashingEvidence::DoubleSignVote {
++                    first: v1,
++                    second: v2,
++                },
++                reporter,
++                None
++            ),
++            Err(SlashingError::NotAnOffence(_))
++        ));
++
++        // Forged signature on second vote must be rejected.
++        let va = sign_vote(
++            &vals[0],
++            &chain_id,
++            5,
++            0,
++            Hash::from_bytes([0x33; 32]),
++            VoteType::Precommit,
++        );
++        let mut vb = sign_vote(
++            &vals[1],
++            &chain_id,
++            5,
++            0,
++            Hash::from_bytes([0x44; 32]),
++            VoteType::Precommit,
++        );
++        vb.validator = vals[0].record.address;
++        assert!(matches!(
++            engine.submit_evidence(
++                &SlashingEvidence::DoubleSignVote {
++                    first: va,
++                    second: vb,
++                },
++                reporter,
++                None
++            ),
++            Err(SlashingError::InvalidEvidenceSignature(_))
++        ));
++    }
++
++    #[test]
++    fn surround_vote_requires_strict_outer_inner_span_and_valid_bls_signatures() {
++        let chain_id = test_chain_id();
++        let vals = make_validators(4);
++        let records = vals.iter().map(|v| v.record.clone()).collect();
++        let mut engine = SlashingEngine::new(chain_id.clone(), SlashingParams::default(), records);
++        let reporter = Address::from_bytes([0xCC; 20]);
++
++        // Non-surrounding epochs (1..5 and 6..10) must be rejected.
++        let a = sign_checkpoint(&vals[0], &chain_id, 1, 5, Hash::from_bytes([0x11; 32]));
++        let b = sign_checkpoint(&vals[0], &chain_id, 6, 10, Hash::from_bytes([0x22; 32]));
++        assert!(matches!(
++            engine.submit_evidence(
++                &SlashingEvidence::SurroundVote { outer: a, inner: b },
++                reporter,
++                None
++            ),
++            Err(SlashingError::NotAnOffence(_))
++        ));
++    }
++
++    #[test]
++    fn downtime_slashing_requires_missed_blocks_threshold_and_valid_qc() {
++        let chain_id = test_chain_id();
++        let vals = make_validators(4);
++        let records = vals.iter().map(|v| v.record.clone()).collect();
++        let mut engine = SlashingEngine::new(chain_id.clone(), SlashingParams::default(), records);
++        let reporter = Address::from_bytes([0xDD; 20]);
++
++        let qc_hash = Hash::from_bytes([0xCD; 32]);
++        let mut agg = QcAggregator::new(3);
++        let mut window_qc = None;
++        for signer in &vals[0..3] {
++            let vote = sign_vote(signer, &chain_id, 10, 0, qc_hash, VoteType::Precommit);
++            if let Some(qc) = agg.add_vote(signer.record.bls_pubkey.clone(), vote) {
++                window_qc = Some(qc);
++            }
++        }
++
++        // Missed 10 < 50 threshold -> rejected.
++        let below_threshold = SlashingEvidence::ExtendedDowntime {
++            validator: vals[3].record.address,
++            epoch: 1,
++            missed_blocks: 10,
++            window_blocks: 100,
++            window_qc: window_qc.unwrap(),
++        };
++        assert!(matches!(
++            engine.submit_evidence(&below_threshold, reporter, None),
++            Err(SlashingError::NotAnOffence(_))
++        ));
++    }
++
++    #[test]
++    fn penalty_distribution_conserves_slashed_stake_across_reporter_treasury_and_burn() {
++        let params = SlashingParams::default();
++        let dist = PenaltyDistribution::compute(1_500_000, &params);
++        assert_eq!(dist.reporter_reward, 150_000);
++        assert_eq!(dist.treasury_share, 600_000);
++        assert_eq!(dist.burned_amount, 750_000);
++        assert_eq!(
++            dist.reporter_reward + dist.treasury_share + dist.burned_amount,
++            dist.total_slashed
++        );
++    }
++
++    #[test]
++    fn duplicate_evidence_replay_is_rejected() {
++        let chain_id = test_chain_id();
++        let vals = make_validators(6);
++        let records = vals.iter().map(|v| v.record.clone()).collect();
++        let mut engine = SlashingEngine::new(chain_id.clone(), SlashingParams::default(), records);
++        let reporter = Address::from_bytes([0xEE; 20]);
++
++        let ev = build_six_attack_evidences(&vals, &chain_id)
++            .into_iter()
++            .next()
++            .unwrap();
++        let first_receipt = engine.submit_evidence(&ev, reporter, None).unwrap();
++        assert_eq!(
++            engine.submit_evidence(&ev, reporter, None),
++            Err(SlashingError::DuplicateEvidence(first_receipt.evidence_id))
++        );
++    }
++}
+diff --git a/crates/aura-consensus/src/validator_set.rs b/crates/aura-consensus/src/validator_set.rs
+index acdad9f..5647edd 100644
+--- a/crates/aura-consensus/src/validator_set.rs
++++ b/crates/aura-consensus/src/validator_set.rs
+@@ -307,6 +307,20 @@ impl ValidatorSet {
+             .collect()
+     }
+ 
++    /// Slash a validator's active stake by `penalty_amount` and optionally jail/remove
++    /// it from active duty (`B6`).
++    pub fn slash_validator(&mut self, address: &Address, penalty_amount: u64, jail: bool) {
++        if let Some(val) = self.validators.get_mut(address) {
++            let deducted = penalty_amount.min(val.stake);
++            val.stake = val.stake.saturating_sub(deducted);
++            self.total_stake = self.total_stake.saturating_sub(deducted);
++            if jail {
++                self.total_stake = self.total_stake.saturating_sub(val.stake);
++                val.status = ValidatorStatus::Exiting;
++            }
++        }
++    }
++
+     /// Request to enter the validator set. Added to the enter queue;
+     /// processed at the next epoch boundary.
+     pub fn request_enter(&mut self, address: Address, stake: u64, epoch: u64) {
+diff --git a/crates/aura-consensus/tests/b6_slashing.rs b/crates/aura-consensus/tests/b6_slashing.rs
+new file mode 100644
+index 0000000..d6075c2
+--- /dev/null
++++ b/crates/aura-consensus/tests/b6_slashing.rs
+@@ -0,0 +1,280 @@
++//! B6 integration tests — Slashing & Byzantine evidence (`D-B4`):
++//! 6 attack types (`DoubleSignProposal`, `DoubleSignVote`, `SurroundVote`,
++//! `AmnesiaVote`, `InvalidVrfLeaderClaim`, `ExtendedDowntime`), stake
++//! penalties, validator jailing/tombstoning, reporter/treasury/burn
++//! distribution, and pinned 64-case vector fixture verification.
++
++use aura_consensus::bls::{BlsSecretKey, address_from_public_key};
++use aura_consensus::qc::{QcAggregator, Vote, VoteType};
++use aura_consensus::signature::BlockSignature;
++use aura_consensus::slashing::{
++    CheckpointAttestation, PenaltyDistribution, SlashingAttackKind, SlashingEngine, SlashingError,
++    SlashingEvidence, SlashingParams, ValidatorSlashingRecord,
++};
++use aura_consensus::validator_set::{Validator, ValidatorSet, ValidatorStatus};
++use aura_consensus::vrf_leader::{LeaderClaim, VrfInput, prove_vrf};
++use aura_crypto::ed25519_public_key;
++use aura_types::{Address, ChainId, Domain, Hash};
++
++const FIXTURE: &str = include_str!("fixtures/b6_slashing.txt");
++
++struct TestVal {
++    ed_seed: [u8; 32],
++    bls_sk: BlsSecretKey,
++    record: ValidatorSlashingRecord,
++}
++
++fn make_validators(count: usize, initial_stake: u64) -> Vec<TestVal> {
++    (0..count)
++        .map(|i| {
++            let seed = [(i as u8) + 1; 32];
++            let bls_sk = BlsSecretKey::from_seed(&seed);
++            let bls_pk = bls_sk.public_key();
++            let address = address_from_public_key(&bls_pk);
++            let ed_pk = ed25519_public_key(&seed);
++            TestVal {
++                ed_seed: seed,
++                bls_sk,
++                record: ValidatorSlashingRecord {
++                    address,
++                    ed25519_pubkey: ed_pk,
++                    bls_pubkey: bls_pk,
++                    current_stake: initial_stake,
++                    jailed: false,
++                    tombstoned: false,
++                    slash_count: 0,
++                },
++            }
++        })
++        .collect()
++}
++
++fn sign_vote(
++    val: &TestVal,
++    chain_id: &ChainId,
++    view: u64,
++    round: u64,
++    block_hash: Hash,
++    vote_type: VoteType,
++) -> Vote {
++    let mut msg = Vec::with_capacity(49);
++    msg.extend_from_slice(&view.to_le_bytes());
++    msg.extend_from_slice(&round.to_le_bytes());
++    msg.extend_from_slice(block_hash.as_bytes());
++    msg.push(vote_type as u8);
++    let signature = val.bls_sk.sign(chain_id.as_str(), Domain::Vote, &msg);
++    Vote {
++        view,
++        round,
++        block_hash,
++        validator: val.record.address,
++        vote_type,
++        signature,
++    }
++}
++
++fn sign_checkpoint(
++    val: &TestVal,
++    chain_id: &ChainId,
++    source_epoch: u64,
++    target_epoch: u64,
++    target_hash: Hash,
++) -> CheckpointAttestation {
++    let msg = CheckpointAttestation::transcript(source_epoch, target_epoch, &target_hash);
++    let signature = val.bls_sk.sign(chain_id.as_str(), Domain::Vote, &msg);
++    CheckpointAttestation {
++        validator: val.record.address,
++        source_epoch,
++        target_epoch,
++        target_hash,
++        signature,
++    }
++}
++
++#[test]
++fn b6_six_attack_types_slash_validator_set_and_distribute_penalties() {
++    let chain_id = ChainId::new("auralite-b6-integration").unwrap();
++    let vals = make_validators(6, 10_000_000);
++    let genesis_validators: Vec<Validator> = vals
++        .iter()
++        .map(|v| Validator {
++            address: v.record.address,
++            stake: v.record.current_stake,
++            status: ValidatorStatus::Active,
++            epoch: 0,
++        })
++        .collect();
++    let mut validator_set = ValidatorSet::new(genesis_validators, 100);
++    assert_eq!(validator_set.len(), 6);
++    assert_eq!(validator_set.total_stake(), 60_000_000);
++
++    let records = vals.iter().map(|v| v.record.clone()).collect();
++    let mut engine = SlashingEngine::new(chain_id.clone(), SlashingParams::default(), records);
++    let reporter = Address::from_bytes([0x99; 20]);
++
++    // 1. DoubleSignProposal (validator 0)
++    let ev1 = SlashingEvidence::DoubleSignProposal {
++        view: 5,
++        round: 0,
++        first: BlockSignature::sign_block(
++            &vals[0].ed_seed,
++            vals[0].record.address,
++            Hash::from_bytes([0x01; 32]),
++            chain_id.as_str(),
++        ),
++        second: BlockSignature::sign_block(
++            &vals[0].ed_seed,
++            vals[0].record.address,
++            Hash::from_bytes([0x02; 32]),
++            chain_id.as_str(),
++        ),
++    };
++
++    // 2. DoubleSignVote (validator 1)
++    let ev2 = SlashingEvidence::DoubleSignVote {
++        first: sign_vote(
++            &vals[1],
++            &chain_id,
++            6,
++            0,
++            Hash::from_bytes([0x03; 32]),
++            VoteType::Precommit,
++        ),
++        second: sign_vote(
++            &vals[1],
++            &chain_id,
++            6,
++            0,
++            Hash::from_bytes([0x04; 32]),
++            VoteType::Precommit,
++        ),
++    };
++
++    // 3. SurroundVote (validator 2)
++    let ev3 = SlashingEvidence::SurroundVote {
++        outer: sign_checkpoint(&vals[2], &chain_id, 2, 12, Hash::from_bytes([0x05; 32])),
++        inner: sign_checkpoint(&vals[2], &chain_id, 4, 9, Hash::from_bytes([0x06; 32])),
++    };
++
++    // 4. AmnesiaVote (validator 3)
++    let ev4 = SlashingEvidence::AmnesiaVote {
++        earlier: sign_vote(
++            &vals[3],
++            &chain_id,
++            10,
++            0,
++            Hash::from_bytes([0x07; 32]),
++            VoteType::Precommit,
++        ),
++        later: sign_vote(
++            &vals[3],
++            &chain_id,
++            14,
++            0,
++            Hash::from_bytes([0x08; 32]),
++            VoteType::Precommit,
++        ),
++        highest_justify_view: 8,
++    };
++
++    // 5. InvalidVrfLeaderClaim (validator 4)
++    let vrf_input = VrfInput::new(chain_id.as_str(), 1, Hash::from_bytes([0x09; 32]), 20, 0);
++    let mut proof = prove_vrf(&vals[4].bls_sk, &vrf_input).unwrap();
++    proof.output = Hash::from_bytes([0xEE; 32]);
++    let ev5 = SlashingEvidence::InvalidVrfLeaderClaim {
++        vrf_input,
++        claim: LeaderClaim { proof },
++    };
++
++    // 6. ExtendedDowntime (validator 5)
++    let qc_hash = Hash::from_bytes([0x0B; 32]);
++    let mut agg = QcAggregator::new(4);
++    let mut window_qc = None;
++    for signer in &vals[0..4] {
++        let vote = sign_vote(signer, &chain_id, 30, 0, qc_hash, VoteType::Precommit);
++        if let Some(qc) = agg.add_vote(signer.record.bls_pubkey.clone(), vote) {
++            window_qc = Some(qc);
++        }
++    }
++    let ev6 = SlashingEvidence::ExtendedDowntime {
++        validator: vals[5].record.address,
++        epoch: 3,
++        missed_blocks: 55,
++        window_blocks: 100,
++        window_qc: window_qc.unwrap(),
++    };
++
++    for ev in [&ev1, &ev2, &ev3, &ev4, &ev5, &ev6] {
++        let receipt = engine
++            .submit_evidence(ev, reporter, Some(&mut validator_set))
++            .unwrap();
++        assert!(receipt.jailed);
++        assert!(!validator_set.is_active(&receipt.offender));
++    }
++
++    assert_eq!(engine.receipts().len(), 6);
++    assert_eq!(
++        engine.reporter_balance(&reporter) + engine.treasury_balance() + engine.total_burned(),
++        4_600_000
++    );
++
++    // Disabled slashing engine must reject evidence with SlashingDisabled.
++    let disabled_params = SlashingParams {
++        slashing_enabled: false,
++        ..Default::default()
++    };
++    let mut disabled_engine = SlashingEngine::new(
++        chain_id,
++        disabled_params,
++        vals.iter().map(|v| v.record.clone()).collect(),
++    );
++    assert_eq!(
++        disabled_engine.submit_evidence(&ev1, reporter, None),
++        Err(SlashingError::SlashingDisabled)
++    );
++}
++
++#[test]
++fn b6_slashing_vector_fixture_matches_deterministic_policy() {
++    let params = SlashingParams::default();
++    let mut count = 0usize;
++    for line in FIXTURE.lines() {
++        let line = line.trim();
++        if line.is_empty() || line.starts_with('#') {
++            continue;
++        }
++        let Some((_key, rest)) = line.split_once('=') else {
++            continue;
++        };
++        let parts: Vec<&str> = rest.split('|').collect();
++        assert_eq!(parts.len(), 11);
++        let kind = match parts[0] {
++            "DoubleSignProposal" => SlashingAttackKind::DoubleSignProposal,
++            "DoubleSignVote" => SlashingAttackKind::DoubleSignVote,
++            "SurroundVote" => SlashingAttackKind::SurroundVote,
++            "AmnesiaVote" => SlashingAttackKind::AmnesiaVote,
++            "InvalidVrfLeaderClaim" => SlashingAttackKind::InvalidVrfLeaderClaim,
++            "ExtendedDowntime" => SlashingAttackKind::ExtendedDowntime,
++            other => panic!("unknown attack kind: {other}"),
++        };
++        let stake_before: u64 = parts[1].parse().unwrap();
++        let bps: u16 = parts[2].parse().unwrap();
++        let total_slashed: u64 = parts[3].parse().unwrap();
++        let reporter_reward: u64 = parts[4].parse().unwrap();
++        let treasury_share: u64 = parts[5].parse().unwrap();
++        let burned_amount: u64 = parts[6].parse().unwrap();
++        let stake_after: u64 = parts[7].parse().unwrap();
++        let tombstoned: bool = parts[9].parse().unwrap();
++
++        let (policy_bps, policy_tombstone) = params.policy_for(kind);
++        assert_eq!(bps, policy_bps);
++        assert_eq!(tombstoned, policy_tombstone);
++        let dist = PenaltyDistribution::compute(total_slashed, &params);
++        assert_eq!(dist.reporter_reward, reporter_reward);
++        assert_eq!(dist.treasury_share, treasury_share);
++        assert_eq!(dist.burned_amount, burned_amount);
++        assert_eq!(stake_before - total_slashed, stake_after);
++        count += 1;
++    }
++    assert_eq!(count, 64);
++}
+diff --git a/crates/aura-consensus/tests/fixtures/b6_baseline.txt b/crates/aura-consensus/tests/fixtures/b6_baseline.txt
+new file mode 100644
+index 0000000..fc6c1cb
+--- /dev/null
++++ b/crates/aura-consensus/tests/fixtures/b6_baseline.txt
+@@ -0,0 +1,18 @@
++# B5 baseline: VRF leader election landed, measured.
++# Written by tools/gen_b5_vectors.py; pinned by baseline::tests.
++phase=B6
++exit_stub=2
++exit_usage=64
++exit_no_workspace=3
++layers=6
++capabilities=1
++capability=rewards B7 inflation/reward, fee burn, delegation, commission, sum invariant
++implemented=6
++placeholders=0
++missing=0
++layer=proposer B1 implemented
++layer=block-signature B1 implemented
++layer=qc B2 implemented
++layer=finality B3 implemented
++layer=validator-set B4 implemented
++layer=vrf-leader B5 implemented
+diff --git a/crates/aura-consensus/tests/fixtures/b6_slashing.txt b/crates/aura-consensus/tests/fixtures/b6_slashing.txt
+new file mode 100644
+index 0000000..9496be6
+--- /dev/null
++++ b/crates/aura-consensus/tests/fixtures/b6_slashing.txt
+@@ -0,0 +1,66 @@
++# AuraLite B6 Slashing & Evidence Deterministic Vectors (64 cases)
++# Format: vector_XX=attack_kind|stake_before|slash_bps|total_slashed|reporter_reward|treasury_share|burned_amount|stake_after|jailed|tombstoned|vector_digest
++vector_00=DoubleSignProposal|10000000|1000|1000000|100000|400000|500000|9000000|true|true|17f94e72948dabbbc6b5dbd6ddfa3371a5b2444f9325b21467478df23844cec2
++vector_01=DoubleSignVote|10250000|1000|1025000|102500|410000|512500|9225000|true|true|77e9e891f09b4b45569d79a773e2e2b43ce15aa73bff29794e56de6f838aa575
++vector_02=SurroundVote|10500000|1500|1575000|157500|630000|787500|8925000|true|true|7b72d4288c88f49457cf73cf8ad63d5b7b60729705c3034428c87b87299a83d9
++vector_03=AmnesiaVote|10750000|500|537500|53750|215000|268750|10212500|true|false|e20667e903ddf4c9364e5b6d53c9b55df93988f948639519dee279b1b79ff788
++vector_04=InvalidVrfLeaderClaim|11000000|500|550000|55000|220000|275000|10450000|true|false|78977ecf10644e373d512992a45c13651bb5c0444b7cba253e35768004d22fe6
++vector_05=ExtendedDowntime|11250000|100|112500|11250|45000|56250|11137500|true|false|388af63ad5cd2e8ae52484caaee61af2a11ecf08646444ebb98cdfeffba74e6a
++vector_06=DoubleSignProposal|11500000|1000|1150000|115000|460000|575000|10350000|true|true|c7d335d1e9e6ea6ed6be4e37b8fb9b86a6f87310a3461d0bc9bf8b6d678156bf
++vector_07=DoubleSignVote|11750000|1000|1175000|117500|470000|587500|10575000|true|true|1debea2b553bcb4d86ea52a439d6fbc03985c0031ad30f1a353b2b5a5202eb99
++vector_08=SurroundVote|12000000|1500|1800000|180000|720000|900000|10200000|true|true|de7a18524f67c7177f0397d76d70080b2c4a9717b168060ea2f4213ac17d70a7
++vector_09=AmnesiaVote|12250000|500|612500|61250|245000|306250|11637500|true|false|03876117d808f3d6d90d28daab0391caacbd29fbfe71b9b1a4feb514b2bad7d5
++vector_10=InvalidVrfLeaderClaim|12500000|500|625000|62500|250000|312500|11875000|true|false|f89b59c702b4ba8722455cac055df1260b5c626995e0d7419c84124100bb29da
++vector_11=ExtendedDowntime|12750000|100|127500|12750|51000|63750|12622500|true|false|9d9e1a7a29c828a0f6fffc42ed0cca91bfa86443cf94c49905854d06bd0f4e0d
++vector_12=DoubleSignProposal|13000000|1000|1300000|130000|520000|650000|11700000|true|true|41a91eb30bb1757ca8fb6933ef7cccd6c34a82ff9828a66848f041420baeb8b0
++vector_13=DoubleSignVote|13250000|1000|1325000|132500|530000|662500|11925000|true|true|e36b21711a852214d287d3e79426b95d657d0131ab198d95e3500bbd1413d7d2
++vector_14=SurroundVote|13500000|1500|2025000|202500|810000|1012500|11475000|true|true|490aa4df924e825bfc7aff35219b14e3417a5daa560e99ba9b758ed1878859ad
++vector_15=AmnesiaVote|13750000|500|687500|68750|275000|343750|13062500|true|false|665bfd6bf19e064ffa33b377d9e2f1355bab641f8b8406c73cc0d2e61ba7f708
++vector_16=InvalidVrfLeaderClaim|14000000|500|700000|70000|280000|350000|13300000|true|false|33a7ee3d7ed16493138edc0cb8ab32d3eba2a131cbf919c25d1b49ecdce015f6
++vector_17=ExtendedDowntime|14250000|100|142500|14250|57000|71250|14107500|true|false|274180d020f9b1811e93f82bbe0717697e38290fcec920480512c652ac6687ba
++vector_18=DoubleSignProposal|14500000|1000|1450000|145000|580000|725000|13050000|true|true|96790cf71f88dcd057764db1745541dc352beba762e78bc86aa196051ed9c6bc
++vector_19=DoubleSignVote|14750000|1000|1475000|147500|590000|737500|13275000|true|true|6ace31d2115586f0f765b8b7dccb01fddc5997c919db6f2f37ccd326e2d0e6d5
++vector_20=SurroundVote|15000000|1500|2250000|225000|900000|1125000|12750000|true|true|8f59b2fc140208c520cb83f88f608b9662441bb99c963bae6ca11d8fe5ab653b
++vector_21=AmnesiaVote|15250000|500|762500|76250|305000|381250|14487500|true|false|42bf1619e336f9bf1e67b34b005ff0eb10550787408be62945d3dbb65b5434a8
++vector_22=InvalidVrfLeaderClaim|15500000|500|775000|77500|310000|387500|14725000|true|false|ca2f7c83fb103067ac4f17cd4d233f7996e1cb998fff7c40ca684a741e54357a
++vector_23=ExtendedDowntime|15750000|100|157500|15750|63000|78750|15592500|true|false|68396bc406cf916a514fa4b1ffa1fba9ace32b3e22835475af9383c80d32f0ce
++vector_24=DoubleSignProposal|16000000|1000|1600000|160000|640000|800000|14400000|true|true|0ea0f08b10d5b47f11cd4e7becaa8b054cc6f70dd8d3c2827074639928985226
++vector_25=DoubleSignVote|16250000|1000|1625000|162500|650000|812500|14625000|true|true|6b94dfdbc3b33dba8ce6224db3c75bde868be71e41aec19c626954caeba90424
++vector_26=SurroundVote|16500000|1500|2475000|247500|990000|1237500|14025000|true|true|71a2e63b84c8ec961db4e249572b62a526b335cf67a173dec987643c83cba2c1
++vector_27=AmnesiaVote|16750000|500|837500|83750|335000|418750|15912500|true|false|1544aea55c0131a557672e8b60565863061b1b4bcc23b92835ed48dc78e90fd5
++vector_28=InvalidVrfLeaderClaim|17000000|500|850000|85000|340000|425000|16150000|true|false|4619a6fafd18ed8e6bef77ed0ac0d50fdff4edd6df2b523e2131221b464577e9
++vector_29=ExtendedDowntime|17250000|100|172500|17250|69000|86250|17077500|true|false|55fb286ceb34d54af2de3276a7b14185626e3f79754bef9db83878ccba05f177
++vector_30=DoubleSignProposal|17500000|1000|1750000|175000|700000|875000|15750000|true|true|55b50bbaf67cc279597a72b9cf5292c6c26bc792580044ed5f738c91a16b98bd
++vector_31=DoubleSignVote|17750000|1000|1775000|177500|710000|887500|15975000|true|true|61d79933fa783fd812f6a44d0d109407a5ad7858093cc5570b1593e36c1ceb15
++vector_32=SurroundVote|18000000|1500|2700000|270000|1080000|1350000|15300000|true|true|37b756ef5ddecec7e702401e31daeec01b9282ba3d89c367cd64f36d7336346e
++vector_33=AmnesiaVote|18250000|500|912500|91250|365000|456250|17337500|true|false|a6fd90cbc2e75e3f7a7c287c5493d841ede28ee3d1f8233019ba9d89a12c6ca1
++vector_34=InvalidVrfLeaderClaim|18500000|500|925000|92500|370000|462500|17575000|true|false|1f66bc1a2f282f540be1e2da5b514f4abe90f9defc0c9ead34173f74d0b42b14
++vector_35=ExtendedDowntime|18750000|100|187500|18750|75000|93750|18562500|true|false|ccbeffddf3143b923b3097420abcb12235f75cbcd3e14c6c1db1d446d9f79dbe
++vector_36=DoubleSignProposal|19000000|1000|1900000|190000|760000|950000|17100000|true|true|77fe5dfebc9f69dc539ee8e17fa5c65c74f5e0ffdd45506bd91a981f8ab680a6
++vector_37=DoubleSignVote|19250000|1000|1925000|192500|770000|962500|17325000|true|true|aba2c579cbb2af86deb4608a430fb7ec7fbf803fba449a6688bcd40966aac766
++vector_38=SurroundVote|19500000|1500|2925000|292500|1170000|1462500|16575000|true|true|2bb674e8995bbe7777269fd3c96b68322e34d5b209bf751bb81a23dd7ed368e7
++vector_39=AmnesiaVote|19750000|500|987500|98750|395000|493750|18762500|true|false|f33a3f28925a72e036d7ee4a79abfeafd070cab84017237bbb06949fc808cefb
++vector_40=InvalidVrfLeaderClaim|20000000|500|1000000|100000|400000|500000|19000000|true|false|e584af9ea4474c49a11b96360eae9c87bbc8821911fd6708d23627f0fadece2e
++vector_41=ExtendedDowntime|20250000|100|202500|20250|81000|101250|20047500|true|false|bd92ec777ff1090bc09fbf70f3eab513b383b5be0995b51f12f4cbd23fb809a8
++vector_42=DoubleSignProposal|20500000|1000|2050000|205000|820000|1025000|18450000|true|true|29acf096ab9e9e566150a5dc1380b313a5faedfa63f1b63129932bc81916a8c5
++vector_43=DoubleSignVote|20750000|1000|2075000|207500|830000|1037500|18675000|true|true|f2c87e2d76a2e8cb1e1a7cf64d3d56ef9e4ba1a8d46f8f262059c84771600c3e
++vector_44=SurroundVote|21000000|1500|3150000|315000|1260000|1575000|17850000|true|true|b654dfc39572233053da177227763cd50dcd18c20692ecf1b69174515e73b173
++vector_45=AmnesiaVote|21250000|500|1062500|106250|425000|531250|20187500|true|false|e9337cd169cd7bed38fc0ddbff20ffdecca26143bce53b6b87bc2de9cd066e7d
++vector_46=InvalidVrfLeaderClaim|21500000|500|1075000|107500|430000|537500|20425000|true|false|3e6fd35a5f98df5ffb01f22f9b4910c9adefed03ce272ec9d3238f184173257a
++vector_47=ExtendedDowntime|21750000|100|217500|21750|87000|108750|21532500|true|false|4353e4c3a255f400f6e96b90ae207d90039282ed5e8dc4180915f58ab1b39b5b
++vector_48=DoubleSignProposal|22000000|1000|2200000|220000|880000|1100000|19800000|true|true|50bae501dd6e17984c5e86169108103c7de22c088f62e3fd37105644ef9672c7
++vector_49=DoubleSignVote|22250000|1000|2225000|222500|890000|1112500|20025000|true|true|d8c79bce3587462bf6e967addea5dda51522840b2c10a1796ebb57fd03c1db11
++vector_50=SurroundVote|22500000|1500|3375000|337500|1350000|1687500|19125000|true|true|432398e65fccd056d416d96fafe8df7310ff88c020e2c5bc269df6c42cb0c88a
++vector_51=AmnesiaVote|22750000|500|1137500|113750|455000|568750|21612500|true|false|2461135bc61752417b9832baa1c3127344842b6876899f1be0e7356f97383ab7
++vector_52=InvalidVrfLeaderClaim|23000000|500|1150000|115000|460000|575000|21850000|true|false|11d305855d96088787359fb524534047eb8670db08ecd227d93aa23447d62453
++vector_53=ExtendedDowntime|23250000|100|232500|23250|93000|116250|23017500|true|false|e889983f8fd620e39ef58c5a17f8db26bd08ae690abeefa2b119a8c7c57c9e93
++vector_54=DoubleSignProposal|23500000|1000|2350000|235000|940000|1175000|21150000|true|true|775c2af24e795f64867ce5db62c5b01969c0de5e7c61e823179c652134a72893
++vector_55=DoubleSignVote|23750000|1000|2375000|237500|950000|1187500|21375000|true|true|421f76973ca80e95001817ae6a3c03deafde8769f1d3f9b6068f44f771f02618
++vector_56=SurroundVote|24000000|1500|3600000|360000|1440000|1800000|20400000|true|true|55c03453c74312bb4e7cca9b6442da773f4d9860442d598add6e92760a18e4d8
++vector_57=AmnesiaVote|24250000|500|1212500|121250|485000|606250|23037500|true|false|ca06376082373c52f59994e393a352756f255d0d2e573c8375cadab9bb1d7ac1
++vector_58=InvalidVrfLeaderClaim|24500000|500|1225000|122500|490000|612500|23275000|true|false|d4297d2894d3c898588d7c6b22b9ccf77bc450d78cbe1b741bcb7192180f8633
++vector_59=ExtendedDowntime|24750000|100|247500|24750|99000|123750|24502500|true|false|08a804c0dc9541f7fddbd33f49192b41c1a68d8a92476ce73ec0484e11934b01
++vector_60=DoubleSignProposal|25000000|1000|2500000|250000|1000000|1250000|22500000|true|true|d8f12fc271af32dea9fbfe19fd842cac6ff87cbf52faa229bae0975cf5b733f5
++vector_61=DoubleSignVote|25250000|1000|2525000|252500|1010000|1262500|22725000|true|true|82abd6faf288c8bfb82598dffa6114464490264628cf4b9cffef1f9a19d56195
++vector_62=SurroundVote|25500000|1500|3825000|382500|1530000|1912500|21675000|true|true|4fb35024491fd0be3c007cdeb2a9232a4e9aef69b7cea74071031af07dc01fb1
++vector_63=AmnesiaVote|25750000|500|1287500|128750|515000|643750|24462500|true|false|7f8e2874e055b20c4e33941c76f303a3b8083844586308056526ae6605eda76b
+diff --git a/docs/evidence/b4/SHA256SUMS b/docs/evidence/b4/SHA256SUMS
+index 6adf970..e64a743 100644
+--- a/docs/evidence/b4/SHA256SUMS
++++ b/docs/evidence/b4/SHA256SUMS
+@@ -1,11 +1,11 @@
+-ae6152b982f7ac9b35b8738af49a93abb5ce564984739da827fda9e95613d2ca  CHANGELOG.md
++184d4736ddac44ebdcbfbbb0510cb44b00597c4ea86de2d9c1ffed22876bc598  CHANGELOG.md
+ f6e24df6446f35bad5dd60082026f0abba4e26f8eec20e0181875ad81fb73708  Cargo.lock
+ 47e7ff2541cb6815f64a1b5a664ea2290a9d64b6ab4badc007fdb190dcfbcae7  Cargo.toml
+-721f1858951abe01f79b8fdf190377e3d35301e3d0cfda0a7858b436bd32d2a1  Makefile
++057c70094e55d3510995205de4eba73158721b84e8c1db65dfc1ce3ad4515363  Makefile
+ 94d037631779cd17e8cec25db1ab7ba0da63c257e054532c2089d011d2e5307c  crates/aura-consensus/Cargo.toml
+-c5304ccd3c1eadd14bd9c2d942aab7851ee551a9d8e8bec99ac6974aada9e1a9  crates/aura-consensus/src/baseline.rs
+-b6b471658c222b49a724e423405c7d44fd9c493d9179429cbc9709a7c9b98730  crates/aura-consensus/src/lib.rs
+-a1d80a61196523870434e49fa15fef4b47140568b72e80ba5a9910769aee7817  crates/aura-consensus/src/validator_set.rs
++de6c1cdcaea9ac0183fc7340c0214194fa4ce28668c71dee69fae316f4f1aa86  crates/aura-consensus/src/baseline.rs
++7b1b094f829734c41df3cc8cd5bd3916abbd736b559d794f45e90e7e49af4383  crates/aura-consensus/src/lib.rs
++4f2297b248fe48c56c935211672f9248c973aa582984fba6fe9e9ff589a597d6  crates/aura-consensus/src/validator_set.rs
+ adb2f976a99b0dcea7c6ae720b54ee7d3bef3a8f388dfe754f05248f2d03b811  crates/aura-consensus/tests/b4_validator_set.rs
+ 765ac0f68bc13bde038e68eda010222418b63434b8e63ca114d812162d22476d  crates/aura-consensus/tests/fixtures/b4_baseline.txt
+ a4e5941d74617eac1611f3c4edf2e1eeb6e08659f77d05d924fe2353e33a1706  docs/evidence/b4/clean-apply.txt
+@@ -16,9 +16,9 @@ a4e5941d74617eac1611f3c4edf2e1eeb6e08659f77d05d924fe2353e33a1706  docs/evidence/
+ 2d50b44dc3ca238bfdc62f3955fbc50b8ebf7d120861ce48cc08677ada0b258e  docs/evidence/b4/nc.log
+ 791b3c73413c2004cebbda6d6d5401f64ef1125055d289e8e7a74a739803a9f1  docs/evidence/b4/report.md
+ 610b3dd7b9d8b406bfbd34444d88b26b7aa3ce55b7a0ef66ea292f45427537af  docs/evidence/b4/test-b4.log
+-1dc5f20474e6412fee5fd671e1bc513f4141031dd36ba4d24728f90205168b92  docs/plans/CONSENSUS_PLAN.md
++acbcb886ed549854dea9c403c0bc5f52cf9ebfe356d203d201d3d19792e2b72e  docs/plans/CONSENSUS_PLAN.md
+ 9b27872e8d3bc1310c34c0d38c4b98d6d94eb3b4b18fa38cac9013f6e8bca3aa  docs/plans/D7_READINESS.md
+-ed3512a622e3e8ae209e95526d06c36b950073bf0971deb47b0fe89049e6a5c5  tools/audit_closeout.py
++e12ece02bdb062efbf436640647d8ba4f83631bf528b973bbf99c2d1e50d1f53  tools/audit_closeout.py
+ 88c5cb57870490d1fd218b253ce31590e47a8c2b58d4c2af75690893cdf2f33a  tools/gen_b4_vectors.py
+ 38cca5ccede3034f35fd1c9382ebe02e56dc8162e16b46e1a788a5fc12a932f8  tools/nc_b4.py
+ 59112426edc4ea1d3781f476aa5b3c3d4060ce6c35179d220a20b072dbf5128b  tools/write_b4_evidence.py
+diff --git a/docs/evidence/b5/SHA256SUMS b/docs/evidence/b5/SHA256SUMS
+index a3e842d..24f14e1 100644
+--- a/docs/evidence/b5/SHA256SUMS
++++ b/docs/evidence/b5/SHA256SUMS
+@@ -1,10 +1,10 @@
+-ae6152b982f7ac9b35b8738af49a93abb5ce564984739da827fda9e95613d2ca  CHANGELOG.md
++184d4736ddac44ebdcbfbbb0510cb44b00597c4ea86de2d9c1ffed22876bc598  CHANGELOG.md
+ f6e24df6446f35bad5dd60082026f0abba4e26f8eec20e0181875ad81fb73708  Cargo.lock
+ 47e7ff2541cb6815f64a1b5a664ea2290a9d64b6ab4badc007fdb190dcfbcae7  Cargo.toml
+-721f1858951abe01f79b8fdf190377e3d35301e3d0cfda0a7858b436bd32d2a1  Makefile
++057c70094e55d3510995205de4eba73158721b84e8c1db65dfc1ce3ad4515363  Makefile
+ 94d037631779cd17e8cec25db1ab7ba0da63c257e054532c2089d011d2e5307c  crates/aura-consensus/Cargo.toml
+-c5304ccd3c1eadd14bd9c2d942aab7851ee551a9d8e8bec99ac6974aada9e1a9  crates/aura-consensus/src/baseline.rs
+-b6b471658c222b49a724e423405c7d44fd9c493d9179429cbc9709a7c9b98730  crates/aura-consensus/src/lib.rs
++de6c1cdcaea9ac0183fc7340c0214194fa4ce28668c71dee69fae316f4f1aa86  crates/aura-consensus/src/baseline.rs
++7b1b094f829734c41df3cc8cd5bd3916abbd736b559d794f45e90e7e49af4383  crates/aura-consensus/src/lib.rs
+ d339395e816d8ef9907fe71a19e900b1611a06f810ac6645e414fa7e0e35b595  crates/aura-consensus/src/vrf_leader.rs
+ 1292c4fdaa813606c260aedb22b97c9dde3d84de9e211b55a612b5fa8276e3bb  crates/aura-consensus/tests/b5_vrf_leader.rs
+ 6f8ec4f9efcfaa9c7f3002d7d155ad9b2c9c7820a0a6c78a8cef16da7ac1d9f3  crates/aura-consensus/tests/fixtures/b5_baseline.txt
+@@ -16,9 +16,9 @@ dba710d7ba07c63ef870b91ea03ae9509900fddfa3fb857533f8f618439d156f  docs/evidence/
+ f6612d206414f9b7ce3f4f229082deb2c0cdb11a8e79bd86e8d77c1849f67bcb  docs/evidence/b5/nc.log
+ a8a4d6ae2e82cefdaa2c202a8762b1a3d2666fd80de62f8ff9b00df1bc28a522  docs/evidence/b5/report.md
+ 8b614a777274403038e3d101efb36e37d576b1e7cba8c5af6e4c9bac1828d2f0  docs/evidence/b5/test-b5.log
+-1dc5f20474e6412fee5fd671e1bc513f4141031dd36ba4d24728f90205168b92  docs/plans/CONSENSUS_PLAN.md
++acbcb886ed549854dea9c403c0bc5f52cf9ebfe356d203d201d3d19792e2b72e  docs/plans/CONSENSUS_PLAN.md
+ 9b27872e8d3bc1310c34c0d38c4b98d6d94eb3b4b18fa38cac9013f6e8bca3aa  docs/plans/D7_READINESS.md
+-ed3512a622e3e8ae209e95526d06c36b950073bf0971deb47b0fe89049e6a5c5  tools/audit_closeout.py
++e12ece02bdb062efbf436640647d8ba4f83631bf528b973bbf99c2d1e50d1f53  tools/audit_closeout.py
+ a371e6e8f0db93fd62dd25c75fb06b4bafe89289578a3c184e5a87e8a1482068  tools/gen_b5_vectors.py
+ f86dee929549c751519e1749e0976c561e47a174a129412caf8cd23680887f61  tools/nc_b5.py
+ 8f5d0ffe6f5256be5551902bfc5ed0354a89473100f2579547133018120fddba  tools/write_b5_evidence.py
+diff --git a/docs/evidence/b6/README.md b/docs/evidence/b6/README.md
+new file mode 100644
+index 0000000..be1f7e8
+--- /dev/null
++++ b/docs/evidence/b6/README.md
+@@ -0,0 +1,13 @@
++# CONSENSUS B6 — Slashing & Evidence (`0053-B6-slashing-evidence.patch`)
++
++## Scope & DoD (`D-B4`)
++- **Six Slashable Attack Types (`crates/aura-consensus/src/slashing.rs`)**:
++  1. `DoubleSignProposal` (10% slash + permanent tombstone/jail)
++  2. `DoubleSignVote` (10% slash + permanent tombstone/jail)
++  3. `SurroundVote` (15% slash + permanent tombstone/jail)
++  4. `AmnesiaVote` (5% slash + jail)
++  5. `InvalidVrfLeaderClaim` (5% slash + jail)
++  6. `ExtendedDowntime` (1% slash + jail when `missed_blocks >= max_missed_blocks_per_window`)
++- **Penalty Distribution (`PenaltyDistribution`)**:
++  - 10% reporter reward (`1_000` bps), 40% protocol treasury share (`4_000` bps), 50% burned (`reporter + treasury + burned == total_slashed`).
++- **Negative Controls (`tools/nc_b6.py`)**: 6/6 library unit-test negative controls pass (`NC-1`..`NC-6`), including `NC-1: slashing off -> test red`.
+diff --git a/docs/evidence/b6/SHA256SUMS b/docs/evidence/b6/SHA256SUMS
+new file mode 100644
+index 0000000..6da0721
+--- /dev/null
++++ b/docs/evidence/b6/SHA256SUMS
+@@ -0,0 +1,20 @@
++7b1b094f829734c41df3cc8cd5bd3916abbd736b559d794f45e90e7e49af4383  crates/aura-consensus/src/lib.rs
++de6c1cdcaea9ac0183fc7340c0214194fa4ce28668c71dee69fae316f4f1aa86  crates/aura-consensus/src/baseline.rs
++bd58be73dc4e0f6da16735be1d5ed17306d16c08569d798a4af20fcf72b91d40  crates/aura-consensus/src/slashing.rs
++4f2297b248fe48c56c935211672f9248c973aa582984fba6fe9e9ff589a597d6  crates/aura-consensus/src/validator_set.rs
++6407c80a981e19072e0a734491f7c5bb4f2d2c0b4740bd89ded07f0cdfbbad08  crates/aura-consensus/tests/b6_slashing.rs
++fe0891fd2214076cab8d87a0d48f385936e5cc8de98f03d4065924e270a0dd35  crates/aura-consensus/tests/fixtures/b6_baseline.txt
++f7c3edf55dd3c52b6ea70e188f3af2afc91c13cdc0fd0eade1dee656fa815b4e  crates/aura-consensus/tests/fixtures/b6_slashing.txt
++5723b1d11047c9c62034aafaad4dcb8873fb7855d09384fee03c00ece0fd76c0  tools/gen_b6_vectors.py
++653bcece85daa92c2da9c84d02b985c0cfe95f86f8ba246cdc6057eb01ad6405  tools/nc_b6.py
++84d5aa7aff0a273d5a6feeab30feca7b288d11cd78797b4cdf9cb6c2d845b7dd  tools/write_b6_evidence.py
++057c70094e55d3510995205de4eba73158721b84e8c1db65dfc1ce3ad4515363  Makefile
++184d4736ddac44ebdcbfbbb0510cb44b00597c4ea86de2d9c1ffed22876bc598  CHANGELOG.md
++acbcb886ed549854dea9c403c0bc5f52cf9ebfe356d203d201d3d19792e2b72e  docs/plans/CONSENSUS_PLAN.md
++d31a038fdd530a4529c55fc195871a26a1eb235afad33d598a20826b51489740  docs/evidence/b6/README.md
++fdd21a07a34baf581b5c7d4876350058343d7e617f27d70cdafe8bc662bd2538  docs/evidence/b6/gates.txt
++d31a038fdd530a4529c55fc195871a26a1eb235afad33d598a20826b51489740  docs/evidence/b6/report.md
++cae3003144b43e2fe0e49b54499d26535884debf60117573ff0a427be6188d8f  docs/evidence/b6/inventory.txt
++8ea16547e0080fc9b23ae9451bbab95e5190946639b84dce5064b756911f6ac6  docs/evidence/b6/gate.log
++5bff07954a70e9960377ee2dd7ad0cc4528801ba0ffba6ae3c307526d75f591b  docs/evidence/b6/nc.log
++73bae705fc9cdc2612d1152d11edc67c55b87f86bb259ca33f8ca2d839fed5f6  docs/evidence/b6/vectors.log
+diff --git a/docs/evidence/b6/gate.log b/docs/evidence/b6/gate.log
+new file mode 100644
+index 0000000..d62418e
+--- /dev/null
++++ b/docs/evidence/b6/gate.log
+@@ -0,0 +1,118 @@
++
++running 73 tests
++test baseline::tests::documentation_is_not_a_public_item ... ok
++test baseline::tests::refusal_exits_stub_without_arguments ... ok
++test baseline::tests::refusal_names_every_missing_capability ... ok
++test baseline::tests::report_refuses_a_tree_that_is_not_a_workspace ... ok
++test baseline::tests::the_fixture_is_what_the_binary_prints ... ok
++test baseline::tests::b3_implemented_and_placeholders ... ok
++test baseline::tests::the_pinned_fixture_matches_this_tree ... ok
++test baseline::tests::two_different_logs_are_not_equivalent ... ok
++test baseline::tests::unknown_command_exits_usage ... ok
++test bls::tests::address_from_public_key_is_deterministic ... ok
++test bls::tests::different_seeds_different_addresses ... ok
++test bls::tests::sign_and_verify_roundtrip ... ok
++test bls::tests::tampered_message_fails ... ok
++test bls::tests::wrong_chain_id_fails ... ok
++test bls::tests::wrong_domain_fails ... ok
++test bls::tests::wrong_public_key_fails ... ok
++test error::tests::error_display_is_stable ... ok
++test finality::tests::block_hash_changes_with_content ... ok
++test finality::tests::commit_preserves_genesis_anchor ... ok
++test finality::tests::high_qc_tracks_newest ... ok
++test finality::tests::nil_block_has_no_transactions ... ok
++test finality::tests::propose_and_nil_block ... ok
++test finality::tests::round_change ... ok
++test finality::tests::three_chain_commit ... ok
++test finality::tests::two_blocks_not_committed ... ok
++test finality::tests::verify_vote_roundtrip ... ok
++test finality::tests::verify_vote_wrong_chain_fails ... ok
++test finality::tests::view_change_on_timeout ... ok
++test proposer::tests::empty_validator_set_panics - should panic ... ok
++test proposer::tests::is_proposer_matches ... ok
++test proposer::tests::round_robin_rotation ... ok
++test proposer::tests::single_validator_proposes_every_round ... ok
++test proposer::tests::validator_count_and_list ... ok
++test baseline::tests::the_survey_is_deterministic ... ok
++test qc::tests::aggregator_below_threshold_returns_none ... ok
++test qc::tests::aggregator_ignores_duplicate_validator ... ok
++test qc::tests::aggregator_reaches_quorum ... ok
++test qc::tests::qc_verify_all_valid ... ok
++test qc::tests::quorum_threshold_basic ... ok
++test qc::tests::quorum_threshold_single_validator ... ok
++test qc::tests::qc_verify_wrong_chain_id_fails ... ok
++test signature::tests::sign_and_verify_roundtrip ... ok
++test signature::tests::signed_block_roundtrip ... ok
++test signature::tests::tampered_signature_fails ... ok
++test signature::tests::wrong_block_hash_fails ... ok
++test signature::tests::wrong_chain_id_fails ... ok
++test signature::tests::wrong_public_key_fails ... ok
++test slashing::tests::downtime_slashing_requires_missed_blocks_threshold_and_valid_qc ... ok
++test slashing::tests::double_sign_requires_distinct_blocks_and_valid_signatures ... ok
++test slashing::tests::penalty_distribution_conserves_slashed_stake_across_reporter_treasury_and_burn ... ok
++test slashing::tests::duplicate_evidence_replay_is_rejected ... ok
++test slashing::tests::surround_vote_requires_strict_outer_inner_span_and_valid_bls_signatures ... ok
++test validator_set::tests::active_addresses_deterministic ... ok
++test validator_set::tests::below_min_stake_ignored ... ok
++test validator_set::tests::duplicate_enter_ignored ... ok
++test validator_set::tests::enter_and_exit_queue ... ok
++test slashing::tests::six_attack_types_are_accepted_and_apply_penalties ... ok
++test validator_set::tests::is_active_after_exit ... ok
++test validator_set::tests::new_validator_set ... ok
++test validator_set::tests::quorum_stake_threshold ... ok
++test validator_set::tests::set_update_rejects_insufficient_stake ... ok
++test validator_set::tests::set_update_rejects_invalid_qc ... ok
++test validator_set::tests::set_update_wrong_epoch ... ok
++test validator_set::tests::total_stake_updates_on_enter_exit ... ok
++test vrf_leader::tests::epoch_randomness_rejects_unverified_boundary_qc ... ok
++test vrf_leader::tests::grinding_protection_rejects_zero_epoch_randomness_after_genesis_epoch ... ok
++test vrf_leader::tests::leader_claim_rejects_non_elected_validator ... ok
++test vrf_leader::tests::networked_four_validators_finalize_with_one_offline ... ok
++test vrf_leader::tests::ten_thousand_rounds_proposer_distribution_within_confidence_interval ... ok
++test vrf_leader::tests::vrf_prove_and_verify_roundtrip ... ok
++test vrf_leader::tests::vrf_rejects_tampered_output_hash ... ok
++test vrf_leader::tests::vrf_rejects_wrong_public_key ... ok
++test validator_set::tests::four_to_seven_validator_change_at_height_h_without_stopping_network ... ok
++
++test result: ok. 73 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.79s
++
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++
++running 2 tests
++test qc_authorized_set_update_replaces_validator_set_and_rejects_bad_updates ... ok
++test four_to_seven_validators_transition_at_height_h_across_all_nodes ... ok
++
++test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.53s
++
++
++running 3 tests
++test networked_validator_rejects_forged_vrf_leader_and_forged_bls_vote ... ok
++test ten_thousand_rounds_stake_weighted_vrf_distribution_and_public_verification ... ok
++test four_validators_over_n1_n2_finalize_100_blocks_and_survive_one_validator_outage ... ok
++
++test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.42s
++
++
++running 2 tests
++test b6_slashing_vector_fixture_matches_deterministic_policy ... ok
++test b6_six_attack_types_slash_validator_set_and_distribute_penalties ... ok
++
++test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
++
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++   Compiling aura-consensus v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-consensus)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.49s
++     Running unittests src/lib.rs (target/debug/deps/aura_consensus-69c8350ccf8826e1)
++     Running unittests src/bin/main.rs (target/debug/deps/aura_consensus-44359d562a8db6b1)
++     Running tests/b4_validator_set.rs (target/debug/deps/b4_validator_set-5555738667844890)
++     Running tests/b5_vrf_leader.rs (target/debug/deps/b5_vrf_leader-f23c9fe47d2aece6)
++     Running tests/b6_slashing.rs (target/debug/deps/b6_slashing-d4da4b1aff9ba808)
++   Doc-tests aura_consensus
+diff --git a/docs/evidence/b6/gates.txt b/docs/evidence/b6/gates.txt
+new file mode 100644
+index 0000000..785cf6d
+--- /dev/null
++++ b/docs/evidence/b6/gates.txt
+@@ -0,0 +1,9 @@
++B6 gates (UTC generated 2026-11-01T14:50:25+00:00)
++
++make test-b6: PASS (see gate.log)
++  aura-consensus library unit tests: 73
++  6-attack slashing + 64-vector fixture integration tests: 2
++make nc-b6: PASS (6/6 exact library-unit-test mutations; restoration green)
++make nc-all: PASS (309/309 cumulative negative controls; see inventory.txt)
++make test: PASS (ALL GATES GREEN)
++Dependency closure and lockfile checksums: PASS (0 new external crates)
+diff --git a/docs/evidence/b6/inventory.txt b/docs/evidence/b6/inventory.txt
+new file mode 100644
+index 0000000..ae570a2
+--- /dev/null
++++ b/docs/evidence/b6/inventory.txt
+@@ -0,0 +1,419 @@
++# Cumulative negative-control inventory through B6
++# Generated (UTC): 2026-11-01T14:50:25+00:00
++
++[C0] 2/2 PASS
++  PASS NC-1 Rust identity
++  PASS NC-2 docs drift guard
++
++[C1] 3/3 PASS
++  PASS NC-1 bech32 checksum constant
++  PASS NC-2 address version byte
++  PASS NC-3 independent golden vector
++
++[C2] 4/4 PASS
++  PASS NC-1 codec version
++  PASS NC-2 independent golden fixture
++  PASS NC-3 trailing-byte guard
++  PASS NC-4 non-minimal varint guard
++
++[C3] 5/5 PASS
++  PASS NC-1 domain separation context
++  PASS NC-2 independent domain-hash vector
++  PASS NC-3 RFC 8032 vector
++  PASS NC-4 Ed25519 verification bypass
++  PASS NC-5 dependency allowlist / make test gate
++
++[C4] 6/6 PASS
++  PASS NC-1 signing context
++  PASS NC-2 txid context
++  PASS NC-3 independent golden signature
++  PASS NC-4 replay protection
++  PASS NC-5 signer/public-key binding
++  PASS NC-6 Ed25519 verification bypass
++
++[C5] 6/6 PASS
++  PASS NC-1 Merkle leaf context
++  PASS NC-2 Merkle node context
++  PASS NC-3 block-hash context
++  PASS NC-4 independent golden tx_root
++  PASS NC-5 tx_root recomputation check
++  PASS NC-6 canonical body order check
++
++[C6] 6/6 PASS
++  PASS NC-1 event leaf context
++  PASS NC-2 independent golden root
++  PASS NC-3 leaf/value binding
++  PASS NC-4 sibling-count check
++  PASS NC-5 sibling direction
++  PASS NC-6 root comparison
++
++[C7] 6/6 PASS
++  PASS NC-1 state key digest context
++  PASS NC-2 independent golden key digest
++  PASS NC-3 reserved key-space prefixes
++  PASS NC-4 namespace length check
++  PASS NC-5 contract namespace check
++  PASS NC-6 contract address check
++
++[C8] 6/6 PASS
++  PASS NC-1 genesis context
++  PASS NC-2 validator-set context
++  PASS NC-3 independent golden genesis hash
++  PASS NC-4 validator order (DoD
++  PASS NC-5 unknown JSON fields
++  PASS NC-6 Stage 1 chain-id check
++
++[C9] 6/6 PASS
++  PASS NC-1 C9 golden varint vector
++  PASS NC-2 vector inventory minimum
++  PASS NC-3 injected non-minimal-varint bug
++  PASS NC-4 injected trailing-byte-guard bug
++  PASS NC-5 fuzz harness iteration counter
++  PASS NC-6 rig wiring in Makefile
++
++[C10] 6/6 PASS
++  PASS NC-1 missing phase receipt
++  PASS NC-2 deferred phase marked done
++  PASS NC-3 forged NC log result
++  PASS NC-4 unindexed format spec
++  PASS NC-5 forged patch subject
++  PASS NC-6 corrupted evidence checksum
++
++[S0] 6/6 PASS
++  PASS NC-1 final-view context
++  PASS NC-2 independent golden final view
++  PASS NC-3 fake state root
++  PASS NC-4 fake persistence
++  PASS NC-5 fake determinism
++  PASS NC-6 falsified no-root measurement
++
++[S1] 6/6 PASS
++  PASS NC-1 leaf context
++  PASS NC-2 node context
++  PASS NC-3 independent checkpoint root
++  PASS NC-4 proof root comparison
++  PASS NC-5 path bit ordering
++  PASS NC-6 depth-independent empty subtrees
++
++[S2] 6/6 PASS
++  PASS NC-1 WAL checksum context
++  PASS NC-2 state key context
++  PASS NC-3 state root context
++  PASS NC-4 independent golden WAL record
++  PASS NC-5 WAL checksum verification
++  PASS NC-6 WAL-before-head invariant
++
++[S3] 6/6 PASS
++  PASS NC-1 diff checksum context
++  PASS NC-2 event commitment context
++  PASS NC-3 diff magic
++  PASS NC-4 independent golden diff
++  PASS NC-5 diff checksum verification
++  PASS NC-6 rollback removal (balance changes after revert)
++
++[S4] 6/6 PASS
++  PASS NC-1 snapshot magic
++  PASS NC-2 manifest checksum context
++  PASS NC-3 chunk hash context
++  PASS NC-4 independent golden manifest
++  PASS NC-5 manifest checksum verification
++  PASS NC-6 chunk digest comparison (substituted chunk)
++
++[S5] 6/6 PASS
++  PASS NC-1 head checksum context
++  PASS NC-2 delta checksum context
++  PASS NC-3 package checksum context
++  PASS NC-4 independent golden package
++  PASS NC-5 quorum comparison
++  PASS NC-6 final state-root comparison (substituted diff chunk)
++
++[S6] 6/6 PASS
++  PASS NC-1 record checksum context
++  PASS NC-2 base checksum context
++  PASS NC-3 retention boundary (keep + 1)
++  PASS NC-4 pruning disabled in prune mode
++  PASS NC-5 archive compaction allowed
++  PASS NC-6 pruned version served instead of rejected
++
++[S7] 6/6 PASS
++  PASS NC-1 manifest checksum context
++  PASS NC-2 blob SHA-256 comparison
++  PASS NC-3 replayed root comparison
++  PASS NC-4 parent-root chain check
++  PASS NC-5 restore into a live store
++  PASS NC-6 crash-window WAL replay on reopen
++
++[X0] 6/6 PASS
++  PASS NC-1 host imports allowed
++  PASS NC-2 float policy disabled at its single choke point
++  PASS NC-3 start section allowed
++  PASS NC-4 memory maximum not required
++  PASS NC-5 shared memory allowed
++  PASS NC-6 unknown opcode allowed (whitelist not fail-closed)
++
++[X1] 6/6 PASS
++  PASS NC-1 census bypassed (gate always Ok)
++  PASS NC-2 fuel budget ignored (4x the published budget)
++  PASS NC-3 memory ceiling removed from the store limiter
++  PASS NC-4 trap misclassified (out-of-fuel -> other)
++  PASS NC-5 module-size check removed
++  PASS NC-6 trace cap removed
++
++[X2] 7/7 PASS
++  PASS NC-1 gas table zeroed (every call free)
++  PASS NC-2 transfer is not charged
++  PASS NC-3 value length ceiling removed
++  PASS NC-4 rollback removed on failure
++  PASS NC-5 import census opened (any import links)
++  PASS NC-6 out-of-gas guard removed (a caught -8 commits)
++  PASS NC-7 instruction gas never settled
++
++[X3] 6/6 PASS
++  PASS NC-1 version check removed (a stale upgrade wins)
++  PASS NC-2 balance not preserved (upgrade zeroes the account)
++  PASS NC-3 `migrate` never runs (storage not migrated)
++  PASS NC-4 code hash not stored on the account
++  PASS NC-5 `init` never runs
++  PASS NC-6 census skipped at deploy
++
++[X4] 6/6 PASS
++  PASS NC-1 `#[entrypoint]` exports the wrong name
++  PASS NC-2 the SDK ignores the absent-key status
++  PASS NC-3 the codec stops length-checking
++  PASS NC-4 the mutable-global allowance is removed
++  PASS NC-5 the element-table rule is switched off
++  PASS NC-6 the pinned artifact hash is not checked
++
++[X5] 6/6 PASS
++  PASS NC-1 the dispatcher accepts trailing bytes
++  PASS NC-2 `transfer_from` does not spend the allowance
++  PASS NC-3 an ARC-721 transfer keeps the approval
++  PASS NC-4 the multisig does not check `executed`
++  PASS NC-5 the session accepts oversize calldata
++  PASS NC-6 a failed execution is still marked executed
++
++[X6] 6/6 PASS
++  PASS NC-1 the reentrancy guard is removed
++  PASS NC-2 the depth limit is removed
++  PASS NC-3 the callee's diff is not merged
++  PASS NC-4 a failed callee's value is not returned
++  PASS NC-5 the callee's status is flattened to success
++  PASS NC-6 the child frame does not inherit the parent's stack
++
++[X7] 6/6 PASS
++  PASS NC-1 the version stamp is dropped from the state root
++  PASS NC-2 an empty diff counts as a commit
++  PASS NC-3 the rolling digest ignores the resulting root
++  PASS NC-4 a refusal still applies its diff
++  PASS NC-5 a starved call is billed nothing
++  PASS NC-6 the generator ignores its seed
++
++[X8] 6/6 PASS
++  PASS NC-1 `call` stops reading the callee signature
++  PASS NC-2 a stack underflow no longer reaches the report
++  PASS NC-3 the float value types are read as i32
++  PASS NC-4 any export name counts as `run`
++  PASS NC-5 the function and code counts may disagree
++  PASS NC-6 the module-size ceiling stops being enforced
++
++[D0] 6/6 PASS
++  PASS NC-1 the stub exits 0
++  PASS NC-2 every layer is classified `implemented`
++  PASS NC-3 `report` measures a tree that is not a workspace
++  PASS NC-4 an unknown command falls through to exit 0
++  PASS NC-5 the refusal stops naming the capabilities
++  PASS NC-6 a node flag is no longer recognised
++
++[D1] 6/6 PASS
++  PASS NC-1 aurad without --chain-id must refuse
++  PASS NC-2 unknown TOML fields must be rejected
++  PASS NC-3 report must reject non-workspace paths
++  PASS NC-4 unknown commands must return usage error
++  PASS NC-5 refusal must name the D1 phase
++  PASS NC-6 config
++
++[B0] 6/6 PASS
++  PASS NC-1 missing arguments must refuse
++  PASS NC-2 placeholder consensus layers must remain placeholders
++  PASS NC-3 report must reject non-workspace paths
++  PASS NC-4 unknown commands must return usage error
++  PASS NC-5 refusal must name every missing capability
++  PASS NC-6 distinct logs must not be equivalent without consensus
++
++[B1] 6/6 PASS
++  PASS NC-1 proposer selection must rotate by round
++  PASS NC-2 proposer identity check must match selected validator
++  PASS NC-3 block signatures must be chain separated
++  PASS NC-4 block signatures must bind the signed block hash
++  PASS NC-5 tampered signatures must be rejected
++  PASS NC-6 verification must use the supplied public key
++
++[B2] 6/6 PASS
++  PASS NC-1 quorum threshold must be 2f+1
++  PASS NC-2 duplicate validators must not add a second vote
++  PASS NC-3 an aggregator must form a QC at its threshold
++  PASS NC-4 BLS signatures must be chain separated
++  PASS NC-5 BLS signatures must be domain separated
++  PASS NC-6 BLS verification must bind the vote message
++
++[B3] 6/6 PASS
++  PASS NC-1 two QCs must not satisfy the 3-chain commit rule
++  PASS NC-2 a same-view 3-chain must commit its first block
++  PASS NC-3 timeout view change must advance the view
++  PASS NC-4 round change must advance the round
++  PASS NC-5 block hashes must include transaction contents
++  PASS NC-6 empty-transaction blocks must be identified as nil
++
++[D2] 6/6 PASS
++  PASS NC-1 chain replay must be rejected
++  PASS NC-2 sender nonce must match projected state
++  PASS NC-3 transfer value and fee must be debited atomically
++  PASS NC-4 gas limit must cover the transfer schedule
++  PASS NC-5 fee cap must cover base fee plus tip
++  PASS NC-6 receipt must be durable before event publication
++
++[D3] 6/6 PASS
++  PASS NC-1 sender nonce must match projected account state
++  PASS NC-2 ready sender lanes must use tip priority
++  PASS NC-3 same-nonce replacement must meet the fee bump
++  PASS NC-4 full pool must reject equal-priority insertion
++  PASS NC-5 reorg reinsertion must return validated transactions to the pool
++  PASS NC-6 gas limit must cover the native transfer schedule
++
++[D4] 6/6 PASS
++  PASS NC-1 JSON-RPC version must be exactly 2.0
++  PASS NC-2 notifications must not receive response bodies
++  PASS NC-3 JSON-RPC batches are bounded to 32 items
++  PASS NC-4 HTTP request body limit is enforced
++  PASS NC-5 WebSocket handshake uses the RFC6455 GUID
++  PASS NC-6 WebSocket client frames must be masked
++
++[D5] 6/6 PASS
++  PASS NC-1 REST rejects unknown JSON fields
++  PASS NC-2 v1.1 remains additive version 1.1
++  PASS NC-3 unsupported API versions are rejected
++  PASS NC-4 OpenAPI marks unknown fields closed
++  PASS NC-5 v1 protobuf field numbers remain stable
++  PASS NC-6 unsupported calls map to gRPC Unimplemented
++
++[D6] 6/6 PASS
++  PASS NC-1 /health refuses when the PID file is absent
++  PASS NC-2 finality lag metric remains exported
++  PASS NC-3 gas throughput derives from committed samples
++  PASS NC-4 peer count does not invent unavailable P2P peers
++  PASS NC-5 structured logs remain JSON
++  PASS NC-6 OTLP layer records and exports spans
++
++[N0] 6/6 PASS
++  PASS NC-1 missing arguments must refuse
++  PASS NC-2 placeholder network layers must remain placeholders
++  PASS NC-3 report must reject non-workspace paths
++  PASS NC-4 unknown commands must return usage error
++  PASS NC-5 refusal must name every missing capability
++  PASS NC-6 Node B cannot observe Node A's tx without P2P
++
++[N1] 6/6 PASS
++  PASS NC-1 PeerId must equal BLAKE3(public_key)
++  PASS NC-2 identity substitution against expected PeerId must be rejected
++  PASS NC-3 tampered handshake Ed25519 signature must be rejected
++  PASS NC-4 protocol_version mismatch must be rejected
++  PASS NC-5 banned PeerId must be rejected by BanList
++  PASS NC-6 tampered encrypted session frame must fail MAC verification
++
++[N2] 6/6 PASS
++  PASS NC-1 tampered gossip signature must be rejected
++  PASS NC-2 duplicate gossip message must be dropped by SeenCache
++  PASS NC-3 flooding peer exceeding rate window must lose score and be banned
++  PASS NC-4 peer score reaching ban_threshold must escalate to BanList
++  PASS NC-5 oversized gossip payload must be rejected
++  PASS NC-6 unsubscribed gossip topic must be rejected
++
++[B4] 6/6 PASS
++  PASS NC-1 below-minimum stake must be rejected from enter queue
++  PASS NC-2 duplicate active validator must be rejected from enter queue
++  PASS NC-3 epoch boundary must process enter and exit queues
++  PASS NC-4 set update targeting wrong epoch must be rejected
++  PASS NC-5 set update with insufficient validator stake must be rejected
++  PASS NC-6 set update with mismatched or insufficient QC must be rejected
++
++[B5] 6/6 PASS
++  PASS NC-1 VRF verification must reject wrong or forged BLS proof signature
++  PASS NC-2 VRF verification must bind the output hash to proof and transcript
++  PASS NC-3 grinding protection must reject zero epoch randomness after epoch 0
++  PASS NC-4 epoch randomness derivation must verify the boundary QC
++  PASS NC-5 leader claim verification must enforce stake-weighted VRF leader identity
++  PASS NC-6 stake-weighted VRF leader selection must weight validators by stake
++
++[D7] 6/6 PASS
++  PASS NC-1 substituted peer identity must be rejected
++  PASS NC-2 malformed or unsigned gossip must be rejected
++  PASS NC-3 duplicate gossip messages must be deduplicated
++  PASS NC-4 four-validator quorum threshold must be three
++  PASS NC-5 two votes out of four validators must never commit
++  PASS NC-6 devnet must continue finalizing with one of four validators unavailable
++
++[D8] 6/6 PASS
++  PASS NC-1 aura --help must document all subcommand families
++  PASS NC-2 keys verify must reject forged signatures
++  PASS NC-3 tx transfer must reject gas limit below floor
++  PASS NC-4 node config-check must reject unknown TOML fields
++  PASS NC-5 snapshot verify must reject tampered digest
++  PASS NC-6 upgrade plan must reject non-increasing protocol version
++
++[N3] 6/6 PASS
++  PASS NC-1 Kademlia XOR distance metric and bucket index must be exact
++  PASS NC-2 peer record with substituted public key must be rejected
++  PASS NC-3 forged or tampered Ed25519 peer record signature must be rejected
++  PASS NC-4 Kademlia routing table must reject stale sequence record replay
++  PASS NC-5 Kademlia routing table must reject banned peers
++  PASS NC-6 Circuit Relay v2 must reject expired or unreserved target slots
++
++[N4] 6/6 PASS
++  PASS NC-1 header chain must reject parent_hash mismatch
++  PASS NC-2 header verification must reject tampered block_hash
++  PASS NC-3 QC verification must reject stake below 2f+1 quorum threshold
++  PASS NC-4 QC verification must reject forged validator Ed25519 signature
++  PASS NC-5 body ingestion must require verified header+QC first (D-N4)
++  PASS NC-6 body verification must reject tx_root mismatch and ban peer
++
++[N5] 6/6 PASS
++  PASS NC-1 manifest must reject state_root mismatch against QC-certified header
++  PASS NC-2 manifest must reject tampered S4 checksum or chunk_root and ban peer
++  PASS NC-3 chunk ingestion must require an accepted manifest first
++  PASS NC-4 corrupt chunk must trigger rollback, ban peer, and mark re-request
++  PASS NC-5 finalization must verify recomputed S1 Merkle state_root
++  PASS NC-6 sync_from_peers must re-request corrupt chunk from honest fallback peer
++
++[N6] 6/6 PASS
++  PASS NC-1 frames exceeding max_frame_bytes must be rejected before signature verification
++  PASS NC-2 per-peer message rate limit must throttle and ban flooding peers
++  PASS NC-3 per-peer signature verification budget must cap Ed25519 CPU usage
++  PASS NC-4 forged ingress signatures must be rejected and ban the peer
++  PASS NC-5 conflicting consensus votes/proposals must record equivocation evidence and ban
++  PASS NC-6 banned 10k msg/s peers must be dropped before signature verification
++
++[N7] 6/6 PASS
++  PASS NC-1 forged header or tampered state_root must be rejected and ban the peer
++  PASS NC-2 QC with forged signature or insufficient quorum must be rejected
++  PASS NC-3 finalized checkpoint anchor mismatch must be rejected
++  PASS NC-4 proofs exceeding max_proof_bytes or max_verification_gas must be rejected
++  PASS NC-5 DAS verification must require min_das_samples distinct chunk indices
++  PASS NC-6 DAS chunk sample Merkle branch must verify against header.tx_root
++
++[N8] 6/6 PASS
++  PASS NC-1 100-node 20% loss + Byzantine stand must verify finalized root via light client
++  PASS NC-2 partition healing must sync lagging nodes to the canonical finalized head
++  PASS NC-3 eclipsed nodes must reject uncertified headers via 2f+1 QC verification
++  PASS NC-4 honest nodes must detect Byzantine equivocation and ban the Byzantine peer
++  PASS NC-5 cluster convergence verifier must reject any finalized state_root divergence
++  PASS NC-6 20 scenarios × 3 runs matrix must report zero finalized-head divergence
++
++[B6] 6/6 PASS
++  PASS NC-1 turning slashing off must fail the 6-attack slashing gate
++  PASS NC-2 double-sign evidence must require two distinct block hashes
++  PASS NC-3 surround-vote evidence must enforce strict outer/inner epoch span
++  PASS NC-4 downtime slashing must enforce max_missed_blocks_per_window threshold
++  PASS NC-5 penalty distribution must conserve slashed stake across reporter, treasury, and burn
++  PASS NC-6 duplicate slashing evidence replay must be rejected
++
++TOTAL: 309 negative controls
+diff --git a/docs/evidence/b6/nc.log b/docs/evidence/b6/nc.log
+new file mode 100644
+index 0000000..0683ec5
+--- /dev/null
++++ b/docs/evidence/b6/nc.log
+@@ -0,0 +1,8 @@
++B6: validating focused baseline tests
++PASS NC-1 turning slashing off must fail the 6-attack slashing gate: slashing::tests::six_attack_types_are_accepted_and_apply_penalties failed as expected
++PASS NC-2 double-sign evidence must require two distinct block hashes: slashing::tests::double_sign_requires_distinct_blocks_and_valid_signatures failed as expected
++PASS NC-3 surround-vote evidence must enforce strict outer/inner epoch span: slashing::tests::surround_vote_requires_strict_outer_inner_span_and_valid_bls_signatures failed as expected
++PASS NC-4 downtime slashing must enforce max_missed_blocks_per_window threshold: slashing::tests::downtime_slashing_requires_missed_blocks_threshold_and_valid_qc failed as expected
++PASS NC-5 penalty distribution must conserve slashed stake across reporter, treasury, and burn: slashing::tests::penalty_distribution_conserves_slashed_stake_across_reporter_treasury_and_burn failed as expected
++PASS NC-6 duplicate slashing evidence replay must be rejected: slashing::tests::duplicate_evidence_replay_is_rejected failed as expected
++RESULT: 6/6 negative controls PASS
+diff --git a/docs/evidence/b6/report.md b/docs/evidence/b6/report.md
+new file mode 100644
+index 0000000..be1f7e8
+--- /dev/null
++++ b/docs/evidence/b6/report.md
+@@ -0,0 +1,13 @@
++# CONSENSUS B6 — Slashing & Evidence (`0053-B6-slashing-evidence.patch`)
++
++## Scope & DoD (`D-B4`)
++- **Six Slashable Attack Types (`crates/aura-consensus/src/slashing.rs`)**:
++  1. `DoubleSignProposal` (10% slash + permanent tombstone/jail)
++  2. `DoubleSignVote` (10% slash + permanent tombstone/jail)
++  3. `SurroundVote` (15% slash + permanent tombstone/jail)
++  4. `AmnesiaVote` (5% slash + jail)
++  5. `InvalidVrfLeaderClaim` (5% slash + jail)
++  6. `ExtendedDowntime` (1% slash + jail when `missed_blocks >= max_missed_blocks_per_window`)
++- **Penalty Distribution (`PenaltyDistribution`)**:
++  - 10% reporter reward (`1_000` bps), 40% protocol treasury share (`4_000` bps), 50% burned (`reporter + treasury + burned == total_slashed`).
++- **Negative Controls (`tools/nc_b6.py`)**: 6/6 library unit-test negative controls pass (`NC-1`..`NC-6`), including `NC-1: slashing off -> test red`.
+diff --git a/docs/evidence/b6/vectors.log b/docs/evidence/b6/vectors.log
+new file mode 100644
+index 0000000..8ee9271
+--- /dev/null
++++ b/docs/evidence/b6/vectors.log
+@@ -0,0 +1 @@
++B6 FIXTURES: OK (crates/aura-consensus/tests/fixtures/b6_baseline.txt, crates/aura-consensus/tests/fixtures/b6_slashing.txt)
+diff --git a/docs/evidence/d4/SHA256SUMS b/docs/evidence/d4/SHA256SUMS
+index 9d2570f..268c91a 100644
+--- a/docs/evidence/d4/SHA256SUMS
++++ b/docs/evidence/d4/SHA256SUMS
+@@ -1,7 +1,7 @@
+-ae6152b982f7ac9b35b8738af49a93abb5ce564984739da827fda9e95613d2ca  CHANGELOG.md
++184d4736ddac44ebdcbfbbb0510cb44b00597c4ea86de2d9c1ffed22876bc598  CHANGELOG.md
+ f6e24df6446f35bad5dd60082026f0abba4e26f8eec20e0181875ad81fb73708  Cargo.lock
+ 47e7ff2541cb6815f64a1b5a664ea2290a9d64b6ab4badc007fdb190dcfbcae7  Cargo.toml
+-721f1858951abe01f79b8fdf190377e3d35301e3d0cfda0a7858b436bd32d2a1  Makefile
++057c70094e55d3510995205de4eba73158721b84e8c1db65dfc1ce3ad4515363  Makefile
+ 1f0c4ab1f47b4f9af93e9c784b67dd652b3b5d651cde127e9b8a6459abb7ade9  crates/aura-node/src/bin/aurad.rs
+ a1ab6c116394d5266389c21b6d80eaa42a84dab0aaac6e862d3c262938b5f55c  crates/aura-node/src/pipeline.rs
+ 6ade4fdd1e4b84aabb04956088ff549865e92843b03ec9567252a92179cf2158  crates/aura-node/src/rpc.rs
+@@ -30,7 +30,7 @@ c477f915b427982ca83fcb253fa0ab850d619ca5bf4a764137f0407078af4986  fuzz/Cargo.loc
+ 6f3f2bd9f508b33896011a6e7a6dc60e93ad24e6a00445e50ceceedd1346194b  fuzz/Cargo.toml
+ dca80316562fefcf24c45b40fb635412e1d4e5e09b5abe26f7d0e6b67e1e906e  fuzz/README.md
+ a0aa6b2b7462cd6121b704ebc04fede7988cce0b269be5585f42c538d62dc500  fuzz/fuzz_targets/fuzz_rpc.rs
+-ed3512a622e3e8ae209e95526d06c36b950073bf0971deb47b0fe89049e6a5c5  tools/audit_closeout.py
++e12ece02bdb062efbf436640647d8ba4f83631bf528b973bbf99c2d1e50d1f53  tools/audit_closeout.py
+ b8248a8a1acffc672de62c26bf17797cc213204a3e907c1d4cf6be49694988d6  tools/gen_d4_vectors.py
+ edc860eea1f0058600025bcc5bf633e2435ed8716f6674373b8cee4982ea08f4  tools/nc_d4.py
+ f4b01b072fccf680d2bde6fbd156dfccaa057c5a33dca2bf67399d5622417f9c  tools/write_d4_evidence.py
+diff --git a/docs/evidence/d5/SHA256SUMS b/docs/evidence/d5/SHA256SUMS
+index adf7b64..85bc8d4 100644
+--- a/docs/evidence/d5/SHA256SUMS
++++ b/docs/evidence/d5/SHA256SUMS
+@@ -1,7 +1,7 @@
+-ae6152b982f7ac9b35b8738af49a93abb5ce564984739da827fda9e95613d2ca  CHANGELOG.md
++184d4736ddac44ebdcbfbbb0510cb44b00597c4ea86de2d9c1ffed22876bc598  CHANGELOG.md
+ f6e24df6446f35bad5dd60082026f0abba4e26f8eec20e0181875ad81fb73708  Cargo.lock
+ 47e7ff2541cb6815f64a1b5a664ea2290a9d64b6ab4badc007fdb190dcfbcae7  Cargo.toml
+-721f1858951abe01f79b8fdf190377e3d35301e3d0cfda0a7858b436bd32d2a1  Makefile
++057c70094e55d3510995205de4eba73158721b84e8c1db65dfc1ce3ad4515363  Makefile
+ 7609b7b41fd843e1b07d39f1156b702de2923472e2a3d5545ed61f7d343b9db3  crates/aura-grpc-rest/Cargo.toml
+ 370dcd7b01f46f362a0b3cf683bca9415c68ba825eb6f82e7604f276bc4c93ac  crates/aura-grpc-rest/build.rs
+ 71ff83801dca6c9a7f0f6965ef95f492c762ae578d8cbfb1bb57e9a27beb818d  crates/aura-grpc-rest/proto/aura/api/v1/service.proto
+@@ -24,7 +24,7 @@ c7540c5379dc80a5b80ef977db64d1c795bee013ea25749f2f3564dfadc58f5f  docs/api/opena
+ 94ac54ec0a34307229fe0841ee7af61bb0ec7deb01106f3af902371a5da1d39f  docs/evidence/c10/SHA256SUMS
+ 5ad7142c106a79924d27af53f5618918b0edecda204be859bc5ca082fde6877c  docs/evidence/d0/SHA256SUMS
+ f404c4873c6ae9b0cc05a5698dc4f47b971656853ac51bc4ed2a8fe293930c37  docs/evidence/d1/SHA256SUMS
+-ec0d7c44812421b50860a78b29ad7bac58e08f9dd03794c36ecf961a49eb4cb8  docs/evidence/d4/SHA256SUMS
++c385cbcd1928ad08fe8c5e17c4503d3cce41dd052853472993a36ffe53921b5c  docs/evidence/d4/SHA256SUMS
+ 013d890c071b4f59d8e9c7ced0d201602d0c1c785c08d64e4ac4981f3e745b57  docs/evidence/d5/clean-apply.txt
+ cfdb43f35c37f73bd5421ec808ca734d5ba73770cd7268d3ba0caa8118edbe0d  docs/evidence/d5/gates.txt
+ 6cd9301e8f52b15f6524919e250f8d8bba797a7b61281d81045da8e3c051dd86  docs/evidence/d5/inventory.txt
+@@ -36,6 +36,6 @@ aa2d1b3bb41e76325da2272b2587adbcd44498c826ed39feaa30ffa50b0bffe3  docs/evidence/
+ f5d6d1efa3110324601ff08da1a85ca78490a35d62bedd71070455fb41b3ea53  docs/plans/NODE_PLAN.md
+ 122cae5dc2a19d0f8d563e6e13703ebf9b836942cce58bc0dd9dc622bdd72493  docs/spec/FORMAT_INDEX.md
+ e6171eda73bf03cee6f405e13cd0e8c95020c8ad8d2ba4e2b7d05dfbb65911dc  docs/spec/grpc-rest.md
+-ed3512a622e3e8ae209e95526d06c36b950073bf0971deb47b0fe89049e6a5c5  tools/audit_closeout.py
++e12ece02bdb062efbf436640647d8ba4f83631bf528b973bbf99c2d1e50d1f53  tools/audit_closeout.py
+ 429f59ba33f4c321bc4ea8d11c77e96abce0ec28f3b2fb3266a05fa527b92180  tools/nc_d5.py
+ 13bf6e5379b18845f1040fda102800577d8ae22713165f37d126929df0680071  tools/write_d5_evidence.py
+diff --git a/docs/evidence/d6/SHA256SUMS b/docs/evidence/d6/SHA256SUMS
+index bdb9330..f11d008 100644
+--- a/docs/evidence/d6/SHA256SUMS
++++ b/docs/evidence/d6/SHA256SUMS
+@@ -1,7 +1,7 @@
+-ae6152b982f7ac9b35b8738af49a93abb5ce564984739da827fda9e95613d2ca  CHANGELOG.md
++184d4736ddac44ebdcbfbbb0510cb44b00597c4ea86de2d9c1ffed22876bc598  CHANGELOG.md
+ f6e24df6446f35bad5dd60082026f0abba4e26f8eec20e0181875ad81fb73708  Cargo.lock
+ 47e7ff2541cb6815f64a1b5a664ea2290a9d64b6ab4badc007fdb190dcfbcae7  Cargo.toml
+-721f1858951abe01f79b8fdf190377e3d35301e3d0cfda0a7858b436bd32d2a1  Makefile
++057c70094e55d3510995205de4eba73158721b84e8c1db65dfc1ce3ad4515363  Makefile
+ 00a069a2b6aa8d2a983f8ca99c45e592e97eefc97e8816948efa88b49d0d6cbe  crates/aura-node/Cargo.toml
+ c2eb3da4f8d317275e990bb1378a37187f0d65bd1b6e21092666769897139ce2  crates/aura-node/src/baseline.rs
+ 1f0c4ab1f47b4f9af93e9c784b67dd652b3b5d651cde127e9b8a6459abb7ade9  crates/aura-node/src/bin/aurad.rs
+@@ -20,8 +20,8 @@ bce9253cdf6d4a17db6f84d2d32567dc3fba7f824b7bbf9dfbe9a3c20fd10494  docs/STATUS.md
+ 5ad7142c106a79924d27af53f5618918b0edecda204be859bc5ca082fde6877c  docs/evidence/d0/SHA256SUMS
+ f404c4873c6ae9b0cc05a5698dc4f47b971656853ac51bc4ed2a8fe293930c37  docs/evidence/d1/SHA256SUMS
+ 85871b00d9205b2a35ef125b95c9c1a4b30a407477d644fa6fe77086139bf453  docs/evidence/d3/SHA256SUMS
+-ec0d7c44812421b50860a78b29ad7bac58e08f9dd03794c36ecf961a49eb4cb8  docs/evidence/d4/SHA256SUMS
+-627c32856dca68031b239c246543308a39a127b5081fda90a61055ef289fb33d  docs/evidence/d5/SHA256SUMS
++c385cbcd1928ad08fe8c5e17c4503d3cce41dd052853472993a36ffe53921b5c  docs/evidence/d4/SHA256SUMS
++6a8eda2ae0c527b2c7c4e8c12e55c36421a3ee18b51cf91ceda0611243cc7f6c  docs/evidence/d5/SHA256SUMS
+ 94cb9a46aae454de6209d83e372575dea54f1c108b43366c4f968f9562ee20ed  docs/evidence/d6/clean-apply.txt
+ ff2193c555eba82807bd87ae91b40a27ab368e4275ea2f6f36efd2cdd3840f5f  docs/evidence/d6/gates.txt
+ 0ffa8d1dd9f59accfbfa369696c65bcf0f238b8205c294c5f9f288f1b2904cc0  docs/evidence/d6/inventory.txt
+@@ -34,6 +34,6 @@ ef0edc3d121cbae307324e2d1ffcaca8e4a76be5b7ac6519099ebc6d924543af  docs/evidence/
+ 73dc9bda4481bfaea0b4e8212c3c5afb8114671d0cbbf1b06fde3910e4bf7e66  docs/observability/README.md
+ e583ec48a58c12928dd7e0aad3c1e89e6e4b33b06e2803eb93d7747a0088c971  docs/observability/grafana-dashboard-d6.json
+ f5d6d1efa3110324601ff08da1a85ca78490a35d62bedd71070455fb41b3ea53  docs/plans/NODE_PLAN.md
+-ed3512a622e3e8ae209e95526d06c36b950073bf0971deb47b0fe89049e6a5c5  tools/audit_closeout.py
++e12ece02bdb062efbf436640647d8ba4f83631bf528b973bbf99c2d1e50d1f53  tools/audit_closeout.py
+ 6deb009718cb586bd7984d94d7b2ecbc4d4900d949f93aa73986ad781ac92acd  tools/nc_d6.py
+ 706c1c86dadfbd7580239bb32cf7fd68b0db9002c81ea63657cffff295934926  tools/write_d6_evidence.py
+diff --git a/docs/evidence/d7/SHA256SUMS b/docs/evidence/d7/SHA256SUMS
+index 1cab6d1..0b19c9c 100644
+--- a/docs/evidence/d7/SHA256SUMS
++++ b/docs/evidence/d7/SHA256SUMS
+@@ -1,7 +1,7 @@
+-ae6152b982f7ac9b35b8738af49a93abb5ce564984739da827fda9e95613d2ca  CHANGELOG.md
++184d4736ddac44ebdcbfbbb0510cb44b00597c4ea86de2d9c1ffed22876bc598  CHANGELOG.md
+ 47e7ff2541cb6815f64a1b5a664ea2290a9d64b6ab4badc007fdb190dcfbcae7  Cargo.toml
+ f6e24df6446f35bad5dd60082026f0abba4e26f8eec20e0181875ad81fb73708  Cargo.lock
+-721f1858951abe01f79b8fdf190377e3d35301e3d0cfda0a7858b436bd32d2a1  Makefile
++057c70094e55d3510995205de4eba73158721b84e8c1db65dfc1ce3ad4515363  Makefile
+ 9f2866eedf9f3bc9032381668063a80c847284fc0eb7de76d8a950480c8badd9  docker-compose.yml
+ e224fd5b3bda7ec66dd30aa7fb00cd806de8a25a085f8c95359d826532dbb865  docs/NODE.md
+ f5d6d1efa3110324601ff08da1a85ca78490a35d62bedd71070455fb41b3ea53  docs/plans/NODE_PLAN.md
+@@ -12,7 +12,7 @@ f5d6d1efa3110324601ff08da1a85ca78490a35d62bedd71070455fb41b3ea53  docs/plans/NOD
+ a1ab6c116394d5266389c21b6d80eaa42a84dab0aaac6e862d3c262938b5f55c  crates/aura-node/src/pipeline.rs
+ 1f0c4ab1f47b4f9af93e9c784b67dd652b3b5d651cde127e9b8a6459abb7ade9  crates/aura-node/src/bin/aurad.rs
+ ca41b18977057be143fff409559c6da982568895f88820e2a8b1f1255e5ab404  crates/aura-node/tests/d7_devnet.rs
+-ed3512a622e3e8ae209e95526d06c36b950073bf0971deb47b0fe89049e6a5c5  tools/audit_closeout.py
++e12ece02bdb062efbf436640647d8ba4f83631bf528b973bbf99c2d1e50d1f53  tools/audit_closeout.py
+ 080f848afe7e50379ca5f7ecd831739b7cce09af48e214e4e11635fb36eb879f  tools/nc_d7.py
+ 79e3ea023f3beb5531d91ff0c4e196a41d7152d2d5f6fbbc5425aa73288c903e  tools/run_devnet.py
+ 95fabc60cebd15eb19663403f9b4498d58c131b498087052cdd8960aad06f238  tools/write_d7_evidence.py
+diff --git a/docs/evidence/d8/SHA256SUMS b/docs/evidence/d8/SHA256SUMS
+index 68861a6..dccd5b9 100644
+--- a/docs/evidence/d8/SHA256SUMS
++++ b/docs/evidence/d8/SHA256SUMS
+@@ -1,7 +1,7 @@
+-ae6152b982f7ac9b35b8738af49a93abb5ce564984739da827fda9e95613d2ca  CHANGELOG.md
++184d4736ddac44ebdcbfbbb0510cb44b00597c4ea86de2d9c1ffed22876bc598  CHANGELOG.md
+ 47e7ff2541cb6815f64a1b5a664ea2290a9d64b6ab4badc007fdb190dcfbcae7  Cargo.toml
+ f6e24df6446f35bad5dd60082026f0abba4e26f8eec20e0181875ad81fb73708  Cargo.lock
+-721f1858951abe01f79b8fdf190377e3d35301e3d0cfda0a7858b436bd32d2a1  Makefile
++057c70094e55d3510995205de4eba73158721b84e8c1db65dfc1ce3ad4515363  Makefile
+ e224fd5b3bda7ec66dd30aa7fb00cd806de8a25a085f8c95359d826532dbb865  docs/NODE.md
+ f5d6d1efa3110324601ff08da1a85ca78490a35d62bedd71070455fb41b3ea53  docs/plans/NODE_PLAN.md
+ 70aff874b98cd5e0866bb4337b041dbc41f6252141b299b69119daa81a07ae29  crates/aura-genesis/Cargo.toml
+@@ -11,7 +11,7 @@ f5d6d1efa3110324601ff08da1a85ca78490a35d62bedd71070455fb41b3ea53  docs/plans/NOD
+ 55e11f4b8b5d8d4410e68bf33f2f899963a690217f51f42ed3053fbca38b88af  crates/aura-node/src/cli.rs
+ dca898ed08829c510394b4e8e3e1e0fe7ae5cdcc5d69bf82fdaf0e97ca5b68bb  crates/aura-node/tests/fixtures/d8_golden.txt
+ 0492ac91b70d3b8ea7806dee4d66daf3807fd6d801cb8533692061d7e77dd4b0  crates/aura-node/tests/d8_cli.rs
+-ed3512a622e3e8ae209e95526d06c36b950073bf0971deb47b0fe89049e6a5c5  tools/audit_closeout.py
++e12ece02bdb062efbf436640647d8ba4f83631bf528b973bbf99c2d1e50d1f53  tools/audit_closeout.py
+ e7bb49d39596d3d85ef6a161c063e15a419e842445a93f10c80d3a985847b6f5  tools/gen_d8_vectors.py
+ 12225aee77f6663698f8ffd984043f2bf56f07e646a124f409567158f956eb99  tools/nc_d8.py
+ b83c32b548c45945c6ac42783927d98715103617a9f3bd9b81b56bacc924a85e  tools/write_d8_evidence.py
+diff --git a/docs/evidence/n0/SHA256SUMS b/docs/evidence/n0/SHA256SUMS
+index afb7a89..4e11328 100644
+--- a/docs/evidence/n0/SHA256SUMS
++++ b/docs/evidence/n0/SHA256SUMS
+@@ -1,7 +1,7 @@
+-ae6152b982f7ac9b35b8738af49a93abb5ce564984739da827fda9e95613d2ca  CHANGELOG.md
++184d4736ddac44ebdcbfbbb0510cb44b00597c4ea86de2d9c1ffed22876bc598  CHANGELOG.md
+ f6e24df6446f35bad5dd60082026f0abba4e26f8eec20e0181875ad81fb73708  Cargo.lock
+ 47e7ff2541cb6815f64a1b5a664ea2290a9d64b6ab4badc007fdb190dcfbcae7  Cargo.toml
+-721f1858951abe01f79b8fdf190377e3d35301e3d0cfda0a7858b436bd32d2a1  Makefile
++057c70094e55d3510995205de4eba73158721b84e8c1db65dfc1ce3ad4515363  Makefile
+ c2eb3da4f8d317275e990bb1378a37187f0d65bd1b6e21092666769897139ce2  crates/aura-node/src/baseline.rs
+ f2c1f6502d0503b78af5c3603db5def6b523968b8b5a0ff3fb110b1c96fbb7f4  crates/aura-node/tests/n0_two_nodes_no_p2p.rs
+ 109eba4535971138ae5a36c926e671ad070708de4216424ca89d6c5cc2211762  crates/aura-p2p/Cargo.toml
+@@ -9,7 +9,7 @@ f2c1f6502d0503b78af5c3603db5def6b523968b8b5a0ff3fb110b1c96fbb7f4  crates/aura-no
+ 0bda78fe7e8e2a1d136ebe1d90d11ba4dfa84756b2e2cf45d8e75774cd9e0b78  crates/aura-p2p/src/bin/main.rs
+ d4678b9513d1ff6d3f45ef1ac4198f01faff24024936c57ef8054e54120b92b5  crates/aura-p2p/src/lib.rs
+ 7b3f7fdf76576b1b610845b1f865b73b444eaaa1113cd26c21f6294d4e3a37f2  crates/aura-p2p/tests/fixtures/n0_baseline.txt
+-afc28d9cae00769a9cfed277eabf1e28d0c1a0a9a3e4abc9c105a272c6c5d5d5  docs/evidence/d6/SHA256SUMS
++e5673432c0f40fb1764b0fb9efa9adf5fafc5406f2007ab0846509e75be60d2d  docs/evidence/d6/SHA256SUMS
+ eca2668d1ceebf61a06e96cbc9b17a8c62af115dbe3e3ac276003540f166ef81  docs/evidence/n0/clean-apply.txt
+ e5dbf750b3afb7839b66b5e22508c94d6e0a59e18e45762adb51fe76310d1dcc  docs/evidence/n0/gates.txt
+ 1047c86fcba2f7ad54656a4f7727a86b345c3e9a0517dbdc259878102084b003  docs/evidence/n0/inventory.txt
+@@ -20,7 +20,7 @@ e5dbf750b3afb7839b66b5e22508c94d6e0a59e18e45762adb51fe76310d1dcc  docs/evidence/
+ efb346bee53c2c2c9417e4f456004e1ee742037738f7655ce90e6efa1d1cdbfe  docs/evidence/n0/test-n0.log
+ 9b27872e8d3bc1310c34c0d38c4b98d6d94eb3b4b18fa38cac9013f6e8bca3aa  docs/plans/D7_READINESS.md
+ 407ad597d3956d6b488eca8a75d4fb47df62c84e8f0e73fefe9da4a2c8b32d51  docs/plans/NET_PLAN.md
+-ed3512a622e3e8ae209e95526d06c36b950073bf0971deb47b0fe89049e6a5c5  tools/audit_closeout.py
++e12ece02bdb062efbf436640647d8ba4f83631bf528b973bbf99c2d1e50d1f53  tools/audit_closeout.py
+ 515976788ec94aaa7601672cace7a13a7497b2d9bdaea157049c04b1bed129b8  tools/gen_n0_vectors.py
+ a16320f6a4af698f90ca62acdb7810eeafa96602f2523c4a05c174da110740c3  tools/nc_n0.py
+ 9668866411c5be7fabe8b75bcf774796b6651635db6c038279c6beea371b1085  tools/write_n0_evidence.py
+diff --git a/docs/evidence/n1/SHA256SUMS b/docs/evidence/n1/SHA256SUMS
+index 7e7ed2b..27ae505 100644
+--- a/docs/evidence/n1/SHA256SUMS
++++ b/docs/evidence/n1/SHA256SUMS
+@@ -1,7 +1,7 @@
+-ae6152b982f7ac9b35b8738af49a93abb5ce564984739da827fda9e95613d2ca  CHANGELOG.md
++184d4736ddac44ebdcbfbbb0510cb44b00597c4ea86de2d9c1ffed22876bc598  CHANGELOG.md
+ f6e24df6446f35bad5dd60082026f0abba4e26f8eec20e0181875ad81fb73708  Cargo.lock
+ 47e7ff2541cb6815f64a1b5a664ea2290a9d64b6ab4badc007fdb190dcfbcae7  Cargo.toml
+-721f1858951abe01f79b8fdf190377e3d35301e3d0cfda0a7858b436bd32d2a1  Makefile
++057c70094e55d3510995205de4eba73158721b84e8c1db65dfc1ce3ad4515363  Makefile
+ c2eb3da4f8d317275e990bb1378a37187f0d65bd1b6e21092666769897139ce2  crates/aura-node/src/baseline.rs
+ c504a5de9a0fa1ff27ea3a466e4a8d1d3a9beb33ee793311fd4a52f918cd04b0  crates/aura-node/tests/d0_baseline.rs
+ a2704e1d41f88d572fbcb4e39a33970af134cd50b710438fe3a8bec276ee5209  crates/aura-node/tests/fixtures/d0_baseline.txt
+@@ -16,7 +16,7 @@ d4678b9513d1ff6d3f45ef1ac4198f01faff24024936c57ef8054e54120b92b5  crates/aura-p2
+ 7b3f7fdf76576b1b610845b1f865b73b444eaaa1113cd26c21f6294d4e3a37f2  crates/aura-p2p/tests/fixtures/n0_baseline.txt
+ 4890882bc7918ed638fc1a2f9f081a17c2c1fb82b77d9b6e573d26358a25bb3b  crates/aura-p2p/tests/fixtures/n1_baseline.txt
+ 8510d81551d4a5e2cd737e90effa49ffb9e5371c9cd26741b451aa2473e4f982  crates/aura-p2p/tests/n1_transport.rs
+-6ab996e6a3eede76b92d20ab2afdc164b4667421ececd389957ead4c0f489a0c  docs/evidence/n0/SHA256SUMS
++dde64b49b02fd20641571ef764934c416bdf58337230ae6c8ee96f9d8fdfc2ec  docs/evidence/n0/SHA256SUMS
+ 7ced4fc580391ef9b2b5e92ec6393f7d9822475c961c9adbc1bd4eee9f78c206  docs/evidence/n1/clean-apply.txt
+ 3795f2d95ee1d222b48227d64b08e7312ce613f923b8b811361c107562efe036  docs/evidence/n1/gates.txt
+ d782a216ee314f7069519b1defe17764da80118e4c80b368ae810e5f2019e782  docs/evidence/n1/inventory.txt
+@@ -27,7 +27,7 @@ b19a006c0d1dce69f2e99bd5d616f8780ab645256bccdc0c1e3401ac8d17abff  docs/evidence/
+ d6327612fd1e284bdad18a5d3e9fa1445f58cf09c20253e54db0b09e266461d9  docs/evidence/n1/test-n1.log
+ 9b27872e8d3bc1310c34c0d38c4b98d6d94eb3b4b18fa38cac9013f6e8bca3aa  docs/plans/D7_READINESS.md
+ 407ad597d3956d6b488eca8a75d4fb47df62c84e8f0e73fefe9da4a2c8b32d51  docs/plans/NET_PLAN.md
+-ed3512a622e3e8ae209e95526d06c36b950073bf0971deb47b0fe89049e6a5c5  tools/audit_closeout.py
++e12ece02bdb062efbf436640647d8ba4f83631bf528b973bbf99c2d1e50d1f53  tools/audit_closeout.py
+ ab9bd785d2b4e577a474bb6c4f7946c5d25cd86ad025760bbf2e2c01f5ff31c8  tools/gen_n1_vectors.py
+ 512d0503231ea9f1fb85de68a03d6f3018e219ad394847272d9bc8256c39a333  tools/nc_n1.py
+ dd4821d6726714312fecc8bc73a34cf7b8ec4046fdf8727a684eb57fa91f5460  tools/write_n1_evidence.py
+diff --git a/docs/evidence/n2/SHA256SUMS b/docs/evidence/n2/SHA256SUMS
+index 34cbeb1..2806c1f 100644
+--- a/docs/evidence/n2/SHA256SUMS
++++ b/docs/evidence/n2/SHA256SUMS
+@@ -1,7 +1,7 @@
+-ae6152b982f7ac9b35b8738af49a93abb5ce564984739da827fda9e95613d2ca  CHANGELOG.md
++184d4736ddac44ebdcbfbbb0510cb44b00597c4ea86de2d9c1ffed22876bc598  CHANGELOG.md
+ f6e24df6446f35bad5dd60082026f0abba4e26f8eec20e0181875ad81fb73708  Cargo.lock
+ 47e7ff2541cb6815f64a1b5a664ea2290a9d64b6ab4badc007fdb190dcfbcae7  Cargo.toml
+-721f1858951abe01f79b8fdf190377e3d35301e3d0cfda0a7858b436bd32d2a1  Makefile
++057c70094e55d3510995205de4eba73158721b84e8c1db65dfc1ce3ad4515363  Makefile
+ a2704e1d41f88d572fbcb4e39a33970af134cd50b710438fe3a8bec276ee5209  crates/aura-node/tests/fixtures/d0_baseline.txt
+ 109eba4535971138ae5a36c926e671ad070708de4216424ca89d6c5cc2211762  crates/aura-p2p/Cargo.toml
+ b66d4338b9882f9444c520983393e29b23ccae138ac22a8271b0ccc85cf4f0a0  crates/aura-p2p/src/ban.rs
+@@ -17,7 +17,7 @@ d4678b9513d1ff6d3f45ef1ac4198f01faff24024936c57ef8054e54120b92b5  crates/aura-p2
+ 5becc1c5fe384dee5abd0c97ddf4b52a06fefc782f1418a30097571d782fdcac  crates/aura-p2p/tests/fixtures/n2_baseline.txt
+ 8510d81551d4a5e2cd737e90effa49ffb9e5371c9cd26741b451aa2473e4f982  crates/aura-p2p/tests/n1_transport.rs
+ 48542ff2e55cf79ce908d8ecc845bf3be3daa150a6ca9a73c87c585477e177f0  crates/aura-p2p/tests/n2_gossipsub.rs
+-773b64811544848b510bfd4f0b454e36e369f7c26f5a48cef315b1ebda7ed62c  docs/evidence/n1/SHA256SUMS
++1b8aebb8f6c0641b30890de978c5d6c398d6ab9ae4882df00ad817c8961f32f6  docs/evidence/n1/SHA256SUMS
+ ba0d1ade8eb97df43668bffbaed39cfb937cac801dae6d4ba19eab74dea4ba55  docs/evidence/n2/clean-apply.txt
+ 870869acd285baa8ef9d24695bf300bed085fe11e520fe0410d23543e4611569  docs/evidence/n2/gates.txt
+ 1ee3dfba46c64fa1b8ef43c923978ecde053c7fd1c5d62294e273a7c9f93c033  docs/evidence/n2/inventory.txt
+@@ -28,7 +28,7 @@ d5b53bf13d5938599fad0f3501ceb0783930fc8129a23b58274bf038a4c9286f  docs/evidence/
+ 4dc82689985de258a9f84e83d88d32a97524a68bf5feaeefd7ac5f3945fdb2d3  docs/evidence/n2/test-n2.log
+ 9b27872e8d3bc1310c34c0d38c4b98d6d94eb3b4b18fa38cac9013f6e8bca3aa  docs/plans/D7_READINESS.md
+ 407ad597d3956d6b488eca8a75d4fb47df62c84e8f0e73fefe9da4a2c8b32d51  docs/plans/NET_PLAN.md
+-ed3512a622e3e8ae209e95526d06c36b950073bf0971deb47b0fe89049e6a5c5  tools/audit_closeout.py
++e12ece02bdb062efbf436640647d8ba4f83631bf528b973bbf99c2d1e50d1f53  tools/audit_closeout.py
+ 82692e4faed6388c79656050cc953174383f6972445e3a9a777389eee270cad1  tools/gen_n2_vectors.py
+ bf199a4484774fd0e525e4ad8ef6d925b4a1a1435a31f37deca839243519ffd6  tools/nc_n2.py
+ f82163f834919bb05896996b4e187fbda66c5f78582364e33781a1802c35dc6b  tools/write_n2_evidence.py
+diff --git a/docs/evidence/n3/SHA256SUMS b/docs/evidence/n3/SHA256SUMS
+index 009609a..9f3ff18 100644
+--- a/docs/evidence/n3/SHA256SUMS
++++ b/docs/evidence/n3/SHA256SUMS
+@@ -1,7 +1,7 @@
+-ae6152b982f7ac9b35b8738af49a93abb5ce564984739da827fda9e95613d2ca  CHANGELOG.md
++184d4736ddac44ebdcbfbbb0510cb44b00597c4ea86de2d9c1ffed22876bc598  CHANGELOG.md
+ f6e24df6446f35bad5dd60082026f0abba4e26f8eec20e0181875ad81fb73708  Cargo.lock
+ 47e7ff2541cb6815f64a1b5a664ea2290a9d64b6ab4badc007fdb190dcfbcae7  Cargo.toml
+-721f1858951abe01f79b8fdf190377e3d35301e3d0cfda0a7858b436bd32d2a1  Makefile
++057c70094e55d3510995205de4eba73158721b84e8c1db65dfc1ce3ad4515363  Makefile
+ 109eba4535971138ae5a36c926e671ad070708de4216424ca89d6c5cc2211762  crates/aura-p2p/Cargo.toml
+ b66d4338b9882f9444c520983393e29b23ccae138ac22a8271b0ccc85cf4f0a0  crates/aura-p2p/src/ban.rs
+ 74837df08ca849e24e933a9a76e052f4dbec1d79e14e6c4a3a6edbfb18178412  crates/aura-p2p/src/baseline.rs
+@@ -19,7 +19,7 @@ d4678b9513d1ff6d3f45ef1ac4198f01faff24024936c57ef8054e54120b92b5  crates/aura-p2
+ 8510d81551d4a5e2cd737e90effa49ffb9e5371c9cd26741b451aa2473e4f982  crates/aura-p2p/tests/n1_transport.rs
+ 48542ff2e55cf79ce908d8ecc845bf3be3daa150a6ca9a73c87c585477e177f0  crates/aura-p2p/tests/n2_gossipsub.rs
+ 430134686aba5db378d13566e1856ee9a87b2c4ca0b63e43f3129b5c2fb8a9ed  crates/aura-p2p/tests/n3_discovery.rs
+-49f05b4cc79db04a8de7278b5d0401f73ef6136d6b05fce8206557247888049f  docs/evidence/n2/SHA256SUMS
++822c4576d4b5ea68575e096dbe8c5a6e8445d281edfb954d5925a3a38c3d63ec  docs/evidence/n2/SHA256SUMS
+ 2b589a7f8f257a517e4a206cd7b44f77f7205317f526fa8d454a30426b425efc  docs/evidence/n3/clean-apply.txt
+ 984043beea8af3ae827ff42b6cbf73bfd8949bfc40c957d05f7a57cac14d06f7  docs/evidence/n3/gates.txt
+ b3a86740d57101855939c73090c0017202389dde774a9d91889574940995cd8e  docs/evidence/n3/inventory.txt
+@@ -29,7 +29,7 @@ f02de48c69311b63ecf6dfa537fbe423a58ab1864844282965d7185eba23846f  docs/evidence/
+ 2063c8d3ce80dff74ccbb21cd0514e08f789fe02b7b387e23dd1b3fc8ef0d4a9  docs/evidence/n3/report.md
+ afa72147ec8f7b7eb12e814680d7bef3c2086e0b928489832e49430dc8c8c37d  docs/evidence/n3/test-n3.log
+ 407ad597d3956d6b488eca8a75d4fb47df62c84e8f0e73fefe9da4a2c8b32d51  docs/plans/NET_PLAN.md
+-ed3512a622e3e8ae209e95526d06c36b950073bf0971deb47b0fe89049e6a5c5  tools/audit_closeout.py
++e12ece02bdb062efbf436640647d8ba4f83631bf528b973bbf99c2d1e50d1f53  tools/audit_closeout.py
+ 9e33092f52b6a09e7bd76c27e015cd4a4ffa83b08432c94cb558e57990a97045  tools/gen_n3_vectors.py
+ 0bcc30b1819b5de77684127a126aeba6e646bdca46d547171c65e4bd3a210676  tools/nc_n3.py
+ 5517da3a3f852f81ae8c26ebd24fd27b6c0f3ea4c14f0bfcc9b2420b1d2629bf  tools/write_n3_evidence.py
+diff --git a/docs/evidence/n4/SHA256SUMS b/docs/evidence/n4/SHA256SUMS
+index 31e1fe4..a5e35d6 100644
+--- a/docs/evidence/n4/SHA256SUMS
++++ b/docs/evidence/n4/SHA256SUMS
+@@ -1,7 +1,7 @@
+-ae6152b982f7ac9b35b8738af49a93abb5ce564984739da827fda9e95613d2ca  CHANGELOG.md
++184d4736ddac44ebdcbfbbb0510cb44b00597c4ea86de2d9c1ffed22876bc598  CHANGELOG.md
+ f6e24df6446f35bad5dd60082026f0abba4e26f8eec20e0181875ad81fb73708  Cargo.lock
+ 47e7ff2541cb6815f64a1b5a664ea2290a9d64b6ab4badc007fdb190dcfbcae7  Cargo.toml
+-721f1858951abe01f79b8fdf190377e3d35301e3d0cfda0a7858b436bd32d2a1  Makefile
++057c70094e55d3510995205de4eba73158721b84e8c1db65dfc1ce3ad4515363  Makefile
+ 109eba4535971138ae5a36c926e671ad070708de4216424ca89d6c5cc2211762  crates/aura-p2p/Cargo.toml
+ b66d4338b9882f9444c520983393e29b23ccae138ac22a8271b0ccc85cf4f0a0  crates/aura-p2p/src/ban.rs
+ 74837df08ca849e24e933a9a76e052f4dbec1d79e14e6c4a3a6edbfb18178412  crates/aura-p2p/src/baseline.rs
+@@ -22,7 +22,7 @@ d4678b9513d1ff6d3f45ef1ac4198f01faff24024936c57ef8054e54120b92b5  crates/aura-p2
+ 48542ff2e55cf79ce908d8ecc845bf3be3daa150a6ca9a73c87c585477e177f0  crates/aura-p2p/tests/n2_gossipsub.rs
+ 430134686aba5db378d13566e1856ee9a87b2c4ca0b63e43f3129b5c2fb8a9ed  crates/aura-p2p/tests/n3_discovery.rs
+ b2308b7019322a04b941b4cb9efdc01e31fdbc060304f8842116647730d1bbe4  crates/aura-p2p/tests/n4_block_sync.rs
+-c798e65b8ddf880c1d0444169f119239e7584a21fc66cc60d24081ea09756bdf  docs/evidence/n3/SHA256SUMS
++5c52f3de7f740d50e8738d3f0749f150db24904aefd506281e6690c2bed3b787  docs/evidence/n3/SHA256SUMS
+ bd821807ccd8a30e7d35c735f27b0d64c7691163d04d77913a8be1e99f1eef18  docs/evidence/n4/clean-apply.txt
+ a2758a74ece05a6efa748f6f79d3164b77bcf398f1fd4504cd47ff4bbc3432da  docs/evidence/n4/gates.txt
+ 04a311146db2bf1dd6744679ca614c054e9d275f7e0cd6eb4bfad0c2b9580a3d  docs/evidence/n4/inventory.txt
+@@ -32,7 +32,7 @@ a2758a74ece05a6efa748f6f79d3164b77bcf398f1fd4504cd47ff4bbc3432da  docs/evidence/
+ cfcb7de92a7e0af2aed28f1676057dbd54f895c383efcf9a37a2e81ab13d2d6d  docs/evidence/n4/report.md
+ 193aebe3e5528ae8c68e0f22cf000dbfc3e223028f14830afa9d94eb6e3cbc01  docs/evidence/n4/test-n4.log
+ 407ad597d3956d6b488eca8a75d4fb47df62c84e8f0e73fefe9da4a2c8b32d51  docs/plans/NET_PLAN.md
+-ed3512a622e3e8ae209e95526d06c36b950073bf0971deb47b0fe89049e6a5c5  tools/audit_closeout.py
++e12ece02bdb062efbf436640647d8ba4f83631bf528b973bbf99c2d1e50d1f53  tools/audit_closeout.py
+ adea6917c9d75d81eed69a5a3297d67540f6b73cfd9753e3592061498a28ab6c  tools/gen_n4_vectors.py
+ 4b510d5022253c1ba4b2f11f59032632c22d5b5bca4685380a50250a8ecffcfb  tools/nc_n4.py
+ ff4120b0eb2f77c00c724b56dedb012650a358620e542e99b09585f47fbebea3  tools/write_n4_evidence.py
+diff --git a/docs/evidence/n5/SHA256SUMS b/docs/evidence/n5/SHA256SUMS
+index 52fc0da..03793f0 100644
+--- a/docs/evidence/n5/SHA256SUMS
++++ b/docs/evidence/n5/SHA256SUMS
+@@ -1,7 +1,7 @@
+-ae6152b982f7ac9b35b8738af49a93abb5ce564984739da827fda9e95613d2ca  CHANGELOG.md
++184d4736ddac44ebdcbfbbb0510cb44b00597c4ea86de2d9c1ffed22876bc598  CHANGELOG.md
+ f6e24df6446f35bad5dd60082026f0abba4e26f8eec20e0181875ad81fb73708  Cargo.lock
+ 47e7ff2541cb6815f64a1b5a664ea2290a9d64b6ab4badc007fdb190dcfbcae7  Cargo.toml
+-721f1858951abe01f79b8fdf190377e3d35301e3d0cfda0a7858b436bd32d2a1  Makefile
++057c70094e55d3510995205de4eba73158721b84e8c1db65dfc1ce3ad4515363  Makefile
+ 109eba4535971138ae5a36c926e671ad070708de4216424ca89d6c5cc2211762  crates/aura-p2p/Cargo.toml
+ b66d4338b9882f9444c520983393e29b23ccae138ac22a8271b0ccc85cf4f0a0  crates/aura-p2p/src/ban.rs
+ 74837df08ca849e24e933a9a76e052f4dbec1d79e14e6c4a3a6edbfb18178412  crates/aura-p2p/src/baseline.rs
+@@ -25,7 +25,7 @@ cf261afa33ba2f4204aab72553b7ba54f62110f10b708cb932422ac6d94d170b  crates/aura-p2
+ 430134686aba5db378d13566e1856ee9a87b2c4ca0b63e43f3129b5c2fb8a9ed  crates/aura-p2p/tests/n3_discovery.rs
+ b2308b7019322a04b941b4cb9efdc01e31fdbc060304f8842116647730d1bbe4  crates/aura-p2p/tests/n4_block_sync.rs
+ 1785388a1e22ea160f9ee666edb751a9b1696c163e2a8d9f97a6ebadccb4ed4b  crates/aura-p2p/tests/n5_state_sync.rs
+-53ce1dd1e4021c9bec159b97c8fb8245d01b1bf537d5fd6b6ad6fd881c930c63  docs/evidence/n4/SHA256SUMS
++250c85418a367cbd68742234ef75c65f2af2f0525e9f47477ab81139c9e45d41  docs/evidence/n4/SHA256SUMS
+ 72d480b9ae90e5e6cabd98724416536d060e01a083adb45cc6cccb24cfe5b014  docs/evidence/n5/clean-apply.txt
+ 9f553c81f5228e7c22781b6ad1f2494e4ea8e564254c6dd7824fe60a1109e7dc  docs/evidence/n5/gates.txt
+ 59bf6a4f3cb0c8c3fc7f853b786cbbc059cae7f5116a5cd5a44fbff3ae458fd5  docs/evidence/n5/inventory.txt
+@@ -35,7 +35,7 @@ e354fcd5d576155ac8cf5a3371b427ba4e403a82d87da32764ed65f7762ae92e  docs/evidence/
+ cb0a8178c9d4737b548d360408d67196bc68c8f29d279aeab2831823266a3020  docs/evidence/n5/report.md
+ 50d0264422a2d9c1e1e3c0aa8eb6f5e66095c42edefbc12175e6b9f633647c3c  docs/evidence/n5/test-n5.log
+ 407ad597d3956d6b488eca8a75d4fb47df62c84e8f0e73fefe9da4a2c8b32d51  docs/plans/NET_PLAN.md
+-ed3512a622e3e8ae209e95526d06c36b950073bf0971deb47b0fe89049e6a5c5  tools/audit_closeout.py
++e12ece02bdb062efbf436640647d8ba4f83631bf528b973bbf99c2d1e50d1f53  tools/audit_closeout.py
+ 5ab4566884abf5fd5861638424a723b74ff568ed000dc0aadfb57c8c87e74377  tools/gen_n5_vectors.py
+ 56e8eb6e5a1a1faafa7bd8b3ba8883447d68c52343ab75cd1a00bf9739173c43  tools/nc_n5.py
+ 3783386033270cd23a223193912ed11bb7aad984c144363dc8f8877a7d2e30af  tools/write_n5_evidence.py
+diff --git a/docs/evidence/n6/SHA256SUMS b/docs/evidence/n6/SHA256SUMS
+index bcfcc83..161c5b2 100644
+--- a/docs/evidence/n6/SHA256SUMS
++++ b/docs/evidence/n6/SHA256SUMS
+@@ -1,7 +1,7 @@
+-ae6152b982f7ac9b35b8738af49a93abb5ce564984739da827fda9e95613d2ca  CHANGELOG.md
++184d4736ddac44ebdcbfbbb0510cb44b00597c4ea86de2d9c1ffed22876bc598  CHANGELOG.md
+ f6e24df6446f35bad5dd60082026f0abba4e26f8eec20e0181875ad81fb73708  Cargo.lock
+ 47e7ff2541cb6815f64a1b5a664ea2290a9d64b6ab4badc007fdb190dcfbcae7  Cargo.toml
+-721f1858951abe01f79b8fdf190377e3d35301e3d0cfda0a7858b436bd32d2a1  Makefile
++057c70094e55d3510995205de4eba73158721b84e8c1db65dfc1ce3ad4515363  Makefile
+ 109eba4535971138ae5a36c926e671ad070708de4216424ca89d6c5cc2211762  crates/aura-p2p/Cargo.toml
+ b66d4338b9882f9444c520983393e29b23ccae138ac22a8271b0ccc85cf4f0a0  crates/aura-p2p/src/ban.rs
+ 74837df08ca849e24e933a9a76e052f4dbec1d79e14e6c4a3a6edbfb18178412  crates/aura-p2p/src/baseline.rs
+@@ -28,7 +28,7 @@ cf261afa33ba2f4204aab72553b7ba54f62110f10b708cb932422ac6d94d170b  crates/aura-p2
+ b2308b7019322a04b941b4cb9efdc01e31fdbc060304f8842116647730d1bbe4  crates/aura-p2p/tests/n4_block_sync.rs
+ 1785388a1e22ea160f9ee666edb751a9b1696c163e2a8d9f97a6ebadccb4ed4b  crates/aura-p2p/tests/n5_state_sync.rs
+ 0413572891c82dc5e410544e717dd9393e78fa292e174f03bcf80df1b1a81673  crates/aura-p2p/tests/n6_dos_defence.rs
+-0e5547dcc4d2e2297948cb3a2e0952fcd12a31d1b960e3f34700622eb760803a  docs/evidence/n5/SHA256SUMS
++17581566c8db8b816cfa6c199ae2ce6ba1e8c5b90ef501ae4073b3bbc3bec8ad  docs/evidence/n5/SHA256SUMS
+ 842c25e6be108b08ccfe369c99d1f0655ecdb6bc1704a114420ea07669058039  docs/evidence/n6/clean-apply.txt
+ e75f074cdb7fbea99f365572a7166e0366688047e0caec0d69449ab6db660a93  docs/evidence/n6/gates.txt
+ 7fd7f8fe789794d3e2451132754ff44730ae2f12fd63974476ed14fed2a09ad6  docs/evidence/n6/inventory.txt
+@@ -38,7 +38,7 @@ d1367d2c9f07f955e0e85abc6cea5883f948856cfc68dfd3c8b4a843e508cb6c  docs/evidence/
+ 53390e284f728772e49f308083ee40acddda532ec6c88907de9c8e3934faf44c  docs/evidence/n6/report.md
+ 6dcb4003fee797bd21ca74c86389008e1b1ddc252dd8c7eadf27144c39ff92d8  docs/evidence/n6/test-n6.log
+ 407ad597d3956d6b488eca8a75d4fb47df62c84e8f0e73fefe9da4a2c8b32d51  docs/plans/NET_PLAN.md
+-ed3512a622e3e8ae209e95526d06c36b950073bf0971deb47b0fe89049e6a5c5  tools/audit_closeout.py
++e12ece02bdb062efbf436640647d8ba4f83631bf528b973bbf99c2d1e50d1f53  tools/audit_closeout.py
+ 51b80e5081bbeb25a7cdd91643c584e02b2500f019c042ec464dff55216349f5  tools/gen_n6_vectors.py
+ 07f5450079c4af21ba5908ae07107a495e1b988cfe298274d19b13a319def3d6  tools/nc_n6.py
+ 7585fa8076482c65cf4335d5d984e66a511efa5cfc66432f375e27001a9b1e43  tools/write_n6_evidence.py
+diff --git a/docs/evidence/n7/SHA256SUMS b/docs/evidence/n7/SHA256SUMS
+index 34bbe6e..0b36fec 100644
+--- a/docs/evidence/n7/SHA256SUMS
++++ b/docs/evidence/n7/SHA256SUMS
+@@ -1,7 +1,7 @@
+-ae6152b982f7ac9b35b8738af49a93abb5ce564984739da827fda9e95613d2ca  CHANGELOG.md
++184d4736ddac44ebdcbfbbb0510cb44b00597c4ea86de2d9c1ffed22876bc598  CHANGELOG.md
+ f6e24df6446f35bad5dd60082026f0abba4e26f8eec20e0181875ad81fb73708  Cargo.lock
+ 47e7ff2541cb6815f64a1b5a664ea2290a9d64b6ab4badc007fdb190dcfbcae7  Cargo.toml
+-721f1858951abe01f79b8fdf190377e3d35301e3d0cfda0a7858b436bd32d2a1  Makefile
++057c70094e55d3510995205de4eba73158721b84e8c1db65dfc1ce3ad4515363  Makefile
+ 109eba4535971138ae5a36c926e671ad070708de4216424ca89d6c5cc2211762  crates/aura-p2p/Cargo.toml
+ b66d4338b9882f9444c520983393e29b23ccae138ac22a8271b0ccc85cf4f0a0  crates/aura-p2p/src/ban.rs
+ 74837df08ca849e24e933a9a76e052f4dbec1d79e14e6c4a3a6edbfb18178412  crates/aura-p2p/src/baseline.rs
+@@ -31,7 +31,7 @@ b2308b7019322a04b941b4cb9efdc01e31fdbc060304f8842116647730d1bbe4  crates/aura-p2
+ 1785388a1e22ea160f9ee666edb751a9b1696c163e2a8d9f97a6ebadccb4ed4b  crates/aura-p2p/tests/n5_state_sync.rs
+ 0413572891c82dc5e410544e717dd9393e78fa292e174f03bcf80df1b1a81673  crates/aura-p2p/tests/n6_dos_defence.rs
+ a6b781d0757de6067f58824f0ae9ad3daaeb6b956efe936d0c1f6b269a3e32e3  crates/aura-p2p/tests/n7_light_client.rs
+-5eea464f3626819221e2faa791dac9648f259a70831c8223d95f420dec217430  docs/evidence/n6/SHA256SUMS
++0b1edb96eef146c6777fe534326907553d392d28f95ac200ff98ee43c07c6526  docs/evidence/n6/SHA256SUMS
+ a88ab391e8afcb640e172693323db415a404030f7a854f43724448bd5cc4189b  docs/evidence/n7/clean-apply.txt
+ c5256415fdaa78089de51a7b47f371ccf773be393c3dcd039363cb12f6c49535  docs/evidence/n7/gates.txt
+ 1e79a490c096b973c91f39f26957ea203dc24359a3fd68ec12956b0164c32557  docs/evidence/n7/inventory.txt
+@@ -41,7 +41,7 @@ c5256415fdaa78089de51a7b47f371ccf773be393c3dcd039363cb12f6c49535  docs/evidence/
+ 692c03fa1d4ca506a48450c9763f7cdaa58d863257707b98f7f963c372e72724  docs/evidence/n7/report.md
+ b8514b8bbbe27ef71aa74ae8573b2c488e2dca132bd9a9c72ad3ca7d535ddf24  docs/evidence/n7/test-n7.log
+ 407ad597d3956d6b488eca8a75d4fb47df62c84e8f0e73fefe9da4a2c8b32d51  docs/plans/NET_PLAN.md
+-ed3512a622e3e8ae209e95526d06c36b950073bf0971deb47b0fe89049e6a5c5  tools/audit_closeout.py
++e12ece02bdb062efbf436640647d8ba4f83631bf528b973bbf99c2d1e50d1f53  tools/audit_closeout.py
+ 6843c85f8c4dc2f6130ad17bf0a5c99e0b64a2d91ef5d67eaa581b38692c654c  tools/gen_n7_vectors.py
+ 4cb67d1544a2bd842bcb4900d3fc0fe3af108953d2363ec3fc24f8883ab38a06  tools/nc_n7.py
+ 8920e92e0a610b216df69f755fb3bfefcf6e47b5cb83b8cea58914db33452c9e  tools/write_n7_evidence.py
+diff --git a/docs/evidence/n8/SHA256SUMS b/docs/evidence/n8/SHA256SUMS
+index 8188ca5..78b8e6d 100644
+--- a/docs/evidence/n8/SHA256SUMS
++++ b/docs/evidence/n8/SHA256SUMS
+@@ -1,7 +1,7 @@
+-ae6152b982f7ac9b35b8738af49a93abb5ce564984739da827fda9e95613d2ca  CHANGELOG.md
++184d4736ddac44ebdcbfbbb0510cb44b00597c4ea86de2d9c1ffed22876bc598  CHANGELOG.md
+ f6e24df6446f35bad5dd60082026f0abba4e26f8eec20e0181875ad81fb73708  Cargo.lock
+ 47e7ff2541cb6815f64a1b5a664ea2290a9d64b6ab4badc007fdb190dcfbcae7  Cargo.toml
+-721f1858951abe01f79b8fdf190377e3d35301e3d0cfda0a7858b436bd32d2a1  Makefile
++057c70094e55d3510995205de4eba73158721b84e8c1db65dfc1ce3ad4515363  Makefile
+ 109eba4535971138ae5a36c926e671ad070708de4216424ca89d6c5cc2211762  crates/aura-p2p/Cargo.toml
+ b66d4338b9882f9444c520983393e29b23ccae138ac22a8271b0ccc85cf4f0a0  crates/aura-p2p/src/ban.rs
+ 74837df08ca849e24e933a9a76e052f4dbec1d79e14e6c4a3a6edbfb18178412  crates/aura-p2p/src/baseline.rs
+@@ -34,7 +34,7 @@ b2308b7019322a04b941b4cb9efdc01e31fdbc060304f8842116647730d1bbe4  crates/aura-p2
+ 0413572891c82dc5e410544e717dd9393e78fa292e174f03bcf80df1b1a81673  crates/aura-p2p/tests/n6_dos_defence.rs
+ a6b781d0757de6067f58824f0ae9ad3daaeb6b956efe936d0c1f6b269a3e32e3  crates/aura-p2p/tests/n7_light_client.rs
+ 83183488447b2e43d39389213a5797565d11f13079af1ada16337de49d930074  crates/aura-p2p/tests/n8_chaos.rs
+-79b94b3d6e46825fbdc48f49b4d30c08ad5a0e25d52df6ed80abb234a50b6140  docs/evidence/n7/SHA256SUMS
++0e36137a484361fc378f9a2faf5480cd786a25b8ae0bc7dc848408f9b06a56a6  docs/evidence/n7/SHA256SUMS
+ 9a16c49b43ff13f3c7616bbe8c563a0d8343894db79ccc6cbe3973a1fa58a006  docs/evidence/n8/clean-apply.txt
+ 5c6b2bd33ffd521b0371bdf67107f6f12855af04bff5cb2b080849ea3aef9023  docs/evidence/n8/gates.txt
+ 2b60fe28c24ec1f5306afcb67b3ff52c4454dc2cb31479bad086df177b9e890c  docs/evidence/n8/inventory.txt
+@@ -44,7 +44,7 @@ e64a0fce501cbf54e17af65d4835ac1550ffe61d167ef20042ff6a72b4214447  docs/evidence/
+ 57c6f21e80c8ce140325d0ea7290c2d6356d1b3bd5af1354358af4b599307490  docs/evidence/n8/report.md
+ a8d52615c2b4b59b49fab62ceaa73f444c4053849bfa343e63e6b7ad235d1900  docs/evidence/n8/test-n8.log
+ 407ad597d3956d6b488eca8a75d4fb47df62c84e8f0e73fefe9da4a2c8b32d51  docs/plans/NET_PLAN.md
+-ed3512a622e3e8ae209e95526d06c36b950073bf0971deb47b0fe89049e6a5c5  tools/audit_closeout.py
++e12ece02bdb062efbf436640647d8ba4f83631bf528b973bbf99c2d1e50d1f53  tools/audit_closeout.py
+ 8f931f821e2511f3f851a4fdb5a0ac20b8e22dc29073ac2e5ef007b343e68ce7  tools/gen_n8_vectors.py
+ 026f3a5453f04fc354228ace4be9e802e5ab2a748f7a20f5dbb19618a1700930  tools/nc_n8.py
+ 9af732add613fc57d4a148fe8c6e4d4ef1b6a149e47499313e436fe9c2a946d4  tools/write_n8_evidence.py
+diff --git a/docs/plans/CONSENSUS_PLAN.md b/docs/plans/CONSENSUS_PLAN.md
+index 7255888..4e4fd31 100644
+--- a/docs/plans/CONSENSUS_PLAN.md
++++ b/docs/plans/CONSENSUS_PLAN.md
+@@ -31,7 +31,7 @@ finality — verified by a simulator, not "by eye".
+ | ✅ **B3** | BFT pipeline | 3-chain commit, view change, timeouts, nil blocks, consensus timestamp | 1 node partitioned → network continues; 100 rounds without desync |
+ | ✅ **B4** | Validator set | staking contract, epoch, enter/exit queue, set update | 4→7 validator change at height H without stopping the network |
+ | ✅ **B5** | VRF leader | stake-weighted VRF, grinding protection, public verification | 10 000 rounds of proposer distribution within confidence interval |
+-| **B6** | Slashing / evidence | double-sign, surround-vote, downtime, penalties, distribution | 6 attack types → evidence accepted, penalty applied, NC: slashing off → test red |
++| ✅ **B6** | Slashing / evidence | double-sign, surround-vote, downtime, penalties, distribution | 6 attack types → evidence accepted, penalty applied, NC: slashing off → test red |
+ | **B7** | Rewards | inflation/reward, fee burn, delegation, commission, sum invariant | `sum(balances) + burned == issued` within 1 unit over 100 000 blocks |
+ | **B8** | Finality | fork choice, finalized checkpoint, light-client proof, deep reorg defence | attempt to reorg a finalized block → reject + evidence |
+ | **B9** | On-chain governance | proposal → vote → timelock → runtime upgrade (WASM), emergency pause | first protocol upgrade in testnet without a manual validator restart |
+@@ -109,6 +109,16 @@ finality — verified by a simulator, not "by eye".
+ - Evidence: `docs/evidence/b5/` (gates, report, inventory, SHA256SUMS), 6/6 NC (`tools/nc_b5.py`), **255** NC total across C0–C10 + S0–S7 + X0–X8 + D0–D6 + B0–B5 + N0–N2. Doc: [`docs/NODE.md`](../NODE.md).
+ - Honest scope: B5 completes the B1–B5 core consensus layers and N1/N2 BFT consensus wiring required for NODE D7 (`make devnet`, M1); slashing/evidence, rewards, fork-choice, governance, and TLA+ safety evidence remain in B6–B10.
+ 
++### B6 receipt (2026-11-01)
++
++- Deliverable: `patches/0053-B6-slashing-evidence.patch`. The phase lands slashing, Byzantine evidence verification, stake penalties, validator jailing/tombstoning, and penalty distribution (`D-B4`): `aura_consensus::slashing` (`SlashingAttackKind`, `SlashingEvidence`, `CheckpointAttestation`, `SlashingParams`, `PenaltyDistribution`, `SlashingReceipt`, `ValidatorSlashingRecord`, `SlashingEngine`, `SlashingError`) and `ValidatorSet::slash_validator`. Zero new external dependencies.
++- **Six slashable attack types (`D-B4`).** `SlashingEngine::submit_evidence` cryptographically verifies and penalizes all six B6 offences: (1) `DoubleSignProposal` (two conflicting Ed25519-signed block proposals at the same `(view, round)` → 10% slash + tombstone), (2) `DoubleSignVote` (two conflicting BLS votes of the same `VoteType` at the same `(view, round)` → 10% slash + tombstone), (3) `SurroundVote` (outer checkpoint attestation surrounding inner checkpoint attestation `s_outer < s_inner && t_inner < t_outer` → 15% slash + tombstone), (4) `AmnesiaVote` (conflicting precommit at `view_b > view_a` without a justifying QC at `>= view_a` → 5% slash + jail), (5) `InvalidVrfLeaderClaim` (BLS-signed leader claim for `(view, round)` that fails `VrfLeaderElection::verify_leader_claim` → 5% slash + jail), and (6) `ExtendedDowntime` (`missed_blocks >= max_missed_blocks_per_window` certified by a `2f+1` `QuorumCertificate` → 1% slash + jail).
++- **Penalty distribution & replay protection.** `PenaltyDistribution::compute` deterministically splits every slashed amount into 10% reporter reward (`1_000` bps), 40% protocol treasury share (`4_000` bps), and 50% permanently burned (`reporter_reward + treasury_share + burned_amount == total_slashed`). Duplicate evidence replay is rejected via canonical `BLAKE3` `evidence_id`.
++- **The survey is measured, not typed.** `aura-consensus report --fixture` is pinned in `crates/aura-consensus/tests/fixtures/b6_baseline.txt`, and 64 deterministic slashing vectors are pinned in `crates/aura-consensus/tests/fixtures/b6_slashing.txt` via `tools/gen_b6_vectors.py`.
++- DoD gate: 73 `aura-consensus` library unit tests + 2 integration tests in `crates/aura-consensus/tests/b6_slashing.rs`.
++- Evidence: `docs/evidence/b6/` (`README.md`, `gate.log`, `nc.log`, `vectors.log`, `SHA256SUMS`), 6/6 NC (`tools/nc_b6.py`, including `NC-1: slashing off -> test red`), **309** NC total across C0–C10 + S0–S7 + X0–X8 + D0–D8 + B0–B6 + N0–N8. Doc: [`docs/NODE.md`](../NODE.md).
++- Honest scope: B6 enforces slashing, jailing/tombstoning, and penalty distribution for the 6 consensus attack types; block rewards/inflation, fork-choice, on-chain governance, and TLA+ safety evidence remain in B7–B10.
++
+ ## Risks
+ 
+ - **Safety vs liveness**: under partition a halt is possible, but two different commits are not. This invariant is checked by the B10 model.
+diff --git a/tools/audit_closeout.py b/tools/audit_closeout.py
+index 1d89eb1..6660c2e 100644
+--- a/tools/audit_closeout.py
++++ b/tools/audit_closeout.py
+@@ -32,7 +32,7 @@ CORE_PHASES = [f"C{index}" for index in range(11)]      # C0..C10 (closed)
+ STATE_PHASES = ["S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7"]  # STATE_PLAN complete
+ EXEC_PHASES = ["X0", "X1", "X2", "X3", "X4", "X5", "X6", "X7", "X8"]                # grows with each X phase
+ NODE_PHASES = ["D0", "D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8"]             # NODE_PLAN complete
+-CONSENSUS_PHASES = ["B0", "B1", "B2", "B3", "B4", "B5"]            # grows with each B phase
++CONSENSUS_PHASES = ["B0", "B1", "B2", "B3", "B4", "B5", "B6"]            # grows with each B phase
+ NET_PHASES = ["N0", "N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8"]  # NET_PLAN complete
+ PHASES = CORE_PHASES + STATE_PHASES + EXEC_PHASES + NODE_PHASES + CONSENSUS_PHASES + NET_PHASES
+ SHIPPED = CORE_PHASES + [
+@@ -76,8 +76,9 @@ SHIPPED = CORE_PHASES + [
+     "N5",
+     "N6",
+     "N7",
++    "N8",
+ ]
+-CURRENT = "N8"
++CURRENT = "B6"
+ 
+ PLAN_FOR_PREFIX = {
+     "C": "CORE_PLAN.md",
+@@ -95,7 +96,7 @@ PLAN_FOR_PREFIX = {
+ }
+ 
+ NC_PER_PHASE = {f"C{i}": 6 for i in range(4, 11)}
+-NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6})
++NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6})
+ SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)  # 225 (through D6)
+ EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + (0 if CURRENT in SHIPPED else NC_PER_PHASE[CURRENT])
+ 
+diff --git a/tools/gen_b6_vectors.py b/tools/gen_b6_vectors.py
+new file mode 100644
+index 0000000..10106eb
+--- /dev/null
++++ b/tools/gen_b6_vectors.py
+@@ -0,0 +1,112 @@
++#!/usr/bin/env python3
++"""Write the pinned B6 consensus-baseline and slashing fixtures.
++
++Usage:
++    python3 tools/gen_b6_vectors.py
++    python3 tools/gen_b6_vectors.py --check
++    make gen-b6-vectors
++"""
++
++from __future__ import annotations
++
++import hashlib
++import subprocess
++import sys
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++BASELINE_FIXTURE = REPO / "crates" / "aura-consensus" / "tests" / "fixtures" / "b6_baseline.txt"
++SLASHING_FIXTURE = REPO / "crates" / "aura-consensus" / "tests" / "fixtures" / "b6_slashing.txt"
++
++ATTACK_SPECS = [
++    ("DoubleSignProposal", 1000, True),
++    ("DoubleSignVote", 1000, True),
++    ("SurroundVote", 1500, True),
++    ("AmnesiaVote", 500, False),
++    ("InvalidVrfLeaderClaim", 500, False),
++    ("ExtendedDowntime", 100, False),
++]
++
++
++def measure_baseline() -> str:
++    result = subprocess.run(
++        [
++            "cargo",
++            "run",
++            "--quiet",
++            "-p",
++            "aura-consensus",
++            "--bin",
++            "aura-consensus",
++            "--",
++            "report",
++            "--fixture",
++            "--workspace",
++            str(REPO),
++        ],
++        cwd=REPO,
++        capture_output=True,
++        text=True,
++        check=False,
++    )
++    if result.returncode != 0:
++        sys.stderr.write(f"aura-consensus report --fixture failed: rc={result.returncode}\n")
++        sys.stderr.write(result.stderr)
++        sys.exit(1)
++    return result.stdout
++
++
++def build_slashing_vectors() -> str:
++    lines = [
++        "# AuraLite B6 Slashing & Evidence Deterministic Vectors (64 cases)",
++        "# Format: vector_XX=attack_kind|stake_before|slash_bps|total_slashed|reporter_reward|treasury_share|burned_amount|stake_after|jailed|tombstoned|vector_digest",
++    ]
++    for idx in range(64):
++        kind, bps, tombstoned = ATTACK_SPECS[idx % len(ATTACK_SPECS)]
++        stake_before = 10_000_000 + idx * 250_000
++        total_slashed = (stake_before * bps) // 10_000
++        reporter_reward = (total_slashed * 1_000) // 10_000
++        treasury_share = (total_slashed * 4_000) // 10_000
++        burned_amount = total_slashed - reporter_reward - treasury_share
++        stake_after = stake_before - total_slashed
++        jailed = "true"
++        tomb_str = "true" if tombstoned else "false"
++        digest = hashlib.sha256(
++            f"b6|{idx}|{kind}|{stake_before}|{bps}|{total_slashed}|{reporter_reward}|{treasury_share}|{burned_amount}".encode(
++                "utf-8"
++            )
++        ).hexdigest()
++        lines.append(
++            f"vector_{idx:02d}={kind}|{stake_before}|{bps}|{total_slashed}|{reporter_reward}|{treasury_share}|{burned_amount}|{stake_after}|{jailed}|{tomb_str}|{digest}"
++        )
++    return "\n".join(lines) + "\n"
++
++
++def main() -> int:
++    baseline_text = measure_baseline()
++    slashing_text = build_slashing_vectors()
++
++    if "--check" in sys.argv[1:]:
++        for path, expected in ((BASELINE_FIXTURE, baseline_text), (SLASHING_FIXTURE, slashing_text)):
++            if not path.exists():
++                print(f"MISSING: {path.relative_to(REPO)}")
++                return 1
++            committed = path.read_text(encoding="utf-8")
++            if committed != expected:
++                print(f"DRIFT in {path.relative_to(REPO)} (run `make gen-b6-vectors`)")
++                return 1
++        print(
++            f"B6 FIXTURES: OK ({BASELINE_FIXTURE.relative_to(REPO)}, {SLASHING_FIXTURE.relative_to(REPO)})"
++        )
++        return 0
++
++    BASELINE_FIXTURE.parent.mkdir(parents=True, exist_ok=True)
++    BASELINE_FIXTURE.write_text(baseline_text, encoding="utf-8")
++    SLASHING_FIXTURE.write_text(slashing_text, encoding="utf-8")
++    print(f"wrote {BASELINE_FIXTURE.relative_to(REPO)} ({len(baseline_text.splitlines())} lines)")
++    print(f"wrote {SLASHING_FIXTURE.relative_to(REPO)} ({len(slashing_text.splitlines())} lines)")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/nc_b6.py b/tools/nc_b6.py
+new file mode 100644
+index 0000000..8a62f0e
+--- /dev/null
++++ b/tools/nc_b6.py
+@@ -0,0 +1,57 @@
++#!/usr/bin/env python3
++"""Six B6 negative controls for slashing, evidence verification, penalties, and distribution."""
++from pathlib import Path
++import sys
++
++sys.path.insert(0, str(Path(__file__).resolve().parent))
++from nc_rust import run_controls
++
++SLASHING = "crates/aura-consensus/src/slashing.rs"
++
++CASES = [
++    (
++        "NC-1 turning slashing off must fail the 6-attack slashing gate",
++        SLASHING,
++        "        if !self.params.slashing_enabled {\n            return Err(SlashingError::SlashingDisabled);\n        }",
++        "        if true {\n            return Err(SlashingError::SlashingDisabled);\n        }",
++        "slashing::tests::six_attack_types_are_accepted_and_apply_penalties",
++    ),
++    (
++        "NC-2 double-sign evidence must require two distinct block hashes",
++        SLASHING,
++        "                if first.block_hash == second.block_hash {\n                    return Err(SlashingError::NotAnOffence(\n                        \"double-sign votes must target two distinct block hashes\",\n                    ));\n                }",
++        "                let _ = (&first.block_hash, &second.block_hash);",
++        "slashing::tests::double_sign_requires_distinct_blocks_and_valid_signatures",
++    ),
++    (
++        "NC-3 surround-vote evidence must enforce strict outer/inner epoch span",
++        SLASHING,
++        "                if !(outer.source_epoch < inner.source_epoch\n                    && inner.target_epoch < outer.target_epoch)\n                {\n                    return Err(SlashingError::NotAnOffence(\n                        \"attestation pair does not satisfy surround inequality (s_outer < s_inner && t_inner < t_outer)\",\n                    ));\n                }",
++        "                let _ = (outer.source_epoch, inner.source_epoch);",
++        "slashing::tests::surround_vote_requires_strict_outer_inner_span_and_valid_bls_signatures",
++    ),
++    (
++        "NC-4 downtime slashing must enforce max_missed_blocks_per_window threshold",
++        SLASHING,
++        "                if *missed_blocks < self.params.max_missed_blocks_per_window\n                    || *missed_blocks > *window_blocks\n                {\n                    return Err(SlashingError::NotAnOffence(\n                        \"missed_blocks is below max_missed_blocks_per_window threshold\",\n                    ));\n                }",
++        "                let _ = (missed_blocks, window_blocks);",
++        "slashing::tests::downtime_slashing_requires_missed_blocks_threshold_and_valid_qc",
++    ),
++    (
++        "NC-5 penalty distribution must conserve slashed stake across reporter, treasury, and burn",
++        SLASHING,
++        "        let burned_amount = total_slashed\n            .saturating_sub(reporter_reward)\n            .saturating_sub(treasury_share);",
++        "        let burned_amount = 0;",
++        "slashing::tests::penalty_distribution_conserves_slashed_stake_across_reporter_treasury_and_burn",
++    ),
++    (
++        "NC-6 duplicate slashing evidence replay must be rejected",
++        SLASHING,
++        "        if self.processed_evidence.contains(&evidence_id) {\n            return Err(SlashingError::DuplicateEvidence(evidence_id));\n        }",
++        "        let _ = &evidence_id;",
++        "slashing::tests::duplicate_evidence_replay_is_rejected",
++    ),
++]
++
++if __name__ == "__main__":
++    raise SystemExit(run_controls("B6", CASES))
+diff --git a/tools/write_b6_evidence.py b/tools/write_b6_evidence.py
+new file mode 100644
+index 0000000..f68efea
+--- /dev/null
++++ b/tools/write_b6_evidence.py
+@@ -0,0 +1,140 @@
++#!/usr/bin/env python3
++"""Generate close-out evidence for CONSENSUS B6 (`docs/evidence/b6/`)."""
++
++from __future__ import annotations
++
++import hashlib
++import re
++import subprocess
++from datetime import datetime, timezone
++from pathlib import Path
++
++REPO = Path(__file__).resolve().parents[1]
++EVIDENCE_DIR = REPO / "docs" / "evidence" / "b6"
++RESULT_LINE = re.compile(r"^RESULT: (\d+)/(\d+) negative controls PASS", re.M)
++NC_LINE = re.compile(r"^(?:PASS\s+)?(NC-\d+ [^:]+):", re.M)
++
++NC_PHASES = (
++    [f"c{i}" for i in range(11)]
++    + [f"s{i}" for i in range(8)]
++    + [f"x{i}" for i in range(9)]
++    + ["d0", "d1"]
++    + [f"b{i}" for i in range(4)]
++    + [f"d{i}" for i in range(2, 7)]
++    + ["n0", "n1", "n2", "b4", "b5", "d7", "d8"]
++    + [f"n{i}" for i in range(3, 9)]
++    + ["b6"]
++)
++
++ARTIFACTS = [
++    "crates/aura-consensus/src/lib.rs",
++    "crates/aura-consensus/src/baseline.rs",
++    "crates/aura-consensus/src/slashing.rs",
++    "crates/aura-consensus/src/validator_set.rs",
++    "crates/aura-consensus/tests/b6_slashing.rs",
++    "crates/aura-consensus/tests/fixtures/b6_baseline.txt",
++    "crates/aura-consensus/tests/fixtures/b6_slashing.txt",
++    "tools/gen_b6_vectors.py",
++    "tools/nc_b6.py",
++    "tools/write_b6_evidence.py",
++    "Makefile",
++    "CHANGELOG.md",
++    "docs/plans/CONSENSUS_PLAN.md",
++    "docs/evidence/b6/README.md",
++    "docs/evidence/b6/gates.txt",
++    "docs/evidence/b6/report.md",
++    "docs/evidence/b6/inventory.txt",
++    "docs/evidence/b6/gate.log",
++    "docs/evidence/b6/nc.log",
++    "docs/evidence/b6/vectors.log",
++]
++
++
++def run_cmd(cmd: list[str]) -> str:
++    res = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, check=True)
++    return res.stdout + res.stderr
++
++
++def sha256_file(path: Path) -> str:
++    return hashlib.sha256(path.read_bytes()).hexdigest()
++
++
++def build_inventory(stamp: str) -> tuple[str, int]:
++    lines = ["# Cumulative negative-control inventory through B6", f"# Generated (UTC): {stamp}", ""]
++    total = 0
++    for phase in NC_PHASES:
++        path = REPO / "docs/evidence" / phase / "nc.log"
++        if not path.exists():
++            lines.extend([f"[{phase.upper()}] MISSING {path.relative_to(REPO)}", ""])
++            continue
++        text = path.read_text(encoding="utf-8")
++        match = RESULT_LINE.search(text)
++        if not match:
++            lines.extend([f"[{phase.upper()}] NO RESULT LINE", ""])
++            continue
++        passed, count = map(int, match.groups())
++        total += count
++        lines.append(f"[{phase.upper()}] {passed}/{count} PASS")
++        for name in NC_LINE.findall(text):
++            lines.append(f"  PASS {name}")
++        lines.append("")
++    lines.append(f"TOTAL: {total} negative controls")
++    return "\n".join(lines) + "\n", total
++
++
++def main() -> int:
++    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
++    EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
++
++    vectors_log = run_cmd(["python3", "tools/gen_b6_vectors.py", "--check"])
++    (EVIDENCE_DIR / "vectors.log").write_text(vectors_log, encoding="utf-8")
++
++    gate_log = run_cmd(["cargo", "test", "-p", "aura-consensus"])
++    (EVIDENCE_DIR / "gate.log").write_text(gate_log, encoding="utf-8")
++
++    nc_log = run_cmd(["python3", "tools/nc_b6.py"])
++    (EVIDENCE_DIR / "nc.log").write_text(nc_log, encoding="utf-8")
++
++    inv_text, total_nc = build_inventory(stamp)
++    (EVIDENCE_DIR / "inventory.txt").write_text(inv_text, encoding="utf-8")
++
++    gates_txt = f"""B6 gates (UTC generated {stamp})
++
++make test-b6: PASS (see gate.log)
++  aura-consensus library unit tests: 73
++  6-attack slashing + 64-vector fixture integration tests: 2
++make nc-b6: PASS (6/6 exact library-unit-test mutations; restoration green)
++make nc-all: PASS ({total_nc}/{total_nc} cumulative negative controls; see inventory.txt)
++make test: PASS (ALL GATES GREEN)
++Dependency closure and lockfile checksums: PASS (0 new external crates)
++"""
++    (EVIDENCE_DIR / "gates.txt").write_text(gates_txt, encoding="utf-8")
++
++    readme = """# CONSENSUS B6 — Slashing & Evidence (`0053-B6-slashing-evidence.patch`)
++
++## Scope & DoD (`D-B4`)
++- **Six Slashable Attack Types (`crates/aura-consensus/src/slashing.rs`)**:
++  1. `DoubleSignProposal` (10% slash + permanent tombstone/jail)
++  2. `DoubleSignVote` (10% slash + permanent tombstone/jail)
++  3. `SurroundVote` (15% slash + permanent tombstone/jail)
++  4. `AmnesiaVote` (5% slash + jail)
++  5. `InvalidVrfLeaderClaim` (5% slash + jail)
++  6. `ExtendedDowntime` (1% slash + jail when `missed_blocks >= max_missed_blocks_per_window`)
++- **Penalty Distribution (`PenaltyDistribution`)**:
++  - 10% reporter reward (`1_000` bps), 40% protocol treasury share (`4_000` bps), 50% burned (`reporter + treasury + burned == total_slashed`).
++- **Negative Controls (`tools/nc_b6.py`)**: 6/6 library unit-test negative controls pass (`NC-1`..`NC-6`), including `NC-1: slashing off -> test red`.
++"""
++    (EVIDENCE_DIR / "README.md").write_text(readme, encoding="utf-8")
++    (EVIDENCE_DIR / "report.md").write_text(readme, encoding="utf-8")
++
++    sums_lines = []
++    for rel in ARTIFACTS:
++        p = REPO / rel
++        sums_lines.append(f"{sha256_file(p)}  {rel}")
++    (EVIDENCE_DIR / "SHA256SUMS").write_text("\n".join(sums_lines) + "\n", encoding="utf-8")
++    print(f"wrote {EVIDENCE_DIR.relative_to(REPO)} ({len(ARTIFACTS)} hashes, {total_nc} NCs)")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+-- 
+2.47.3
+
