@@ -22,10 +22,12 @@ CASES = [
     (
         "NC-2 a same-view 3-chain must commit its first block",
         FINALITY,
-        '''                if self.qcs.contains_key(grandchild_hash) && qc_b.view == qc_c.view {
+        '''                    && block_c.round.checked_add(1) == Some(block_d.round)
+                {
                     return true;
                 }''',
-        '''                if self.qcs.contains_key(grandchild_hash) && qc_b.view == qc_c.view {
+        '''                    && block_c.round.checked_add(1) == Some(block_d.round)
+                {
                     return false;
                 }''',
         "finality::tests::three_chain_commit",

@@ -41,7 +41,7 @@ pub const EXIT_NO_WORKSPACE: i32 = 3;
 /// Exit code of a usage error (sysexits `EX_USAGE`).
 pub const EXIT_USAGE: i32 = 64;
 
-/// BIP-44 derivation path template locked by decision `D-W1`.
+/// Historical W0 BIP-44 path; superseded by D-W1-testnet for this branch.
 pub const BIP44_PATH_TEMPLATE: &str = "m/44'/ALCRY'/0'/0/i";
 
 /// One wallet component that will land in W1–W4.
@@ -60,7 +60,7 @@ pub const LAYERS: [Layer; 4] = [
     Layer {
         name: "keystore",
         phase: "W1",
-        what: "BIP-39/32/44 derivation, Argon2id + AES-256-GCM keystore, zeroize",
+        what: "BIP-39 and SLIP-0010 Ed25519 testnet derivation, encrypted keystore, zeroize",
     },
     Layer {
         name: "wallet-cli",
@@ -93,13 +93,10 @@ impl Layer {
     }
 
     /// True when this layer's source file declares public wallet logic.
-    /// At W0, none of W1–W4 exist yet.
+    /// W1 lands the keystore; W2–W4 remain placeholders.
     #[must_use]
     pub fn has_wallet_logic(&self) -> bool {
-        !matches!(
-            self.name,
-            "keystore" | "wallet-cli" | "offline-signing" | "multisig"
-        )
+        matches!(self.name, "keystore")
     }
 }
 
@@ -115,12 +112,7 @@ pub struct Capability {
 }
 
 /// Capabilities still absent at W0 (`W1`–`W4`).
-pub const MISSING_CAPABILITIES: [Capability; 4] = [
-    Capability {
-        name: "keystore",
-        phase: "W1",
-        what: "BIP-39/32/44 derivation, Argon2id + AES-256-GCM encryption, zeroize",
-    },
+pub const MISSING_CAPABILITIES: [Capability; 3] = [
     Capability {
         name: "wallet-cli",
         phase: "W2",
@@ -248,8 +240,8 @@ pub const THREAT_NOTES: [ThreatNote; 6] = [
         id: "T-W0-3",
         title: "Non-deterministic or colliding key derivation paths",
         attack_vector: "Ad-hoc key generation prevents mnemonic backup recovery or mixes keys across chains and account indices.",
-        control: "D-W1: canonical BIP-39 mnemonic -> BIP-32/44 hierarchical derivation path m/44'/ALCRY'/0'/0/i.",
-        verification_gate: "W1 gate: BIP-32 test vectors and deterministic address derivation",
+        control: "D-W1-testnet: BIP-39 -> hardened SLIP-0010 Ed25519 path m/44'/1'/0'/0'/i'; mainnet requires a separate decision.",
+        verification_gate: "W1 gate: BIP-39 and SLIP-0010 vectors and deterministic address derivation",
     },
     ThreatNote {
         id: "T-W0-4",
@@ -866,7 +858,12 @@ pub fn format_fixture(survey: &Survey) -> String {
     let _ = writeln!(out, "exit_stub={EXIT_STUB}");
     let _ = writeln!(out, "exit_usage={EXIT_USAGE}");
     let _ = writeln!(out, "exit_no_workspace={EXIT_NO_WORKSPACE}");
-    let _ = writeln!(out, "bip44_path_template={BIP44_PATH_TEMPLATE}");
+    let _ = writeln!(out, "historical_bip44_path_template={BIP44_PATH_TEMPLATE}");
+    let _ = writeln!(
+        out,
+        "testnet_path_template={}",
+        crate::derivation::AURA_PATH_TEMPLATE
+    );
     let _ = writeln!(out, "layers={}", survey.layers.len());
     let _ = writeln!(out, "implemented={}", survey.implemented());
     let _ = writeln!(out, "placeholders={}", survey.placeholders());
@@ -946,9 +943,10 @@ pub fn format_report(survey: &Survey) -> String {
     );
     let _ = writeln!(
         out,
-        "  key-exposure audit: {} surfaces mapped, {} threat notes recorded (BIP-44 path `{BIP44_PATH_TEMPLATE}`)",
+        "  key-exposure audit: {} surfaces mapped, {} threat notes; testnet path `{}` (historical BIP-44 path `{BIP44_PATH_TEMPLATE}` superseded)",
         EXPOSURE_SURFACES.len(),
         THREAT_NOTES.len(),
+        crate::derivation::AURA_PATH_TEMPLATE,
     );
     let _ = writeln!(out);
     let _ = writeln!(out, "  wallet capabilities NOT present at {PHASE}:");
@@ -1186,16 +1184,12 @@ mod tests {
     }
 
     #[test]
-    fn w0_all_layers_are_placeholders() {
+    fn w1_survey_reports_only_keystore_implemented() {
         let root = default_workspace_root();
         let s = survey(&root).expect("survey workspace");
         assert_eq!(s.layers.len(), 4);
-        assert_eq!(s.implemented(), 0, "no W1-W4 module is implemented at W0");
-        assert_eq!(
-            s.placeholders(),
-            4,
-            "all 4 W1-W4 layers are placeholders at W0"
-        );
+        assert_eq!(s.implemented(), 1, "W1 keystore is implemented");
+        assert_eq!(s.placeholders(), 3, "W2-W4 remain placeholders");
         assert_eq!(s.missing(), 0);
     }
 
@@ -1208,8 +1202,8 @@ mod tests {
             .join("aura-wallet")
             .join("tests")
             .join("fixtures")
-            .join("w0_baseline.txt");
-        let pinned = std::fs::read_to_string(&fixture_path).expect("read w0_baseline.txt");
+            .join("w1_baseline.txt");
+        let pinned = std::fs::read_to_string(&fixture_path).expect("read w1_baseline.txt");
         assert_eq!(format_fixture(&s), pinned);
     }
 

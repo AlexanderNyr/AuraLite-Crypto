@@ -1,34 +1,12 @@
-//! VRF leader election and N1/N2 networked BFT pipeline (B5).
+//! Public-input, stake-weighted leader-selection simulation and networked BFT.
 //!
-//! B5 lands two things required by `CONSENSUS_PLAN` and `D7_READINESS`:
-//! 1. **Stake-weighted VRF leader election with grinding protection and public
-//!    verification**:
-//!    - [`VrfInput`] binds `(chain_id, epoch, epoch_randomness, view, round)`
-//!      and rejects zero `epoch_randomness` after epoch 0 so proposers cannot
-//!      grind block payloads or transaction ordering to bias future leader
-//!      selection.
-//!    - [`derive_epoch_randomness`] derives the next epoch's seed from a
-//!      cryptographically verified boundary [`QuorumCertificate`] with
-//!      canonically sorted signer keys/signatures.
-//!    - [`prove_vrf`] and [`verify_vrf`] use deterministic BLS12-381 signatures
-//!      over the domain-separated VRF transcript to produce a unique, publicly
-//!      verifiable 96-byte proof and 32-byte uniform output [`Hash`].
-//!    - [`VrfLeaderElection`] maps the round VRF draw onto `[0, total_stake)`
-//!      using 128-bit fixed-point arithmetic (`(draw * total_stake) >> 64`),
-//!      selecting each validator with probability strictly proportional to
-//!      `stake_i / total_stake`, and publicly verifies [`LeaderClaim`]s.
-//! 2. **Connecting the B3 voting/finality pipeline to N1/N2**:
-//!    - [`ProposalEnvelope`] and [`VoteEnvelope`] encode/decode BFT proposals
-//!      (with [`VrfProof`] and optional high QC) and BLS votes for
-//!      [`GossipTopic::Proposal`] and [`GossipTopic::Vote`].
-//!    - [`NetworkedValidatorNode`] and [`FourValidatorNetwork`] wire
-//!      [`aura_p2p::gossipsub::GossipEngine`] and [`aura_p2p::identity::NodeIdentity`]
-//!      to [`FinalityEngine`], [`QcAggregator`], [`ValidatorSet`], and
-//!      [`VrfLeaderElection`] without bypassing BLS vote or QC verification,
-//!      preserving 3-of-4 (`f = 1`) quorum finality even when 1 validator is
-//!      offline.
+//! This is not a secret VRF lottery or a production consensus protocol. Leader
+//! selection uses publicly predictable input; boundary randomness may be biased
+//! by selecting the signers included in a QC. The networked harness uses
+//! signed proposals and quorum-verified votes but lacks persistent locking,
+//! robust view-change certificates, and integration into the node swarm.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use aura_crypto::hash_domain;
@@ -40,7 +18,7 @@ use aura_types::{Address, Domain, Hash};
 
 use crate::bls::{self, BlsPublicKey, BlsSecretKey, BlsSignature, address_from_public_key};
 use crate::finality::{FinalityBlock, FinalityEngine, FinalizedBlock};
-use crate::qc::{QcAggregator, QuorumCertificate, Vote, VoteType, quorum_threshold};
+use crate::qc::{QcAggregator, QuorumCertificate, Vote, VoteType};
 use crate::validator_set::{DEFAULT_MIN_STAKE, Validator, ValidatorSet, ValidatorStatus};
 
 /// Stake amount in base units.
@@ -49,7 +27,7 @@ pub type Stake = u64;
 const VRF_INPUT_TAG: &[u8] = b"AURA_CONSENSUS_VRF_INPUT_V1\0";
 const VRF_OUTPUT_TAG: &[u8] = b"AURA_CONSENSUS_VRF_OUT_V1\0";
 const VRF_EPOCH_TAG: &[u8] = b"AURA_CONSENSUS_EPOCH_RAND_V1\0";
-const PROPOSAL_WIRE_MAGIC: &[u8; 4] = b"APRP";
+const PROPOSAL_WIRE_MAGIC: &[u8; 4] = b"APR2";
 const VOTE_WIRE_MAGIC: &[u8; 4] = b"AVOT";
 
 /// Errors returned by VRF proving, verification, leader election, and networked BFT.
@@ -114,8 +92,9 @@ impl fmt::Display for VrfError {
 
 impl std::error::Error for VrfError {}
 
-/// Un-grindable VRF input transcript bound to consensus-agreed epoch randomness,
-/// view, and round.
+/// Leader-selection input transcript bound to epoch randomness, view, and round.
+/// The boundary QC signer subset can bias that randomness; it is not proven
+/// un-grindable or unpredictable.
 ///
 /// Block contents and transaction hashes are deliberately excluded from
 /// [`VrfInput`] so a proposer cannot grind transactions or timestamps to bias
@@ -175,13 +154,16 @@ impl VrfInput {
     }
 }
 
-/// Derive un-grindable epoch randomness for `next_epoch` from `prev_randomness`
-/// and a verified epoch-boundary [`QuorumCertificate`].
+/// Derive deterministic epoch input from a membership-verified boundary QC.
+///
+/// This construction is potentially biasable via the included signer subset;
+/// it is not a secure randomness beacon.
 pub fn derive_epoch_randomness(
     prev_randomness: Hash,
     next_epoch: u64,
     boundary_qc: &QuorumCertificate,
     chain_id: &str,
+    active: &BTreeSet<Address>,
 ) -> Result<Hash, VrfError> {
     if chain_id.is_empty() {
         return Err(VrfError::EmptyChainId);
@@ -192,7 +174,7 @@ pub fn derive_epoch_randomness(
         return Err(VrfError::InvalidBoundaryQc);
     }
     boundary_qc
-        .verify(chain_id, Domain::Vote)
+        .verify_with_members(chain_id, Domain::Vote, active)
         .map_err(|_| VrfError::InvalidBoundaryQc)?;
 
     // Sort (pubkey, signature) pairs canonically so vote arrival order cannot
@@ -461,6 +443,8 @@ pub struct ProposalEnvelope {
     pub block: FinalityBlock,
     /// Leader's VRF proof for `(epoch, epoch_randomness, block.view, block.round)`.
     pub vrf_proof: VrfProof,
+    /// Leader BLS signature over epoch, randomness and the block commitment.
+    pub proposal_signature: BlsSignature,
 }
 
 impl ProposalEnvelope {
@@ -478,6 +462,7 @@ impl ProposalEnvelope {
         out.extend_from_slice(self.vrf_proof.validator.as_bytes());
         out.extend_from_slice(&self.vrf_proof.signature.to_bytes());
         out.extend_from_slice(self.vrf_proof.output.as_bytes());
+        out.extend_from_slice(&self.proposal_signature.to_bytes());
         out.extend_from_slice(&(self.block.transactions.len() as u32).to_le_bytes());
         for tx in &self.block.transactions {
             out.extend_from_slice(&(tx.len() as u32).to_le_bytes());
@@ -488,7 +473,7 @@ impl ProposalEnvelope {
 
     /// Decode from canonical wire bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, VrfError> {
-        if bytes.len() < 4 + 8 + 32 + 8 + 8 + 32 + 8 + 32 + 20 + 96 + 32 + 4 {
+        if bytes.len() < 4 + 8 + 32 + 8 + 8 + 32 + 8 + 32 + 20 + 96 + 32 + 96 + 4 {
             return Err(VrfError::InvalidEnvelope("proposal envelope truncated"));
         }
         if &bytes[0..4] != PROPOSAL_WIRE_MAGIC {
@@ -516,6 +501,9 @@ impl ProposalEnvelope {
         pos += 96;
         let output = Hash::from_bytes(bytes[pos..pos + 32].try_into().unwrap());
         pos += 32;
+        let proposal_signature = BlsSignature::from_bytes(&bytes[pos..pos + 96])
+            .map_err(|_| VrfError::InvalidEnvelope("invalid proposal BLS signature bytes"))?;
+        pos += 96;
         let tx_count = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4;
         let mut transactions = Vec::with_capacity(tx_count.min(1024));
@@ -563,8 +551,20 @@ impl ProposalEnvelope {
                 signature,
                 output,
             },
+            proposal_signature,
         })
     }
+}
+
+fn proposal_signing_payload(epoch: u64, randomness: Hash, block: &FinalityBlock) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(96);
+    payload.extend_from_slice(b"AURA_CONSENSUS_PROPOSAL_V2\0");
+    payload.extend_from_slice(&epoch.to_le_bytes());
+    payload.extend_from_slice(randomness.as_bytes());
+    payload.extend_from_slice(&block.view.to_le_bytes());
+    payload.extend_from_slice(&block.round.to_le_bytes());
+    payload.extend_from_slice(block.block_hash.as_bytes());
+    payload
 }
 
 /// Wire payload broadcast on [`GossipTopic::Vote`] in B5.
@@ -659,6 +659,7 @@ pub struct NetworkedValidatorNode {
     pub online: bool,
     /// Per-(view, round, block_hash) vote aggregators.
     aggregators: BTreeMap<(u64, u64, Hash), QcAggregator>,
+    voted: BTreeMap<(u64, u64), Hash>,
 }
 
 impl NetworkedValidatorNode {
@@ -699,6 +700,7 @@ impl NetworkedValidatorNode {
             epoch_randomness,
             online: true,
             aggregators: BTreeMap::new(),
+            voted: BTreeMap::new(),
         }
     }
 
@@ -738,11 +740,17 @@ impl NetworkedValidatorNode {
             .leader_election
             .prove_leader_claim(&self.bls_secret, &input)?;
         let block = self.finality.propose_at(timestamp_ms, transactions);
+        let proposal_signature = self.bls_secret.sign(
+            &self.chain_id,
+            Domain::Block,
+            &proposal_signing_payload(input.epoch, input.epoch_randomness, &block),
+        );
         let envelope = ProposalEnvelope {
             epoch: input.epoch,
             epoch_randomness: input.epoch_randomness,
             block,
             vrf_proof: claim.proof,
+            proposal_signature,
         };
         let (msg, _) = self
             .gossip
@@ -781,13 +789,48 @@ impl NetworkedValidatorNode {
             env.block.view,
             env.block.round,
         );
+        if input != self.current_vrf_input() {
+            return Err(VrfError::InvalidEnvelope(
+                "unexpected epoch, randomness, view or round",
+            ));
+        }
         self.leader_election.verify_leader_claim(
             &LeaderClaim {
                 proof: env.vrf_proof.clone(),
             },
             &input,
         )?;
-
+        let leader = self
+            .leader_election
+            .validators
+            .get(&env.vrf_proof.validator)
+            .ok_or(VrfError::UnknownValidator(env.vrf_proof.validator))?;
+        bls::verify(
+            &leader.public_key,
+            &self.chain_id,
+            Domain::Block,
+            &proposal_signing_payload(env.epoch, env.epoch_randomness, &env.block),
+            &env.proposal_signature,
+        )
+        .map_err(|_| VrfError::InvalidEnvelope("proposal signature invalid"))?;
+        let position = (env.block.view, env.block.round);
+        if let Some(previous) = self.voted.get(&position) {
+            return if *previous == env.block.block_hash {
+                Ok(None)
+            } else {
+                Err(VrfError::InvalidEnvelope("conflicting proposal for round"))
+            };
+        }
+        // A proposer has already advanced its own tip in try_propose; followers
+        // must see a block extending their current tip.
+        if env.block.block_hash != self.finality.tip.block_hash
+            && env.block.parent_hash != self.finality.tip.block_hash
+        {
+            return Err(VrfError::InvalidEnvelope(
+                "proposal does not extend local tip",
+            ));
+        }
+        self.voted.insert(position, env.block.block_hash);
         self.finality.commit_rule.insert_block(env.block.clone());
         self.finality.tip = env.block.clone();
 
@@ -842,19 +885,17 @@ impl NetworkedValidatorNode {
         crate::finality::verify_vote(&self.chain_id, &env.vote, &env.public_key)
             .map_err(|_| VrfError::InvalidConsensusVote)?;
 
-        let threshold = quorum_threshold(self.validator_set.len() as u64);
+        let active = self.validator_set.active_addresses();
         let key = (env.vote.view, env.vote.round, env.vote.block_hash);
         let agg = self
             .aggregators
             .entry(key)
-            .or_insert_with(|| QcAggregator::new(threshold));
+            .or_insert_with(|| QcAggregator::new(self.chain_id.clone(), active.clone()));
         if let Some(qc) = agg.add_vote(env.public_key, env.vote) {
-            qc.verify(&self.chain_id, Domain::Vote)
+            let finalized = self
+                .finality
+                .submit_qc(qc.clone(), &active)
                 .map_err(|_| VrfError::InvalidConsensusVote)?;
-            let block_hash = qc.block_hash;
-            self.finality.commit_rule.insert_qc(block_hash, qc.clone());
-            self.finality.view_change.update_high_qc(qc.clone());
-            let finalized = self.finality.commit_rule.finalize_committed();
             return Ok((Some(qc), finalized));
         }
         Ok((None, Vec::new()))
@@ -1065,6 +1106,7 @@ mod tests {
         let (sk1, entry1) = key_and_entry(1, DEFAULT_MIN_STAKE);
         let (sk2, _) = key_and_entry(2, DEFAULT_MIN_STAKE);
         let block_hash = Hash::from_bytes([0xAA; 32]);
+        let active = BTreeSet::from([entry1.address]);
         let payload = [
             &0u64.to_le_bytes()[..],
             &1u64.to_le_bytes()[..],
@@ -1083,7 +1125,7 @@ mod tests {
             signatures: vec![forged_sig],
         };
         assert_eq!(
-            derive_epoch_randomness(Hash::from_bytes([1u8; 32]), 1, &forged_qc, CHAIN),
+            derive_epoch_randomness(Hash::from_bytes([1u8; 32]), 1, &forged_qc, CHAIN, &active),
             Err(VrfError::InvalidBoundaryQc)
         );
 
@@ -1098,10 +1140,23 @@ mod tests {
             public_keys: vec![pk1],
             signatures: vec![valid_sig],
         };
-        let r1 = derive_epoch_randomness(Hash::from_bytes([1u8; 32]), 1, &valid_qc, CHAIN)
+        let r1 = derive_epoch_randomness(Hash::from_bytes([1u8; 32]), 1, &valid_qc, CHAIN, &active)
             .expect("valid boundary QC derives epoch randomness");
-        let r2 = derive_epoch_randomness(Hash::from_bytes([1u8; 32]), 1, &valid_qc, CHAIN)
+        let r2 = derive_epoch_randomness(Hash::from_bytes([1u8; 32]), 1, &valid_qc, CHAIN, &active)
             .expect("deterministic");
+        let larger_active: BTreeSet<_> = (1..=4)
+            .map(|i| key_and_entry(i, DEFAULT_MIN_STAKE).1.address)
+            .collect();
+        assert_eq!(
+            derive_epoch_randomness(
+                Hash::from_bytes([1u8; 32]),
+                1,
+                &valid_qc,
+                CHAIN,
+                &larger_active
+            ),
+            Err(VrfError::InvalidBoundaryQc)
+        );
         assert_eq!(r1, r2);
         assert_ne!(r1, Hash::ZERO);
     }
@@ -1189,7 +1244,9 @@ mod tests {
         // Take validator 3 offline: remaining 3 of 4 validators still form 2f+1 = 3 quorum.
         net.set_online(3, false);
 
-        for r in 0..6u64 {
+        // View changes restart the same-view 3-chain, so six successful
+        // rounds need not finalize three blocks when the leader times out.
+        for r in 0..20u64 {
             let qc = net
                 .run_round(
                     1_700_000_000_000 + r * 100,
@@ -1212,5 +1269,64 @@ mod tests {
                 "online validator {idx} matches tip block hash"
             );
         }
+    }
+    #[test]
+    fn proposal_signature_binds_block_and_validator_refuses_equivocation() {
+        let mut net = FourValidatorNetwork::new(CHAIN, 100);
+        let input = net.nodes[0].current_vrf_input();
+        let leader_address = net.nodes[0].leader_election.select_leader(&input).unwrap();
+        let leader_idx = (0..4)
+            .find(|i| net.nodes[*i].address == leader_address)
+            .unwrap();
+        let receiver_idx = (0..4).find(|i| *i != leader_idx).unwrap();
+        let impostor_idx = (0..4)
+            .find(|i| *i != leader_idx && *i != receiver_idx)
+            .unwrap();
+        let proposal = net.nodes[leader_idx]
+            .try_propose(1_700_000_000_000, vec![b"original".to_vec()])
+            .unwrap()
+            .unwrap();
+        let mut altered = ProposalEnvelope::from_bytes(&proposal.payload).unwrap();
+        let parent = net.nodes[receiver_idx].finality.tip.clone();
+        altered.block = FinalityBlock::propose(
+            input.view,
+            input.round,
+            &parent,
+            1_700_000_000_000,
+            vec![b"changed".to_vec()],
+        );
+        let (forgery, _) = net.nodes[impostor_idx]
+            .gossip
+            .publish(GossipTopic::Proposal, altered.to_bytes())
+            .unwrap();
+        let impostor_peer = net.nodes[impostor_idx].peer_id();
+        assert!(matches!(
+            net.nodes[receiver_idx].on_proposal_gossip(impostor_peer, &forgery, 1_700_000_000_000),
+            Err(VrfError::InvalidEnvelope("proposal signature invalid"))
+        ));
+        let leader_peer = net.nodes[leader_idx].peer_id();
+        assert!(
+            net.nodes[receiver_idx]
+                .on_proposal_gossip(leader_peer, &proposal, 1_700_000_000_001)
+                .unwrap()
+                .is_some()
+        );
+        altered.proposal_signature = net.nodes[leader_idx].bls_secret.sign(
+            CHAIN,
+            Domain::Block,
+            &proposal_signing_payload(altered.epoch, altered.epoch_randomness, &altered.block),
+        );
+        let (equivocation, _) = net.nodes[impostor_idx]
+            .gossip
+            .publish(GossipTopic::Proposal, altered.to_bytes())
+            .unwrap();
+        assert!(matches!(
+            net.nodes[receiver_idx].on_proposal_gossip(
+                impostor_peer,
+                &equivocation,
+                1_700_000_000_002
+            ),
+            Err(VrfError::InvalidEnvelope("conflicting proposal for round"))
+        ));
     }
 }

@@ -45,7 +45,7 @@ PYTHON ?= python3
         test-d7 nc-d7 evidence-d7 \
         gen-d8-vectors test-d8 nc-d8 evidence-d8 \
         gen-n0-vectors test-n0 nc-n0 evidence-n0 \
-        gen-n1-vectors test-n1 nc-n1 evidence-n1 \
+        gen-n1-vectors test-n1 nc-n1 nc-p2p-review evidence-n1 \
         gen-n2-vectors test-n2 nc-n2 evidence-n2 \
         gen-n3-vectors test-n3 nc-n3 evidence-n3 \
         gen-n4-vectors test-n4 nc-n4 evidence-n4 \
@@ -233,14 +233,21 @@ test: deps-check
 	@$(CARGO) clippy --workspace --all-targets -- -D warnings
 	@echo "== cargo test =="
 	@$(CARGO) test --workspace
+	@echo "== P2P pre-auth ban review mutation controls =="
+	@$(PYTHON) tools/nc_p2p_review.py
 	@echo "== docs drift guard =="
 	@$(PYTHON) tools/check_claims.py
 	@echo "== dependency gate =="
 	@$(PYTHON) tools/check_deps.py
+	@echo "== local scrypt fork provenance =="
+	@$(PYTHON) tools/check_scrypt_fork.py
+	@$(PYTHON) tools/test_scrypt_fork_guard.py
 	@echo "== vector inventory =="
 	@$(PYTHON) tools/count_vectors.py
 	@echo "== test rig wiring =="
 	@$(PYTHON) tools/check_rig.py
+	@echo "== historical checksum policy tests =="
+	@$(PYTHON) tools/test_historical_drift.py
 	@echo "== close-out audit =="
 	@$(PYTHON) tools/audit_closeout.py
 	@echo "ALL GATES GREEN"
@@ -984,11 +991,14 @@ gen-n1-vectors:
 test-n1:
 	@$(CARGO) test -p aura-p2p --lib
 	@$(CARGO) test -p aura-p2p --test n1_transport
+	@$(CARGO) test -p aura-p2p --test n1_spoofed_peer_ban
+
+nc-p2p-review:
+	@$(PYTHON) tools/nc_p2p_review.py
 
 nc-n1:
-	@mkdir -p docs/evidence/n1
-	@$(PYTHON) tools/nc_n1.py > docs/evidence/n1/nc.log 2>&1 || { cat docs/evidence/n1/nc.log; exit 1; }
-	@cat docs/evidence/n1/nc.log
+	@$(PYTHON) tools/nc_n1.py > /tmp/aura-nc-n1.log 2>&1 || { cat /tmp/aura-nc-n1.log; exit 1; }
+	@cat /tmp/aura-nc-n1.log
 
 evidence-n1:
 	@$(PYTHON) tools/write_n1_evidence.py
@@ -1061,9 +1071,8 @@ test-n6:
 	@$(CARGO) test -p aura-p2p --test n6_dos_defence
 
 nc-n6:
-	@mkdir -p docs/evidence/n6
-	@$(PYTHON) tools/nc_n6.py > docs/evidence/n6/nc.log 2>&1 || { cat docs/evidence/n6/nc.log; exit 1; }
-	@cat docs/evidence/n6/nc.log
+	@$(PYTHON) tools/nc_n6.py > /tmp/aura-nc-n6.log 2>&1 || { cat /tmp/aura-nc-n6.log; exit 1; }
+	@cat /tmp/aura-nc-n6.log
 
 evidence-n6:
 	@$(PYTHON) tools/write_n6_evidence.py
@@ -1105,10 +1114,9 @@ test-w0:
 	@$(CARGO) test -p aura-wallet --lib
 	@$(CARGO) test -p aura-wallet --test w0_key_audit
 
+# Historical W0 receipts are immutable; print current results instead.
 nc-w0:
-	@mkdir -p docs/evidence/w0
-	@$(PYTHON) tools/nc_w0.py > docs/evidence/w0/nc.log 2>&1 || { cat docs/evidence/w0/nc.log; exit 1; }
-	@cat docs/evidence/w0/nc.log
+	@$(PYTHON) tools/nc_w0.py
 
 evidence-w0:
 	@$(PYTHON) tools/write_w0_evidence.py
@@ -1118,3 +1126,33 @@ devnet:
 
 clean:
 	@$(CARGO) clean
+
+# W1 crypto component gates. The explicit feature enables deliberately weak
+# Argon2 parameters ONLY for the 1000-negative-password/format-fuzz tests.
+.PHONY: test-w1 nc-w1
+test-w1:
+	@$(PYTHON) tools/w1_mnemonic_reference.py
+	@$(PYTHON) tools/test_w1_mnemonic_reference_guard.py
+	@$(PYTHON) tools/w1_aad_reference.py
+	@$(PYTHON) tools/check_scrypt_fork.py
+	@$(PYTHON) tools/test_scrypt_fork_guard.py
+	@$(PYTHON) tools/check_w1_test_api.py
+	@$(CARGO) test -p aura-wallet --lib
+	@$(CARGO) test -p aura-wallet --lib --features serde_json/preserve_order keystore::aad_reference_tests::canonical_aad_matches_independent_python_bytes -- --exact
+	@$(CARGO) test -p aura-wallet --test w1_keystore
+	@$(CARGO) test -p aura-wallet --features insecure-test-kdf --test w1_keystore
+	@$(CARGO) test --locked --manifest-path fuzz/Cargo.toml --lib --features insecure-wallet-fuzz
+
+# Mutation controls do not overwrite historical receipts. They temporarily
+# modify source, so do not run concurrently with builds or other controls.
+nc-w1:
+	@$(PYTHON) tools/nc_w1.py
+	@$(PYTHON) tools/nc_w1_fuzz.py
+
+# Optional independent interop check; install the pinned test-only Python
+# dependencies in tools/w1-reference-requirements.txt first.
+.PHONY: test-w1-interop
+test-w1-interop:
+	@$(PYTHON) tools/test_w1_interop_guard.py
+	@$(PYTHON) tools/w1_interop_reference.py
+	@$(PYTHON) -m tools.w1_tx_reference

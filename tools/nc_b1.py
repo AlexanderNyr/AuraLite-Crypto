@@ -48,7 +48,7 @@ CASES = [
         "NC-6 verification must use the supplied public key",
         SIGNATURE,
         "            &self.public_key,\n            chain_id,",
-        "            &ed25519_public_key(&[42u8; 32]),\n            chain_id,",
+        "            &ed25519_public_key(&{ let mut seed = [0u8; 32]; seed[0] = 42; seed }),\n            chain_id,",
         "signature::tests::wrong_public_key_fails",
     ),
 ]

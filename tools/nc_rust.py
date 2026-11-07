@@ -14,7 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def focused_test(test: str) -> tuple[bool, str]:
+def focused_test(test: str, expect_failure: bool = False) -> tuple[bool, str]:
     command = [
         "cargo", "test", "-p", "aura-consensus", "--lib", "--",
         "--exact", test,
@@ -27,7 +27,7 @@ def focused_test(test: str) -> tuple[bool, str]:
     ran_failed = result.returncode != 0 and re.search(
         rf"test\s+{re.escape(test)}\s+\.\.\.\s+FAILED", output
     ) is not None
-    return (ran_ok if result.returncode == 0 else ran_failed), output
+    return (ran_failed if expect_failure else ran_ok), output
 
 
 def run_controls(phase: str, cases: list[tuple[str, str, str, str, str]]) -> int:
@@ -55,7 +55,7 @@ def run_controls(phase: str, cases: list[tuple[str, str, str, str, str]]) -> int
         mutated = original.replace(old, new, 1)
         path.write_text(mutated, encoding="utf-8")
         try:
-            red, output = focused_test(test)
+            red, output = focused_test(test, expect_failure=True)
         finally:
             path.write_text(original, encoding="utf-8")
         if red:

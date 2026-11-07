@@ -8,7 +8,7 @@ Seven tamper tests must each turn the X2 gate red:
   NC-3 max value length removed       -> value_too_long writes 4097 bytes.
   NC-4 rollback removed on a trap     -> a failed call commits a diff.
   NC-5 import census opened           -> the refusal vectors link and run.
-  NC-6 out-of-gas guard removed       -> a caught -8 status still commits.
+  NC-6 out-of-gas guard removed       -> a caught -8 loses out-of-gas status.
   NC-7 instruction gas never settled  -> the bill stays at the host part.
 
 Rule (CONTRIBUTING.md §1): a gate that cannot go red is not a gate.
@@ -50,7 +50,7 @@ def expect_red(label: str, path: Path, old: str, new: str) -> bool:
         path.write_text(tampered, encoding="utf-8")
         os.utime(path, None)
         result = run(CARGO_TEST)
-        went_red = result.returncode != 0
+        went_red = result.returncode != 0 and "test result: FAILED" in (result.stdout + result.stderr)
         raw = "\n".join((result.stdout + result.stderr).strip().splitlines()[-3:])
         snippet = re.sub(r"finished in [\d.]+s", "finished", raw)
         print(f"{label}: {'PASS' if went_red else 'FAIL'}")
@@ -119,10 +119,10 @@ def main() -> int:
         let _ = (func_import, import.module(), name);""",
         ),
         expect_red(
-            "NC-6 out-of-gas guard removed (a caught -8 commits)",
+            "NC-6 out-of-gas guard removed (a caught -8 loses out-of-gas status)",
             CONTRACT_RS,
-            """            Some(Outcome::Returned(value)) if !host.out_of_gas => (""",
-            """            Some(Outcome::Returned(value)) => (""",
+            """            Some(Outcome::Returned(value)) if !host.out_of_gas => {""",
+            """            Some(Outcome::Returned(value)) => {""",
         ),
         expect_red(
             "NC-7 instruction gas never settled",

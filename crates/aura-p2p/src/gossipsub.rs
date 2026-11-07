@@ -612,6 +612,10 @@ impl GossipEngine {
     }
 
     /// Decode and ingest raw wire gossip bytes from `from_peer`.
+    ///
+    /// `from_peer` must be the authenticated transport source, not the
+    /// message's untrusted `sender_peer_id`. Rejections and score-based bans
+    /// are attributed to this source; gossip messages may be forwarded.
     pub fn ingest_wire(
         &mut self,
         from_peer: PeerId,
@@ -630,6 +634,10 @@ impl GossipEngine {
     }
 
     /// Ingest a [`GossipMessage`] from `from_peer` at timestamp `now_ms`.
+    ///
+    /// `from_peer` is the authenticated transport source. The signed message
+    /// origin is separately checked, and must not be used as the ban/score
+    /// attribution target because the transport peer may be forwarding it.
     pub fn ingest(&mut self, from_peer: PeerId, msg: GossipMessage, now_ms: u64) -> GossipOutcome {
         // 1. Reject banned peers immediately.
         if let Err(err) = self.bans.check_peer(&from_peer, now_ms) {

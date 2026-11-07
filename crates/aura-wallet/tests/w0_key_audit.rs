@@ -36,8 +36,8 @@ fn synthesize_log_line(
 fn w0_tree_search_and_exposure_audit_gate() {
     let root = default_workspace_root();
     let s = survey(&root).expect("survey workspace");
-    assert_eq!(s.implemented(), 0);
-    assert_eq!(s.placeholders(), 4);
+    assert_eq!(s.implemented(), 1);
+    assert_eq!(s.placeholders(), 3);
     assert_eq!(s.missing(), 0);
     assert_eq!(EXPOSURE_SURFACES.len(), 8);
     assert_eq!(THREAT_NOTES.len(), 6);

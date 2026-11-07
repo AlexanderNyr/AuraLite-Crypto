@@ -80,11 +80,17 @@ fn identity_substitution_and_banned_peers_are_rejected_on_live_swarm() {
         }
     );
 
-    // Node C is now automatically on Node A's ban list.
-    assert!(node_a.is_peer_banned(&node_c.local_peer_id(), 0));
+    // A wrong endpoint is rejected but never auto-banned; it may be a legitimate
+    // unrelated node. Identity-based bans remain an explicit local policy action.
+    assert!(!node_a.is_peer_banned(&node_c.local_peer_id(), 0));
+    node_a.ban_peer(
+        node_c.local_peer_id(),
+        BanReason::Manual("test_peer_ban".into()),
+        None,
+    );
     let banned_err = node_a
         .dial(node_c.local_addr(), Some(node_c.local_peer_id()))
-        .expect_err("banned peer must be rejected before handshake completes");
+        .expect_err("explicitly banned peer must be rejected before handshake completes");
     assert!(matches!(banned_err, P2pError::PeerBanned { .. }));
 
     // Self-connection is rejected.

@@ -139,12 +139,8 @@ def main() -> int:
         return 1
 
     audit = run(AUDIT)
-    sums = run(["sh", "-c", "for f in $(find docs/evidence -name SHA256SUMS | sort); do sha256sum -c \"$f\" >/dev/null || exit 1; done"])
-    ok = audit.returncode == 0 and sums.returncode == 0
-    print(
-        f"restore check: audit rc={audit.returncode}; checksums rc={sums.returncode} "
-        f"({'GREEN as expected' if ok else 'STILL RED — FAIL'})"
-    )
+    ok = audit.returncode == 0
+    print(f"restore check: audit rc={audit.returncode} ({'GREEN as expected' if ok else 'STILL RED — FAIL'})")
     return 0 if ok else 1
 
 

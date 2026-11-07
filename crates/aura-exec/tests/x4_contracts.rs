@@ -71,6 +71,12 @@ fn call(gas: u64) -> ContractCall {
     }
 }
 
+fn self_upgrade_call(gas: u64) -> ContractCall {
+    let mut call = call(gas);
+    call.caller = call.contract;
+    call
+}
+
 fn base(value: u128) -> MerkleTree {
     let caller = Account::new(
         Nonce::new(0),
@@ -277,7 +283,7 @@ fn kv_takes_an_argument_and_migrates_on_upgrade() {
 
     // Upgrading to the same code still runs `migrate(from, to)`.
     let upgraded = lifecycle
-        .upgrade(&tree, call(1_000_000), 1, KV.to_vec())
+        .upgrade(&tree, self_upgrade_call(1_000_000), 1, KV.to_vec())
         .expect("upgrade");
     assert_eq!(
         upgraded.lifecycle,
@@ -384,7 +390,7 @@ fn two_runs_of_the_same_contract_agree_byte_for_byte() {
             .expect("call");
         let tree = commit(&tree, called.diff.as_ref().expect("diff"));
         let upgraded = lifecycle
-            .upgrade(&tree, call(1_000_000), 1, code.to_vec())
+            .upgrade(&tree, self_upgrade_call(1_000_000), 1, code.to_vec())
             .expect("upgrade");
         let tree = commit(&tree, upgraded.diff.as_ref().expect("diff"));
         roots.insert(attempt, tree.tree_root());

@@ -3,12 +3,18 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use aes_gcm::aead::{Aead, Payload};
+use aes_gcm::{Aes256Gcm, KeyInit};
 use aura_crypto::{blake3_hash, constant_time_eq};
+use hkdf::Hkdf;
+use sha2::Sha256;
+use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};
+use zeroize::Zeroize;
 
 use crate::ban::{BanList, BanReason};
 use crate::error::P2pError;
@@ -17,7 +23,7 @@ use crate::identity::{
 };
 
 /// Wire protocol version enforced during the N1 handshake.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// Maximum wire frame length (64 KiB) enforced before allocation.
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
@@ -28,14 +34,12 @@ pub const MAX_AGENT_LEN: usize = 128;
 /// Default agent string advertised by `aura-p2p`.
 pub const DEFAULT_AGENT_VERSION: &str = "aura-p2p/0.1.0-n1";
 
-static NONCE_COUNTER: AtomicU64 = AtomicU64::new(1);
-
 /// Underlying transport profile advertised in the handshake (`NET_PLAN` D-N1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransportKind {
-    /// TCP with Noise-authenticated transcript and encrypted session framing.
+    /// TCP with signed X25519 ephemeral key agreement and AES-256-GCM framing.
     TcpNoise,
-    /// QUIC with Noise/TLS identity binding (`peer_id = BLAKE3(pubkey)`).
+    /// QUIC profile identifier (same identity binding; transport is TCP in Stage 1).
     QuicNoise,
 }
 
@@ -71,8 +75,8 @@ pub struct HandshakeHello {
     pub claimed_peer_id: PeerId,
     /// Peer's 32-byte Ed25519 public key.
     pub public_key: [u8; 32],
-    /// Per-handshake 32-byte ephemeral nonce mixed into session keys.
-    pub ephemeral_nonce: [u8; 32],
+    /// Per-handshake X25519 ephemeral public key, bound into the signed transcript.
+    pub ephemeral_public_key: [u8; 32],
     /// Bounded identify agent string (`aura-p2p/0.1.0-n1`).
     pub agent_version: String,
     /// Local listener port advertised for peer table identification.
@@ -86,23 +90,20 @@ impl HandshakeHello {
         chain_id: impl Into<String>,
         transport_kind: TransportKind,
         listen_port: u16,
-    ) -> Self {
-        let seq = NONCE_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let mut seed = Vec::with_capacity(48);
-        seed.extend_from_slice(identity.peer_id().as_bytes());
-        seed.extend_from_slice(&seq.to_le_bytes());
-        seed.extend_from_slice(&listen_port.to_le_bytes());
-        let ephemeral_nonce = *blake3_hash(&seed).as_bytes();
-        Self {
+    ) -> (Self, EphemeralSecret) {
+        let secret = EphemeralSecret::random();
+        let ephemeral_public_key = X25519PublicKey::from(&secret).to_bytes();
+        let hello = Self {
             protocol_version: PROTOCOL_VERSION,
             transport_kind,
             chain_id: chain_id.into(),
             claimed_peer_id: identity.peer_id(),
             public_key: *identity.public_key(),
-            ephemeral_nonce,
+            ephemeral_public_key,
             agent_version: DEFAULT_AGENT_VERSION.to_owned(),
             listen_port,
-        }
+        };
+        (hello, secret)
     }
 
     /// Encode this hello message into canonical length-prefixed bytes.
@@ -119,7 +120,7 @@ impl HandshakeHello {
         out.extend_from_slice(chain_bytes);
         out.extend_from_slice(self.claimed_peer_id.as_bytes());
         out.extend_from_slice(&self.public_key);
-        out.extend_from_slice(&self.ephemeral_nonce);
+        out.extend_from_slice(&self.ephemeral_public_key);
         out.extend_from_slice(&(agent_bytes.len() as u16).to_le_bytes());
         out.extend_from_slice(agent_bytes);
         out.extend_from_slice(&self.listen_port.to_le_bytes());
@@ -140,7 +141,7 @@ impl HandshakeHello {
             .to_owned();
         let claimed_peer_id = PeerId::from_bytes(read_array::<PEER_ID_LEN>(bytes, &mut cursor)?);
         let public_key = read_array::<32>(bytes, &mut cursor)?;
-        let ephemeral_nonce = read_array::<32>(bytes, &mut cursor)?;
+        let ephemeral_public_key = read_array::<32>(bytes, &mut cursor)?;
         let agent_len = read_u16(bytes, &mut cursor)? as usize;
         if agent_len > MAX_AGENT_LEN {
             return Err(P2pError::Codec(format!(
@@ -162,24 +163,25 @@ impl HandshakeHello {
             chain_id,
             claimed_peer_id,
             public_key,
-            ephemeral_nonce,
+            ephemeral_public_key,
             agent_version,
             listen_port,
         })
     }
 }
 
-/// Validate a remote [`HandshakeHello`] against local policy, identity rules, and ban list.
+/// Validate the contents and local policy of an untrusted remote [`HandshakeHello`].
+///
+/// This function does not authenticate ownership of `claimed_peer_id`, consult or
+/// mutate the peer ban list, or check the dialer's expected identity. Callers must
+/// verify the transcript signature before treating the claimed identity as an
+/// authenticated peer or consulting identity-based bans.
 pub fn validate_remote_hello(
     local_peer_id: PeerId,
     local_chain_id: &str,
     local_protocol_version: u16,
-    expected_peer: Option<PeerId>,
     remote: &HandshakeHello,
-    ban_list: &mut BanList,
-    now_ms: u64,
 ) -> Result<(), P2pError> {
-    ban_list.check_peer(&remote.claimed_peer_id, now_ms)?;
     if remote.claimed_peer_id == local_peer_id {
         return Err(P2pError::SelfConnection(local_peer_id));
     }
@@ -195,23 +197,17 @@ pub fn validate_remote_hello(
             actual: remote.chain_id.clone(),
         });
     }
-    if let Err(err) = remote.claimed_peer_id.verify_public_key(&remote.public_key) {
-        ban_list.ban_peer(remote.claimed_peer_id, BanReason::IdentityMismatch, None);
-        return Err(err);
-    }
-    verify_expected_peer(expected_peer, remote.claimed_peer_id, ban_list)
+    remote.claimed_peer_id.verify_public_key(&remote.public_key)
 }
 
-/// Verify that `actual` matches the dialer's `expected` target [`PeerId`], banning on substitution.
-pub fn verify_expected_peer(
-    expected: Option<PeerId>,
-    actual: PeerId,
-    ban_list: &mut BanList,
-) -> Result<(), P2pError> {
+/// Reject an authenticated remote identity that differs from the dialer's expected [`PeerId`].
+///
+/// A mismatch is not automatically banned: dialing the wrong endpoint can reach
+/// an honest, unrelated peer, and a pre-signature identity claim is untrusted.
+pub fn verify_expected_peer(expected: Option<PeerId>, actual: PeerId) -> Result<(), P2pError> {
     if let Some(expected_peer) = expected
         && !constant_time_eq(expected_peer.as_bytes(), actual.as_bytes())
     {
-        ban_list.ban_peer(actual, BanReason::IdentitySubstitution, None);
         return Err(P2pError::IdentitySubstitution {
             expected: expected_peer,
             actual,
@@ -236,37 +232,50 @@ pub fn compute_transcript_hash(
     Ok(*blake3_hash(&buf).as_bytes())
 }
 
-/// Post-handshake Noise-inspired directional AEAD/MAC stream cipher.
-#[derive(Debug, Clone)]
+/// Post-handshake directional AES-256-GCM cipher. Keys are derived from an
+/// ephemeral X25519 shared secret and the signed handshake transcript.
 pub struct SessionCipher {
     send_key: [u8; 32],
     recv_key: [u8; 32],
     send_seq: u64,
     recv_seq: u64,
+    transcript_hash: [u8; 32],
 }
 
 impl SessionCipher {
-    /// Derive directional session ciphers `(initiator_cipher, responder_cipher)` from the handshake.
-    pub fn derive_pair(
+    /// Derive a directional cipher from this side's ephemeral secret and the
+    /// remote ephemeral public key. The secret is consumed and zeroized.
+    pub fn new(
         transcript_hash: &[u8; 32],
-        initiator_nonce: &[u8; 32],
-        responder_nonce: &[u8; 32],
-    ) -> (Self, Self) {
-        let i_to_r = derive_traffic_key(b"i2r", transcript_hash, initiator_nonce, responder_nonce);
-        let r_to_i = derive_traffic_key(b"r2i", transcript_hash, initiator_nonce, responder_nonce);
-        let initiator = Self {
-            send_key: i_to_r,
-            recv_key: r_to_i,
+        local_secret: EphemeralSecret,
+        remote_public: &[u8; 32],
+        role: HandshakeRole,
+    ) -> Result<Self, P2pError> {
+        let remote = X25519PublicKey::from(*remote_public);
+        let shared = local_secret.diffie_hellman(&remote);
+        if constant_time_eq(shared.as_bytes(), &[0u8; 32]) {
+            return Err(P2pError::InvalidHandshakeSignature);
+        }
+        let hk = Hkdf::<Sha256>::new(Some(transcript_hash), shared.as_bytes());
+        let mut okm = [0u8; 64];
+        hk.expand(b"AuraLite-Crypto/p2p-session-v2", &mut okm)
+            .map_err(|_| P2pError::InvalidHandshakeSignature)?;
+        let mut i2r = [0u8; 32];
+        let mut r2i = [0u8; 32];
+        i2r.copy_from_slice(&okm[..32]);
+        r2i.copy_from_slice(&okm[32..]);
+        okm.zeroize();
+        let (send_key, recv_key) = match role {
+            HandshakeRole::Initiator => (i2r, r2i),
+            HandshakeRole::Responder => (r2i, i2r),
+        };
+        Ok(Self {
+            send_key,
+            recv_key,
             send_seq: 0,
             recv_seq: 0,
-        };
-        let responder = Self {
-            send_key: r_to_i,
-            recv_key: i_to_r,
-            send_seq: 0,
-            recv_seq: 0,
-        };
-        (initiator, responder)
+            transcript_hash: *transcript_hash,
+        })
     }
 
     /// Encrypt and authenticate `plaintext` with the next monotonic sequence number.
@@ -278,83 +287,83 @@ impl SessionCipher {
             });
         }
         let seq = self.send_seq;
-        self.send_seq = self.send_seq.saturating_add(1);
-        let ciphertext = xor_keystream(&self.send_key, seq, plaintext);
-        let tag = compute_frame_mac(&self.send_key, seq, &ciphertext);
-        let mut frame = Vec::with_capacity(8 + 32 + ciphertext.len());
+        self.send_seq = self
+            .send_seq
+            .checked_add(1)
+            .ok_or(P2pError::FrameAuthenticationFailed)?;
+        let nonce = frame_nonce(seq);
+        let aad = frame_aad(&self.transcript_hash, seq);
+        let cipher = Aes256Gcm::new_from_slice(&self.send_key)
+            .map_err(|_| P2pError::FrameAuthenticationFailed)?;
+        let ciphertext = cipher
+            .encrypt(
+                &nonce.into(),
+                Payload {
+                    msg: plaintext,
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| P2pError::FrameAuthenticationFailed)?;
+        let mut frame = Vec::with_capacity(8 + ciphertext.len());
         frame.extend_from_slice(&seq.to_le_bytes());
-        frame.extend_from_slice(&tag);
         frame.extend_from_slice(&ciphertext);
         Ok(frame)
     }
 
-    /// Authenticate and decrypt an incoming frame, enforcing sequence ordering and MAC integrity.
+    /// Authenticate and decrypt an incoming frame, enforcing strict sequence ordering.
     pub fn open_frame(&mut self, frame: &[u8]) -> Result<Vec<u8>, P2pError> {
-        if frame.len() < 40 {
+        if frame.len() < 24 {
             return Err(P2pError::FrameAuthenticationFailed);
         }
-        if frame.len() - 40 > MAX_FRAME_BYTES {
+        if frame.len() - 8 > MAX_FRAME_BYTES + 16 {
             return Err(P2pError::FrameTooLarge {
-                size: frame.len() - 40,
-                max: MAX_FRAME_BYTES,
+                size: frame.len() - 8,
+                max: MAX_FRAME_BYTES + 16,
             });
         }
-        let mut seq_bytes = [0u8; 8];
-        seq_bytes.copy_from_slice(&frame[..8]);
-        let seq = u64::from_le_bytes(seq_bytes);
+        let seq = u64::from_le_bytes(frame[..8].try_into().unwrap());
         if seq != self.recv_seq {
             return Err(P2pError::FrameAuthenticationFailed);
         }
-        let mut tag = [0u8; 32];
-        tag.copy_from_slice(&frame[8..40]);
-        let ciphertext = &frame[40..];
-        let expected_tag = compute_frame_mac(&self.recv_key, seq, ciphertext);
-        if !constant_time_eq(&expected_tag, &tag) {
-            return Err(P2pError::FrameAuthenticationFailed);
-        }
-        self.recv_seq = self.recv_seq.saturating_add(1);
-        Ok(xor_keystream(&self.recv_key, seq, ciphertext))
+        let nonce = frame_nonce(seq);
+        let aad = frame_aad(&self.transcript_hash, seq);
+        let cipher = Aes256Gcm::new_from_slice(&self.recv_key)
+            .map_err(|_| P2pError::FrameAuthenticationFailed)?;
+        let plaintext = cipher
+            .decrypt(
+                &nonce.into(),
+                Payload {
+                    msg: &frame[8..],
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| P2pError::FrameAuthenticationFailed)?;
+        self.recv_seq = self
+            .recv_seq
+            .checked_add(1)
+            .ok_or(P2pError::FrameAuthenticationFailed)?;
+        Ok(plaintext)
     }
 }
 
-fn derive_traffic_key(
-    direction: &[u8],
-    transcript_hash: &[u8; 32],
-    initiator_nonce: &[u8; 32],
-    responder_nonce: &[u8; 32],
-) -> [u8; 32] {
-    let mut buf = Vec::with_capacity(128);
-    buf.extend_from_slice(b"AuraLite-Crypto/p2p-session-key-v1\0");
-    buf.extend_from_slice(direction);
-    buf.extend_from_slice(transcript_hash);
-    buf.extend_from_slice(initiator_nonce);
-    buf.extend_from_slice(responder_nonce);
-    *blake3_hash(&buf).as_bytes()
-}
-
-fn xor_keystream(key: &[u8; 32], seq: u64, input: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(input.len());
-    for (block_idx, chunk) in input.chunks(32).enumerate() {
-        let mut seed = [0u8; 48];
-        seed[..32].copy_from_slice(key);
-        seed[32..40].copy_from_slice(&seq.to_le_bytes());
-        seed[40..48].copy_from_slice(&(block_idx as u64).to_le_bytes());
-        let stream = blake3_hash(&seed);
-        for (b, k) in chunk.iter().zip(stream.as_bytes().iter()) {
-            out.push(b ^ k);
-        }
+impl Drop for SessionCipher {
+    fn drop(&mut self) {
+        self.send_key.zeroize();
+        self.recv_key.zeroize();
     }
-    out
 }
 
-fn compute_frame_mac(key: &[u8; 32], seq: u64, ciphertext: &[u8]) -> [u8; 32] {
-    let mut buf = Vec::with_capacity(64 + ciphertext.len());
-    buf.extend_from_slice(b"AuraLite-Crypto/p2p-frame-mac-v1\0");
-    buf.extend_from_slice(key);
-    buf.extend_from_slice(&seq.to_le_bytes());
-    buf.extend_from_slice(&(ciphertext.len() as u32).to_le_bytes());
-    buf.extend_from_slice(ciphertext);
-    *blake3_hash(&buf).as_bytes()
+fn frame_nonce(seq: u64) -> [u8; 12] {
+    let mut nonce = [0u8; 12];
+    nonce[4..].copy_from_slice(&seq.to_le_bytes());
+    nonce
+}
+
+fn frame_aad(transcript: &[u8; 32], seq: u64) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(40);
+    aad.extend_from_slice(transcript);
+    aad.extend_from_slice(&seq.to_le_bytes());
+    aad
 }
 
 /// Authenticated peer metadata recorded once the N1 handshake + encrypted identify check pass.
@@ -521,7 +530,7 @@ impl TransportSwarm {
             .set_write_timeout(Some(self.config.io_timeout))
             .map_err(|e| P2pError::Io(e.to_string()))?;
 
-        let init_hello = HandshakeHello::new(
+        let (init_hello, init_secret) = HandshakeHello::new(
             &self.identity,
             &self.config.chain_id,
             self.config.transport_kind,
@@ -531,18 +540,12 @@ impl TransportSwarm {
         let resp_bytes = read_raw_frame(&mut stream)?;
         let resp_hello = HandshakeHello::decode(&resp_bytes)?;
 
-        {
-            let mut bans = self.bans.lock().unwrap();
-            validate_remote_hello(
-                self.identity.peer_id(),
-                &self.config.chain_id,
-                PROTOCOL_VERSION,
-                expected_peer,
-                &resp_hello,
-                &mut bans,
-                0,
-            )?;
-        }
+        validate_remote_hello(
+            self.identity.peer_id(),
+            &self.config.chain_id,
+            PROTOCOL_VERSION,
+            &resp_hello,
+        )?;
 
         let transcript_hash = compute_transcript_hash(&init_hello, &resp_hello)?;
         let init_sig = self.identity.sign_transcript(
@@ -558,26 +561,29 @@ impl TransportSwarm {
         }
         let mut resp_sig = [0u8; 64];
         resp_sig.copy_from_slice(&resp_sig_vec);
-        if let Err(err) = verify_transcript_signature(
+        verify_transcript_signature(
             &resp_hello.public_key,
             &self.config.chain_id,
             HandshakeRole::Responder,
             &transcript_hash,
             &resp_sig,
-        ) {
-            self.bans.lock().unwrap().ban_peer(
-                resp_hello.claimed_peer_id,
-                BanReason::InvalidHandshakeSignature,
-                None,
-            );
-            return Err(err);
-        }
+        )?;
 
-        let (mut initiator_cipher, _) = SessionCipher::derive_pair(
+        // The signed transcript is the first proof that the remote controls the
+        // key associated with this PeerId. Only now may identity-based bans or
+        // expected-peer policy be applied.
+        self.bans
+            .lock()
+            .unwrap()
+            .check_peer(&resp_hello.claimed_peer_id, 0)?;
+        verify_expected_peer(expected_peer, resp_hello.claimed_peer_id)?;
+
+        let mut initiator_cipher = SessionCipher::new(
             &transcript_hash,
-            &init_hello.ephemeral_nonce,
-            &resp_hello.ephemeral_nonce,
-        );
+            init_secret,
+            &resp_hello.ephemeral_public_key,
+            HandshakeRole::Initiator,
+        )?;
         let ping = initiator_cipher.seal_frame(b"identify:ping")?;
         write_raw_frame(&mut stream, &ping)?;
         let pong_encrypted = read_raw_frame(&mut stream)?;
@@ -674,20 +680,14 @@ fn handle_inbound_stream(
 
     let init_bytes = read_raw_frame(stream)?;
     let init_hello = HandshakeHello::decode(&init_bytes)?;
-    {
-        let mut bans_guard = bans.lock().unwrap();
-        validate_remote_hello(
-            identity.peer_id(),
-            &config.chain_id,
-            PROTOCOL_VERSION,
-            None,
-            &init_hello,
-            &mut bans_guard,
-            0,
-        )?;
-    }
+    validate_remote_hello(
+        identity.peer_id(),
+        &config.chain_id,
+        PROTOCOL_VERSION,
+        &init_hello,
+    )?;
 
-    let resp_hello = HandshakeHello::new(
+    let (resp_hello, resp_secret) = HandshakeHello::new(
         identity,
         &config.chain_id,
         config.transport_kind,
@@ -702,30 +702,29 @@ fn handle_inbound_stream(
     }
     let mut init_sig = [0u8; 64];
     init_sig.copy_from_slice(&init_sig_vec);
-    if let Err(err) = verify_transcript_signature(
+    verify_transcript_signature(
         &init_hello.public_key,
         &config.chain_id,
         HandshakeRole::Initiator,
         &transcript_hash,
         &init_sig,
-    ) {
-        bans.lock().unwrap().ban_peer(
-            init_hello.claimed_peer_id,
-            BanReason::InvalidHandshakeSignature,
-            None,
-        );
-        return Err(err);
-    }
+    )?;
+
+    // Only a valid transcript signature authenticates the claimed identity.
+    bans.lock()
+        .unwrap()
+        .check_peer(&init_hello.claimed_peer_id, 0)?;
 
     let resp_sig =
         identity.sign_transcript(&config.chain_id, HandshakeRole::Responder, &transcript_hash);
     write_raw_frame(stream, &resp_sig)?;
 
-    let (_, mut responder_cipher) = SessionCipher::derive_pair(
+    let mut responder_cipher = SessionCipher::new(
         &transcript_hash,
-        &init_hello.ephemeral_nonce,
-        &resp_hello.ephemeral_nonce,
-    );
+        resp_secret,
+        &init_hello.ephemeral_public_key,
+        HandshakeRole::Responder,
+    )?;
     let ping_encrypted = read_raw_frame(stream)?;
     let ping = responder_cipher.open_frame(&ping_encrypted)?;
     if ping != b"identify:ping" {
@@ -817,47 +816,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn expected_peer_mismatch_is_rejected_and_banned() {
+    fn expected_peer_mismatch_is_rejected_without_an_automatic_ban() {
         let local = PeerIdentity::from_seed([0x01; 32]);
         let expected_b = PeerIdentity::from_seed([0x02; 32]);
-        let impostor_c = PeerIdentity::from_seed([0x03; 32]);
-        let hello_c = HandshakeHello::new(
-            &impostor_c,
-            "auralite-test-1",
-            TransportKind::TcpNoise,
-            9000,
-        );
-        let mut bans = BanList::new();
-        let err = validate_remote_hello(
+        let peer_c = PeerIdentity::from_seed([0x03; 32]);
+        let (hello_c, _) =
+            HandshakeHello::new(&peer_c, "auralite-test-1", TransportKind::TcpNoise, 9000);
+        validate_remote_hello(
             local.peer_id(),
             "auralite-test-1",
             PROTOCOL_VERSION,
-            Some(expected_b.peer_id()),
             &hello_c,
-            &mut bans,
-            0,
         )
-        .expect_err("identity substitution must be rejected");
+        .expect("hello structure is valid before signature verification");
         assert_eq!(
-            err,
-            P2pError::IdentitySubstitution {
+            verify_expected_peer(Some(expected_b.peer_id()), hello_c.claimed_peer_id),
+            Err(P2pError::IdentitySubstitution {
                 expected: expected_b.peer_id(),
-                actual: impostor_c.peer_id(),
-            }
+                actual: peer_c.peer_id(),
+            })
         );
-        assert!(
-            bans.is_peer_banned(&impostor_c.peer_id(), 0),
-            "substituting peer must be added to BanList"
-        );
+    }
+
+    #[test]
+    fn claimed_peer_id_must_match_public_key() {
+        let local = PeerIdentity::from_seed([0x04; 32]);
+        let remote = PeerIdentity::from_seed([0x05; 32]);
+        let other = PeerIdentity::from_seed([0x06; 32]);
+        let (mut hello, _) =
+            HandshakeHello::new(&remote, "auralite-test-1", TransportKind::TcpNoise, 9001);
+        hello.claimed_peer_id = other.peer_id();
+        assert!(matches!(
+            validate_remote_hello(local.peer_id(), "auralite-test-1", PROTOCOL_VERSION, &hello),
+            Err(P2pError::IdentityMismatch { .. })
+        ));
     }
 
     #[test]
     fn tampered_handshake_signature_is_rejected() {
         let initiator = PeerIdentity::from_seed([0x10; 32]);
         let responder = PeerIdentity::from_seed([0x20; 32]);
-        let hello_i =
+        let (hello_i, _) =
             HandshakeHello::new(&initiator, "auralite-test-1", TransportKind::TcpNoise, 9001);
-        let hello_r =
+        let (hello_r, _) =
             HandshakeHello::new(&responder, "auralite-test-1", TransportKind::TcpNoise, 9002);
         let transcript = compute_transcript_hash(&hello_i, &hello_r).unwrap();
         let mut sig =
@@ -879,20 +880,11 @@ mod tests {
     fn protocol_version_and_chain_id_mismatches_are_rejected() {
         let local = PeerIdentity::from_seed([0x30; 32]);
         let remote = PeerIdentity::from_seed([0x40; 32]);
-        let mut hello =
+        let (mut hello, _) =
             HandshakeHello::new(&remote, "auralite-test-1", TransportKind::TcpNoise, 9003);
         hello.protocol_version = PROTOCOL_VERSION + 1;
-        let mut bans = BanList::new();
         assert_eq!(
-            validate_remote_hello(
-                local.peer_id(),
-                "auralite-test-1",
-                PROTOCOL_VERSION,
-                None,
-                &hello,
-                &mut bans,
-                0,
-            ),
+            validate_remote_hello(local.peer_id(), "auralite-test-1", PROTOCOL_VERSION, &hello,),
             Err(P2pError::ProtocolVersionMismatch {
                 local: PROTOCOL_VERSION,
                 remote: PROTOCOL_VERSION + 1,
@@ -902,15 +894,7 @@ mod tests {
         hello.protocol_version = PROTOCOL_VERSION;
         hello.chain_id = "auralite-other-1".into();
         assert_eq!(
-            validate_remote_hello(
-                local.peer_id(),
-                "auralite-test-1",
-                PROTOCOL_VERSION,
-                None,
-                &hello,
-                &mut bans,
-                0,
-            ),
+            validate_remote_hello(local.peer_id(), "auralite-test-1", PROTOCOL_VERSION, &hello,),
             Err(P2pError::ChainIdMismatch {
                 expected: "auralite-test-1".into(),
                 actual: "auralite-other-1".into(),
@@ -919,11 +903,38 @@ mod tests {
     }
 
     #[test]
+    fn rejects_low_order_x25519_peer_key() {
+        let secret = EphemeralSecret::random();
+        assert!(SessionCipher::new(&[42; 32], secret, &[0; 32], HandshakeRole::Initiator).is_err());
+    }
+
+    fn cipher_pair(transcript: &[u8; 32]) -> (SessionCipher, SessionCipher) {
+        let client_secret = EphemeralSecret::random();
+        let server_secret = EphemeralSecret::random();
+        let client_public = X25519PublicKey::from(&client_secret).to_bytes();
+        let server_public = X25519PublicKey::from(&server_secret).to_bytes();
+        let client = SessionCipher::new(
+            transcript,
+            client_secret,
+            &server_public,
+            HandshakeRole::Initiator,
+        )
+        .unwrap();
+        let server = SessionCipher::new(
+            transcript,
+            server_secret,
+            &client_public,
+            HandshakeRole::Responder,
+        )
+        .unwrap();
+        (client, server)
+    }
+
+    #[test]
     fn tampered_encrypted_frame_is_rejected() {
-        let (mut client, mut server) =
-            SessionCipher::derive_pair(&[0x55; 32], &[0x66; 32], &[0x77; 32]);
+        let (mut client, mut server) = cipher_pair(&[0x55; 32]);
         let mut frame = client.seal_frame(b"hello authenticated swarm").unwrap();
-        frame[40] ^= 0x80;
+        frame[8] ^= 0x80;
         assert_eq!(
             server.open_frame(&frame),
             Err(P2pError::FrameAuthenticationFailed)
@@ -932,8 +943,7 @@ mod tests {
 
     #[test]
     fn session_cipher_roundtrips_and_rejects_replay() {
-        let (mut client, mut server) =
-            SessionCipher::derive_pair(&[0xAA; 32], &[0xBB; 32], &[0xCC; 32]);
+        let (mut client, mut server) = cipher_pair(&[0xAA; 32]);
         let f0 = client.seal_frame(b"frame-0").unwrap();
         let f1 = client.seal_frame(b"frame-1").unwrap();
         assert_eq!(server.open_frame(&f0).unwrap(), b"frame-0");
@@ -943,5 +953,24 @@ mod tests {
             "replayed frame must fail sequence check"
         );
         assert_eq!(server.open_frame(&f1).unwrap(), b"frame-1");
+    }
+
+    #[test]
+    fn passive_observer_cannot_derive_session_keys_from_public_transcript() {
+        let transcript = [0xAB; 32];
+        let (mut client, mut server) = cipher_pair(&transcript);
+        let frame = client.seal_frame(b"secret").unwrap();
+        let observer_secret = EphemeralSecret::random();
+        let dummy_secret = EphemeralSecret::random();
+        let dummy_public = X25519PublicKey::from(&dummy_secret).to_bytes();
+        let mut observer = SessionCipher::new(
+            &transcript,
+            observer_secret,
+            &dummy_public,
+            HandshakeRole::Responder,
+        )
+        .unwrap();
+        assert!(observer.open_frame(&frame).is_err());
+        assert_eq!(server.open_frame(&frame).unwrap(), b"secret");
     }
 }

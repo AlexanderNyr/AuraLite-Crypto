@@ -159,6 +159,11 @@ fn networked_validator_rejects_forged_vrf_leader_and_forged_bls_vote() {
         epoch_randomness: input.epoch_randomness,
         block: fake_block.clone(),
         vrf_proof: impostor_proof,
+        proposal_signature: net.nodes[impostor_idx].bls_secret.sign(
+            CHAIN,
+            Domain::Block,
+            b"bad proposal",
+        ),
     };
     let (proposal_msg, _) = net.nodes[impostor_idx]
         .gossip

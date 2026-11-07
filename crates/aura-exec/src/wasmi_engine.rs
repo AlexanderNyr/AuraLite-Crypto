@@ -327,6 +327,15 @@ fn nested_call(
     if !charged {
         host.out_of_gas = true;
     }
+    if let crate::contract::ExecStatus::Returned(value) = receipt.status
+        && value < 0
+    {
+        if let Some(undo) = undo {
+            host.undo_value(undo);
+        }
+        host.returndata.clear();
+        return i32::try_from(value).unwrap_or(AbiError::CalleeFailed.code());
+    }
     if !receipt.status.is_success() {
         if let Some(undo) = undo {
             host.undo_value(undo);
@@ -346,16 +355,15 @@ fn nested_call(
     if host.out_of_gas {
         return AbiError::OutOfGas.code();
     }
-    // A committed callee answers with its own status code, and the caller sees
-    // it: `0` is success, a negative value is the callee's refusal — the X5
-    // standards answer `-6` and `-24`, and a caller must be able to read that.
+    // A committed callee answers with its non-negative status code. Negative
+    // refusals were rolled back and propagated by the early return above.
     // Anything wider than an `i32` is a status this ABI cannot carry, so it is
     // clamped to the ABI's own "unknown" answer rather than truncated silently.
     match receipt.status {
         crate::contract::ExecStatus::Returned(value) => {
             i32::try_from(value).unwrap_or(AbiError::CalleeFailed.code())
         }
-        _ => 0,
+        _ => AbiError::CalleeFailed.code(),
     }
 }
 

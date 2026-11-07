@@ -1080,7 +1080,8 @@ impl HotUpgradableTestnet {
             let _ = node.finality.propose_at(timestamp_ms, txs.clone());
         }
 
-        let threshold = quorum_threshold(self.nodes.len() as u64);
+        let active: std::collections::BTreeSet<Address> =
+            self.nodes.iter().map(|n| n.address).collect();
         let votes: Vec<(BlsPublicKey, crate::qc::Vote)> = self
             .nodes
             .iter()
@@ -1093,7 +1094,7 @@ impl HotUpgradableTestnet {
             .collect();
 
         for node in &mut self.nodes {
-            let mut agg = QcAggregator::new(threshold);
+            let mut agg = QcAggregator::new(node.governance.chain_id.as_str(), active.clone());
             for (pk, vote) in &votes {
                 let (qc_opt, _) =
                     node.finality

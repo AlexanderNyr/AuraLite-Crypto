@@ -48,8 +48,8 @@ CASES = [
     (
         "NC-6 accountable safety must extract all double-signing validators in quorum intersection",
         MODEL,
-        "set_a.intersection(&set_b).copied().collect()",
-        "Vec::new()",
+        "        set_a.intersection(&set_b).copied().collect()\n    }",
+        "        Vec::new()\n    }",
         "safety_model::tests::accountable_safety_identifies_at_least_f_plus_1_equivocators_on_conflicting_qcs",
     ),
 ]

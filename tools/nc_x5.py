@@ -12,8 +12,9 @@ mistake a real implementer makes, not a typo:
   NC-4 the multisig does not check `executed`       -> a proposal pays out twice.
   NC-5 the session accepts oversize calldata        -> a host pays for work it should
                                                      have refused before the engine.
-  NC-6 a failed execution is still marked executed  -> a proposal the wallet could not
-                                                     fund can never be retried.
+  NC-6 a negative-return write commits             -> an ABI error can persist state.
+        The original X5 contract-only mutant is neutralized by the strengthened
+        executor rollback; this control now tests that independent defense.
 
 Rule (CONTRIBUTING.md §1): a gate that cannot go red is not a gate.
 
@@ -71,7 +72,7 @@ def expect_red(label: str, path: Path, old: str, new: str, cmd: list[str]) -> bo
         path.write_text(tampered, encoding="utf-8")
         os.utime(path, None)
         result = run(cmd)
-        went_red = result.returncode != 0
+        went_red = result.returncode != 0 and "test result: FAILED" in (result.stdout + result.stderr)
         shown = " ".join(cmd)
         raw = "\n".join((result.stdout + result.stderr).strip().splitlines()[-2:])
         snippet = re.sub(r"finished in [\d.]+s", "finished", raw)
@@ -128,7 +129,7 @@ def expect_red_after_rebuild(
             print("      " + "\n      ".join(build.stderr.strip().splitlines()[-3:]))
             return False
         result = run(cmd)
-        went_red = result.returncode != 0
+        went_red = result.returncode != 0 and "test result: FAILED" in (result.stdout + result.stderr)
         shown = " ".join(cmd)
         raw = "\n".join((result.stdout + result.stderr).strip().splitlines()[-2:])
         snippet = re.sub(r"finished in [\d.]+s", "finished", raw)
@@ -187,25 +188,27 @@ def main() -> int:
             "        if false {",
             ABI2_TEST,
         ),
-        expect_red_after_rebuild(
-            "NC-6 a failed execution is still marked executed",
-            MULTISIG,
-            """    if funds < amount {
-        return ERR_INSUFFICIENT_BALANCE as u32;
-    }
-    Slot::<u8>::with_key(pid_key(b"e", pid)).write(1);
-    if let Err(error) = transfer(&to, amount) {
-        // The money did not move, so the flag must not stay set: a proposal that
-        // failed is retryable.
-        unwrap(Slot::<u8>::with_key(pid_key(b"e", pid)).clear());
-        return error.code() as u32;
-    }""",
-            """    let _ = funds;
-    Slot::<u8>::with_key(pid_key(b"e", pid)).write(1);
-    if let Err(error) = transfer(&to, amount) {
-        return error.code() as u32;
-    }""",
-            MULTISIG_TEST,
+        expect_red(
+            "NC-6 negative-return state writes commit",
+            CONTRACT_RS,
+            """            Some(Outcome::Returned(value)) if !host.out_of_gas => {
+                host.rollback();
+                (
+                    ExecStatus::Returned(value),
+                    None,
+                    host.view.events().to_vec(),
+                    Vec::new(),
+                )
+            }""",
+            """            Some(Outcome::Returned(value)) if !host.out_of_gas => {
+                (
+                    ExecStatus::Returned(value),
+                    Some(host.view.diff(version)),
+                    host.view.events().to_vec(),
+                    Vec::new(),
+                )
+            }""",
+            ["cargo", "test", "-p", "aura-exec", "--test", "x2_abi", "negative_return_after_write_rolls_back", "--quiet"],
         ),
     ]
     print()

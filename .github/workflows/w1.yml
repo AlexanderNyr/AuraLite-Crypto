@@ -1,0 +1,61 @@
+name: W1 wallet prototype
+
+on:
+  push:
+  pull_request:
+
+# These gates test an experimental testnet component; they do not close W1 or
+# constitute a security audit. The weak-KDF feature is strictly test-only.
+jobs:
+  wallet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install optional test-only reference dependencies
+        run: python -m pip install -r tools/w1-reference-requirements.txt
+      - name: W1 tests and focused negative controls
+        run: make test-w1 && make nc-w1
+      - name: Ordinary KDF policy remains strict in release with test feature
+        run: cargo test --release -p aura-wallet --features insecure-test-kdf --test w1_keystore insecure_feature_does_not_weaken_normal_kdf_policy -- --exact
+      - name: Python and Rust interoperability vectors
+        run: make test-w1-interop
+
+  cross-check:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64-unknown-freebsd, x86_64-unknown-redox, x86_64-pc-windows-gnu]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+          targets: ${{ matrix.target }}
+      - name: Install Windows C cross-compiler
+        if: matrix.target == 'x86_64-pc-windows-gnu'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64
+      - name: Compile wallet targets (not a runtime test)
+        run: cargo check --locked -p aura-wallet --all-targets --target ${{ matrix.target }}
+
+  fuzz-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-11-03
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Parser fuzz smoke
+        run: cargo +nightly-2026-11-03 fuzz run fuzz_keystore_parse -- -max_total_time=15 -max_len=8192
+      - name: Decrypt fuzz smoke with test-only weak KDF
+        run: cargo +nightly-2026-11-03 fuzz run fuzz_keystore_decrypt --features insecure-wallet-fuzz -- -max_total_time=15 -max_len=128
+      - name: Scrypt fork differential fuzz smoke (test-only small costs)
+        run: cargo +nightly-2026-11-03 fuzz run fuzz_scrypt_differential -- -max_total_time=15 -max_len=128

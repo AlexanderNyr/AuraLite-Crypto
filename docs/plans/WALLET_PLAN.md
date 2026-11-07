@@ -13,7 +13,8 @@ procedure for generating genesis keys.
 
 ## Decisions
 
-- **D-W1.** BIP-39 (mnemonic) → BIP-32/44 derivation path `m/44'/ALCRY'/0'/0/i`.
+- **D-W1 (historical, superseded for Stage-1 testnet).** BIP-39 → BIP-32/44 path `m/44'/ALCRY'/0'/0/i`. This literal path is incompatible with hardened-only SLIP-0010 Ed25519.
+- **D-W1-testnet (accepted 2026-11-03).** Keep Ed25519 transaction keys; derive from an English BIP-39 seed with SLIP-0010 Ed25519 at `m/44'/1'/0'/0'/i'`, where all segments including `i` are hardened and `0 <= i < 2^31`. Coin type `1` is the shared testnet allocation, **not** an ALCRY mainnet allocation. This is BIP-44-shaped, not literal BIP-32/44 compatibility. It is testnet-only; mainnet curve/path/coin type and any migration strategy require a separate decision. Existing historical W0 evidence is not rewritten.
 - **D-W2.** Keystore: Argon2id + AES-256-GCM + scrypt parameters in the file; keys zeroized; never write a private key to logs.
 - **D-W3.** Offline signing as a first-class scenario: `unsigned tx` → QR/file → `signed tx` → broadcast.
 - **D-W4.** Treasury and validators — only M-of-N multisig, never one key.
@@ -23,7 +24,7 @@ procedure for generating genesis keys.
 | Phase | Title | DoD | Test gate |
 |---|---|---|---|
 | ✅ **W0** | Baseline | audit of "where keys could end up" + threat notes | NC: key in a log → gate red (tree search) |
-| **W1** | Crypto keystore | BIP-39/32/44, encryption, zeroize, versioned format | BIP-32 test vectors; 1000 wrong passwords → 0 decryptions; format fuzz |
+| **W1** | Crypto keystore | BIP-39, testnet SLIP-0010 Ed25519 hardened path (D-W1-testnet), encryption, zeroize, versioned format | BIP-39 and SLIP-0010 vectors plus independently verified testnet-path vectors; 1000 wrong passwords → 0 decryptions; format fuzz |
 | **W2** | `aura-wallet` CLI | `new/import/list/balance/transfer/sign/broadcast/stake/vote` | 40 CLI vectors, including rejection of a tx with a foreign chain-id |
 | **W3** | Offline signing | unsigned/signed tx format, QR/USB, verification on the online machine | air-gapped scenario end-to-end; NC: signature with a foreign domain → reject |
 | **W4** | Multisig | M-of-N contract, signature collection, timeouts, member rotation | 3-of-5: 3 collected → success, 2 → reject; NC: threshold bypass → red |
@@ -44,6 +45,16 @@ mainnet and ⏸ Stage 2.
 - Audited "where keys could end up" across 8 concrete exposure surfaces (`EXPOSURE_SURFACES`) and documented 6 threat notes (`THREAT_NOTES`, `T-W0-1`..`T-W0-6`) in `docs/evidence/w0/threat-notes.md`, locking the BIP-44 derivation path `m/44'/ALCRY'/0'/0/i` (`D-W1`).
 - Implemented the tree-search secret-material scanner (`scan_text_for_key_leaks` and `audit_tree_for_key_leaks`), verified against the live workspace (`0` findings across all repository logs and files), a poisoned-log tree-search gate (`key in a log -> gate red`), and 64 deterministic vectors in `crates/aura-wallet/tests/fixtures/w0_key_audit.txt`.
 - `make nc-w0`: 6/6 library unit-test mutation controls pass (`339/339` cumulative negative controls). Evidence: `docs/evidence/w0/`.
+
+### W1 prototype (in progress; not a phase receipt)
+
+The current working tree contains an experimental encrypted keystore and Ed25519
+SLIP-0010 derivation matching the accepted D-W1-testnet deviation. It does not
+claim literal BIP-32/44 or mainnet compatibility. W1 remains open pending
+a frozen interoperability specification, longer fuzzing, phase evidence and review;
+mainnet allocation and migration policy remain separate decisions. See
+[`WIP_SECURITY_AND_W1.md`](../WIP_SECURITY_AND_W1.md) for gates and limitations.
+W2–W4 remain open.
 
 ## Risks
 

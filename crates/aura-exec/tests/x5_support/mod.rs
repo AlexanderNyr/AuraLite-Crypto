@@ -175,22 +175,14 @@ pub fn storage(tree: &MerkleTree, contract: [u8; 20], key: &[u8]) -> Option<Vec<
 
 /// Assert that a call changed nothing in the tree's content.
 ///
-/// X2's rule is that `Returned(_)` — any value, negative included — is a
-/// *successful* call and gets a diff. A standard that answers "not enough
-/// balance" with `-6` is therefore still a committed call; what makes that honest
-/// is that it writes nothing, so the change set is empty and the entries of the
-/// tree are unchanged. A trap would give `diff: None` and throw the reason away,
-/// which is why the standards do not use one for a business-level refusal.
+/// Negative contract return codes roll back the entire call; an empty diff is
+/// also acceptable for positive read-only calls.
 pub fn assert_no_effect(receipt: &ContractReceipt, before: &MerkleTree) {
-    let diff = receipt
-        .diff
-        .as_ref()
-        .expect("a returned status carries a diff");
-    assert!(
-        diff.changes.is_empty(),
-        "a refusal must not write: {} entries",
-        diff.changes.len()
-    );
+    if let Some(diff) = &receipt.diff {
+        assert!(diff.changes.is_empty(), "a refusal must not write");
+    } else {
+        assert!(matches!(receipt.status, ExecStatus::Returned(code) if code < 0));
+    }
     let after = commit(before, receipt);
     assert_eq!(
         after.entries(),

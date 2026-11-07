@@ -719,7 +719,7 @@ mod tests {
             // Collect 2f+1 precommit votes from the active validator set (3 of 4 before H, 5 of 7 after H).
             let n_active = staking.validator_set().len() as u64;
             let needed = quorum_threshold(n_active) as usize;
-            let mut agg = QcAggregator::new(quorum_threshold(n_active));
+            let mut agg = QcAggregator::new(CHAIN, staking.validator_set().active_addresses());
             let mut qc_opt = None;
             for (idx, addr) in addrs.iter().enumerate() {
                 if !staking.validator_set().is_active(addr) {

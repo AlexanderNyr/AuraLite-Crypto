@@ -56,7 +56,13 @@ fn build_qc(
     block_hash: Hash,
     signers: usize,
 ) -> QuorumCertificate {
-    let mut agg = QcAggregator::new(signers as u64);
+    let mut agg = QcAggregator::with_signers(
+        chain_id.as_str(),
+        &vals[0..signers]
+            .iter()
+            .map(|v| v.record.bls_pubkey.clone())
+            .collect::<Vec<_>>(),
+    );
     let mut out = None;
     for v in &vals[0..signers] {
         let mut msg = Vec::with_capacity(49);
@@ -142,7 +148,7 @@ fn b8_deep_reorg_past_finalized_checkpoint_is_rejected_and_slashes_offender() {
     let genesis_qc = build_qc(&vals, &chain_id, 0, 0, genesis.block.block_hash, 3);
     let mut tree = ForkChoiceTree::new(
         chain_id.clone(),
-        4,
+        vals.iter().map(|v| v.record.address).collect(),
         genesis.clone(),
         FinalizedCheckpoint {
             height: 0,
@@ -174,8 +180,26 @@ fn b8_deep_reorg_past_finalized_checkpoint_is_rejected_and_slashes_offender() {
         child_qc: qc2.clone(),
         grandchild_qc: qc3,
     };
-    lc_proof.verify(&chain_id, 4).unwrap();
+    lc_proof
+        .verify(
+            &chain_id,
+            &vals.iter().map(|v| v.record.address).collect(),
+            lc_proof.state_root,
+        )
+        .unwrap();
 
+    let trusted_root = Hash::from_bytes([0x30; 32]);
+    let proof_child = FinalityBlock::propose(1, 2, &b2.block, 4_000, vec![]);
+    let proof_grandchild = FinalityBlock::propose(1, 3, &proof_child, 5_000, vec![]);
+    let checkpoint_proof = ConsensusLightClientProof {
+        state_root: trusted_root,
+        target_block: b2.block.clone(),
+        child_qc: build_qc(&vals, &chain_id, 1, 2, proof_child.block_hash, 3),
+        grandchild_qc: build_qc(&vals, &chain_id, 1, 3, proof_grandchild.block_hash, 3),
+        target_qc: qc2.clone(),
+        child_block: proof_child,
+        grandchild_block: proof_grandchild,
+    };
     tree.update_finalized_checkpoint(
         FinalizedCheckpoint {
             height: 2,
@@ -184,6 +208,8 @@ fn b8_deep_reorg_past_finalized_checkpoint_is_rejected_and_slashes_offender() {
             state_root: Hash::from_bytes([0x30; 32]),
             commit_qc: qc2,
         },
+        &checkpoint_proof,
+        trusted_root,
         3,
     )
     .unwrap();

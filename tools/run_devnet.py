@@ -95,7 +95,10 @@ def main() -> int:
         cwd=REPO,
         check=True,
     )
-    aurad_bin = REPO / "target/debug/aurad"
+    target_dir = Path(os.environ.get("CARGO_TARGET_DIR", REPO / "target"))
+    if not target_dir.is_absolute():
+        target_dir = REPO / target_dir
+    aurad_bin = target_dir / "debug" / "aurad"
     if not aurad_bin.exists():
         raise FileNotFoundError(f"aurad binary not found at {aurad_bin}")
 

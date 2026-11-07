@@ -474,6 +474,11 @@ impl<E: Engine> Lifecycle<E> {
         code: Vec<u8>,
     ) -> Result<LifecycleReceipt, LifecycleError> {
         self.validate_code(&code)?;
+        if call.caller != call.contract {
+            return Err(LifecycleError::Refused(SandboxError::Limit(
+                "upgrade_authorization",
+            )));
+        }
         let mut session = self.executor.open(base, call);
         let current = code_of(session.view(), &call.contract)?
             .ok_or(LifecycleError::NotDeployed(call.contract))?;

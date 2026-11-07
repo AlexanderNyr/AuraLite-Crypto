@@ -344,6 +344,17 @@ struct PendingBlock {
     after_accounts: BTreeMap<[u8; 20], Account>,
 }
 
+struct PreparedBlock {
+    block: Block,
+    finality_txs: Vec<Vec<u8>>,
+    timestamp_ms: u64,
+    count: usize,
+    included_txids: Vec<Hash>,
+    receipts: Vec<TransactionReceipt>,
+    changes: Vec<StateChange>,
+    after_accounts: BTreeMap<[u8; 20], Account>,
+}
+
 /// Single-process D2 transaction sequencer.
 pub struct Pipeline {
     chain_id: String,
@@ -555,13 +566,12 @@ impl Pipeline {
         Ok(outcome.txid)
     }
 
-    /// Propose one block, run its transactions through the D2 executor and
-    /// B3 one-validator QC path, then persist any blocks newly finalized.
-    ///
-    /// Empty calls produce nil blocks. This lets a local pipeline advance the
-    /// three-chain rule after a transaction block without inventing work.
-    pub fn produce_block(&mut self) -> Result<BlockProduction, PipelineError> {
-        let _span = tracing::info_span!("aura.block.produce").entered();
+    /// Compute the next candidate without changing mempool, consensus, or storage.
+    pub fn preview_block(&self) -> Result<Block, PipelineError> {
+        Ok(self.prepare_block()?.block)
+    }
+
+    fn prepare_block(&self) -> Result<PreparedBlock, PipelineError> {
         let height = self
             .proposed_height
             .checked_add(1)
@@ -611,7 +621,6 @@ impl Pipeline {
             .ok_or(PipelineError::AmountOverflow)?;
         let mut finality_txs = txs.iter().map(Tx::to_bytes).collect::<Vec<_>>();
         finality_txs.sort();
-        let finality_block = self.consensus.propose_at(timestamp_ms, finality_txs);
         let qc_bytes = self.latest_qc.as_ref().map(encode_qc);
         let block = Block::new(
             HeaderParams {
@@ -633,17 +642,47 @@ impl Pipeline {
         block.validate(&self.chain_id)?;
         block.validate_transactions(&self.chain_id)?;
 
+        Ok(PreparedBlock {
+            block,
+            finality_txs,
+            timestamp_ms,
+            count,
+            included_txids,
+            receipts,
+            changes,
+            after_accounts,
+        })
+    }
+
+    /// Propose one local one-validator block and persist newly finalized blocks.
+    /// This method alone is not a multi-validator commit protocol.
+    pub fn produce_block(&mut self) -> Result<BlockProduction, PipelineError> {
+        let _span = tracing::info_span!("aura.block.produce").entered();
+        let PreparedBlock {
+            block,
+            finality_txs,
+            timestamp_ms,
+            count,
+            included_txids,
+            receipts,
+            changes,
+            after_accounts,
+        } = self.prepare_block()?;
+        let height = block.header.height.value();
+        let finality_block = self.consensus.propose_at(timestamp_ms, finality_txs);
         let vote = self.consensus.vote_for(
             &self.validator,
             self.proposer,
             &finality_block,
             VoteType::Precommit,
         );
-        let mut aggregator = QcAggregator::new(1);
+        let mut aggregator =
+            QcAggregator::with_signers(&self.chain_id, &[self.validator.public_key()]);
         let (qc, newly_finalized) =
             self.consensus
                 .aggregate_and_commit(&mut aggregator, self.validator.public_key(), vote);
         let qc = qc.ok_or(PipelineError::NoQuorum)?;
+        self.consensus.change_round();
         let finality_hash = finality_block.block_hash;
         let committed = CommittedBlock {
             block: block.clone(),

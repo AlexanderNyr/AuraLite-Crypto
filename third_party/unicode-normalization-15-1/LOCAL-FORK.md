@@ -1,0 +1,7 @@
+# Local 15.1 normalization profile
+
+This directory is a renamed local copy of the upstream `unicode-normalization` 0.1.23 crate. The source archive was downloaded from crates.io and checked against SHA-256 `a56d1686db2308d901306f92a263857ef59ea39678a5458e7cb17f01415101f5`; its generated tables declare `UNICODE_VERSION = (15, 1, 0)`.
+
+The source and generated tables are retained from that archive. The local `Cargo.toml` changes the package name to `unicode-normalization-15-1` so this workspace can compile it alongside upstream `unicode-normalization` 0.1.26 (the latter is semver-compatible, and Cargo resolves only one version of a semver-compatible package). Its `tinyvec` requirement is pinned to the workspace's exact `=1.13.3`, and `autobenches = false` excludes the upstream nightly benchmark target, which refers to the original crate name and is not needed by this dependency. `Cargo.toml.orig` preserves the upstream normalized manifest for provenance. `src/lib.rs` adds crate-level Clippy allowances for three style lints that would otherwise require changing the frozen 0.1.23 algorithm/tables under `-D warnings`, and aliases the local crate name in its doctest example. These are build/documentation adaptations only; no normalization logic or tables have been edited.
+
+The upstream crate is licensed MIT OR Apache-2.0; the upstream license and copyright files are retained here. This is a W1-specific frozen table set, not a general-purpose recommendation to pin old Unicode behavior.

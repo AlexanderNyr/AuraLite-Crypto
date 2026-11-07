@@ -76,11 +76,11 @@ def main() -> int:
             "baseline::tests::key_in_a_log_turns_tree_search_gate_red",
         ),
         (
-            "NC-2 W0 layer survey must report placeholders until W1-W4 modules exist",
+            "NC-2 layer survey must report only W1 keystore implemented until W2-W4 exist",
             BASELINE,
             "            } else {\n                Presence::Placeholder\n            }",
             "            } else {\n                Presence::Implemented\n            }",
-            "baseline::tests::w0_all_layers_are_placeholders",
+            "baseline::tests::w1_survey_reports_only_keystore_implemented",
         ),
         (
             "NC-3 report must refuse a directory without crates/",

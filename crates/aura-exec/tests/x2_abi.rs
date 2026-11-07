@@ -509,3 +509,29 @@ fn out_of_gas_is_reported_as_out_of_gas() {
     assert!(result.receipt.events.is_empty());
     assert!(result.receipt.diff.is_none());
 }
+
+#[test]
+fn negative_return_after_write_rolls_back() {
+    // Start from the pinned write-then-read module. Replace its final read with
+    // NOPs followed by i32.const -1, keeping all wasm section sizes unchanged.
+    let mut vector = parse()
+        .into_iter()
+        .find(|v| v.label == "write_then_read")
+        .unwrap();
+    let read = [
+        0x41, 0x00, 0x41, 0x07, 0x41, 0xc0, 0x00, 0x41, 0xc0, 0x00, 0x10, 0x01,
+    ];
+    let offset = vector
+        .wasm
+        .windows(read.len())
+        .position(|w| w == read)
+        .expect("pinned read sequence");
+    vector.wasm[offset..offset + read.len() - 2].fill(0x01);
+    vector.wasm[offset + read.len() - 2..offset + read.len()].copy_from_slice(&[0x41, 0x7f]);
+    let before = base_tree(&vector);
+    let (after, result) = run(&vector);
+    assert_eq!(result.receipt.status, ExecStatus::Returned(-1));
+    assert!(result.receipt.diff.is_none());
+    assert!(result.receipt.events.is_empty());
+    assert_eq!(after.entries(), before.entries());
+}

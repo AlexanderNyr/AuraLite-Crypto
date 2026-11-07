@@ -2,7 +2,7 @@
 """Generate W0 baseline and key-exposure audit fixtures.
 
 Writes:
-  - crates/aura-wallet/tests/fixtures/w0_baseline.txt
+  - crates/aura-wallet/tests/fixtures/w1_baseline.txt (live survey; W0 remains historical)
   - crates/aura-wallet/tests/fixtures/w0_key_audit.txt (64 deterministic vectors)
 """
 
@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-BASELINE_OUT = REPO / "crates" / "aura-wallet" / "tests" / "fixtures" / "w0_baseline.txt"
+BASELINE_OUT = REPO / "crates" / "aura-wallet" / "tests" / "fixtures" / "w1_baseline.txt"
 VECTORS_OUT = REPO / "crates" / "aura-wallet" / "tests" / "fixtures" / "w0_key_audit.txt"
 
 

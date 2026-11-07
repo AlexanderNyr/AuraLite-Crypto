@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use aura_block::Block;
 use aura_consensus::bls::{BlsPublicKey, BlsSecretKey, address_from_public_key};
 use aura_consensus::finality::verify_vote;
 use aura_consensus::qc::{QcAggregator, QuorumCertificate, Vote, VoteType};
@@ -185,14 +186,11 @@ pub fn ingest_devnet_gossip(
     }
 }
 
-/// Compute the BFT `2f + 1` quorum threshold for `validator_count` validators.
+/// Compute the count quorum `n - floor((n - 1) / 3)` for `n` validators.
 ///
 /// For the 4-validator devnet (`f = 1`), this returns `3`.
 pub fn devnet_quorum_threshold(validator_count: u64) -> u64 {
-    if validator_count == 0 {
-        return 1;
-    }
-    (2 * validator_count) / 3 + 1
+    aura_consensus::qc::quorum_threshold(validator_count)
 }
 
 /// Verify and aggregate a set of validator BLS votes for a devnet round.
@@ -204,11 +202,11 @@ pub fn devnet_quorum_threshold(validator_count: u64) -> u64 {
 /// 3. The resulting [`QuorumCertificate`] passes `qc.verify(chain_id, Domain::Vote)`.
 pub fn try_commit_round_votes(
     chain_id: &str,
-    validator_count: u64,
+    validator_keys: &[BlsPublicKey],
     votes: &[(BlsPublicKey, Vote)],
 ) -> Result<Option<QuorumCertificate>, DevnetError> {
-    let required = devnet_quorum_threshold(validator_count);
-    let mut agg = QcAggregator::new(required);
+    let required = devnet_quorum_threshold(validator_keys.len() as u64);
+    let mut agg = QcAggregator::with_signers(chain_id, validator_keys);
     let mut formed: Option<QuorumCertificate> = None;
 
     for (pk, vote) in votes {
@@ -236,6 +234,18 @@ pub fn try_commit_round_votes(
     qc.verify(chain_id, Domain::Vote)
         .map_err(|e| DevnetError::InvalidVoteOrQc(e.to_string()))?;
     Ok(Some(qc))
+}
+
+/// Canonical devnet proposal commitment: binds the round to the actual block,
+/// transaction root and post-state root. A round-only hash is never sufficient.
+pub fn devnet_proposal_hash(round: u64, block: &Block) -> Hash {
+    let mut payload = Vec::with_capacity(8 + 8 + 32 * 3);
+    payload.extend_from_slice(&round.to_le_bytes());
+    payload.extend_from_slice(&block.header.height.value().to_le_bytes());
+    payload.extend_from_slice(block.block_hash().as_bytes());
+    payload.extend_from_slice(block.header.tx_root.as_bytes());
+    payload.extend_from_slice(block.header.state_root.as_bytes());
+    aura_crypto::hash_domain(DEVNET_CHAIN_ID, Domain::Block, &payload)
 }
 
 /// In-process 4-validator devnet cluster combining `FourValidatorNetwork` (B5 + N1/N2)
@@ -321,8 +331,9 @@ impl DevnetCluster {
     /// Run one consensus + execution round across all online validators.
     ///
     /// Requires at least `devnet_quorum_threshold(4) == 3` online validators to
-    /// form a verified 3-of-4 BLS `QuorumCertificate` over N2 gossip before
-    /// advancing the online validators' `Pipeline`s.
+    /// form a verified 3-of-4 BLS `QuorumCertificate` for matching previews
+    /// before advancing local pipelines. This is still a devnet simulation,
+    /// not a distributed commit protocol or safety boundary.
     pub fn step_block(&mut self) -> Result<QuorumCertificate, DevnetError> {
         let online_count = self.consensus_net.nodes.iter().filter(|n| n.online).count() as u64;
         let required = devnet_quorum_threshold(DEVNET_VALIDATOR_COUNT as u64);
@@ -334,23 +345,67 @@ impl DevnetCluster {
         }
 
         let ts = self.next_timestamp_ms;
-        self.next_timestamp_ms = self.next_timestamp_ms.saturating_add(1_000);
-
-        let qc = self
-            .consensus_net
-            .run_round(ts, vec![format!("round-{ts}").into_bytes()])?;
-        if (qc.signatures.len() as u64) < required {
-            return Err(DevnetError::InsufficientQuorum {
-                got: qc.signatures.len() as u64,
-                required,
-            });
-        }
-
+        let round = ts; // deterministic devnet round identifier
+        let mut proposals = Vec::new();
         for idx in 0..DEVNET_VALIDATOR_COUNT {
             if self.consensus_net.nodes[idx].online {
-                let _ = self.pipelines[idx].produce_block()?;
+                let block = self.pipelines[idx].preview_block()?;
+                proposals.push((idx, devnet_proposal_hash(round, &block)));
             }
         }
+        let canonical = proposals
+            .first()
+            .map(|(_, h)| *h)
+            .ok_or(DevnetError::InsufficientQuorum { got: 0, required })?;
+        if proposals.iter().any(|(_, h)| *h != canonical) {
+            return Err(DevnetError::InvalidVoteOrQc(
+                "online validators produced divergent blocks/state for the same round".to_owned(),
+            ));
+        }
+        let validator_keys: Vec<BlsPublicKey> = DEVNET_BLS_SEEDS
+            .iter()
+            .map(|seed| BlsSecretKey::from_seed(seed).public_key())
+            .collect();
+        let mut votes = Vec::new();
+        for (idx, _) in &proposals {
+            let sk = BlsSecretKey::from_seed(&DEVNET_BLS_SEEDS[*idx]);
+            let payload = [
+                &1u64.to_le_bytes()[..],
+                &round.to_le_bytes()[..],
+                canonical.as_bytes(),
+                &[VoteType::Precommit as u8],
+            ]
+            .concat();
+            votes.push((
+                sk.public_key(),
+                Vote {
+                    view: 1,
+                    round,
+                    block_hash: canonical,
+                    validator: address_from_public_key(&sk.public_key()),
+                    vote_type: VoteType::Precommit,
+                    signature: sk.sign(DEVNET_CHAIN_ID, Domain::Vote, &payload),
+                },
+            ));
+        }
+        let qc = try_commit_round_votes(DEVNET_CHAIN_ID, &validator_keys, &votes)?.ok_or(
+            DevnetError::InsufficientQuorum {
+                got: votes.len() as u64,
+                required,
+            },
+        )?;
+        // Publish only after quorum. This remains a simulation: local
+        // pipelines still use one-validator finality, and cross-node storage
+        // commits are not a crash-atomic distributed transaction.
+        for (idx, _) in proposals {
+            let production = self.pipelines[idx].produce_block()?;
+            if devnet_proposal_hash(round, &production.block) != canonical {
+                return Err(DevnetError::InvalidVoteOrQc(
+                    "pipeline changed after preview".to_owned(),
+                ));
+            }
+        }
+        self.next_timestamp_ms = self.next_timestamp_ms.saturating_add(1_000);
         Ok(qc)
     }
 }
@@ -435,8 +490,15 @@ pub fn run_devnet_worker(
                     && let Ok(decoded) = GossipMessage::decode(&raw)
                 {
                     let sender = decoded.sender_peer_id;
-                    let _ = ingest_devnet_gossip(&mut gossip, sender, &raw, 1_700_000_000_000);
-                    if let Ok(tx) = Tx::from_canonical_bytes(&decoded.payload)
+                    if decoded.topic != GossipTopic::Tx {
+                        continue;
+                    }
+                    let Ok(Some(accepted)) =
+                        ingest_devnet_gossip(&mut gossip, sender, &raw, 1_700_000_000_000)
+                    else {
+                        continue;
+                    };
+                    if let Ok(tx) = Tx::from_canonical_bytes(&accepted.payload)
                         && let Ok(mut guard) = pipeline.lock()
                     {
                         let _ = guard.submit(tx);
@@ -456,17 +518,49 @@ pub fn run_devnet_worker(
         // 3. Publish our signed BLS Precommit vote for `current_round` wrapped in
         //    an N2 `GossipTopic::Vote` wire frame.
         let vote_path = wire_dir.join(format!("round-{current_round}-vote-{validator_index}.wire"));
+        let proposal_path = wire_dir.join(format!(
+            "round-{current_round}-proposal-{validator_index}.hash"
+        ));
+        if !proposal_path.exists() {
+            let preview = pipeline
+                .lock()
+                .ok()
+                .and_then(|guard| guard.preview_block().ok());
+            let Some(block) = preview else {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            };
+            let block_hash = devnet_proposal_hash(current_round, &block);
+            let _ = write_atomic(&proposal_path, block_hash.as_bytes());
+        }
         if !vote_path.exists() {
-            let block_hash =
-                aura_crypto::hash_domain(chain_id, Domain::Block, &current_round.to_le_bytes());
+            let Ok(raw_hash) = fs::read(&proposal_path) else {
+                continue;
+            };
+            let Ok(bytes) = <[u8; 32]>::try_from(raw_hash.as_slice()) else {
+                continue;
+            };
+            let block_hash = Hash::from_bytes(bytes);
+            // Vote only for a proposal advertised by at least a quorum of validators.
+            let mut matching = 0usize;
+            for idx in 0..DEVNET_VALIDATOR_COUNT {
+                let ppath = wire_dir.join(format!("round-{current_round}-proposal-{idx}.hash"));
+                if fs::read(ppath).ok().as_deref() == Some(block_hash.as_bytes()) {
+                    matching += 1;
+                }
+            }
+            if matching < DEVNET_QUORUM_THRESHOLD as usize {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
             let mut payload = Vec::with_capacity(8 + 8 + 32 + 1);
-            payload.extend_from_slice(&0u64.to_le_bytes());
+            payload.extend_from_slice(&1u64.to_le_bytes());
             payload.extend_from_slice(&current_round.to_le_bytes());
             payload.extend_from_slice(block_hash.as_bytes());
             payload.push(VoteType::Precommit as u8);
             let sig = bls_sk.sign(chain_id, Domain::Vote, &payload);
             let vote = Vote {
-                view: 0,
+                view: 1,
                 round: current_round,
                 block_hash,
                 validator: validator_addr,
@@ -481,6 +575,14 @@ pub fn run_devnet_worker(
                 let _ = write_atomic(&vote_path, &msg.encode());
             }
         }
+
+        let Ok(raw_proposal_hash) = fs::read(&proposal_path) else {
+            continue;
+        };
+        let Ok(proposal_bytes) = <[u8; 32]>::try_from(raw_proposal_hash.as_slice()) else {
+            continue;
+        };
+        let expected_hash = Hash::from_bytes(proposal_bytes);
 
         // 4. Collect vote wire frames from all online validators until at least
         //    `devnet_quorum_threshold(4) == 3` valid votes are present.
@@ -498,6 +600,9 @@ pub fn run_devnet_worker(
             {
                 continue;
             }
+            if msg.verify(chain_id, 4096).is_err() {
+                continue;
+            }
             if idx != validator_index {
                 let _ = ingest_devnet_gossip(
                     &mut gossip,
@@ -509,18 +614,36 @@ pub fn run_devnet_worker(
             let Ok(env) = VoteEnvelope::from_bytes(&msg.payload) else {
                 continue;
             };
-            if env.public_key != all_bls_pks[idx] {
+            if env.public_key != all_bls_pks[idx]
+                || env.vote.view != 1
+                || env.vote.round != current_round
+                || env.vote.block_hash != expected_hash
+                || env.vote.vote_type != VoteType::Precommit
+            {
                 continue;
             }
             collected_votes.push((env.public_key, env.vote));
         }
 
-        if let Ok(Some(_qc)) =
-            try_commit_round_votes(chain_id, DEVNET_VALIDATOR_COUNT as u64, &collected_votes)
-        {
-            if let Ok(mut guard) = pipeline.lock()
-                && let Ok(production) = guard.produce_block()
-            {
+        if let Ok(Some(qc)) = try_commit_round_votes(chain_id, &all_bls_pks, &collected_votes) {
+            if qc.block_hash != expected_hash || qc.round != current_round || qc.view != 1 {
+                continue;
+            }
+            if let Ok(mut guard) = pipeline.lock() {
+                // RPC/mempool input can change while votes are collected; fail
+                // closed if the current candidate no longer matches the QC.
+                let Ok(candidate) = guard.preview_block() else {
+                    continue;
+                };
+                if devnet_proposal_hash(current_round, &candidate) != expected_hash {
+                    continue;
+                }
+                let Ok(production) = guard.produce_block() else {
+                    continue;
+                };
+                if devnet_proposal_hash(current_round, &production.block) != expected_hash {
+                    continue;
+                }
                 for committed in production.committed {
                     metrics.record_committed_block(
                         committed.block.header.gas_used.value(),
@@ -702,9 +825,13 @@ mod tests {
 
     #[test]
     fn two_votes_of_four_never_commit() {
+        let all_bls_pks: Vec<BlsPublicKey> = DEVNET_BLS_SEEDS
+            .iter()
+            .map(|seed| BlsSecretKey::from_seed(seed).public_key())
+            .collect();
         let block_hash = Hash::from_bytes([0x42; 32]);
         let mut payload = Vec::new();
-        payload.extend_from_slice(&0u64.to_le_bytes());
+        payload.extend_from_slice(&1u64.to_le_bytes());
         payload.extend_from_slice(&1u64.to_le_bytes());
         payload.extend_from_slice(block_hash.as_bytes());
         payload.push(VoteType::Precommit as u8);
@@ -718,7 +845,7 @@ mod tests {
             votes.push((
                 pk,
                 Vote {
-                    view: 0,
+                    view: 1,
                     round: 1,
                     block_hash,
                     validator,
@@ -729,16 +856,16 @@ mod tests {
         }
 
         // Only 2 of 4 votes -> must return Ok(None) (no commit!).
-        let two_votes =
-            try_commit_round_votes(DEVNET_CHAIN_ID, 4, &votes[0..2]).expect("valid votes");
+        let two_votes = try_commit_round_votes(DEVNET_CHAIN_ID, &all_bls_pks, &votes[0..2])
+            .expect("valid votes");
         assert!(
             two_votes.is_none(),
             "two votes out of four validators must never form a QC"
         );
 
         // 3 of 4 votes -> forms a verified QC.
-        let three_votes =
-            try_commit_round_votes(DEVNET_CHAIN_ID, 4, &votes[0..3]).expect("valid votes");
+        let three_votes = try_commit_round_votes(DEVNET_CHAIN_ID, &all_bls_pks, &votes[0..3])
+            .expect("valid votes");
         assert_eq!(three_votes.expect("3 of 4 forms QC").signatures.len(), 3);
     }
 
@@ -772,6 +899,31 @@ mod tests {
             let acct = cluster.pipelines[idx].account(&recipient).unwrap();
             assert_eq!(acct.balance, Amount::from_units(50_000));
         }
+        let _ = fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn divergent_proposals_do_not_advance_pipeline_before_quorum() {
+        let dir = temp_dir("divergent-preview");
+        let mut cluster = DevnetCluster::open(&dir).unwrap();
+        let recipient = Address::from_bytes([0x77; 20]);
+        let tx = build_faucet_transfer(DEVNET_CHAIN_ID, recipient, Amount::from_units(50_000), 0)
+            .unwrap();
+        let txid = cluster.pipelines[0].submit(tx).unwrap();
+        let before: Vec<_> = cluster
+            .pipelines
+            .iter()
+            .map(|p| p.preview_block().unwrap())
+            .collect();
+        assert_ne!(before[0].block_hash(), before[1].block_hash());
+        assert!(matches!(
+            cluster.step_block(),
+            Err(DevnetError::InvalidVoteOrQc(_))
+        ));
+        for (idx, pipeline) in cluster.pipelines.iter().enumerate() {
+            assert_eq!(pipeline.committed_height(), 0);
+            assert_eq!(pipeline.preview_block().unwrap(), before[idx]);
+        }
+        assert!(cluster.pipelines[0].contains_pending_txid(&txid));
         let _ = fs::remove_dir_all(&dir);
     }
 }

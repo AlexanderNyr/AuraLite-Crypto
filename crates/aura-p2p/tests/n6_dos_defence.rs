@@ -51,7 +51,7 @@ fn malicious_peer_sending_10k_msgs_per_sec_is_isolated_while_validators_keep_fin
             if i % 50 == 49 {
                 flood_msg.raw_size_bytes = limits.max_frame_bytes + 1024;
             }
-            match engine.ingest(flood_msg, step_ms) {
+            match engine.ingest(attacker.peer_id(), flood_msg, step_ms) {
                 Ok(()) => attacker_accepted += 1,
                 Err(_) => attacker_rejected += 1,
             }
@@ -79,7 +79,7 @@ fn malicious_peer_sending_10k_msgs_per_sec_is_isolated_while_validators_keep_fin
             },
         );
         engine
-            .ingest(proposal_env, step_ms)
+            .ingest(leader.peer_id(), proposal_env, step_ms)
             .expect("honest leader proposal must be admitted despite 10k msg/s flood");
 
         let mut qc_signers = Vec::new();
@@ -95,7 +95,7 @@ fn malicious_peer_sending_10k_msgs_per_sec_is_isolated_while_validators_keep_fin
                 },
             );
             engine
-                .ingest(vote_env, step_ms)
+                .ingest(voter.peer_id(), vote_env, step_ms)
                 .expect("honest validator vote must be admitted despite 10k msg/s flood");
             qc_signers.push(voter);
         }

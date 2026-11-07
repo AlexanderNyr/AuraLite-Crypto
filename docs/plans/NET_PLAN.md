@@ -58,21 +58,43 @@ down a validator.
 - **Code:** `crates/aura-p2p/src/identity.rs`, `crates/aura-p2p/src/ban.rs`,
   `crates/aura-p2p/src/transport.rs`, `crates/aura-p2p/src/error.rs`,
   `crates/aura-p2p/src/baseline.rs`, `crates/aura-p2p/tests/n1_transport.rs`,
+  `crates/aura-p2p/tests/n1_spoofed_peer_ban.rs`,
   `crates/aura-p2p/tests/fixtures/n1_baseline.txt`, `tools/gen_n1_vectors.py`,
-  `tools/nc_n1.py`, and `tools/write_n1_evidence.py`.
+  `tools/nc_n1.py`, `tools/nc_p2p_review.py`, and `tools/write_n1_evidence.py`.
 - **Identity & handshake (`D-N1`):** `PeerId = BLAKE3(ed25519_pubkey)` verified
   in constant time (`PeerId::verify_public_key`); domain-separated Ed25519
   transcript signatures (`AURA_P2P_HANDSHAKE_V1\0`) binding `protocol_version`,
   `chain_id`, initiator/responder role, challenges, and public key; directional
   BLAKE3-keyed session encryption + MAC (`SessionCipher`) with monotonic
   sequence numbers; deterministic `BanList` for `PeerId` and `IpAddr`.
-- **Swarm & identity substitution gate:** 10 live `TransportSwarm` nodes connect
-  over TCP (`127.0.0.1:0`), authenticate each other, reject identity
-  substitution (`P2pError::IdentitySubstitution`) and automatically ban the
-  impostor `PeerId`, reject self-connections, and enforce peer/IP bans.
-- **Gates:** `make test-n1`, `make nc-n1` (**6/6** exact library unit-test
-  mutations), `make nc-all` (**237/237**), `make test` (**ALL GATES GREEN**).
-  Evidence: `docs/evidence/n1/`.
+- **Swarm & identity substitution gate:** live `TransportSwarm` nodes connect
+  over TCP, authenticate each other, reject identity substitution
+  (`P2pError::IdentitySubstitution`) without automatically banning another
+  endpoint, reject self-connections, and enforce explicit peer/IP bans.
+- **Historical gates:** the phase-close receipts in `docs/evidence/n1/`
+  describe the earlier implementation and are intentionally preserved; see the
+  security-review follow-up below for current behavior.
+
+#### N1 security-review follow-up (2026-11-05; WIP)
+
+The earlier transport automatically banned `HandshakeHello.claimed_peer_id`
+for a claimed-ID/public-key mismatch, an expected-peer mismatch, or an invalid
+Ed25519 transcript signature. Those values were attacker-controlled until a
+valid signature proved possession of the corresponding key, so a remote peer
+could permanently ban a victim by spoofing its public PeerId. The handshake no
+longer creates identity bans on these unauthenticated failure paths; identity-
+ban-list checks occur only after valid transcript-signature verification. An
+expected-peer mismatch is rejected without an automatic ban, even after
+authentication, because reaching a different honest endpoint is not by itself
+evidence of malicious behavior. No automatic IP ban was added.
+
+Live regressions cover inbound claimed-ID mismatch, inbound and outbound
+invalid signatures, authenticated outbound identity substitution, and retention
+of ban checks for authenticated peers. `make nc-p2p-review` has four mutation
+controls that reintroduce the vulnerable ban behaviors
+and require the named regression tests to go red. Historical N1 reports and
+checksums remain unchanged. This correction is WIP and has not received an
+independent review or production approval.
 
 ### N2 receipt
 

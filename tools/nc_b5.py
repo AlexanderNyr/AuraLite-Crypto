@@ -33,8 +33,8 @@ CASES = [
     (
         "NC-4 epoch randomness derivation must verify the boundary QC",
         VRF_LEADER,
-        "    boundary_qc\n        .verify(chain_id, Domain::Vote)\n        .map_err(|_| VrfError::InvalidBoundaryQc)?;",
-        "    let _ = &boundary_qc;",
+        "    boundary_qc\n        .verify_with_members(chain_id, Domain::Vote, active)\n        .map_err(|_| VrfError::InvalidBoundaryQc)?;",
+        "    let _ = active;",
         "vrf_leader::tests::epoch_randomness_rejects_unverified_boundary_qc",
     ),
     (

@@ -918,7 +918,13 @@ mod tests {
 
         // 6. ExtendedDowntime by validator 5
         let qc_hash = Hash::from_bytes([0xCD; 32]);
-        let mut agg = QcAggregator::new(4);
+        let mut agg = QcAggregator::with_signers(
+            chain_id.as_str(),
+            &vals[0..4]
+                .iter()
+                .map(|v| v.record.bls_pubkey.clone())
+                .collect::<Vec<_>>(),
+        );
         let mut window_qc = None;
         for signer in &vals[0..4] {
             let vote = sign_vote(signer, chain_id, 25, 0, qc_hash, VoteType::Precommit);
@@ -1059,7 +1065,13 @@ mod tests {
         let reporter = Address::from_bytes([0xDD; 20]);
 
         let qc_hash = Hash::from_bytes([0xCD; 32]);
-        let mut agg = QcAggregator::new(3);
+        let mut agg = QcAggregator::with_signers(
+            chain_id.as_str(),
+            &vals[0..3]
+                .iter()
+                .map(|v| v.record.bls_pubkey.clone())
+                .collect::<Vec<_>>(),
+        );
         let mut window_qc = None;
         for signer in &vals[0..3] {
             let vote = sign_vote(signer, &chain_id, 10, 0, qc_hash, VoteType::Precommit);

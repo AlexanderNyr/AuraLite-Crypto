@@ -36,7 +36,7 @@ def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
 
 
 def expect_red(label: str, path: Path, old: str, new: str, test: str) -> bool:
-    cmd = list(GATE) + ["--", "--exact", test]
+    cmd = [arg for arg in GATE if arg != "--quiet"] + ["--", "--exact", test]
     original = path.read_text(encoding="utf-8")
     if old not in original:
         print(f"{label}: FAIL — tamper target not found in {path.name}")
@@ -49,7 +49,7 @@ def expect_red(label: str, path: Path, old: str, new: str, test: str) -> bool:
         path.write_text(tampered, encoding="utf-8")
         os.utime(path, None)
         result = run(cmd)
-        went_red = result.returncode != 0
+        went_red = result.returncode != 0 and re.search(rf"test\s+{re.escape(test)}\s+\.\.\.\s+FAILED", result.stdout + result.stderr) is not None
         raw = "\n".join(
             line.rstrip()
             for line in (result.stdout + result.stderr).strip().splitlines()
@@ -101,7 +101,7 @@ def main() -> int:
             TRANSPORT,
             "if let Some(expected_peer) = expected\n        && !constant_time_eq(expected_peer.as_bytes(), actual.as_bytes())",
             "if let Some(expected_peer) = expected\n        && constant_time_eq(expected_peer.as_bytes(), actual.as_bytes()) && false",
-            "transport::tests::expected_peer_mismatch_is_rejected_and_banned",
+            "transport::tests::expected_peer_mismatch_is_rejected_without_an_automatic_ban",
         ),
         expect_red(
             "NC-3 tampered handshake Ed25519 signature must be rejected",
@@ -127,8 +127,16 @@ def main() -> int:
         expect_red(
             "NC-6 tampered encrypted session frame must fail MAC verification",
             TRANSPORT,
-            "if !constant_time_eq(&expected_tag, &tag) {",
-            "if constant_time_eq(&expected_tag, &tag) && false {",
+            """                    msg: &frame[8..],
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| P2pError::FrameAuthenticationFailed)?;""",
+            """                    msg: &frame[8..],
+                    aad: &aad,
+                },
+            )
+            .unwrap_or_default();""",
             "transport::tests::tampered_encrypted_frame_is_rejected",
         ),
     ]

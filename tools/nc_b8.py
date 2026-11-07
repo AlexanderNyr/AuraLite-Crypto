@@ -31,10 +31,10 @@ CASES = [
         "fork_choice::tests::fork_not_descending_from_finalized_checkpoint_is_never_selected",
     ),
     (
-        "NC-4 finalized checkpoint must enforce 2f+1 quorum threshold on commit_qc",
+        "NC-4 finalized checkpoint must reject a sub-quorum commit QC",
         FORK_CHOICE,
-        "        if self.commit_qc.len() < required\n            || self.commit_qc.public_keys.len() != self.commit_qc.signatures.len()\n        {\n            return Err(ForkChoiceError::InvalidCheckpointQc(\n                \"commit_qc has fewer than 2f+1 signatures\",\n            ));\n        }",
-        "        let _ = required;",
+        "        checkpoint.verify(&self.chain_id, &self.active)?;",
+        "        let _ = &self.active;",
         "fork_choice::tests::finalized_checkpoint_rejects_invalid_or_sub_quorum_qc",
     ),
     (

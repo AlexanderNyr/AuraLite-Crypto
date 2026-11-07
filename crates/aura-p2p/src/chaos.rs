@@ -340,8 +340,12 @@ impl ChaosStand {
                 );
                 for node in &mut self.nodes {
                     if !node.is_byzantine {
-                        let _ = node.dos_engine.ingest(vote_a.clone(), base_ts);
-                        let _ = node.dos_engine.ingest(vote_b.clone(), base_ts);
+                        let _ = node
+                            .dos_engine
+                            .ingest(byz_id.peer_id(), vote_a.clone(), base_ts);
+                        let _ = node
+                            .dos_engine
+                            .ingest(byz_id.peer_id(), vote_b.clone(), base_ts);
                     }
                 }
             }

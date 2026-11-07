@@ -35,15 +35,15 @@ CASES = [
     (
         "NC-4 four-validator quorum threshold must be three",
         DEVNET,
-        "    (2 * validator_count) / 3 + 1",
+        "    aura_consensus::qc::quorum_threshold(validator_count)",
         "    validator_count / 2",
         "devnet::tests::four_validator_quorum_threshold_is_three",
     ),
     (
-        "NC-5 two votes out of four validators must never commit",
+        "NC-5 quorum must use the registered committee, not the voters alone",
         DEVNET,
-        "    let required = devnet_quorum_threshold(validator_count);",
-        "    let required = 1;",
+        "    let required = devnet_quorum_threshold(validator_keys.len() as u64);\n    let mut agg = QcAggregator::with_signers(chain_id, validator_keys);",
+        "    let voter_keys: Vec<_> = votes.iter().map(|(pk, _)| pk.clone()).collect();\n    let required = devnet_quorum_threshold(voter_keys.len() as u64);\n    let mut agg = QcAggregator::with_signers(chain_id, &voter_keys);",
         "devnet::tests::two_votes_of_four_never_commit",
     ),
     (
@@ -56,7 +56,7 @@ CASES = [
 ]
 
 
-def focused_test(test: str) -> tuple[bool, str]:
+def focused_test(test: str, expect_failure: bool = False) -> tuple[bool, str]:
     command = [
         "cargo",
         "test",
@@ -75,7 +75,7 @@ def focused_test(test: str) -> tuple[bool, str]:
     ran_failed = result.returncode != 0 and re.search(
         rf"test\s+{re.escape(test)}\s+\.\.\.\s+FAILED", output
     ) is not None
-    return (ran_ok if result.returncode == 0 else ran_failed), output
+    return (ran_failed if expect_failure else ran_ok), output
 
 
 def main() -> int:
@@ -97,7 +97,7 @@ def main() -> int:
         mutated = original.replace(old, new, 1)
         path.write_text(mutated, encoding="utf-8")
         try:
-            red, output = focused_test(test)
+            red, output = focused_test(test, expect_failure=True)
         finally:
             path.write_text(original, encoding="utf-8")
         if red:

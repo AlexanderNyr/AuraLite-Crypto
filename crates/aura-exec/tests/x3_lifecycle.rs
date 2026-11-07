@@ -114,6 +114,12 @@ fn call(gas: u64) -> ContractCall {
 }
 
 /// A funded base tree: the caller has plenty, the contract does not exist yet.
+fn self_upgrade_call(gas: u64) -> ContractCall {
+    let mut call = call(gas);
+    call.caller = call.contract;
+    call
+}
+
 fn base(value: u128) -> MerkleTree {
     let caller = Account::new(
         Nonce::new(0),
@@ -319,7 +325,7 @@ fn upgrade_preserves_balance_and_storage_and_runs_migrate() {
     assert!(!called.events.is_empty() || called.diff.is_some() || called.writes == 0);
 
     let upgraded = lifecycle
-        .upgrade(&after_deploy, call(1_000_000), 1, v2.clone())
+        .upgrade(&after_deploy, self_upgrade_call(1_000_000), 1, v2.clone())
         .expect("upgrade");
     assert_eq!(
         upgraded.lifecycle,
@@ -379,7 +385,7 @@ fn upgrade_refuses_a_stale_version() {
     let after = commit(&base, deployed.diff.as_ref().expect("diff"));
 
     let error = lifecycle
-        .upgrade(&after, call(1_000_000), 2, program("v2"))
+        .upgrade(&after, self_upgrade_call(1_000_000), 2, program("v2"))
         .expect_err("stale version must be refused");
     assert_eq!(
         error,
@@ -392,11 +398,11 @@ fn upgrade_refuses_a_stale_version() {
 
     // The first upgrade wins, the second one sees the new version.
     let first = lifecycle
-        .upgrade(&after, call(1_000_000), 1, program("v2"))
+        .upgrade(&after, self_upgrade_call(1_000_000), 1, program("v2"))
         .expect("upgrade");
     let after_two = commit(&after, first.diff.as_ref().expect("diff"));
     let second = lifecycle
-        .upgrade(&after_two, call(1_000_000), 1, program("v3"))
+        .upgrade(&after_two, self_upgrade_call(1_000_000), 1, program("v3"))
         .expect_err("second upgrade from the same version must fail");
     assert_eq!(
         second,
@@ -407,7 +413,7 @@ fn upgrade_refuses_a_stale_version() {
     );
     // A third-version upgrade from the right base works.
     lifecycle
-        .upgrade(&after_two, call(1_000_000), 2, program("v3"))
+        .upgrade(&after_two, self_upgrade_call(1_000_000), 2, program("v3"))
         .expect("upgrade from 2");
 }
 
@@ -425,7 +431,7 @@ fn lifecycle_refusals_happen_before_state() {
     );
     assert_eq!(
         lifecycle
-            .upgrade(&base, call(1_000_000), 1, program("v2"))
+            .upgrade(&base, self_upgrade_call(1_000_000), 1, program("v2"))
             .expect_err("not deployed"),
         LifecycleError::NotDeployed(address(CONTRACT))
     );
@@ -556,4 +562,20 @@ fn measured_gas_is_pinned() {
         .expect("call");
     assert_eq!(deployed.gas_used, measured("deploy_v1_gas"));
     assert_eq!(called.gas_used, measured("call_v1_gas"));
+}
+
+#[test]
+fn external_caller_cannot_upgrade_contract() {
+    let lifecycle = Lifecycle::new();
+    let base = base(10_000);
+    let deployed = lifecycle
+        .deploy(&base, call(1_000_000), program("v1"), Amount::ZERO, None)
+        .expect("deploy");
+    let tree = commit(&base, deployed.diff.as_ref().expect("diff"));
+    let external = call(1_000_000);
+    assert_ne!(external.caller, external.contract);
+    assert!(matches!(
+        lifecycle.upgrade(&tree, external, 1, program("v2")),
+        Err(LifecycleError::Refused(_))
+    ));
 }

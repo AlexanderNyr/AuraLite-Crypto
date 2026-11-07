@@ -1,4 +1,4 @@
-//! N6 DoS defence: pre-crypto frame size & message rate limits, per-peer
+//! N6 DoS defence: pre-crypto frame size & message rate limits, per-authenticated-source
 //! signature verification CPU budgets (signature-storm defence), and
 //! cryptographic equivocation detection (double-proposal / double-vote at the
 //! same `(height, round)`).
@@ -25,27 +25,27 @@ pub const DEFAULT_MAX_DOS_FRAME_BYTES: usize = 64 * 1024;
 /// Default sliding-window duration in milliseconds (1 second).
 pub const DEFAULT_DOS_WINDOW_MS: u64 = 1_000;
 
-/// Default maximum messages per peer per 1-second window.
+/// Default maximum messages per authenticated transport source per 1-second window.
 pub const DEFAULT_MAX_MSGS_PER_SEC: usize = 200;
 
-/// Default maximum Ed25519 signature verifications per peer per 1-second window.
+/// Default maximum Ed25519 signature verifications per authenticated source per 1-second window.
 pub const DEFAULT_MAX_SIGS_PER_SEC: usize = 100;
 
 /// Default number of rate/size strikes before automatic `BanList` isolation.
 pub const DEFAULT_VIOLATIONS_BEFORE_BAN: usize = 3;
 
-/// Per-peer and per-frame DoS defence limits.
+/// Per-authenticated-source and per-frame DoS defence limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DosDefenceLimits {
     /// Maximum allowed wire frame size in bytes (checked before signature verification).
     pub max_frame_bytes: usize,
-    /// Maximum messages accepted for inspection per peer per window.
+    /// Maximum messages accepted for inspection per authenticated source per window.
     pub max_messages_per_window: usize,
-    /// Maximum cryptographic signature verifications per peer per window.
+    /// Maximum signature-verification attempts per authenticated source per window.
     pub max_sig_verifications_per_window: usize,
     /// Sliding window duration in milliseconds.
     pub window_ms: u64,
-    /// Number of rate/size violations before the peer is banned.
+    /// Number of rate/size violations before the authenticated source is banned.
     pub violations_before_ban: usize,
 }
 
@@ -94,7 +94,8 @@ pub enum IngressKind {
 pub struct IngressEnvelope {
     /// Chain identifier.
     pub chain_id: String,
-    /// Sender `PeerId = BLAKE3(sender_public_key)`.
+    /// Claimed signer `PeerId = BLAKE3(sender_public_key)`; untrusted until verified.
+    /// This is the message origin, not the authenticated transport source.
     pub sender: PeerId,
     /// 32-byte Ed25519 verifying key.
     pub sender_public_key: [u8; 32],
@@ -208,8 +209,8 @@ struct PeerDosWindow {
 /// Key for equivocation tracking: `(peer_id, is_proposal, height, round)`.
 type EquivocationKey = (PeerId, bool, u64, u64);
 
-/// N6 DoS defence engine enforcing pre-crypto size & rate limits, per-peer
-/// signature verification budgets, and equivocation detection (`D-N3`).
+/// N6 DoS defence engine enforcing pre-crypto size & rate limits, per-source
+/// signature-verification-attempt budgets, and equivocation detection (`D-N3`).
 #[derive(Debug, Clone)]
 pub struct DosDefenceEngine {
     chain_id: String,
@@ -265,30 +266,41 @@ impl DosDefenceEngine {
     }
 
     /// Inspect and validate an incoming [`IngressEnvelope`] at `now_ms`.
-    pub fn ingest(&mut self, envelope: IngressEnvelope, now_ms: u64) -> Result<(), P2pError> {
-        let peer_id = envelope.sender;
+    ///
+    /// `authenticated_peer` must come from a completed, authenticated transport
+    /// session; never populate it from `envelope.sender` or other wire data. All
+    /// pre-crypto budgets and source-attributed strikes use this ID. The envelope
+    /// signer is checked separately after its public key and signature validate.
+    pub fn ingest(
+        &mut self,
+        authenticated_peer: PeerId,
+        envelope: IngressEnvelope,
+        now_ms: u64,
+    ) -> Result<(), P2pError> {
+        let signer_peer_id = envelope.sender;
 
-        // 1. O(1) BanList check BEFORE any signature verification.
-        if let Err(err) = self.ban_list.check_peer(&peer_id, now_ms) {
+        // 1. This ID is supplied by the authenticated transport, not the frame.
+        if let Err(err) = self.ban_list.check_peer(&authenticated_peer, now_ms) {
             self.dropped_pre_crypto += 1;
             return Err(err);
         }
 
-        // 2. O(1) Frame size check BEFORE any signature verification.
+        // 2. O(1) frame-size check before any signature verification.
         if envelope.raw_size_bytes == 0 || envelope.raw_size_bytes > self.limits.max_frame_bytes {
             self.dropped_pre_crypto += 1;
-            self.record_strike(peer_id, "dos_frame_size_exceeded");
+            self.record_strike(authenticated_peer, "dos_frame_size_exceeded");
             return Err(P2pError::DosFrameSizeExceeded {
                 size: envelope.raw_size_bytes,
                 max: self.limits.max_frame_bytes,
             });
         }
 
-        // Update sliding window for `peer_id`.
+        // Resource accounting is keyed by the authenticated transport source,
+        // never by the message's unauthenticated claimed signer.
         let window_ms = self.limits.window_ms.max(1);
         let max_msgs = self.limits.max_messages_per_window;
         let max_sigs = self.limits.max_sig_verifications_per_window;
-        let state = self.peer_windows.entry(peer_id).or_default();
+        let state = self.peer_windows.entry(authenticated_peer).or_default();
         if now_ms.saturating_sub(state.window_start_ms) >= window_ms {
             state.window_start_ms = now_ms;
             state.msg_count = 0;
@@ -297,40 +309,71 @@ impl DosDefenceEngine {
         state.msg_count += 1;
         let current_msgs = state.msg_count;
 
-        // 3. O(1) Per-peer message rate limit BEFORE any signature verification.
+        // 3. O(1) per-source message rate limit before crypto.
         if current_msgs > max_msgs {
             self.dropped_pre_crypto += 1;
-            self.record_strike(peer_id, "dos_message_rate_exceeded");
+            self.record_strike(authenticated_peer, "dos_message_rate_exceeded");
             return Err(P2pError::DosMessageRateExceeded {
-                peer_id,
+                peer_id: authenticated_peer,
                 count: current_msgs,
                 max: max_msgs,
             });
         }
 
-        // 4. O(1) Per-peer signature verification CPU budget BEFORE running Ed25519 verify.
-        let next_sigs = self.peer_windows.get(&peer_id).unwrap().sig_count + 1;
+        // 4. O(1) per-source signature verification CPU budget before Ed25519.
+        let next_sigs = self
+            .peer_windows
+            .get(&authenticated_peer)
+            .unwrap()
+            .sig_count
+            + 1;
         if next_sigs > max_sigs {
             self.dropped_pre_crypto += 1;
-            self.record_strike(peer_id, "dos_signature_budget_exceeded");
+            self.record_strike(authenticated_peer, "dos_signature_budget_exceeded");
             return Err(P2pError::DosSignatureBudgetExceeded {
-                peer_id,
+                peer_id: authenticated_peer,
                 count: next_sigs,
                 max: max_sigs,
             });
         }
-        self.peer_windows.get_mut(&peer_id).unwrap().sig_count = next_sigs;
+        self.peer_windows
+            .get_mut(&authenticated_peer)
+            .unwrap()
+            .sig_count = next_sigs;
 
-        // 5. Cryptographic identity & domain-separated Ed25519 signature verification.
-        self.sig_verifications_performed += 1;
-        if let Err(err) = peer_id.verify_public_key(&envelope.sender_public_key) {
-            self.ban_list
-                .ban_peer(peer_id, BanReason::IdentityMismatch, None);
+        // A bad claimed origin is not evidence against that claimed PeerId.
+        // Attribute repeated malformed input only to the authenticated source.
+        if let Err(err) = signer_peer_id.verify_public_key(&envelope.sender_public_key) {
+            self.record_strike(authenticated_peer, "dos_identity_mismatch");
             return Err(err);
         }
+
+        // 5. Verify the domain-separated signature before applying identity-based
+        // bans for signed protocol violations.
+        self.sig_verifications_performed += 1;
+        let digest = envelope_signing_digest(
+            &envelope.chain_id,
+            &signer_peer_id,
+            &envelope.sender_public_key,
+            envelope.seq,
+            &envelope.kind,
+        );
+        if verify_raw(&envelope.sender_public_key, &digest, &envelope.signature).is_err() {
+            // The transport identity is authenticated even though the envelope's
+            // claimed signer is not. Never ban the unverified claimed signer.
+            self.ban_list.ban_peer(
+                authenticated_peer,
+                BanReason::ProtocolViolation("invalid_dos_ingress_signature".to_owned()),
+                None,
+            );
+            return Err(P2pError::InvalidGossipSignature);
+        }
+
+        // The signed envelope now proves control of the key for signer_peer_id.
+        self.ban_list.check_peer(&signer_peer_id, now_ms)?;
         if envelope.chain_id != self.chain_id {
             self.ban_list.ban_peer(
-                peer_id,
+                signer_peer_id,
                 BanReason::ProtocolViolation("dos_chain_id_mismatch".to_owned()),
                 None,
             );
@@ -338,21 +381,6 @@ impl DosDefenceEngine {
                 expected: self.chain_id.clone(),
                 actual: envelope.chain_id,
             });
-        }
-        let digest = envelope_signing_digest(
-            &envelope.chain_id,
-            &peer_id,
-            &envelope.sender_public_key,
-            envelope.seq,
-            &envelope.kind,
-        );
-        if verify_raw(&envelope.sender_public_key, &digest, &envelope.signature).is_err() {
-            self.ban_list.ban_peer(
-                peer_id,
-                BanReason::ProtocolViolation("invalid_dos_ingress_signature".to_owned()),
-                None,
-            );
-            return Err(P2pError::InvalidGossipSignature);
         }
 
         // 6. Equivocation detection for consensus proposals and votes.
@@ -363,7 +391,7 @@ impl DosDefenceEngine {
                 block_hash,
             } => {
                 self.check_equivocation(
-                    peer_id,
+                    signer_peer_id,
                     true,
                     *height,
                     *round,
@@ -377,7 +405,7 @@ impl DosDefenceEngine {
                 block_hash,
             } => {
                 self.check_equivocation(
-                    peer_id,
+                    signer_peer_id,
                     false,
                     *height,
                     *round,
@@ -392,15 +420,15 @@ impl DosDefenceEngine {
         Ok(())
     }
 
-    fn record_strike(&mut self, peer_id: PeerId, reason: &str) {
+    fn record_strike(&mut self, authenticated_peer: PeerId, reason: &str) {
         let strikes = {
-            let entry = self.peer_windows.entry(peer_id).or_default();
+            let entry = self.peer_windows.entry(authenticated_peer).or_default();
             entry.strikes += 1;
             entry.strikes
         };
         if strikes >= self.limits.violations_before_ban {
             self.ban_list.ban_peer(
-                peer_id,
+                authenticated_peer,
                 BanReason::ProtocolViolation(reason.to_owned()),
                 None,
             );
@@ -475,7 +503,7 @@ mod tests {
         env.raw_size_bytes = 2_200;
 
         assert_eq!(
-            engine.ingest(env, NOW_MS),
+            engine.ingest(peer.peer_id(), env, NOW_MS),
             Err(P2pError::DosFrameSizeExceeded {
                 size: 2_200,
                 max: 1_024,
@@ -508,7 +536,7 @@ mod tests {
                     payload: vec![seq as u8; 16],
                 },
             );
-            engine.ingest(env, NOW_MS).unwrap();
+            engine.ingest(flooder.peer_id(), env, NOW_MS).unwrap();
         }
 
         // Messages 6 and 7 exceed max_messages_per_window (2 strikes -> banned).
@@ -522,7 +550,7 @@ mod tests {
                 },
             );
             assert!(matches!(
-                engine.ingest(env, NOW_MS),
+                engine.ingest(flooder.peer_id(), env, NOW_MS),
                 Err(P2pError::DosMessageRateExceeded { .. })
             ));
         }
@@ -554,7 +582,7 @@ mod tests {
                     payload: vec![seq as u8; 8],
                 },
             );
-            engine.ingest(env, NOW_MS).unwrap();
+            engine.ingest(storm_peer.peer_id(), env, NOW_MS).unwrap();
         }
         assert_eq!(engine.sig_verifications_performed(), 3);
 
@@ -568,7 +596,7 @@ mod tests {
             },
         );
         assert_eq!(
-            engine.ingest(env4, NOW_MS),
+            engine.ingest(storm_peer.peer_id(), env4, NOW_MS),
             Err(P2pError::DosSignatureBudgetExceeded {
                 peer_id: storm_peer.peer_id(),
                 count: 4,
@@ -579,6 +607,160 @@ mod tests {
             engine.sig_verifications_performed(),
             3,
             "signature budget cap must prevent extra Ed25519 verifications"
+        );
+    }
+
+    #[test]
+    fn unauthenticated_sender_id_mismatch_cannot_ban_victim() {
+        let limits = DosDefenceLimits {
+            max_messages_per_window: 1,
+            violations_before_ban: 1,
+            ..DosDefenceLimits::default()
+        };
+        let mut engine = DosDefenceEngine::new(CHAIN, limits);
+        let victim = PeerIdentity::from_seed([0x61; 32]);
+        let attacker = PeerIdentity::from_seed([0x62; 32]);
+        let victim_id = victim.peer_id();
+
+        let mut spoofed = IngressEnvelope::sign(
+            &attacker,
+            CHAIN,
+            1,
+            IngressKind::Transaction {
+                payload: b"spoofed sender".to_vec(),
+            },
+        );
+        // `sender` is an unauthenticated wire claim, not proof of the signer.
+        spoofed.sender = victim_id;
+        assert!(matches!(
+            engine.ingest(attacker.peer_id(), spoofed, NOW_MS),
+            Err(P2pError::IdentityMismatch { .. })
+        ));
+        assert!(
+            !engine.ban_list().is_peer_banned(&victim_id, NOW_MS),
+            "a mismatching public key must not permanently ban the claimed PeerId"
+        );
+        assert!(
+            engine
+                .ban_list()
+                .is_peer_banned(&attacker.peer_id(), NOW_MS),
+            "source-attributed strikes may ban only the authenticated transport peer"
+        );
+
+        let honest = IngressEnvelope::sign(
+            &victim,
+            CHAIN,
+            2,
+            IngressKind::Transaction {
+                payload: b"victim remains admissible".to_vec(),
+            },
+        );
+        engine
+            .ingest(victim_id, honest, NOW_MS)
+            .expect("victim's valid signature still passes");
+    }
+
+    #[test]
+    fn unauthenticated_sender_id_mismatch_cannot_poison_signature_budget() {
+        let limits = DosDefenceLimits {
+            max_messages_per_window: 10,
+            max_sig_verifications_per_window: 1,
+            violations_before_ban: 1,
+            ..DosDefenceLimits::default()
+        };
+        let mut engine = DosDefenceEngine::new(CHAIN, limits);
+        let victim = PeerIdentity::from_seed([0x67; 32]);
+        let attacker = PeerIdentity::from_seed([0x68; 32]);
+        let victim_id = victim.peer_id();
+        let mut spoofed = IngressEnvelope::sign(
+            &attacker,
+            CHAIN,
+            1,
+            IngressKind::Transaction {
+                payload: b"poison signature budget".to_vec(),
+            },
+        );
+        spoofed.sender = victim_id;
+
+        assert!(matches!(
+            engine.ingest(attacker.peer_id(), spoofed, NOW_MS),
+            Err(P2pError::IdentityMismatch { .. })
+        ));
+        assert!(!engine.ban_list().is_peer_banned(&victim_id, NOW_MS));
+        assert!(
+            engine
+                .ban_list()
+                .is_peer_banned(&attacker.peer_id(), NOW_MS)
+        );
+
+        let honest = IngressEnvelope::sign(
+            &victim,
+            CHAIN,
+            2,
+            IngressKind::Transaction {
+                payload: b"victim still has its own signature budget".to_vec(),
+            },
+        );
+        engine
+            .ingest(victim_id, honest, NOW_MS)
+            .expect("an unauthenticated claim must not consume the victim's signature budget");
+    }
+
+    #[test]
+    fn invalid_signature_bans_authenticated_source_not_spoofed_signer() {
+        let mut engine = DosDefenceEngine::new(CHAIN, DosDefenceLimits::default());
+        let victim = PeerIdentity::from_seed([0x63; 32]);
+        let attacker = PeerIdentity::from_seed([0x64; 32]);
+        let victim_id = victim.peer_id();
+        let mut forged = IngressEnvelope::sign(
+            &victim,
+            CHAIN,
+            1,
+            IngressKind::Transaction {
+                payload: b"invalid signature with victim claim".to_vec(),
+            },
+        );
+        forged.signature[0] ^= 0x80;
+
+        assert_eq!(
+            engine.ingest(attacker.peer_id(), forged, NOW_MS),
+            Err(P2pError::InvalidGossipSignature)
+        );
+        assert!(!engine.ban_list().is_peer_banned(&victim_id, NOW_MS));
+        assert!(
+            engine
+                .ban_list()
+                .is_peer_banned(&attacker.peer_id(), NOW_MS)
+        );
+    }
+
+    #[test]
+    fn wrong_chain_is_checked_only_after_the_claimed_signer_signature() {
+        let mut engine = DosDefenceEngine::new(CHAIN, DosDefenceLimits::default());
+        let victim = PeerIdentity::from_seed([0x65; 32]);
+        let attacker = PeerIdentity::from_seed([0x66; 32]);
+        let victim_id = victim.peer_id();
+        let mut forged = IngressEnvelope::sign(
+            &attacker,
+            "foreign-chain",
+            1,
+            IngressKind::Transaction {
+                payload: b"spoofed foreign-chain sender".to_vec(),
+            },
+        );
+        // The victim public key is public; possession is not proven by the claim.
+        forged.sender = victim_id;
+        forged.sender_public_key = *victim.public_key();
+
+        assert_eq!(
+            engine.ingest(attacker.peer_id(), forged, NOW_MS),
+            Err(P2pError::InvalidGossipSignature)
+        );
+        assert!(!engine.ban_list().is_peer_banned(&victim_id, NOW_MS));
+        assert!(
+            engine
+                .ban_list()
+                .is_peer_banned(&attacker.peer_id(), NOW_MS)
         );
     }
 
@@ -597,7 +779,7 @@ mod tests {
         env.signature[0] ^= 0xFF;
 
         assert_eq!(
-            engine.ingest(env, NOW_MS),
+            engine.ingest(forger.peer_id(), env, NOW_MS),
             Err(P2pError::InvalidGossipSignature)
         );
         assert!(
@@ -634,9 +816,9 @@ mod tests {
             },
         );
 
-        engine.ingest(vote_a, NOW_MS).unwrap();
+        engine.ingest(byzantine.peer_id(), vote_a, NOW_MS).unwrap();
         assert_eq!(
-            engine.ingest(vote_b, NOW_MS),
+            engine.ingest(byzantine.peer_id(), vote_b, NOW_MS),
             Err(P2pError::EquivocationDetected {
                 peer_id: byzantine.peer_id(),
                 height: 42,
@@ -681,7 +863,7 @@ mod tests {
         );
         for i in 0..10_000 {
             let ts = if i < 5_000 { NOW_MS } else { NOW_MS + 1_000 };
-            let _ = engine.ingest(flood_env.clone(), ts);
+            let _ = engine.ingest(attacker.peer_id(), flood_env.clone(), ts);
         }
 
         // Attacker must be banned after 50 allowed + 3 rate strikes in the first window,
@@ -709,7 +891,9 @@ mod tests {
                     block_hash,
                 },
             );
-            engine.ingest(prop, NOW_MS).unwrap();
+            engine
+                .ingest(validators[0].peer_id(), prop, NOW_MS)
+                .unwrap();
             for val in &validators[..3] {
                 let vote = IngressEnvelope::sign(
                     val,
@@ -721,7 +905,7 @@ mod tests {
                         block_hash,
                     },
                 );
-                engine.ingest(vote, NOW_MS).unwrap();
+                engine.ingest(val.peer_id(), vote, NOW_MS).unwrap();
             }
             finalized_heights += 1;
         }

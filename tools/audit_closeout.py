@@ -17,6 +17,7 @@ Default mode tolerates them as "pending" while that phase is being produced.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import re
 import subprocess
 import sys
@@ -117,6 +118,75 @@ PATCH_ORDER += ["B0", "B1", "B2", "B3"] + [f"D{i}" for i in range(2, 7)]
 PATCH_ORDER += ["N0", "N1", "N2"] + ["B4", "B5"] + ["D7", "D8"]
 PATCH_ORDER += [f"N{i}" for i in range(3, 9)] + [f"B{i}" for i in range(6, 11)] + ["W0"]
 PATCH_NUMBERS = {phase: index + 1 for index, phase in enumerate(PATCH_ORDER)}
+
+
+# Historical receipts pin the source as it was when a phase closed. Later
+# reviewed changes are recorded explicitly as (path, historical SHA, current
+# SHA) triples; the historical evidence files themselves are never exempted.
+DRIFT_LEDGER = REPO / "docs/evidence/review-w1-source-drift.txt"
+_SHA_LINE = re.compile(r"^([0-9a-f]{64}) [ *](.+)$")
+_DRIFT_LINE = re.compile(r"^([0-9a-f]{64}) ([0-9a-f]{64}) (.+)$")
+
+
+def read_drift_ledger(path: Path) -> set[tuple[str, str, str]]:
+    records: set[tuple[str, str, str]] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line or line.startswith("#"):
+            continue
+        match = _DRIFT_LINE.fullmatch(line)
+        if not match:
+            raise ValueError(f"invalid drift ledger entry: {line!r}")
+        historical, current, name = match.groups()
+        candidate = Path(name)
+        if candidate.is_absolute() or ".." in candidate.parts or name.startswith("docs/evidence/"):
+            raise ValueError(f"invalid or evidence path in drift ledger: {name!r}")
+        record = (name, historical, current)
+        if record in records or historical == current:
+            raise ValueError(f"duplicate or no-op drift ledger entry: {name!r}")
+        records.add(record)
+    return records
+
+
+def verify_evidence_checksums(
+    root: Path, sums_files: list[Path], allowed: set[tuple[str, str, str]]
+) -> tuple[list[str], set[tuple[str, str, str]]]:
+    errors: list[str] = []
+    used: set[tuple[str, str, str]] = set()
+    cache: dict[str, str] = {}
+    for sums in sums_files:
+        try:
+            lines = sums.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            errors.append(f"{sums}: cannot read checksums: {exc}")
+            continue
+        for line in lines:
+            match = _SHA_LINE.fullmatch(line)
+            if not match:
+                errors.append(f"{sums}: malformed checksum line")
+                continue
+            expected, name = match.groups()
+            rel = Path(name)
+            path = root / rel
+            if rel.is_absolute() or ".." in rel.parts or not path.resolve().is_relative_to(root.resolve()):
+                errors.append(f"{sums}: unsafe checksum path {name!r}")
+                continue
+            try:
+                if name not in cache:
+                    cache[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+                actual = cache[name]
+            except OSError:
+                errors.append(f"{sums}: missing or unreadable {name}")
+                continue
+            if actual == expected:
+                continue
+            record = (name, expected, actual)
+            if name.startswith("docs/evidence/") or record not in allowed:
+                errors.append(f"{sums}: checksum mismatch: {name}")
+            else:
+                used.add(record)
+    for name, _, _ in sorted(allowed - used):
+        errors.append(f"stale or unused drift ledger entry: {name}")
+    return errors, used
 
 
 def patch_prefix(phase: str) -> str:
@@ -279,21 +349,15 @@ def check(strict: bool) -> tuple[list[str], list[str]]:
             if not (EVIDENCE / CURRENT.lower() / name).exists():
                 errors.append(f"{CURRENT}: missing docs/evidence/{CURRENT.lower()}/{name}")
 
-    # 5. Every evidence checksum must verify (paths are repo-root relative).
-    for sums in sha_files():
-        result = subprocess.run(
-            ["sha256sum", "-c", str(sums.relative_to(REPO))],
-            cwd=REPO,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode != 0:
-            bad = [line for line in result.stdout.splitlines() if not line.endswith(": OK")]
-            errors.append(
-                f"{sums.relative_to(REPO)}: checksum mismatch "
-                f"({'; '.join(bad[:3]) if bad else result.stderr.strip()})"
-            )
+    # 5. Verify frozen evidence; allow only explicitly pinned source drift.
+    try:
+        allowed_drift = read_drift_ledger(DRIFT_LEDGER)
+        checksum_errors, used_drift = verify_evidence_checksums(REPO, sha_files(), allowed_drift)
+        errors.extend(checksum_errors)
+        if used_drift:
+            notes.append(f"historical source drift: {len(used_drift)} explicitly pinned paths; old receipts are not new certification")
+    except (OSError, ValueError) as exc:
+        errors.append(f"historical source drift ledger: {exc}")
 
     # 6. Every spec file must be indexed (FORMAT_INDEX.md is the frozen CORE
     # index; S0 stores its report in evidence, not in docs/spec/).
@@ -359,7 +423,7 @@ def main() -> int:
         for error in errors:
             print(f"  - {error}")
         return 1
-    print("AUDIT: OK — every ✅ phase has a receipt, patch, NC log and evidence; all checksums verify")
+    print("AUDIT: OK — every ✅ phase has a receipt, patch, NC log and evidence; historical source drift is explicitly recorded where applicable")
     return 0
 
 

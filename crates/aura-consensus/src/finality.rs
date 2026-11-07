@@ -73,6 +73,19 @@ impl FinalityBlock {
         blake3_hash(&buf)
     }
 
+    /// Check that the declared hash commits to the block's current fields.
+    pub(crate) fn has_valid_hash(&self) -> bool {
+        self.block_hash
+            == Self::compute_hash(
+                self.view,
+                self.round,
+                &self.parent_hash,
+                self.timestamp_ms,
+                &self.qc,
+                &self.transactions,
+            )
+    }
+
     /// Propose a new block at `(view, round)` on top of `parent`.
     pub fn propose(
         view: u64,
@@ -127,9 +140,9 @@ pub struct FinalizedBlock {
 ///
 /// A block B is committed when QCs exist for B, its child C, and C's child
 /// D, all in the same view. Once B is committed, B and every ancestor of B
-/// are finalized. This is the HotStuff-style 3-chain commit rule: safety
-/// follows from the quorum intersection property (any two 2f+1 quorums
-/// overlap in at least f+1 validators).
+/// are finalized. This rule alone does not establish HotStuff safety: quorum
+/// intersection must be paired with persistent voting locks and a correct
+/// view-change protocol, which this prototype does not yet implement.
 pub struct ThreeChainCommit {
     /// Blocks by hash.
     blocks: BTreeMap<Hash, FinalityBlock>,
@@ -160,26 +173,25 @@ impl ThreeChainCommit {
 
     /// Register a block. Returns `true` if the block was new.
     pub fn insert_block(&mut self, block: FinalityBlock) -> bool {
-        let is_new = self
-            .blocks
-            .insert(block.block_hash, block.clone())
-            .is_none();
-        if let Some(parent_hash) = self.blocks.get(&block.block_hash) {
-            let _ = parent_hash;
+        if self.blocks.contains_key(&block.block_hash) {
+            return false;
         }
-        if block.parent_hash != self.genesis_hash || block.view == 0 {
+        if block.block_hash != self.genesis_hash {
             self.children
                 .entry(block.parent_hash)
                 .or_default()
                 .push(block.block_hash);
         }
-        is_new
+        self.blocks.insert(block.block_hash, block);
+        true
     }
 
     /// Register a QC for `block_hash`. After inserting, check whether any
     /// block is now committed by the 3-chain rule.
-    pub fn insert_qc(&mut self, block_hash: Hash, qc: QuorumCertificate) {
-        self.qcs.insert(block_hash, qc);
+    pub(crate) fn insert_qc(&mut self, block_hash: Hash, qc: QuorumCertificate) {
+        if qc.block_hash == block_hash {
+            self.qcs.insert(block_hash, qc);
+        }
     }
 
     /// Check whether `block_hash` is committed: a QC exists for it, for its
@@ -201,8 +213,41 @@ impl ThreeChainCommit {
             let Some(grandchildren) = self.children.get(child_hash) else {
                 continue;
             };
+            let Some(block_b) = self.blocks.get(block_hash) else {
+                continue;
+            };
+            if qc_b.block_hash != *block_hash
+                || qc_b.view != block_b.view
+                || qc_b.round != block_b.round
+            {
+                continue;
+            }
+            let Some(block_c) = self.blocks.get(child_hash) else {
+                continue;
+            };
+            if block_c.parent_hash != *block_hash
+                || qc_c.block_hash != *child_hash
+                || qc_c.view != block_c.view
+                || qc_c.round != block_c.round
+                || block_c.view != block_b.view
+                || block_b.round.checked_add(1) != Some(block_c.round)
+            {
+                continue;
+            }
             for grandchild_hash in grandchildren {
-                if self.qcs.contains_key(grandchild_hash) && qc_b.view == qc_c.view {
+                let Some(qc_d) = self.qcs.get(grandchild_hash) else {
+                    continue;
+                };
+                let Some(block_d) = self.blocks.get(grandchild_hash) else {
+                    continue;
+                };
+                if block_d.parent_hash == *child_hash
+                    && qc_d.block_hash == *grandchild_hash
+                    && qc_d.view == block_d.view
+                    && qc_d.round == block_d.round
+                    && block_d.view == block_b.view
+                    && block_c.round.checked_add(1) == Some(block_d.round)
+                {
                     return true;
                 }
             }
@@ -228,39 +273,49 @@ impl ThreeChainCommit {
             .collect();
         committed_candidates.sort();
 
-        // For each committed block, finalize it and all its ancestors up to
-        // the last finalized block.
-        let finalized_hashes: BTreeSet<Hash> = self
+        // Never finalize duplicates or branches that do not extend the
+        // current finalized tip. Missing ancestry and cycles fail closed.
+        let mut finalized_hashes: BTreeSet<Hash> = self
             .finalized
             .iter()
             .map(|fb| fb.block.block_hash)
             .collect();
-
         for block_hash in committed_candidates {
             if finalized_hashes.contains(&block_hash) {
                 continue;
             }
-            // Walk up from this block to the genesis or the last finalized
-            // block, finalizing each ancestor.
+            let anchor = self
+                .finalized
+                .last()
+                .map_or(self.genesis_hash, |fb| fb.block.block_hash);
             let mut current = block_hash;
-            let mut chain: Vec<FinalityBlock> = Vec::new();
-            loop {
-                if finalized_hashes.contains(&current) {
+            let mut chain = Vec::new();
+            let mut seen = BTreeSet::new();
+            let mut connected = true;
+            while current != anchor {
+                if !seen.insert(current) || finalized_hashes.contains(&current) {
+                    connected = false;
                     break;
                 }
                 let Some(block) = self.blocks.get(&current) else {
+                    connected = false;
                     break;
                 };
                 chain.push(block.clone());
-                if current == self.genesis_hash {
-                    break;
-                }
                 current = block.parent_hash;
             }
-            // Finalize in reverse order (oldest first) so heights are correct.
+            if !connected {
+                continue;
+            }
+            if self.finalized.is_empty()
+                && let Some(genesis) = self.blocks.get(&self.genesis_hash)
+            {
+                chain.push(genesis.clone());
+            }
             for block in chain.into_iter().rev() {
                 let height = self.next_height;
                 self.next_height += 1;
+                finalized_hashes.insert(block.block_hash);
                 let finalized = FinalizedBlock { height, block };
                 newly_finalized.push(finalized.clone());
                 self.finalized.push(finalized);
@@ -487,7 +542,25 @@ impl FinalityEngine {
         public_key: BlsPublicKey,
         vote: Vote,
     ) -> (Option<QuorumCertificate>, Vec<FinalizedBlock>) {
+        if aggregator.chain_id() != self.chain_id {
+            return (None, Vec::new());
+        }
+        if vote.vote_type != VoteType::Precommit {
+            return (None, Vec::new());
+        }
         if let Some(qc) = aggregator.add_vote(public_key, vote.clone()) {
+            if qc
+                .verify_with_members(&self.chain_id, Domain::Vote, aggregator.active())
+                .is_err()
+            {
+                return (None, Vec::new());
+            }
+            let Some(block) = self.commit_rule.blocks.get(&qc.block_hash) else {
+                return (None, Vec::new());
+            };
+            if qc.view != block.view || qc.round != block.round {
+                return (None, Vec::new());
+            }
             let block_hash = qc.block_hash;
             self.commit_rule.insert_qc(block_hash, qc.clone());
             self.view_change.update_high_qc(qc.clone());
@@ -496,6 +569,28 @@ impl FinalityEngine {
         } else {
             (None, Vec::new())
         }
+    }
+
+    /// Verify and submit an externally aggregated QC. Membership and quorum
+    /// are checked against the supplied active validator address set.
+    pub fn submit_qc(
+        &mut self,
+        qc: QuorumCertificate,
+        active: &BTreeSet<Address>,
+    ) -> Result<Vec<FinalizedBlock>, crate::bls::BlsError> {
+        qc.verify_with_members(&self.chain_id, Domain::Vote, active)?;
+        let block = self
+            .commit_rule
+            .blocks
+            .get(&qc.block_hash)
+            .ok_or(crate::bls::BlsError::VerificationFailed)?;
+        if qc.vote_type != VoteType::Precommit || qc.view != block.view || qc.round != block.round {
+            return Err(crate::bls::BlsError::VerificationFailed);
+        }
+        let block_hash = qc.block_hash;
+        self.commit_rule.insert_qc(block_hash, qc.clone());
+        self.view_change.update_high_qc(qc.clone());
+        Ok(self.commit_rule.finalize_committed())
     }
 
     /// True if the view-change timeout has expired.
@@ -560,7 +655,7 @@ pub fn verify_vote(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bls::BlsSecretKey;
+    use crate::bls::{BlsSecretKey, address_from_public_key};
 
     fn test_chain_id() -> &'static str {
         "auralite-b3-test"
@@ -574,10 +669,6 @@ mod tests {
         let mut s = [0u8; 32];
         s[0] = index;
         s
-    }
-
-    fn validator_address(index: u8) -> Address {
-        Address::from_bytes([index; 20])
     }
 
     /// Build a 4-validator engine and a set of secret keys.
@@ -611,7 +702,11 @@ mod tests {
             let block = engine.propose(vec![]);
             blocks.push(block.clone());
             // Create a QC for this block from all validators.
-            let mut aggregator = crate::qc::QcAggregator::new(addrs.len() as u64);
+            engine.change_round();
+            let mut aggregator = crate::qc::QcAggregator::with_signers(
+                test_chain_id(),
+                &sks.iter().map(|sk| sk.public_key()).collect::<Vec<_>>(),
+            );
             for (j, sk) in sks.iter().enumerate() {
                 let vote = engine.vote_for(sk, addrs[j], &block, VoteType::Precommit);
                 let _ = engine.aggregate_and_commit(&mut aggregator, sk.public_key(), vote);
@@ -634,7 +729,10 @@ mod tests {
     #[test]
     fn three_chain_commit() {
         let (mut engine, sks) = setup_engine();
-        let addrs: Vec<Address> = (0..4).map(validator_address).collect();
+        let addrs: Vec<Address> = sks
+            .iter()
+            .map(|sk| address_from_public_key(&sk.public_key()))
+            .collect();
 
         // Propose 3 blocks and get QCs for each.
         build_chain_with_qcs(&mut engine, &sks, &addrs, 3);
@@ -652,7 +750,10 @@ mod tests {
     #[test]
     fn two_blocks_not_committed() {
         let (mut engine, sks) = setup_engine();
-        let addrs: Vec<Address> = (0..4).map(validator_address).collect();
+        let addrs: Vec<Address> = sks
+            .iter()
+            .map(|sk| address_from_public_key(&sk.public_key()))
+            .collect();
 
         // Propose only 2 blocks - not enough for a 3-chain.
         build_chain_with_qcs(&mut engine, &sks, &addrs, 2);
@@ -690,10 +791,10 @@ mod tests {
 
     #[test]
     fn block_hash_changes_with_content() {
-        let (mut engine, _) = setup_engine();
-        let block_a = engine.propose(vec![b"tx1".to_vec()]);
-        let block_b = engine.propose(vec![b"tx2".to_vec()]);
-        assert_ne!(block_a.block_hash, block_b.block_hash);
+        let parent = genesis_hash();
+        let hash_a = FinalityBlock::compute_hash(1, 2, &parent, 123, &None, &[b"tx1".to_vec()]);
+        let hash_b = FinalityBlock::compute_hash(1, 2, &parent, 123, &None, &[b"tx2".to_vec()]);
+        assert_ne!(hash_a, hash_b);
     }
 
     #[test]
@@ -707,7 +808,10 @@ mod tests {
     #[test]
     fn verify_vote_roundtrip() {
         let (mut engine, sks) = setup_engine();
-        let addrs: Vec<Address> = (0..4).map(validator_address).collect();
+        let addrs: Vec<Address> = sks
+            .iter()
+            .map(|sk| address_from_public_key(&sk.public_key()))
+            .collect();
         let block = engine.propose(vec![]);
         let vote = engine.vote_for(&sks[0], addrs[0], &block, VoteType::Precommit);
         assert!(verify_vote(test_chain_id(), &vote, &sks[0].public_key()).is_ok());
@@ -716,7 +820,10 @@ mod tests {
     #[test]
     fn verify_vote_wrong_chain_fails() {
         let (mut engine, sks) = setup_engine();
-        let addrs: Vec<Address> = (0..4).map(validator_address).collect();
+        let addrs: Vec<Address> = sks
+            .iter()
+            .map(|sk| address_from_public_key(&sk.public_key()))
+            .collect();
         let block = engine.propose(vec![]);
         let vote = engine.vote_for(&sks[0], addrs[0], &block, VoteType::Precommit);
         assert!(verify_vote("wrong-chain", &vote, &sks[0].public_key()).is_err());
@@ -725,11 +832,17 @@ mod tests {
     #[test]
     fn high_qc_tracks_newest() {
         let (mut engine, sks) = setup_engine();
-        let addrs: Vec<Address> = (0..4).map(validator_address).collect();
+        let addrs: Vec<Address> = sks
+            .iter()
+            .map(|sk| address_from_public_key(&sk.public_key()))
+            .collect();
 
         // Propose a block and get a QC.
         let block = engine.propose(vec![]);
-        let mut aggregator = crate::qc::QcAggregator::new(4);
+        let mut aggregator = crate::qc::QcAggregator::with_signers(
+            test_chain_id(),
+            &sks.iter().map(|sk| sk.public_key()).collect::<Vec<_>>(),
+        );
         for (j, sk) in sks.iter().enumerate() {
             let vote = engine.vote_for(sk, addrs[j], &block, VoteType::Precommit);
             let _ = engine.aggregate_and_commit(&mut aggregator, sk.public_key(), vote);
@@ -745,12 +858,106 @@ mod tests {
     #[test]
     fn commit_preserves_genesis_anchor() {
         let (mut engine, sks) = setup_engine();
-        let addrs: Vec<Address> = (0..4).map(validator_address).collect();
+        let addrs: Vec<Address> = sks
+            .iter()
+            .map(|sk| address_from_public_key(&sk.public_key()))
+            .collect();
 
         // Propose 3 blocks with QCs.
         build_chain_with_qcs(&mut engine, &sks, &addrs, 3);
 
         // The genesis hash should still be the anchor.
         assert_eq!(engine.commit_rule.genesis_hash, genesis_hash());
+    }
+    #[test]
+    fn cross_view_grandchild_does_not_form_same_view_three_chain() {
+        let (mut engine, sks) = setup_engine();
+        let addrs: Vec<_> = sks
+            .iter()
+            .map(|sk| address_from_public_key(&sk.public_key()))
+            .collect();
+        build_chain_with_qcs(&mut engine, &sks, &addrs, 2);
+        engine.change_view();
+        build_chain_with_qcs(&mut engine, &sks, &addrs, 1);
+        assert_eq!(engine.commit_rule.finalized_count(), 0);
+    }
+
+    #[test]
+    fn finality_rejects_prevote_certificate_and_unknown_block() {
+        let (mut engine, sks) = setup_engine();
+        let pks: Vec<_> = sks.iter().map(|sk| sk.public_key()).collect();
+        let active: BTreeSet<_> = pks.iter().map(address_from_public_key).collect();
+        let block = engine.propose(vec![]);
+        let mut agg = crate::qc::QcAggregator::with_signers(test_chain_id(), &pks);
+        let mut qc = None;
+        for sk in sks.iter().take(3) {
+            let vote = engine.vote_for(
+                sk,
+                address_from_public_key(&sk.public_key()),
+                &block,
+                VoteType::Prevote,
+            );
+            qc = agg.add_vote(sk.public_key(), vote).or(qc);
+        }
+        let qc = qc.unwrap();
+        assert!(engine.submit_qc(qc, &active).is_err());
+        let unknown = FinalityBlock::propose(1, 4, &block, 5, vec![]);
+        let mut agg = crate::qc::QcAggregator::with_signers(test_chain_id(), &pks);
+        let mut qc = None;
+        for sk in sks.iter().take(3) {
+            let vote = engine.vote_for(
+                sk,
+                address_from_public_key(&sk.public_key()),
+                &unknown,
+                VoteType::Precommit,
+            );
+            qc = agg.add_vote(sk.public_key(), vote).or(qc);
+        }
+        assert!(engine.submit_qc(qc.unwrap(), &active).is_err());
+        assert!(engine.view_change.high_qc.is_none());
+    }
+    #[test]
+    fn multiple_committed_candidates_do_not_duplicate_ancestors() {
+        let (mut engine, sks) = setup_engine();
+        let pks: Vec<_> = sks.iter().map(|sk| sk.public_key()).collect();
+        for _ in 0..5 {
+            let block = engine.propose(vec![]);
+            let mut agg = crate::qc::QcAggregator::with_signers(test_chain_id(), &pks);
+            let mut qc = None;
+            for sk in sks.iter().take(3) {
+                let vote = engine.vote_for(
+                    sk,
+                    address_from_public_key(&sk.public_key()),
+                    &block,
+                    VoteType::Precommit,
+                );
+                qc = agg.add_vote(sk.public_key(), vote).or(qc);
+            }
+            engine.commit_rule.insert_qc(block.block_hash, qc.unwrap());
+            engine.change_round();
+        }
+        let finalized = engine.commit_rule.finalize_committed();
+        let unique: BTreeSet<_> = finalized
+            .iter()
+            .map(|entry| entry.block.block_hash)
+            .collect();
+        assert_eq!(finalized.len(), 4); // genesis and three committed blocks
+        assert_eq!(unique.len(), finalized.len());
+        for pair in finalized.windows(2) {
+            assert_eq!(pair[1].block.parent_hash, pair[0].block.block_hash);
+        }
+    }
+
+    #[test]
+    fn duplicate_hash_cannot_replace_registered_block() {
+        let (mut engine, _) = setup_engine();
+        let original = engine.propose(vec![]);
+        let mut replacement = original.clone();
+        replacement.parent_hash = Hash::from_bytes([0xef; 32]);
+        assert!(!engine.commit_rule.insert_block(replacement));
+        assert_eq!(
+            engine.commit_rule.blocks.get(&original.block_hash),
+            Some(&original)
+        );
     }
 }

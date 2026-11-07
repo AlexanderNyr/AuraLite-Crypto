@@ -57,7 +57,7 @@ def expect_red(label: str, path: Path, old: str, new: str, cmd: list[str]) -> bo
         path.write_text(tampered, encoding="utf-8")
         os.utime(path, None)
         result = run(cmd)
-        went_red = result.returncode != 0
+        went_red = result.returncode != 0 and "test result: FAILED" in (result.stdout + result.stderr)
         shown = " ".join(cmd)
         raw = "\n".join((result.stdout + result.stderr).strip().splitlines()[-2:])
         snippet = re.sub(r"finished in [\d.]+s", "finished", raw)
@@ -119,13 +119,8 @@ def main() -> int:
         expect_red(
             "NC-5 the callee's status is flattened to success",
             ENGINE_RS,
-            """        crate::contract::ExecStatus::Returned(value) => {
-            i32::try_from(value).unwrap_or(AbiError::CalleeFailed.code())
-        }""",
-            """        crate::contract::ExecStatus::Returned(value) => {
-            let _ = value;
-            0
-        }""",
+            """        return i32::try_from(value).unwrap_or(AbiError::CalleeFailed.code());""",
+            """        return 0;""",
             CALLS_TEST,
         ),
         expect_red(

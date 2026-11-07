@@ -188,7 +188,13 @@ fn b6_six_attack_types_slash_validator_set_and_distribute_penalties() {
 
     // 6. ExtendedDowntime (validator 5)
     let qc_hash = Hash::from_bytes([0x0B; 32]);
-    let mut agg = QcAggregator::new(4);
+    let mut agg = QcAggregator::with_signers(
+        chain_id.as_str(),
+        &vals[0..4]
+            .iter()
+            .map(|v| v.record.bls_pubkey.clone())
+            .collect::<Vec<_>>(),
+    );
     let mut window_qc = None;
     for signer in &vals[0..4] {
         let vote = sign_vote(signer, &chain_id, 30, 0, qc_hash, VoteType::Precommit);

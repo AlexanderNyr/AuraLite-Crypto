@@ -315,7 +315,7 @@ impl ExecStatus {
 
     /// True when the call may be committed.
     pub fn is_success(self) -> bool {
-        matches!(self, Self::Returned(_))
+        matches!(self, Self::Returned(value) if value >= 0)
     }
 }
 
@@ -608,12 +608,21 @@ impl<E: Engine> Session<'_, E> {
                 host.view.events().to_vec(),
                 host.return_data.clone(),
             ),
-            Some(Outcome::Returned(value)) if !host.out_of_gas => (
+            Some(Outcome::Returned(value)) if !host.out_of_gas && value >= 0 => (
                 ExecStatus::Returned(value),
                 Some(host.view.diff(version)),
                 host.view.events().to_vec(),
                 host.return_data.clone(),
             ),
+            Some(Outcome::Returned(value)) if !host.out_of_gas => {
+                host.rollback();
+                (
+                    ExecStatus::Returned(value),
+                    None,
+                    host.view.events().to_vec(),
+                    Vec::new(),
+                )
+            }
             Some(Outcome::Returned(_)) => {
                 host.rollback();
                 (

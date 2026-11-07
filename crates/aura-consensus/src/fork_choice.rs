@@ -2,14 +2,18 @@
 //! proofs, and deep-reorg defence (`D-B3`, `D-B4`): any attempt to reorganize
 //! a finalized block is rejected and produces cryptographic [`SlashingEvidence`]
 //! against the offending signer.
+//!
+//! Experimental only: fork scores contain an unauthenticated justified-QC view,
+//! and this tree does not yet bind each validator address to its Ed25519 key.
+//! It must not be used as a production fork-choice or slashing authority.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use aura_types::{Address, ChainId, Domain, Hash};
 
 use crate::finality::FinalityBlock;
-use crate::qc::{QuorumCertificate, Vote, quorum_threshold};
+use crate::qc::{QuorumCertificate, Vote, VoteType, quorum_threshold};
 use crate::signature::BlockSignature;
 use crate::slashing::SlashingEvidence;
 
@@ -52,6 +56,8 @@ pub enum ForkChoiceError {
     },
     /// Light-client finality proof failed 3-chain or QC checks.
     InvalidLightClientProof(&'static str),
+    /// Candidate hash, signature, or height is inconsistent.
+    InvalidCandidate(&'static str),
 }
 
 impl fmt::Display for ForkChoiceError {
@@ -84,6 +90,7 @@ impl fmt::Display for ForkChoiceError {
                 "deep reorg rejected: conflicting block {conflicting_hash} at height {conflicting_height} conflicts with finalized checkpoint {finalized_hash} at height {finalized_height}"
             ),
             Self::InvalidLightClientProof(msg) => write!(f, "invalid light-client proof: {msg}"),
+            Self::InvalidCandidate(msg) => write!(f, "invalid fork candidate: {msg}"),
         }
     }
 }
@@ -106,9 +113,19 @@ pub struct FinalizedCheckpoint {
 }
 
 impl FinalizedCheckpoint {
-    /// Verify the checkpoint's `commit_qc` against `chain_id` and `validator_count`.
-    pub fn verify(&self, chain_id: &ChainId, validator_count: u64) -> Result<(), ForkChoiceError> {
-        let required = quorum_threshold(validator_count) as usize;
+    /// Verify the checkpoint QC against a trusted active committee. A single QC
+    /// does not by itself prove finality, height, or the claimed state root.
+    pub fn verify(
+        &self,
+        chain_id: &ChainId,
+        active: &BTreeSet<Address>,
+    ) -> Result<(), ForkChoiceError> {
+        let required = quorum_threshold(active.len() as u64) as usize;
+        if self.commit_qc.view != self.view || self.commit_qc.vote_type != VoteType::Precommit {
+            return Err(ForkChoiceError::InvalidCheckpointQc(
+                "checkpoint must have a matching-view precommit QC",
+            ));
+        }
         if self.commit_qc.block_hash != self.block_hash {
             return Err(ForkChoiceError::InvalidCheckpointQc(
                 "commit_qc block_hash does not match checkpoint block_hash",
@@ -122,7 +139,7 @@ impl FinalizedCheckpoint {
             ));
         }
         self.commit_qc
-            .verify(chain_id.as_str(), Domain::Vote)
+            .verify_with_members(chain_id.as_str(), Domain::Vote, active)
             .map_err(|_| {
                 ForkChoiceError::InvalidCheckpointQc("commit_qc BLS verification failed")
             })?;
@@ -130,12 +147,12 @@ impl FinalizedCheckpoint {
     }
 }
 
-/// Self-contained 3-chain finality proof for light clients (`B8`).
+/// Three-chain proof; the state root requires an independently authenticated anchor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsensusLightClientProof {
     /// Committed target block `B`.
     pub target_block: FinalityBlock,
-    /// Committed state root of `target_block`.
+    /// Claimed state root; not committed by `FinalityBlock` and not independently authenticated here.
     pub state_root: Hash,
     /// Child block `B'` whose `parent_hash == target_block.block_hash`.
     pub child_block: FinalityBlock,
@@ -150,8 +167,20 @@ pub struct ConsensusLightClientProof {
 }
 
 impl ConsensusLightClientProof {
-    /// Verify the 3-chain parent links, same-view rule, and `2f+1` BLS QCs.
-    pub fn verify(&self, chain_id: &ChainId, validator_count: u64) -> Result<(), ForkChoiceError> {
+    /// Check the 3-chain against a trusted active committee and an independently
+    /// authenticated state root. The current block format does not commit to
+    /// `state_root`; this method cannot itself authenticate that root.
+    pub fn verify(
+        &self,
+        chain_id: &ChainId,
+        active: &BTreeSet<Address>,
+        trusted_state_root: Hash,
+    ) -> Result<(), ForkChoiceError> {
+        if self.state_root != trusted_state_root {
+            return Err(ForkChoiceError::InvalidLightClientProof(
+                "state root differs from trusted root",
+            ));
+        }
         if self.child_block.parent_hash != self.target_block.block_hash
             || self.grandchild_block.parent_hash != self.child_block.block_hash
         {
@@ -174,18 +203,41 @@ impl ConsensusLightClientProof {
                 "3-chain QCs must share the same view",
             ));
         }
-        let required = quorum_threshold(validator_count) as usize;
+        for (block, qc) in [
+            (&self.target_block, &self.target_qc),
+            (&self.child_block, &self.child_qc),
+            (&self.grandchild_block, &self.grandchild_qc),
+        ] {
+            if !block.has_valid_hash()
+                || qc.view != block.view
+                || qc.round != block.round
+                || qc.vote_type != VoteType::Precommit
+            {
+                return Err(ForkChoiceError::InvalidLightClientProof(
+                    "block hash or QC context mismatch",
+                ));
+            }
+        }
+        if self.target_block.round.checked_add(1) != Some(self.child_block.round)
+            || self.child_block.round.checked_add(1) != Some(self.grandchild_block.round)
+        {
+            return Err(ForkChoiceError::InvalidLightClientProof(
+                "3-chain rounds must be adjacent",
+            ));
+        }
+        let required = quorum_threshold(active.len() as u64) as usize;
         for qc in [&self.target_qc, &self.child_qc, &self.grandchild_qc] {
             if qc.len() < required || qc.public_keys.len() != qc.signatures.len() {
                 return Err(ForkChoiceError::InvalidLightClientProof(
                     "QC in 3-chain proof has fewer than 2f+1 signatures",
                 ));
             }
-            qc.verify(chain_id.as_str(), Domain::Vote).map_err(|_| {
-                ForkChoiceError::InvalidLightClientProof(
-                    "QC BLS signature verification failed in 3-chain proof",
-                )
-            })?;
+            qc.verify_with_members(chain_id.as_str(), Domain::Vote, active)
+                .map_err(|_| {
+                    ForkChoiceError::InvalidLightClientProof(
+                        "QC BLS signature verification failed in 3-chain proof",
+                    )
+                })?;
         }
         Ok(())
     }
@@ -221,7 +273,7 @@ pub struct ReorgRejection {
 #[derive(Debug, Clone)]
 pub struct ForkChoiceTree {
     chain_id: ChainId,
-    validator_count: u64,
+    active: BTreeSet<Address>,
     weak_subjectivity_window: u64,
     blocks: BTreeMap<Hash, SignedForkBlock>,
     canonical_by_height: BTreeMap<u64, Hash>,
@@ -233,7 +285,7 @@ impl ForkChoiceTree {
     /// Initialize a [`ForkChoiceTree`] anchored at `genesis` and `genesis_checkpoint`.
     pub fn new(
         chain_id: ChainId,
-        validator_count: u64,
+        active: BTreeSet<Address>,
         genesis: SignedForkBlock,
         genesis_checkpoint: FinalizedCheckpoint,
     ) -> Self {
@@ -244,7 +296,7 @@ impl ForkChoiceTree {
         canonical_by_height.insert(0, genesis_hash);
         Self {
             chain_id,
-            validator_count,
+            active,
             weak_subjectivity_window: DEFAULT_WEAK_SUBJECTIVITY_WINDOW,
             blocks,
             canonical_by_height,
@@ -271,7 +323,11 @@ impl ForkChoiceTree {
 
     /// Check whether `block_hash` descends from (or equals) `ancestor_hash`.
     pub fn descends_from(&self, mut block_hash: Hash, ancestor_hash: Hash) -> bool {
+        let mut seen = BTreeSet::new();
         while let Some(node) = self.blocks.get(&block_hash) {
+            if !seen.insert(block_hash) {
+                return false;
+            }
             if block_hash == ancestor_hash {
                 return true;
             }
@@ -308,11 +364,14 @@ impl ForkChoiceTree {
         best_hash
     }
 
-    /// Advance the finalized checkpoint after verifying `checkpoint`'s `2f+1` QC
-    /// and weak-subjectivity bounds (`D-B3`).
+    /// Advance only with a verified three-chain proof for the same block and an
+    /// independently trusted state root. The caller must authenticate the root
+    /// separately: `FinalityBlock` does not currently commit it.
     pub fn update_finalized_checkpoint(
         &mut self,
         checkpoint: FinalizedCheckpoint,
+        proof: &ConsensusLightClientProof,
+        trusted_state_root: Hash,
         current_head_height: u64,
     ) -> Result<(), ForkChoiceError> {
         if checkpoint.height < self.finalized_checkpoint.height {
@@ -328,7 +387,29 @@ impl ForkChoiceTree {
                 window: self.weak_subjectivity_window,
             });
         }
-        checkpoint.verify(&self.chain_id, self.validator_count)?;
+        checkpoint.verify(&self.chain_id, &self.active)?;
+        proof.verify(&self.chain_id, &self.active, trusted_state_root)?;
+        if checkpoint.block_hash != proof.target_block.block_hash
+            || checkpoint.state_root != trusted_state_root
+        {
+            return Err(ForkChoiceError::InvalidCheckpointQc(
+                "checkpoint does not match verified proof and trusted root",
+            ));
+        }
+        let entry =
+            self.blocks
+                .get(&checkpoint.block_hash)
+                .ok_or(ForkChoiceError::InvalidCheckpointQc(
+                    "checkpoint block is unknown",
+                ))?;
+        if entry.height != checkpoint.height
+            || entry.block.view != checkpoint.view
+            || !self.descends_from(checkpoint.block_hash, self.finalized_checkpoint.block_hash)
+        {
+            return Err(ForkChoiceError::InvalidCheckpointQc(
+                "checkpoint height, view, or ancestry mismatch",
+            ));
+        }
 
         // Walk ancestors from checkpoint back to previous finalized checkpoint to index canonical heights.
         let mut cursor = checkpoint.block_hash;
@@ -354,9 +435,34 @@ impl ForkChoiceTree {
         candidate: SignedForkBlock,
     ) -> Result<Hash, Result<ForkChoiceError, Box<ReorgRejection>>> {
         let hash = candidate.block.block_hash;
+        if self.blocks.contains_key(&hash)
+            || !candidate.block.has_valid_hash()
+            || candidate.proposer_sig.block_hash != hash
+            || !self.active.contains(&candidate.proposer_sig.validator)
+            || candidate
+                .proposer_sig
+                .verify(self.chain_id.as_str())
+                .is_err()
+        {
+            return Err(Ok(ForkChoiceError::InvalidCandidate(
+                "duplicate, invalid hash, signature, or validator",
+            )));
+        }
         if candidate.height > 0 && !self.blocks.contains_key(&candidate.block.parent_hash) {
             return Err(Ok(ForkChoiceError::UnknownParent(
                 candidate.block.parent_hash,
+            )));
+        }
+
+        if candidate.height == 0
+            || self
+                .blocks
+                .get(&candidate.block.parent_hash)
+                .and_then(|parent| parent.height.checked_add(1))
+                != Some(candidate.height)
+        {
+            return Err(Ok(ForkChoiceError::InvalidCandidate(
+                "height does not follow parent",
             )));
         }
 
@@ -499,7 +605,13 @@ mod tests {
         block_hash: Hash,
         signers: usize,
     ) -> QuorumCertificate {
-        let mut agg = QcAggregator::new(signers as u64);
+        let mut agg = QcAggregator::with_signers(
+            chain_id.as_str(),
+            &vals[0..signers]
+                .iter()
+                .map(|v| v.record.bls_pubkey.clone())
+                .collect::<Vec<_>>(),
+        );
         let mut out = None;
         for v in &vals[0..signers] {
             let mut msg = Vec::with_capacity(49);
@@ -589,8 +701,54 @@ mod tests {
             state_root: Hash::from_bytes([0xAA; 32]),
             commit_qc: genesis_qc,
         };
-        let tree = ForkChoiceTree::new(chain_id.clone(), 4, genesis.clone(), cp);
+        let active = vals.iter().map(|v| v.record.address).collect();
+        let tree = ForkChoiceTree::new(chain_id.clone(), active, genesis.clone(), cp);
         (tree, vals, chain_id, genesis)
+    }
+
+    fn proof_for_target(
+        vals: &[TestVal],
+        chain_id: &ChainId,
+        target: &FinalityBlock,
+        state_root: Hash,
+    ) -> ConsensusLightClientProof {
+        let child = FinalityBlock::propose(
+            target.view,
+            target.round + 1,
+            target,
+            target.timestamp_ms + 1,
+            vec![],
+        );
+        let grandchild = FinalityBlock::propose(
+            target.view,
+            target.round + 2,
+            &child,
+            target.timestamp_ms + 2,
+            vec![],
+        );
+        ConsensusLightClientProof {
+            state_root,
+            target_qc: build_qc(
+                vals,
+                chain_id,
+                target.view,
+                target.round,
+                target.block_hash,
+                3,
+            ),
+            child_qc: build_qc(vals, chain_id, child.view, child.round, child.block_hash, 3),
+            grandchild_qc: build_qc(
+                vals,
+                chain_id,
+                grandchild.view,
+                grandchild.round,
+                grandchild.block_hash,
+                3,
+            ),
+            target_block: target.clone(),
+            child_block: child,
+            grandchild_block: grandchild,
+        }
     }
 
     #[test]
@@ -604,6 +762,8 @@ mod tests {
         tree.insert_block(b2.clone()).unwrap();
 
         let qc2 = build_qc(&vals, &chain_id, 2, 0, b2.block.block_hash, 3);
+        let trusted_root = Hash::from_bytes([0xBB; 32]);
+        let proof = proof_for_target(&vals, &chain_id, &b2.block, trusted_root);
         tree.update_finalized_checkpoint(
             FinalizedCheckpoint {
                 height: 2,
@@ -612,6 +772,8 @@ mod tests {
                 state_root: Hash::from_bytes([0xBB; 32]),
                 commit_qc: qc2,
             },
+            &proof,
+            trusted_root,
             2,
         )
         .unwrap();
@@ -673,6 +835,8 @@ mod tests {
 
         // Finalize b1_canon! Even though b1_stale had justified_qc_view = 99, canonical head must now be b1_canon.
         let qc1 = build_qc(&vals, &chain_id, 1, 0, b1_canon.block.block_hash, 3);
+        let trusted_root = Hash::from_bytes([0xCC; 32]);
+        let proof = proof_for_target(&vals, &chain_id, &b1_canon.block, trusted_root);
         tree.update_finalized_checkpoint(
             FinalizedCheckpoint {
                 height: 1,
@@ -681,6 +845,8 @@ mod tests {
                 state_root: Hash::from_bytes([0xCC; 32]),
                 commit_qc: qc1,
             },
+            &proof,
+            trusted_root,
             1,
         )
         .unwrap();
@@ -703,8 +869,10 @@ mod tests {
             state_root: Hash::from_bytes([0xDD; 32]),
             commit_qc: sub_quorum_qc,
         };
+        let trusted_root = bad_cp.state_root;
+        let proof = proof_for_target(&vals, &chain_id, &b1.block, trusted_root);
         assert!(matches!(
-            tree.update_finalized_checkpoint(bad_cp, 1),
+            tree.update_finalized_checkpoint(bad_cp, &proof, trusted_root, 1),
             Err(ForkChoiceError::InvalidCheckpointQc(_))
         ));
     }
@@ -729,15 +897,155 @@ mod tests {
             child_qc: qc2,
             grandchild_qc: qc3,
         };
-        proof.verify(&chain_id, 4).unwrap();
+        proof
+            .verify(
+                &chain_id,
+                &vals.iter().map(|v| v.record.address).collect(),
+                proof.state_root,
+            )
+            .unwrap();
 
-        // Tamper with grandchild_qc view -> must fail 3-chain same-view rule.
+        // Sign a genuine cross-view certificate. Merely changing its view after
+        // signing also breaks the signature and would not isolate this rule.
         let mut bad_proof = proof.clone();
-        bad_proof.grandchild_qc.view = 2;
+        bad_proof.grandchild_block =
+            FinalityBlock::propose(2, 2, &bad_proof.child_block, 4_000, vec![b"tx3".to_vec()]);
+        bad_proof.grandchild_qc = build_qc(
+            &vals,
+            &chain_id,
+            2,
+            2,
+            bad_proof.grandchild_block.block_hash,
+            3,
+        );
         assert!(matches!(
-            bad_proof.verify(&chain_id, 4),
+            bad_proof.verify(
+                &chain_id,
+                &vals.iter().map(|v| v.record.address).collect(),
+                proof.state_root
+            ),
             Err(ForkChoiceError::InvalidLightClientProof(_))
         ));
+    }
+
+    // Regression checks for trusted signer membership and an externally
+    // authenticated root; the block format itself still does not commit that root.
+    fn b8_sample_proof(
+        vals: &[TestVal],
+        chain_id: &ChainId,
+        genesis: &SignedForkBlock,
+    ) -> ConsensusLightClientProof {
+        let b1 = FinalityBlock::propose(1, 0, &genesis.block, 2_000, vec![]);
+        let b2 = FinalityBlock::propose(1, 1, &b1, 3_000, vec![]);
+        let b3 = FinalityBlock::propose(1, 2, &b2, 4_000, vec![]);
+        ConsensusLightClientProof {
+            state_root: Hash::from_bytes([0xEE; 32]),
+            target_qc: build_qc(vals, chain_id, 1, 0, b1.block_hash, 3),
+            child_qc: build_qc(vals, chain_id, 1, 1, b2.block_hash, 3),
+            grandchild_qc: build_qc(vals, chain_id, 1, 2, b3.block_hash, 3),
+            target_block: b1,
+            child_block: b2,
+            grandchild_block: b3,
+        }
+    }
+
+    #[test]
+    fn b8_rejects_untrusted_signers() {
+        let (_tree, trusted, chain_id, genesis) = setup_tree();
+        let attacker_vals = make_validators(7);
+        let proof = b8_sample_proof(&attacker_vals[4..], &chain_id, &genesis);
+        assert!(
+            proof
+                .verify(
+                    &chain_id,
+                    &trusted.iter().map(|v| v.record.address).collect(),
+                    proof.state_root
+                )
+                .is_err(),
+            "untrusted signers were accepted"
+        );
+    }
+
+    #[test]
+    fn b8_rejects_root_different_from_trusted_anchor() {
+        let (_tree, vals, chain_id, genesis) = setup_tree();
+        let mut proof = b8_sample_proof(&vals, &chain_id, &genesis);
+        let trusted_root = proof.state_root;
+        proof.state_root = Hash::from_bytes([0x99; 32]);
+        assert!(
+            proof
+                .verify(
+                    &chain_id,
+                    &vals.iter().map(|v| v.record.address).collect(),
+                    trusted_root
+                )
+                .is_err(),
+            "unbound state root was accepted"
+        );
+    }
+
+    #[test]
+    fn proof_rejects_unbound_block_data_and_mismatched_qc_context() {
+        let (_tree, vals, chain_id, genesis) = setup_tree();
+        let proof = b8_sample_proof(&vals, &chain_id, &genesis);
+        let active = vals.iter().map(|v| v.record.address).collect();
+        let mut altered = proof.clone();
+        altered.child_block.transactions.push(b"changed".to_vec());
+        assert!(
+            altered
+                .verify(&chain_id, &active, proof.state_root)
+                .is_err()
+        );
+        let mut altered = proof.clone();
+        altered.child_qc = build_qc(&vals, &chain_id, 1, 12, proof.child_block.block_hash, 3);
+        assert!(
+            altered
+                .verify(&chain_id, &active, proof.state_root)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn checkpoint_requires_a_valid_three_chain_and_trusted_root() {
+        let (mut tree, vals, chain_id, genesis) = setup_tree();
+        let b1 = make_signed_block(&vals[1], &chain_id, 1, 1, 0, &genesis.block, 1, b"b1");
+        tree.insert_block(b1.clone()).unwrap();
+        let root = Hash::from_bytes([0x90; 32]);
+        let mut proof = proof_for_target(&vals, &chain_id, &b1.block, root);
+        let cp = FinalizedCheckpoint {
+            height: 1,
+            view: 1,
+            block_hash: b1.block.block_hash,
+            state_root: root,
+            commit_qc: proof.target_qc.clone(),
+        };
+        // A valid single target QC cannot substitute for the child/grandchild QCs.
+        proof.child_qc = build_qc(&vals, &chain_id, 1, 1, proof.child_block.block_hash, 2);
+        assert!(
+            tree.update_finalized_checkpoint(cp.clone(), &proof, root, 1)
+                .is_err()
+        );
+        assert_eq!(tree.finalized_checkpoint().height, 0);
+        let proof = proof_for_target(&vals, &chain_id, &b1.block, root);
+        assert!(
+            tree.update_finalized_checkpoint(cp, &proof, Hash::ZERO, 1)
+                .is_err()
+        );
+        assert_eq!(tree.finalized_checkpoint().height, 0);
+    }
+
+    #[test]
+    fn candidate_duplicate_tampering_and_height_mismatch_are_rejected() {
+        let (mut tree, vals, chain_id, genesis) = setup_tree();
+        let b1 = make_signed_block(&vals[1], &chain_id, 1, 1, 0, &genesis.block, 1, b"b1");
+        tree.insert_block(b1.clone()).unwrap();
+        assert!(tree.insert_block(b1.clone()).is_err());
+        let mut b2 = make_signed_block(&vals[2], &chain_id, 2, 1, 1, &b1.block, 1, b"b2");
+        b2.block.transactions.push(b"altered".to_vec());
+        assert!(tree.insert_block(b2).is_err());
+        let mut b2 = make_signed_block(&vals[2], &chain_id, 2, 1, 1, &b1.block, 1, b"b2");
+        b2.height = 99;
+        assert!(tree.insert_block(b2).is_err());
     }
 
     #[test]
@@ -755,8 +1063,10 @@ mod tests {
             commit_qc: qc1,
         };
         // Head height = 500, checkpoint height = 1 -> age 499 > window 100 -> rejected!
+        let trusted_root = cp.state_root;
+        let proof = proof_for_target(&vals, &chain_id, &b1.block, trusted_root);
         assert!(matches!(
-            tree.update_finalized_checkpoint(cp, 500),
+            tree.update_finalized_checkpoint(cp, &proof, trusted_root, 500),
             Err(ForkChoiceError::WeakSubjectivityExpired { .. })
         ));
     }

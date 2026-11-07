@@ -12,11 +12,11 @@ VERIFY_DIGEST = '''    let digest = hash_domain(chain_id, domain, message);
     let dst = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_";'''
 CASES = [
     (
-        "NC-1 quorum threshold must be 2f+1",
+        "NC-1 quorum threshold must be n-f",
         QC,
-        "2 * f + 1",
-        "2 * f",
-        "qc::tests::quorum_threshold_basic",
+        "total_validators - max_faulty",
+        "total_validators.saturating_sub(max_faulty + 1)",
+        "qc::tests::quorum_threshold_is_safe_for_all_n",
     ),
     (
         "NC-2 duplicate validators must not add a second vote",
@@ -25,15 +25,18 @@ CASES = [
             return None;
         }
 ''',
-        "",
-        "qc::tests::aggregator_ignores_duplicate_validator",
+        """        if self.votes.contains_key(&vote.validator) {
+            return Some(self.build_qc());
+        }
+""",
+        "qc::tests::duplicate_validator_cannot_count_twice",
     ),
     (
         "NC-3 an aggregator must form a QC at its threshold",
         QC,
         "self.votes.len() as u64 >= self.threshold",
         "self.votes.len() as u64 > self.threshold",
-        "qc::tests::aggregator_reaches_quorum",
+        "qc::tests::aggregator_reaches_quorum_and_verifies_membership",
     ),
     (
         "NC-4 BLS signatures must be chain separated",

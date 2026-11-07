@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""Aggregate N1 test, mutation, full-gate and clean-apply evidence."""
+"""Historical N1 closeout writer, frozen after the phase receipt was published.
+
+This generator rewrites old N1 evidence and prior SHA256SUMS manifests. The
+post-closeout security review must not regenerate historical receipts.
+"""
 from __future__ import annotations
 
 import hashlib
 import re
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -211,32 +216,13 @@ def refresh_sums() -> None:
 
 
 def main() -> int:
-    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    _, _, _, _ = validate()
-    refresh_prior_sums()
-    inventory_text, total = inventory(stamp)
-    if total != EXPECTED_TOTAL:
-        raise SystemExit(
-            f"ERROR: evidence inventory has {total} controls, expected {EXPECTED_TOTAL}"
-        )
-    gates = f"""N1 gates (UTC generated {stamp})
-
-make test-n1: PASS (see test-n1.log)
-  aura-p2p library unit tests: 18
-  live 10-node TCP TransportSwarm & identity-substitution tests: 2
-make nc-n1: PASS (6/6 exact library-unit-test mutations; restoration green)
-make nc-all: PASS ({total}/{total} cumulative negative controls; see nc-all.log)
-make test: PASS (ALL GATES GREEN; see make-test.log)
-Dependency closure and lockfile checksums: PASS (0 new external crates)
-Clean GitHub-HEAD patch application and revalidation: PASS (see clean-apply.txt)
-"""
-    (EVIDENCE / "gates.txt").write_text(gates, encoding="utf-8")
-    (EVIDENCE / "inventory.txt").write_text(inventory_text, encoding="utf-8")
-    (EVIDENCE / "report.md").write_text(report(stamp), encoding="utf-8")
-    refresh_sums()
-    print(f"wrote docs/evidence/n1/gates.txt, report.md and inventory.txt ({total} NCs)")
-    print("wrote docs/evidence/n1/SHA256SUMS")
-    return 0
+    print(
+        "REFUSED: N1 phase-close evidence is historical and frozen. "
+        "This legacy generator rewrites receipts and prior checksum manifests; "
+        "see the N1 security-review follow-up in docs/plans/NET_PLAN.md.",
+        file=sys.stderr,
+    )
+    return 2
 
 
 if __name__ == "__main__":

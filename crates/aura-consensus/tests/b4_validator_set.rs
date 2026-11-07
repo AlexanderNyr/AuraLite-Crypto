@@ -73,7 +73,7 @@ fn four_to_seven_validators_transition_at_height_h_across_all_nodes() {
 
         for (staking, engine) in &mut nodes {
             let block = engine.propose_at(timestamp_ms, txs.clone());
-            let mut agg = QcAggregator::new(quorum_threshold(n_active as u64));
+            let mut agg = QcAggregator::new(CHAIN, staking.validator_set().active_addresses());
             let mut qc_opt = None;
             for (idx, addr) in addrs.iter().enumerate() {
                 if !staking.validator_set().is_active(addr) {
@@ -145,7 +145,10 @@ fn qc_authorized_set_update_replaces_validator_set_and_rejects_bad_updates() {
     let tip = Hash::from_bytes([0xAB; 32]);
 
     // Build a valid 3-of-4 BLS QC over `tip`.
-    let mut agg = QcAggregator::new(quorum_threshold(4));
+    let mut agg = QcAggregator::with_signers(
+        CHAIN,
+        &keys[..4].iter().map(|k| k.public_key()).collect::<Vec<_>>(),
+    );
     let mut qc_opt = None;
     for i in 0..3 {
         let payload: Vec<u8> = [
