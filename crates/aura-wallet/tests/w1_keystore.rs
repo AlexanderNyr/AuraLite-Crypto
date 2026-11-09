@@ -1021,6 +1021,126 @@ fn python_generated_keystore_interoperability_vectors() {
     }
 }
 
+#[cfg(not(feature = "insecure-test-kdf"))]
+#[test]
+fn python_schema_reference_matches_parser_matrix() {
+    // Parse-only: accepted documents are unauthenticated and may have stale
+    // GCM tags. This oracle deliberately uses the default parser KDF limits.
+    let cases: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/w1_schema_reference.json")).unwrap();
+    let cases = cases.as_array().unwrap();
+    assert_eq!(cases.len(), 71);
+    for case in cases {
+        let name = case["name"].as_str().unwrap();
+        let input = case["document"].as_str().unwrap();
+        let expected = case["accepted"].as_bool().unwrap();
+        assert_eq!(
+            Keystore::from_json_str(input).is_ok(),
+            expected,
+            "schema case: {name}"
+        );
+    }
+}
+
+#[test]
+fn python_profile_vectors_decrypt_and_authenticate_marker() {
+    use aura_wallet::derivation::Bip39NormalizationProfile::Unicode15_1;
+
+    // Public vectors: ASCII mnemonic/passphrase deliberately derive the same
+    // seed under both frozen profiles. They do not test version-sensitive NFKD.
+    let expected = seed_v18(BIP39_MNEMONIC, BIP39_PASSPHRASE).unwrap();
+    let password = Password::new("public-interop-password");
+    let cases = [
+        (
+            include_str!("fixtures/w1_interop_argon2id_profile_null.json"),
+            None,
+        ),
+        (
+            include_str!("fixtures/w1_interop_scrypt_profile_null.json"),
+            None,
+        ),
+        (
+            include_str!("fixtures/w1_interop_argon2id_profile_15_1.json"),
+            Some(Unicode15_1),
+        ),
+        (
+            include_str!("fixtures/w1_interop_scrypt_profile_15_1.json"),
+            Some(Unicode15_1),
+        ),
+    ];
+    for (fixture, profile) in cases {
+        let store = Keystore::from_json_str(fixture).unwrap();
+        assert_eq!(store.normalization_profile(), profile);
+        assert_eq!(
+            store.decrypt_seed(&password).unwrap().as_bytes(),
+            expected.as_bytes()
+        );
+        let mut altered: serde_json::Value = serde_json::from_str(fixture).unwrap();
+        altered["seed_derivation"]["normalization_profile"] = if profile.is_some() {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!("bip39-nfkd-unicode-15.1")
+        };
+        let tampered = Keystore::from_json_str(&altered.to_string()).unwrap();
+        assert!(matches!(
+            tampered.decrypt_seed(&password),
+            Err(KeystoreError::AuthenticationFailed)
+        ));
+    }
+}
+
+#[test]
+fn independent_sensitive_profile_fixtures_recover_distinct_seeds() {
+    use aura_wallet::derivation::Bip39NormalizationProfile::{Unicode15_1, Unicode18_0};
+    use aura_wallet::keystore::RecoveryMetadata;
+
+    let password = Password::new("public-interop-password");
+    let cases = [
+        (
+            include_str!("fixtures/w1_interop_argon2id_profile_sensitive_15_1.json"),
+            Unicode15_1,
+        ),
+        (
+            include_str!("fixtures/w1_interop_argon2id_profile_sensitive_18_0.json"),
+            Unicode18_0,
+        ),
+    ];
+    let mut previous: Option<SecretSeed> = None;
+    for (fixture, profile) in cases {
+        let store = Keystore::from_json_str(fixture).unwrap();
+        let seed = store.decrypt_seed(&password).unwrap();
+        let expected =
+            derivation::mnemonic_to_seed_with_profile(BIP39_MNEMONIC, "\u{a7f1}", profile).unwrap();
+        assert_eq!(seed.as_bytes(), expected.as_bytes());
+        if let Some(ref previous) = previous {
+            assert_ne!(seed.as_bytes(), previous.as_bytes());
+        }
+        previous = Some(seed);
+        store
+            .verify_mnemonic_recovery(
+                BIP39_MNEMONIC,
+                "\u{a7f1}",
+                RecoveryMetadata::new(profile),
+                &password,
+            )
+            .unwrap();
+        let other = if profile == Unicode15_1 {
+            Unicode18_0
+        } else {
+            Unicode15_1
+        };
+        assert_eq!(
+            store.verify_mnemonic_recovery(
+                BIP39_MNEMONIC,
+                "\u{a7f1}",
+                RecoveryMetadata::new(other),
+                &password
+            ),
+            Err(KeystoreError::RecoveryProfileMismatch)
+        );
+    }
+}
+
 #[test]
 fn unicode_interop_vectors_use_nfkd_mnemonic_and_raw_password_bytes() {
     // All seed, password and KDF inputs below are PUBLIC test data.
@@ -1546,4 +1666,281 @@ fn insecure_test_parser_enforces_resource_caps() {
         Keystore::from_json_str(&scrypt.to_string()),
         Err(KeystoreError::WeakKdfParameters)
     ));
+}
+
+#[test]
+fn recovery_metadata_strict_schema_and_byte_limit_matrix() {
+    use aura_wallet::derivation::Bip39NormalizationProfile::{Unicode15_1, Unicode18_0};
+    use aura_wallet::keystore::RecoveryMetadata;
+
+    // Explicit public cases: parsing the marker is not authentication, and
+    // must never choose a profile for malformed or ambiguous metadata.
+    let cases = [
+        (
+            "legacy",
+            r#"{"normalization_profile":"bip39-nfkd-unicode-15.1"}"#,
+            Some(Unicode15_1),
+        ),
+        (
+            "current",
+            r#"{"normalization_profile":"bip39-nfkd-unicode-18.0"}"#,
+            Some(Unicode18_0),
+        ),
+        (
+            "escaped field",
+            r#"{"normalization_\u0070rofile":"bip39-nfkd-unicode-18.0"}"#,
+            Some(Unicode18_0),
+        ),
+        (
+            "escaped value",
+            r#"{"normalization_profile":"bip39-nfkd-unicode-\u0031\u0035.1"}"#,
+            Some(Unicode15_1),
+        ),
+        (
+            "JSON whitespace",
+            " \n\t{ \"normalization_profile\" : \"bip39-nfkd-unicode-18.0\" }\r",
+            Some(Unicode18_0),
+        ),
+        ("missing", "{}", None),
+        ("top null", "null", None),
+        ("top array", "[]", None),
+        ("top scalar", "123", None),
+        ("null profile", r#"{"normalization_profile":null}"#, None),
+        ("number profile", r#"{"normalization_profile":18}"#, None),
+        ("array profile", r#"{"normalization_profile":[]}"#, None),
+        ("object profile", r#"{"normalization_profile":{}}"#, None),
+        ("empty profile", r#"{"normalization_profile":""}"#, None),
+        (
+            "unsupported profile",
+            r#"{"normalization_profile":"bip39-nfkd-unicode-19.0"}"#,
+            None,
+        ),
+        (
+            "case sensitive",
+            r#"{"normalization_profile":"BIP39-nfkd-unicode-18.0"}"#,
+            None,
+        ),
+        (
+            "trailing profile space",
+            r#"{"normalization_profile":"bip39-nfkd-unicode-18.0 "}"#,
+            None,
+        ),
+        (
+            "unknown field",
+            r#"{"normalization_profile":"bip39-nfkd-unicode-18.0","extra":null}"#,
+            None,
+        ),
+        (
+            "same duplicate",
+            r#"{"normalization_profile":"bip39-nfkd-unicode-18.0","normalization_profile":"bip39-nfkd-unicode-18.0"}"#,
+            None,
+        ),
+        (
+            "escaped duplicate",
+            r#"{"normalization_profile":"bip39-nfkd-unicode-15.1","normalization_\u0070rofile":"bip39-nfkd-unicode-18.0"}"#,
+            None,
+        ),
+        (
+            "escaped duplicate reversed",
+            r#"{"normalization_\u0070rofile":"bip39-nfkd-unicode-18.0","normalization_profile":"bip39-nfkd-unicode-15.1"}"#,
+            None,
+        ),
+        (
+            "trailing comma",
+            r#"{"normalization_profile":"bip39-nfkd-unicode-18.0",}"#,
+            None,
+        ),
+        (
+            "trailing JSON",
+            r#"{"normalization_profile":"bip39-nfkd-unicode-18.0"}{}"#,
+            None,
+        ),
+        (
+            "unpaired surrogate",
+            r#"{"normalization_profile":"\ud800"}"#,
+            None,
+        ),
+        (
+            "BOM",
+            "\u{feff}{\"normalization_profile\":\"bip39-nfkd-unicode-18.0\"}",
+            None,
+        ),
+    ];
+    for (name, input, expected) in cases {
+        let parsed = RecoveryMetadata::from_json_str(input);
+        assert_eq!(
+            parsed.as_ref().ok().map(|m| m.normalization_profile()),
+            expected,
+            "{name}"
+        );
+        if let Ok(marker) = parsed {
+            let canonical = marker.to_json_string().unwrap();
+            assert_eq!(
+                RecoveryMetadata::from_json_str(&canonical).unwrap(),
+                marker,
+                "{name}"
+            );
+        }
+    }
+
+    let canonical = RecoveryMetadata::new(Unicode18_0).to_json_string().unwrap();
+    let at_limit = format!("{}{}", canonical, " ".repeat(4096 - canonical.len()));
+    assert_eq!(at_limit.len(), 4096);
+    assert_eq!(
+        RecoveryMetadata::from_json_str(&at_limit)
+            .unwrap()
+            .normalization_profile(),
+        Unicode18_0
+    );
+    let oversized = format!("{at_limit} ");
+    assert_eq!(oversized.len(), 4097);
+    assert!(
+        RecoveryMetadata::from_json_str(&oversized).is_err(),
+        "4097 bytes must be rejected"
+    );
+}
+
+#[test]
+fn python_recovery_metadata_reference_matches_parser_matrix() {
+    use aura_wallet::keystore::RecoveryMetadata;
+
+    let cases: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/w1_recovery_metadata_reference.json")).unwrap();
+    let cases = cases.as_array().unwrap();
+    assert_eq!(cases.len(), 37);
+    for case in cases {
+        let name = case["name"].as_str().unwrap();
+        let input = case["document"].as_str().unwrap();
+        let accepted = case["accepted"].as_bool().unwrap();
+        match RecoveryMetadata::from_json_str(input) {
+            Ok(marker) => {
+                assert!(accepted, "unexpected acceptance for {name}");
+                assert_eq!(
+                    marker.normalization_profile().id(),
+                    case["profile"].as_str().unwrap(),
+                    "profile mismatch for {name}"
+                );
+                assert_eq!(
+                    marker.to_json_string().unwrap(),
+                    case["canonical"].as_str().unwrap(),
+                    "canonical mismatch for {name}"
+                );
+            }
+            Err(err) => {
+                assert!(!accepted, "unexpected error {err:?} for {name}");
+                let actual_kind = match err {
+                    KeystoreError::InvalidFormat => "invalid_format",
+                    KeystoreError::RecoveryProfileMissing => "missing_profile",
+                    KeystoreError::Unsupported => "unsupported",
+                    other => panic!("unexpected error variant {other:?} for {name}"),
+                };
+                assert_eq!(
+                    actual_kind,
+                    case["error"].as_str().unwrap(),
+                    "error kind mismatch for {name}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn reauthenticated_uppercase_hex_header_and_canonical_account_rules() {
+    let expected = seed_v18(BIP39_MNEMONIC, BIP39_PASSPHRASE).unwrap();
+    let password = Password::new("public-interop-password");
+
+    // Uppercase hex in id/salt/nonce/ciphertext is valid when authenticated,
+    // while accounts[0] remains canonical lowercase.
+    let upper_raw = include_str!("fixtures/w1_interop_argon2id_uppercase_hex_header.json");
+    let upper_store = Keystore::from_json_str(upper_raw).unwrap();
+    assert_eq!(
+        upper_store.decrypt_seed(&password).unwrap().as_bytes(),
+        expected.as_bytes()
+    );
+
+    // Header hex case is part of AAD: changing case in id, salt or nonce fails GCM.
+    let base_doc: serde_json::Value = serde_json::from_str(upper_raw).unwrap();
+    for mutate in [
+        |d: &mut serde_json::Value| {
+            d["id"] = d["id"].as_str().unwrap().to_ascii_lowercase().into();
+        },
+        |d: &mut serde_json::Value| {
+            d["kdf"]["salt"] = d["kdf"]["salt"]
+                .as_str()
+                .unwrap()
+                .to_ascii_lowercase()
+                .into();
+        },
+        |d: &mut serde_json::Value| {
+            d["cipher"]["nonce"] = d["cipher"]["nonce"]
+                .as_str()
+                .unwrap()
+                .to_ascii_lowercase()
+                .into();
+        },
+    ] {
+        let mut altered = base_doc.clone();
+        mutate(&mut altered);
+        let parsed = Keystore::from_json_str(&altered.to_string()).unwrap();
+        assert_eq!(
+            parsed.decrypt_seed(&password).err(),
+            Some(KeystoreError::AuthenticationFailed)
+        );
+    }
+
+    // Ciphertext is excluded from AAD and decoded case-insensitively.
+    let mut lower_ct = base_doc;
+    lower_ct["ciphertext"] = lower_ct["ciphertext"]
+        .as_str()
+        .unwrap()
+        .to_ascii_lowercase()
+        .into();
+    assert_eq!(
+        Keystore::from_json_str(&lower_ct.to_string())
+            .unwrap()
+            .decrypt_seed(&password)
+            .unwrap()
+            .as_bytes(),
+        expected.as_bytes()
+    );
+
+    // Validly GCM-authenticated documents whose account public_key or address
+    // uses uppercase spelling of the true derived account must still fail closed.
+    for fixture in [
+        include_str!("fixtures/w1_inconsistent_uppercase_public_key.json"),
+        include_str!("fixtures/w1_inconsistent_uppercase_address.json"),
+    ] {
+        let store = Keystore::from_json_str(fixture).unwrap();
+        assert_eq!(
+            store.decrypt_seed(&password).err(),
+            Some(KeystoreError::AuthenticationFailed)
+        );
+    }
+
+    // Legacy weak-scrypt migration must also reject a validly GCM-authenticated
+    // document whose account metadata disagrees with the decrypted seed.
+    let legacy_bad = Keystore::from_json_str(include_str!(
+        "fixtures/w1_inconsistent_scrypt_legacy_account.json"
+    ))
+    .unwrap();
+    assert_eq!(
+        legacy_bad.decrypt_seed(&password).err(),
+        Some(KeystoreError::WeakKdfParameters)
+    );
+    assert_eq!(
+        legacy_bad
+            .decrypt_legacy_scrypt_for_migration(&password)
+            .err(),
+        Some(KeystoreError::AuthenticationFailed)
+    );
+    assert_eq!(
+        legacy_bad
+            .reencrypt_legacy_scrypt_for_migration(
+                &password,
+                &Password::new("migrated-public-password"),
+                KdfParams::default_argon2id(),
+            )
+            .err(),
+        Some(KeystoreError::AuthenticationFailed)
+    );
 }

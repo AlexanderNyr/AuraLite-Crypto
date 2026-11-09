@@ -20,5 +20,24 @@ fuzz_target!(|data: &[u8]| {
             serialized,
             reparsed.to_json_string().expect("stable serialization")
         );
+        // The authenticated normalization-profile marker survives parsing and
+        // serialization unchanged (including its absence).
+        assert_eq!(
+            store.normalization_profile(),
+            reparsed.normalization_profile()
+        );
+
+        // Strict-parser metamorphic rejects derived from this accepted
+        // document: one extra field, a duplicate key spelled with an escape
+        // (`\u0066ormat` is `format`), and one byte over the size limit.
+        let body = serialized.strip_prefix('{').expect("object document");
+        let extra_field = format!("{{\"extra-field\":0,{body}");
+        assert!(Keystore::from_json_str(&extra_field).is_err());
+        let escaped_duplicate = format!("{{\"\\u0066ormat\":null,{body}");
+        assert!(Keystore::from_json_str(&escaped_duplicate).is_err());
+        let mut oversize = serialized;
+        oversize.push_str(&" ".repeat((MAX_KEYSTORE_BYTES as usize + 1) - oversize.len()));
+        assert_eq!(oversize.len(), MAX_KEYSTORE_BYTES as usize + 1);
+        assert!(Keystore::from_json_str(&oversize).is_err());
     }
 });

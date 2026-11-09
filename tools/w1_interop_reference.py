@@ -45,9 +45,10 @@ CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 GEN = (0x3B6A57B2, 0x26508E6D, 0x1EA119FA, 0x3D4233DD, 0x2A1462B3)
 
 
-def seed_and_account(passphrase: str = MNEMONIC_PASSPHRASE) -> tuple[bytes, str, str]:
+def seed_and_account(passphrase: str = MNEMONIC_PASSPHRASE, *, already_normalized: bool = False) -> tuple[bytes, str, str]:
     phrase = unicodedata.normalize("NFKD", PHRASE).encode("utf-8")
-    salt = ("mnemonic" + unicodedata.normalize("NFKD", passphrase)).encode("utf-8")
+    normalized = passphrase if already_normalized else unicodedata.normalize("NFKD", passphrase)
+    salt = ("mnemonic" + normalized).encode("utf-8")
     seed = hashlib.pbkdf2_hmac("sha512", phrase, salt, 2048)
     ext = hmac.new(b"ed25519 seed", seed, hashlib.sha512).digest()
     for index in (44, 1, 0, 0, 0):
@@ -134,10 +135,69 @@ def make_fixture(kind: str) -> dict:
     return doc
 
 
+def make_profile_fixture(kdf: str, profile: str | None) -> dict:
+    """Public deterministic AES-GCM vector with authenticated v2 profile metadata."""
+    if kdf not in ("argon2id", "scrypt") or profile not in (None, "bip39-nfkd-unicode-15.1"):
+        raise ValueError("unsupported profile vector")
+    label = f"{kdf}:{profile}".encode("ascii")
+    doc = make_fixture(kdf)
+    # Separate deterministic test-only values for each case, with distinct
+    # hash domains; never reuse public fixture credentials for real wallets.
+    doc["id"] = hashlib.sha256(b"w1-public-id:" + label).digest()[:16].hex()
+    doc["kdf"]["salt"] = hashlib.sha256(b"w1-public-salt:" + label).digest()[:16].hex()
+    doc["cipher"]["nonce"] = hashlib.sha256(b"w1-public-nonce:" + label).digest()[:12].hex()
+    doc["seed_derivation"]["normalization_profile"] = profile
+    doc.pop("ciphertext")
+    seed, _, _ = seed_and_account()
+    doc["ciphertext"] = AESGCM(key_for(doc["kdf"], PASSWORD)).encrypt(
+        bytes.fromhex(doc["cipher"]["nonce"]), seed, aad_for(doc)
+    ).hex()
+    return doc
+
+
+def make_sensitive_profile_fixture(profile: str) -> dict:
+    """Use explicit known NFKD outputs, independent of the host Unicode tables."""
+    if profile not in ("15.1", "18.0"):
+        raise ValueError("unsupported profile")
+    # For input U+A7F1, Unicode 15.1 preserves it; Unicode 18.0 maps it to S.
+    # These literals specify the normalization result being tested, not a claim
+    # that Python's installed Unicode tables independently implement either version.
+    normalized_passphrase = "\ua7f1" if profile == "15.1" else "S"
+    label = f"argon2id:sensitive:{profile}".encode("ascii")
+    doc = make_fixture("argon2id")
+    doc["id"] = hashlib.sha256(b"w1-public-id:" + label).digest()[:16].hex()
+    doc["kdf"]["salt"] = hashlib.sha256(b"w1-public-salt:" + label).digest()[:16].hex()
+    doc["cipher"]["nonce"] = hashlib.sha256(b"w1-public-nonce:" + label).digest()[:12].hex()
+    doc["seed_derivation"]["normalization_profile"] = f"bip39-nfkd-unicode-{profile}"
+    seed, public, address = seed_and_account(normalized_passphrase, already_normalized=True)
+    doc["accounts"][0]["public_key"] = public
+    doc["accounts"][0]["address"] = address
+    doc.pop("ciphertext")
+    doc["ciphertext"] = AESGCM(key_for(doc["kdf"], PASSWORD)).encrypt(
+        bytes.fromhex(doc["cipher"]["nonce"]), seed, aad_for(doc)
+    ).hex()
+    return doc
+
+
+def make_uppercase_hex_header_fixture() -> dict:
+    """Valid v2 Argon2id document with uppercase hex id/salt/nonce/ciphertext and canonical lowercase account."""
+    doc = make_fixture("argon2id")
+    seed, _, _ = seed_and_account(MNEMONIC_PASSPHRASE)
+    doc["id"] = "ABCDEF0123456789ABCDEF0123456789"
+    doc["kdf"]["salt"] = "FEDCBA9876543210FEDCBA9876543210"
+    doc["cipher"]["nonce"] = "AABBCCDDEEFF001122334455"
+    doc.pop("ciphertext")
+    nonce = bytes.fromhex(doc["cipher"]["nonce"])
+    doc["ciphertext"] = AESGCM(key_for(doc["kdf"], PASSWORD)).encrypt(nonce, seed, aad_for(doc)).hex().upper()
+    assert any(ch in doc["ciphertext"] for ch in "ABCDEF")
+    return doc
+
+
 def make_inconsistent_fixture(field: str) -> dict:
     # Public test credentials only. Deliberately build a valid GCM tag for a
-    # document whose account metadata does not belong to the encrypted seed.
-    doc = make_fixture("argon2id")
+    # document whose account metadata does not belong to the encrypted seed
+    # or violates canonical lowercase comparison.
+    doc = make_fixture("scrypt_legacy" if field == "scrypt_legacy_account" else "argon2id")
     seed, public, address = seed_and_account(MNEMONIC_PASSPHRASE)
     if field == "public_key":
         doc["id"] = "11111111111111111111111111111111"
@@ -148,6 +208,25 @@ def make_inconsistent_fixture(field: str) -> dict:
         doc["id"] = "22222222222222222222222222222222"
         doc["kdf"]["salt"] = "2233445566778899aabbccddeeff0011"
         doc["cipher"]["nonce"] = "2233445566778899aabbccdd"
+        other_address = seed_and_account("another-public-passphrase")[2]
+        assert other_address != address
+        doc["accounts"][0]["address"] = other_address
+    elif field == "uppercase_public_key":
+        doc["id"] = "33333333333333333333333333333333"
+        doc["kdf"]["salt"] = "33445566778899aabbccddeeff001122"
+        doc["cipher"]["nonce"] = "33445566778899aabbccddee"
+        assert public.upper() != public
+        doc["accounts"][0]["public_key"] = public.upper()
+    elif field == "uppercase_address":
+        doc["id"] = "44444444444444444444444444444444"
+        doc["kdf"]["salt"] = "445566778899aabbccddeeff00112233"
+        doc["cipher"]["nonce"] = "445566778899aabbccddeeff"
+        assert address.upper() != address
+        doc["accounts"][0]["address"] = address.upper()
+    elif field == "scrypt_legacy_account":
+        doc["id"] = "55555555555555555555555555555555"
+        doc["kdf"]["salt"] = "5566778899aabbccddeeff0011223344"
+        doc["cipher"]["nonce"] = "5566778899aabbccddeeff00"
         other_address = seed_and_account("another-public-passphrase")[2]
         assert other_address != address
         doc["accounts"][0]["address"] = other_address
@@ -168,20 +247,31 @@ def verify_inconsistent(doc: dict, field: str) -> None:
     )
     assert plaintext == seed
     account = doc["accounts"][0]
-    assert (account["public_key"] != public) == (field == "public_key")
-    assert (account["address"] != address) == (field == "address")
+    if field == "uppercase_public_key":
+        assert account["public_key"] == public.upper() and account["public_key"] != public
+        assert account["address"] == address
+    elif field == "uppercase_address":
+        assert account["public_key"] == public
+        assert account["address"] == address.upper() and account["address"] != address
+    elif field == "scrypt_legacy_account":
+        assert doc["version"] == 1 and doc["kdf"]["log_n"] == 14
+        assert account["public_key"] == public and account["address"] != address
+    else:
+        assert (account["public_key"] != public) == (field == "public_key")
+        assert (account["address"] != address) == (field == "address")
 
 
-def verify(doc: dict, unicode_case: bool = False) -> None:
+def verify(doc: dict, unicode_case: bool = False, profile: str | None = "bip39-nfkd-unicode-18.0", *, expected_normalized_passphrase: str | None = None) -> None:
     if doc["version"] == 1:
         assert "seed_derivation" not in doc, "legacy v1 profile must remain unknown"
     else:
         assert doc["version"] == 2
-        assert doc["seed_derivation"] == {
-            "normalization_profile": "bip39-nfkd-unicode-18.0"
-        }
+        assert doc["seed_derivation"] == {"normalization_profile": profile}
     password = UNICODE_PASSWORD if unicode_case else PASSWORD
-    seed, public, address = seed_and_account(UNICODE_MNEMONIC_PASSPHRASE if unicode_case else MNEMONIC_PASSPHRASE)
+    if expected_normalized_passphrase is None:
+        seed, public, address = seed_and_account(UNICODE_MNEMONIC_PASSPHRASE if unicode_case else MNEMONIC_PASSPHRASE)
+    else:
+        seed, public, address = seed_and_account(expected_normalized_passphrase, already_normalized=True)
     plaintext = AESGCM(key_for(doc["kdf"], password)).decrypt(bytes.fromhex(doc["cipher"]["nonce"]), bytes.fromhex(doc["ciphertext"]), aad_for(doc))
     assert plaintext == seed, "seed mismatch"
     assert doc["accounts"] == [{"index": 0, "path": "m/44'/1'/0'/0'/0'", "public_key": public, "address": address}]
@@ -216,7 +306,60 @@ def main() -> None:
             ).stdout
             verify(json.loads(output), kind.endswith("_unicode"))
             print(f"PASS {kind}: Python-generated fixture and Rust-generated random keystore")
-    for field in ("public_key", "address"):
+    for kdf in ("argon2id", "scrypt"):
+        for suffix, profile in (("null", None), ("15_1", "bip39-nfkd-unicode-15.1")):
+            kind = f"{kdf}_profile_{suffix}"
+            path = FIXTURES / f"w1_interop_{kind}.json"
+            doc = make_profile_fixture(kdf, profile)
+            if write:
+                path.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            else:
+                assert json.loads(path.read_text(encoding="utf-8")) == doc, f"fixture drift: {path}"
+                verify(doc, profile=profile)
+                output = subprocess.run(
+                    ["cargo", "run", "--quiet", "-p", "aura-wallet", "--example", "w1_interop_fixture", "--", kind],
+                    cwd=ROOT, text=True, capture_output=True, check=True,
+                ).stdout
+                verify(json.loads(output), profile=profile)
+                print(f"PASS {kind}: authenticated Python fixture and Rust-generated keystore")
+    for suffix, profile, normalized in (("15_1", "15.1", "\ua7f1"), ("18_0", "18.0", "S")):
+        kind = f"argon2id_profile_sensitive_{suffix}"
+        path = FIXTURES / f"w1_interop_{kind}.json"
+        doc = make_sensitive_profile_fixture(profile)
+        if write:
+            path.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        else:
+            assert json.loads(path.read_text(encoding="utf-8")) == doc, f"fixture drift: {path}"
+            verify(doc, profile=f"bip39-nfkd-unicode-{profile}", expected_normalized_passphrase=normalized)
+            output = subprocess.run(
+                ["cargo", "run", "--quiet", "-p", "aura-wallet", "--example", "w1_interop_fixture", "--", kind],
+                cwd=ROOT, text=True, capture_output=True, check=True,
+            ).stdout
+            verify(json.loads(output), profile=f"bip39-nfkd-unicode-{profile}", expected_normalized_passphrase=normalized)
+            print(f"PASS {kind}: version-sensitive normalization and authenticated cross-implementation keystore")
+    upper_path = FIXTURES / "w1_interop_argon2id_uppercase_hex_header.json"
+    upper_doc = make_uppercase_hex_header_fixture()
+    if write:
+        upper_path.write_text(json.dumps(upper_doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    else:
+        assert json.loads(upper_path.read_text(encoding="utf-8")) == upper_doc, f"fixture drift: {upper_path}"
+        verify(upper_doc)
+        lowered_id = dict(upper_doc, id=upper_doc["id"].lower())
+        try:
+            AESGCM(key_for(lowered_id["kdf"], PASSWORD)).decrypt(
+                bytes.fromhex(lowered_id["cipher"]["nonce"]),
+                bytes.fromhex(lowered_id["ciphertext"]),
+                aad_for(lowered_id),
+            )
+        except Exception as exc:
+            from cryptography.exceptions import InvalidTag
+            if not isinstance(exc, InvalidTag):
+                raise
+        else:
+            raise AssertionError("lowercasing authenticated header hex unexpectedly passed GCM")
+        print("PASS argon2id_uppercase_hex_header: valid uppercase header/ciphertext hex and case-sensitive AAD")
+
+    for field in ("public_key", "address", "uppercase_public_key", "uppercase_address", "scrypt_legacy_account"):
         path = FIXTURES / f"w1_inconsistent_{field}.json"
         doc = make_inconsistent_fixture(field)
         if write:

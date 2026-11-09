@@ -18,7 +18,7 @@ The historical D-W1 BIP-32/44 path `m/44'/ALCRY'/0'/0/i` is incompatible with ha
 
 `make test-w1` runs official BIP-39 seed and BIP-32 secp256k1 vectors, SLIP-0010 Ed25519 master and hardened child vectors, round trips, 1000 wrong passwords, deterministic byte mutations, and permission/no-overwrite and concurrency tests. The wrong-password/mutation tests compile with `insecure-test-kdf` to keep them fast and explicitly call `encrypt_seed_insecure_for_testing`/`decrypt_seed_insecure_for_testing`. The ordinary `encrypt_seed`/`decrypt_seed` methods keep production KDF floors even when that feature is enabled. The feature still exposes intentionally unsafe test methods, including in release builds, and **must never be enabled or called for production**. The deterministic mutation test is complemented by short coverage-guided libFuzzer parser and decrypt smoke runs with AddressSanitizer; these are not a long-running campaign. Zeroizing wrappers do not guarantee removal of every compiler/library/OS copy, swap, or core dump; mnemonic strings are caller-managed.
 
-W1 now has independent Python/Rust scrypt and Argon2id keystore interoperability vectors, including Unicode cases, and short coverage-guided parser/decrypt fuzz runs. The explicit normalization-profile policy is implemented in the experimental API: Unicode 18.0 is the default for new mnemonic seeds; Unicode 15.1 is used only when legacy recovery explicitly selects it. The stable IDs are `bip39-nfkd-unicode-15.1` and `bip39-nfkd-unicode-18.0`; the keystore AAD header carries `seed_derivation.normalization_profile`, and recovery metadata carries `normalization_profile`. Missing/unknown markers, profile mismatches and silent fallback are rejected. Version 1 remains markerless and does not imply a profile; re-encryption preserves the known marker or its absence. On 2026-11-07 the user approved no in-place 15.1→18.0 upgrade: the same mnemonic remains a 15.1 recovery phrase, while changing keys requires a new 18.0 mnemonic and explicit asset transfer. Unicode 18.0 tables come from pinned `unicode-normalization` 0.1.26; Unicode 15.1 tables come from a checksum-verified local fork of upstream 0.1.23, with normalization source/tables retained and stylistic Clippy lints suppressed rather than changing the frozen algorithm. A reproduced version-sensitive example and the experimental canonical mnemonic whitespace rule are documented in `w1-keystore-prototype.md`. W1 remains open: it still needs a frozen interoperable format specification, broader vectors, longer fuzzing, phase evidence, and independent security review. The current `tools/nc_w1.py` run passes 39 wallet mutation controls, including password bypass, authenticated-header/profile omissions, unknown/mismatched profile fallback, profile loss on re-encryption, serialized-size bounds, duplicate fields, overwrite, weak production Argon2/scrypt parameters, mnemonic/passphrase normalization, unintended keystore password normalization, unsafe directory acceptance, parent-path redirection, temporary-file replacement, symlink following, and directory-sync bypass. `make nc-w1` also runs two controls of the structured decrypt fuzz oracle (wrong-password bypass and AAD-ID omission). These controls test tests, not cryptosystem security. Separate tests mutate every ciphertext/tag byte with weak test-only Argon2, exercise the ciphertext/tag boundaries for both KDFs, and check rejection of schema-fixed values. Ordinary production-policy APIs are also tested against modified ciphertext and tag using independent Argon2id and scrypt fixtures. These tests do not establish security against every mutation. W2 CLI, W3 offline signing and W4 multisig are not implemented.
+W1 now has independent Python/Rust scrypt and Argon2id keystore interoperability vectors, including Unicode cases, and short coverage-guided parser/decrypt fuzz runs. The explicit normalization-profile policy is implemented in the experimental API: Unicode 18.0 is the default for new mnemonic seeds; Unicode 15.1 is used only when legacy recovery explicitly selects it. The stable IDs are `bip39-nfkd-unicode-15.1` and `bip39-nfkd-unicode-18.0`; the keystore AAD header carries `seed_derivation.normalization_profile`, and recovery metadata carries `normalization_profile`. Missing/unknown markers, profile mismatches and silent fallback are rejected. Version 1 remains markerless and does not imply a profile; re-encryption preserves the known marker or its absence. On 2026-11-07 the user approved no in-place 15.1→18.0 upgrade: the same mnemonic remains a 15.1 recovery phrase, while changing keys requires a new 18.0 mnemonic and explicit asset transfer. Unicode 18.0 tables come from pinned `unicode-normalization` 0.1.26; Unicode 15.1 tables come from a checksum-verified local fork of upstream 0.1.23, with normalization source/tables retained and stylistic Clippy lints suppressed rather than changing the frozen algorithm. A reproduced version-sensitive example and the experimental canonical mnemonic whitespace rule are documented in `w1-keystore-prototype.md`. W1 remains open: it still needs a frozen interoperable format specification, broader vectors, longer fuzzing, phase evidence, and independent security review. The 2026-11-07 `tools/nc_w1.py` run passed 39 wallet mutation controls, including password bypass, authenticated-header/profile omissions, unknown/mismatched profile fallback, profile loss on re-encryption, serialized-size bounds, duplicate fields, overwrite, weak production Argon2/scrypt parameters, mnemonic/passphrase normalization, unintended keystore password normalization, unsafe directory acceptance, parent-path redirection, temporary-file replacement, symlink following, and directory-sync bypass. `make nc-w1` also runs two controls of the structured decrypt fuzz oracle (wrong-password bypass and AAD-ID omission). These controls test tests, not cryptosystem security. Separate tests mutate every ciphertext/tag byte with weak test-only Argon2, exercise the ciphertext/tag boundaries for both KDFs, and check rejection of schema-fixed values. Ordinary production-policy APIs are also tested against modified ciphertext and tag using independent Argon2id and scrypt fixtures. These tests do not establish security against every mutation. W2 CLI, W3 offline signing and W4 multisig are not implemented.
 
 ## Known integration gaps
 
@@ -96,6 +96,156 @@ They do not defend against same-UID or privileged attackers, hostile ancestors,
 unsafe/network filesystems, or name changes after the function returns. A
 post-publication error can leave a file behind. Non-Unix behavior has not
 received equivalent path, ACL, or durability hardening.
+
+## Post-GCM account canonicalization, hex-case AAD and Unicode fork provenance (2026-11-08; W1 still open)
+
+New Python-generated fixtures carry **valid** AES-256-GCM tags (independently
+produced and checked in Python) but deliberately inconsistent or non-canonical
+account metadata. `w1_interop_argon2id_uppercase_hex_header.json` uses uppercase
+hex for `id`, `kdf.salt`, `cipher.nonce` and `ciphertext` with canonical
+lowercase `public_key`/`address`; both implementations decrypt it, and case
+changes to `id`/`salt`/`nonce` break the AAD while ciphertext hex case is
+inert (bytes are identical). `w1_inconsistent_uppercase_public_key.json`,
+`w1_inconsistent_uppercase_address.json` and
+`w1_inconsistent_scrypt_legacy_account.json` encrypt the true seed but spell
+the account with uppercase hex/Bech32 or disagree in a weak-scrypt v1 account.
+Python GCM accepts them; Rust `decrypt_seed` and the migration-only legacy APIs
+reject them after authentication with `AuthenticationFailed` because the
+account comparison is exact-match. The `reauthenticated_uppercase_hex_header_and_canonical_account_rules`
+test covers all of this, and two wallet negative controls show detection of
+case-insensitive comparison bypasses at the post-GCM check: `make nc-w1` now
+passes 52/52 wallet and 4/4 fuzz-oracle controls. These are local regression
+tests over public test credentials, not a security certification.
+
+The structured decrypt fuzz oracle (`fuzz/src/lib.rs`) now has 14 deterministic
+mutation modes over a byte-pinned public base document: besides ciphertext/tag,
+id, password, account, salt/nonce nibbles and KDF costs, it mutates the
+authenticated `seed_derivation.normalization_profile` marker and the hex case/
+nibble spelling of AAD fields (`id`, `kdf.salt`, `cipher.nonce`) whose decoded
+bytes — derived key and GCM nonce included — stay identical. Two fuzz-oracle
+negative controls cover a missing `seed_derivation` and a missing `kdf` in the
+AAD builder (`tools/nc_w1_fuzz.py`, 4/4). The parser-only target
+`fuzz_keystore_parse` additionally derives strict-parser metamorphic rejects
+from each accepted document (one extra field, a duplicate key spelled
+`\u0066ormat`, and `MAX_KEYSTORE_BYTES + 1` size padding) and asserts
+`normalization_profile()` is preserved across reserialization.
+
+`third_party/unicode-normalization-15-1/` now has an automatic offline
+provenance guard, `tools/check_unicode_15_1_fork.py` (run by `make test-w1`,
+mutation-tested by `tools/test_unicode_15_1_fork_guard.py`): all 23 unmodified
+files are byte-equal to crates.io `unicode-normalization` 0.1.23 (archive
+SHA-256 `a56d1686db2308d901306f92a263857ef59ea39678a5458e7cb17f01415101f5`),
+`Cargo.toml` and `src/lib.rs` reverse through the exact documented build/lint
+adaptations to the upstream digests, `src/tables.rs` pins
+`UNICODE_VERSION = (15, 1, 0)`, extra files and symlinks are rejected, and the
+workspace/wallet manifest bindings stay pinned. This is provenance evidence
+only, not Unicode correctness or an independent review.
+
+A fifth version-2 ASan campaign (`/home/user/w1-campaign-v2-reauth`, seed base
+`20261150`, 61 s per target) completed all four targets with zero artifacts and
+unchanged sources and passed `verify_w1_fuzz_evidence.py --check-checkout`; see
+[w1-fuzz-extended-observation.md](w1-fuzz-extended-observation.md). Bounded
+runs and unkeyed manifests are not a signed phase receipt, a 24-hour H3
+campaign or an independent audit. Never run source-mutating controls during a
+campaign.
+
+## Recovery seed comparison and campaign tooling (W1 still open)
+
+`verify_mnemonic_recovery` now compares its two fixed-length seed values using
+`aura_crypto::constant_time_eq` instead of ordinary array equality. This limits
+content-dependent early exit in that comparison only; it does not establish
+constant-time execution of the complete recovery workflow or replace independent
+side-channel review. A focused mutation that bypasses the comparison makes
+`keystore_and_recovery_manifest_bind_the_explicit_profile` fail; the full local
+`make nc-w1` passed 46 wallet controls and 2 fuzz-oracle controls. `make test-w1`
+passed with 14 library tests, 1 preserve-order check, 37 normal and 45
+insecure-feature integration tests, and 1 fuzz-driver unit test.
+
+`tools/w1_fuzz_campaign.py` runs the four wallet fuzz targets sequentially
+with ASan, separate copied corpora, recorded commands/tool versions, source and
+corpus SHA-256 manifests (`format_version: 2`) and explicit per-target time
+budgets. It records incomplete or failing runs rather than interpreting an exit
+code alone as success. `tools/verify_w1_fuzz_evidence.py` checks internal
+unkeyed SHA-256 self-consistency of a version-2 bundle and optionally checks
+agreement with a live checkout; twelve unit tests cover interrupted runs, early
+completion, duplicate `Done` lines, crashes, broken-symlink artifacts, source
+or corpus drift, tampering and existing output refusal. `tools/w1_recovery_metadata_reference.py`
+and its guard independently check 37 public recovery-marker cases (including
+multi-byte UTF-8 4,096/4,097-byte boundaries and error categories), bringing
+`make nc-w1` to 50/50 wallet controls and 2/2 fuzz-oracle controls, while
+`.github/workflows/w1.yml` now includes the fourth fuzz smoke target. None of
+these local tools or runs is a signed receipt, an external audit or a 24-hour
+H3 campaign. Never run source-mutating controls during a campaign.
+
+## Independent schema matrix (2026-11-08; W1 still open)
+
+`tools/w1_schema_reference.py` independently models the default-feature v1/v2
+parser schema and generates 71 public cases, covering legacy and v2 documents,
+Unicode/escaped duplicate member names, exact field sets, numeric types and KDF
+bounds. Rust checks the same inputs through `Keystore::from_json_str`. These
+are parse-only cases: an accepted document can be unauthenticated or have a
+stale GCM tag. The matrix deliberately excludes the test-only weak-KDF parser
+policy, which is different. A guard detects fixture corruption and a mutated
+accept-all Python oracle, and runs the reference under Python `-O` and `-OO`.
+Three Rust mutation controls check escaped-duplicate, extra-field and KDF
+limit bypasses. Local `make test-w1` passed (14 library, 1 preserve-order,
+37 ordinary integration, 45 insecure-feature integration and 1 fuzz-driver
+unit tests); `make nc-w1` passed 45/45 wallet and 2/2 fuzz-oracle controls.
+These local regression tests neither independently review cryptography nor
+freeze the format, and W1 is not marked complete.
+
+## Expanded W1 interoperability and fuzz observation (2026-11-08; W1 still open)
+
+A [candidate format draft](w1-format-draft.md) now assembles the current schema,
+AAD construction, derivation, KDF policy and recovery semantics for review. It
+is not frozen, approved or an independent security specification. Six further
+Python-generated authenticated fixtures cover null and Unicode 15.1 markers
+with both KDFs plus two Argon2id cases where U+A7F1 has different normalized
+outputs under the two profiles. Python verifies the fixtures and independently
+reads fresh Rust-generated documents. Rust decrypts all six, checks profile
+substitution for the first four and exercises recovery with both sensitive
+profiles. Python explicitly supplies the known normalized outputs in the last
+two cases; it does not independently implement both Unicode versions.
+
+On this checkout `make test-w1` passed (14 library tests, one preserve-order
+check, 36 ordinary and 45 insecure-feature integration tests, and one
+fuzz-driver unit test). `make test-w1-interop` passed. `make nc-w1` passed
+42/42 wallet plus 2/2 fuzz-oracle controls, including a new test that detects
+using Unicode 18.0 tables for the legacy profile. Three bounded libFuzzer/ASan
+runs (181 seconds each, parser/decrypt/scrypt differential) exited successfully;
+see [the local observation](w1-fuzz-observation-2026-11-08.md) for counts,
+limits and hashes. These results do not constitute the 24-hour H3 campaign,
+format freeze, phase receipt, independent review or production-readiness claim.
+The project-wide `make test` also completed successfully on this checkout
+before this documentation note was added: its workspace test section reported
+752 passed, 0 failed and 7 ignored; formatting, Clippy, P2P review controls,
+dependency/docs gates and close-out audit passed. Intentional failures inside
+negative controls are not workspace test failures. The W1 CI cross-check command
+`cargo check --locked -p aura-wallet --all-targets --target <target>` also
+passed for `x86_64-unknown-freebsd`, `x86_64-unknown-redox` and
+`x86_64-pc-windows-gnu`; these are compile checks, not runtime, filesystem or
+security tests on those operating systems. The CI's release-mode test for the
+ordinary KDF policy with `insecure-test-kdf` enabled also passed. The feature's
+explicit weak methods remain unsafe and must never be used for production.
+Local logs are under `/home/user/` and are not historical phase receipts.
+
+## Additional AAD coverage (2026-11-08; W1 still open)
+
+The independent Python AAD fixture now covers six public cases, adding legacy
+version 1 without profile metadata, version 2 with a null profile, and version 2
+with the Unicode 15.1 profile. The altered v2 documents retain their original
+ciphertext and have invalid authentication tags: they test AAD encoding only,
+not successful decryption. The Rust byte comparison runs both with default
+`serde_json` and with `preserve_order`. Two additional mutation controls remove
+only the null or Unicode 15.1 metadata and cause that exact test to fail.
+
+On this checkout `make test-w1` passed: 14 wallet library tests, the additional
+preserve-order test, 34 ordinary integration tests, 43 integration tests with
+`insecure-test-kdf`, and the single fuzz-driver unit test. `make nc-w1` passed
+41/41 wallet and 2/2 fuzz-oracle controls. These are local regression results,
+not a security review, long-running fuzz campaign, phase receipt, or format
+freeze. No keystore serialization or cryptographic implementation was changed.
+W1 remains open under the criteria above.
 
 ## Latest WIP verification (2026-11-07)
 

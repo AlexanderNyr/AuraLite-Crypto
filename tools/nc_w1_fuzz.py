@@ -35,6 +35,12 @@ def main():
         ("fuzz driver detects missing AAD ID",
          '        map.remove("ciphertext");',
          '        map.remove("ciphertext");\n        map.remove("id");'),
+        ("fuzz driver detects missing AAD seed_derivation",
+         '        map.remove("ciphertext");',
+         '        map.remove("ciphertext");\n        map.remove("seed_derivation");'),
+        ("fuzz driver detects missing AAD kdf",
+         '        map.remove("ciphertext");',
+         '        map.remove("ciphertext");\n        map.remove("kdf");'),
     ]
     passed = 0
     for label, old, new in mutations:

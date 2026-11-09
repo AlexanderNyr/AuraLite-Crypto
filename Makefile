@@ -1131,11 +1131,18 @@ clean:
 # Argon2 parameters ONLY for the 1000-negative-password/format-fuzz tests.
 .PHONY: test-w1 nc-w1
 test-w1:
+	@$(PYTHON) tools/w1_schema_reference.py
+	@$(PYTHON) tools/test_w1_schema_reference_guard.py
+	@$(PYTHON) tools/w1_recovery_metadata_reference.py
+	@$(PYTHON) tools/test_w1_recovery_metadata_reference_guard.py
+	@$(PYTHON) tools/test_w1_fuzz_campaign.py
 	@$(PYTHON) tools/w1_mnemonic_reference.py
 	@$(PYTHON) tools/test_w1_mnemonic_reference_guard.py
 	@$(PYTHON) tools/w1_aad_reference.py
 	@$(PYTHON) tools/check_scrypt_fork.py
 	@$(PYTHON) tools/test_scrypt_fork_guard.py
+	@$(PYTHON) tools/check_unicode_15_1_fork.py
+	@$(PYTHON) tools/test_unicode_15_1_fork_guard.py
 	@$(PYTHON) tools/check_w1_test_api.py
 	@$(CARGO) test -p aura-wallet --lib
 	@$(CARGO) test -p aura-wallet --lib --features serde_json/preserve_order keystore::aad_reference_tests::canonical_aad_matches_independent_python_bytes -- --exact

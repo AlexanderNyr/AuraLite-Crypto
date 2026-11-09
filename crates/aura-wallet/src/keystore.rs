@@ -549,7 +549,7 @@ impl Keystore {
             recovery_metadata.normalization_profile(),
         )
         .map_err(|e| KeystoreError::Derivation(e.to_string()))?;
-        if recovered_seed.as_bytes() != keystore_seed.as_bytes() {
+        if !aura_crypto::constant_time_eq(recovered_seed.as_bytes(), keystore_seed.as_bytes()) {
             return Err(KeystoreError::AuthenticationFailed);
         }
         Ok(())
@@ -1342,12 +1342,12 @@ mod aad_reference_tests {
 
     #[test]
     fn canonical_aad_matches_independent_python_bytes() {
-        // Public fixtures. The escaping case intentionally has an invalid
-        // address: it tests unauthenticated JSON encoding, not decryption.
+        // AAD-only public fixtures: the escaping address is invalid; altered
+        // profile cases retain an invalid GCM tag and must not be decrypted.
         let cases: Value =
             serde_json::from_str(include_str!("../tests/fixtures/w1_aad_reference.json")).unwrap();
         let cases = cases.as_array().unwrap();
-        assert_eq!(cases.len(), 3);
+        assert_eq!(cases.len(), 6);
         for case in cases {
             let document = serde_json::to_string(&case["document"]).unwrap();
             let keystore = Keystore::from_json_str(&document).unwrap();

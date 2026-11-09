@@ -3,6 +3,119 @@
 All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
 never rewritten: corrections are made with a new entry or an explicit note.
 
+## [W1 — canonical account checks, hex-case AAD fuzz modes, Unicode fork guard, work in progress] 2026-11-08
+
+- New Python-generated, independently GCM-authenticated fixtures: an
+  uppercase-hex v2 header (`w1_interop_argon2id_uppercase_hex_header.json`) that
+  both implementations decrypt (ciphertext hex case is inert; `id`/`salt`/
+  `nonce` hex case is covered by AAD), plus three valid-tag but semantically
+  inconsistent account documents (uppercase `public_key`, uppercase Bech32
+  `address`, and a weak-scrypt legacy account). Rust rejects the inconsistent
+  ones after authentication (`AuthenticationFailed`) and the migration-only
+  legacy APIs fail closed. Two new wallet negative controls cover
+  case-insensitive comparison bypasses at the post-GCM account check
+  (`52/52` wallet + `4/4` fuzz-oracle controls).
+- The decrypt fuzz oracle now has 14 deterministic mutation modes over a
+  byte-pinned public base document, adding authenticated profile-marker
+  mutation and case/nibble hex spelling mutations in AAD fields whose decoded
+  id/salt/nonce bytes stay identical. Two new fuzz-oracle controls cover a
+  missing `seed_derivation` and a missing `kdf` in the AAD builder. The
+  parser-only target derives extra-field, escaped-duplicate (`\u0066ormat`) and
+  `MAX_KEYSTORE_BYTES + 1` rejects from each accepted document and checks that
+  `normalization_profile()` survives reserialization.
+- Added the offline Unicode-fork provenance guard `tools/check_unicode_15_1_fork.py`
+  with its mutation test: all 23 unmodified files in
+  `third_party/unicode-normalization-15-1/` are byte-equal to crates.io
+  `unicode-normalization` 0.1.23, the two adapted files reverse to the exact
+  upstream digests, extra files/symlinks are rejected and workspace bindings
+  stay pinned. It runs inside `make test-w1`.
+- A new version-2 ASan campaign (`/home/user/w1-campaign-v2-reauth`, seed base
+  `20261150`, 61 s per target) completed for all four targets with zero
+  artifacts and passed `verify_w1_fuzz_evidence.py --check-checkout`.
+- W1 remains open: unkeyed local manifests and bounded runs are not a signed
+  phase receipt, format freeze, 24-hour H3 campaign or independent audit.
+
+## [W1 — recovery-marker reference oracle & fuzz evidence verifier, work in progress] 2026-11-08
+
+- Added `tools/w1_recovery_metadata_reference.py`, its fail-closed guard, and a
+  37-case public fixture (`w1_recovery_metadata_reference.json`) checked by
+  Rust for acceptance, error category (including multi-byte UTF-8 4096/4097-byte
+  limits), profile ID and canonical serialization, plus a 50th wallet negative
+  control (`50/50` wallet + `2/2` fuzz-oracle controls).
+- Upgraded `tools/w1_fuzz_campaign.py` to version-2 unkeyed SHA-256 source and
+  corpus manifests, added `tools/verify_w1_fuzz_evidence.py` (with optional live
+  checkout comparison and 12 fail-closed unit tests), and added the fourth W1
+  fuzz smoke target (`fuzz_recovery_metadata`) to `.github/workflows/w1.yml`.
+- W1 remains open: unkeyed local manifests and bounded runs are not a signed
+  phase receipt, format freeze, 24-hour H3 campaign or independent audit.
+
+## [W1 — strict recovery marker checks, work in progress] 2026-11-08
+
+- Added a 25-case public regression matrix for recovery profile marker parsing,
+  plus exact 4096/4097-byte boundaries and canonical round-trips. Selected
+  mutations demonstrate detection of duplicate, extra-field and limit bypasses.
+- The recovery metadata fuzz target now derives duplicate-key, extra-field and
+  oversized cases from each accepted marker. These checks are bounded and do
+  not establish complete parser safety or authenticate recovery metadata.
+- W1 remains open: no freeze, independent audit or phase receipt is claimed.
+
+## [W1 — recovery metadata fuzz coverage, work in progress] 2026-11-08
+
+- Added a parser-only recovery-metadata fuzz target and public seed corpus;
+  the sequential ASan runner now covers four wallet targets. A 61-second-per-
+  target follow-up completed without artifacts. Earlier, three targets each
+  completed a 301-second run; see `docs/w1-fuzz-extended-observation.md`.
+- These bounded tests are neither an independent security review nor the H3
+  24-hour campaign. W1 remains open; the format is not frozen.
+
+## [W1 — recovery comparison and fuzz campaign tooling, work in progress] 2026-11-08
+
+- Recovery seed comparison uses the existing constant-time byte comparison
+  primitive instead of ordinary array equality. This does not make the entire
+  recovery flow constant-time. A bypass mutation is detected by the existing
+  profile-bound recovery test; `make nc-w1` passed 46 wallet controls plus 2
+  fuzz-oracle controls, and `make test-w1` passed locally.
+- Added a sequential ASan fuzz campaign runner, fail-closed runner tests and
+  an independent-review brief. A campaign is not an audit or phase receipt.
+  W1 remains open and no format is frozen by this entry.
+
+## [W1 — independent schema-conformance matrix, work in progress] 2026-11-08
+
+- Added a 71-case public Python/Rust parse-only matrix covering strict v1/v2
+  schema, duplicate keys, Unicode, exact fields and KDF resource limits, plus
+  a guard against vector corruption and an accept-all Python oracle mutation.
+- Three additional Rust mutation controls exercise the matrix. Local
+  `make test-w1` and `make nc-w1` passed (45 wallet and 2 fuzz-oracle controls).
+  Parsed metadata remains untrusted until authentication. No production
+  keystore or cryptographic behavior changed.
+- W1 remains open; this is not a frozen format, phase receipt, independent
+  security review, or production-readiness claim.
+
+## [W1 — candidate format, profile interop and bounded fuzzing, work in progress] 2026-11-08
+
+- Added a review draft of the testnet keystore format; it is not frozen or
+  approved. Added six independently generated, authenticated profile vectors
+  across both KDFs, including version-sensitive Unicode 15.1/18.0 recovery.
+  Python and Rust exchange files in both directions. Fixed vector secrets are
+  public test data only.
+- Local `make test-w1` and `make test-w1-interop` passed; `make nc-w1` passed
+  42 wallet plus 2 fuzz-oracle controls. Three 180-second AddressSanitizer
+  libFuzzer runs completed without a crash; see `docs/w1-fuzz-observation-2026-11-08.md`.
+  This is not the H3 24-hour campaign, a phase receipt or an independent audit.
+- W1 remains open. No production cryptographic or keystore behavior changed.
+
+## [W1 — additional AAD reference coverage, work in progress] 2026-11-08
+
+- Expanded the independent Python/Rust AAD vectors from three to six cases:
+  legacy v1 without profile metadata, v2 with a null profile, and v2 with the
+  Unicode 15.1 profile. The two altered v2 documents are AAD-only: their
+  original ciphertext tags are invalid and they are not decryption fixtures.
+- Added two mutation controls detecting omission of those profile metadata
+  values. Local `make test-w1` and `make nc-w1` passed (41 wallet and 2
+  fuzz-oracle controls). No production keystore or crypto behavior changed.
+- W1 remains open; this entry is not a phase receipt, frozen format, security
+  audit or production-readiness claim. Historical evidence is not rewritten.
+
 ## [W0 — Wallet baseline: key-exposure surface audit, threat notes, and tree/log secret scanner] 2026-11-02
 
 **First `WALLET_PLAN` phase (`W0` complete).**
