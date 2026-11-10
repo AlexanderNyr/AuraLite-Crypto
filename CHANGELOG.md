@@ -3,6 +3,70 @@
 All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
 never rewritten: corrections are made with a new entry or an explicit note.
 
+## [W1 — recovery-metadata and scrypt-differential fuzz oracles, 15 mutation controls, work in progress] 2026-11-08
+
+- `fuzz/src/lib.rs::recovery_metadata` is now a shared, unit/mutation-tested
+  driver for `fuzz_recovery_metadata`: every accepted marker must round-trip
+  through canonical `{"normalization_profile":"<id>"}` output, its
+  `normalization_profile()` accessor result must match a second, raw-text
+  (JSON-escape aware) extraction of the member — not merely a second accessor
+  call — and an escape-spelled duplicate member
+  (`{"\u006eormalization_profile":…}`), one extra member or 4,097-byte
+  oversized text must be rejected before any default can be substituted. The
+  37-case `w1_recovery_metadata_reference.json` matrix plus 4,096/4,097-byte
+  boundary and must-reject cases run deterministically in `make test-w1`.
+- `fuzz/src/lib.rs::scrypt_differential` compares the pinned local scrypt fork
+  (`third_party/scrypt-w1`, upstream `scrypt` 0.11.0) against the upstream
+  `scrypt` crate on deterministic inputs each iteration, with a fixed-input
+  unit test; a fork output divergence panics the fuzz target.
+- `tools/nc_w1_fuzz.py` now carries 15 fuzz-oracle negative controls
+  (`52/52` wallet + `15/15` fuzz-oracle): the previous eight parser/decrypt
+  controls plus six recovery-oracle controls (size-limit, extra-member,
+  escaped-duplicate, error-classification and profile-accessor/raw-text
+  cross-check bypasses) and one scrypt-fork-divergence control, each with a
+  named mutation anchor in `crates/aura-wallet/src/keystore.rs` or
+  `third_party/scrypt-w1/src/lib.rs`.
+- A sustained version-2 ASan campaign (`/home/user/w1-campaign-v2-oracles`,
+  seed base `20261170`, 301 s per target) completed for all four targets with
+  zero artifacts and passed `verify_w1_fuzz_evidence.py --check-checkout`
+  (8.1M parser, 271k decrypt, 225k scrypt and 12.7M recovery-metadata
+  iterations). `w1-campaign-v2-sustained` predates this oracle refactor and is
+  now an internal-consistency-only historical run.
+- Historical corpus loss, recorded without rewriting receipts: the workspace
+  snapshot restore that preceded this increment substituted
+  `w1-campaign-v2-reauth`'s evolved `fuzz_recovery_metadata` corpus (1,583
+  unmatched files present, 1,557 recorded files absent) and dropped its empty
+  `artifacts` directories; the run's `corpus-sha256.json` manifest remains and
+  the corpus tree is unrecoverable. This is the same class of workspace
+  snapshot loss already recorded for `w1-campaign-v2-verified`'s
+  `fuzz_keystore_parse` corpus. Both historical bundles are admissible as
+  run-log/manifest-form evidence only; `verify_w1_fuzz_evidence.py` correctly
+  fails their corpus checks.
+- W1 remains open: unkeyed local manifests and bounded runs are not a signed
+  phase receipt, format freeze, 24-hour H3 campaign or independent audit.
+
+## [W1 — parser fuzz oracle harness, mutation controls and sustained ASan run, work in progress] 2026-11-08
+
+- The parser-only fuzz oracle is now a shared, unit-tested driver
+  (`fuzz/src/lib.rs::keystore_parse`) used by `fuzz_keystore_parse`: every
+  accepted document must serialize stably, report exactly the normalization
+  profile carried by its raw text (not merely a second call to the same
+  accessor), and reject one extra field, an escape-spelled duplicate key and
+  `MAX_KEYSTORE_BYTES + 1` size padding. Nine public fixtures (v1/v2,
+  profile-bearing, uppercase-hex and valid-tag inconsistent variants) plus
+  malformed and oversized inputs run deterministically in `make test-w1`.
+- `tools/nc_w1_fuzz.py` now carries 8 fuzz-oracle negative controls
+  (`52/52` wallet + `8/8` fuzz-oracle): the four decrypt-oracle controls plus
+  new controls for extra-field, duplicate-key, oversize and profile-accessor
+  bypasses in the strict parser.
+- A sustained version-2 ASan campaign (`/home/user/w1-campaign-v2-sustained`,
+  seed base `20261160`, 301 s per target — five times the earlier budget)
+  completed for all four targets with zero artifacts and passed
+  `verify_w1_fuzz_evidence.py --check-checkout` (7.4M parser, 263k decrypt,
+  254k scrypt and 13.5M recovery-metadata iterations).
+- W1 remains open: unkeyed local manifests and bounded runs are not a signed
+  phase receipt, format freeze, 24-hour H3 campaign or independent audit.
+
 ## [W1 — canonical account checks, hex-case AAD fuzz modes, Unicode fork guard, work in progress] 2026-11-08
 
 - New Python-generated, independently GCM-authenticated fixtures: an

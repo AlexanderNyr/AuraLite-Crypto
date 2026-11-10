@@ -14,17 +14,17 @@ they must not be attributed to a different commit or to hosted CI.
 | Keystore encryption / profile metadata | Python/Rust AES-GCM / Argon2id / scrypt vectors and profile-bound recovery checks pass | Prototype format, public test credentials; not a security certification |
 | 1,000 wrong passwords | W1 regression test passes | The repeated test uses the explicitly weak test-only KDF to keep the campaign bounded; normal KDF policy is checked separately |
 | Strict parser | 71 Python/Rust parse-only cases pass; duplicate-key, extra-field and KDF-limit bypass mutation controls turn the named test red | Accepted parsing is not authentication; the matrix exercises default-feature parser policy |
-| Mutation testing | `make nc-w1`: 52/52 wallet and 4/4 fuzz-oracle controls, including recovery marker size, duplicate, extra-field and error-classification bypasses, post-GCM case-insensitive account comparison bypasses, and missing-AAD `seed_derivation`/`kdf` fuzz-oracle bypasses | Negative controls test detection by selected tests, not completeness or resistance to all attacks |
+| Mutation testing | `make nc-w1`: 52/52 wallet and 15/15 fuzz-oracle controls, including recovery marker size, duplicate, extra-field and error-classification bypasses, post-GCM case-insensitive account comparison bypasses, missing-AAD `seed_derivation`/`kdf`, parser extra-field/duplicate/oversize/profile-accessor bypasses, recovery-oracle escaped-duplicate/raw-text-profile-cross-check bypasses and scrypt-fork divergence detection | Negative controls test detection by selected tests, not completeness or resistance to all attacks |
 | Post-GCM account canonicalization | Uppercase-hex v2 header with canonical lowercase account decrypts in Python and Rust; changing `id`/`salt`/`nonce` hex case breaks AAD while ciphertext case is inert; valid-GCM uppercase `public_key`/`address` and inconsistent legacy-scrypt account documents fail closed | Exact-match comparison only; public test credentials; not a security certification |
 | Unicode 15.1 fork provenance | `tools/check_unicode_15_1_fork.py` + mutation-tested guard (run by `make test-w1`): 23 unmodified files byte-equal to crates.io `unicode-normalization` 0.1.23, the two adapted files reverse to exact upstream digests, extra files/symlinks rejected, workspace bindings pinned | Provenance only, not Unicode correctness or cryptographic review |
-| Project gate | Latest `make test`: workspace 755 passed, 0 failed, 7 ignored; fmt, Clippy, P2P controls, docs, deps and close-out audit passed | Local run, not hosted CI or every optional backend; the negative controls deliberately create failing test runs |
+| Project gate | Latest `make test`: workspace 756 passed, 0 failed, 7 ignored; fmt, Clippy, P2P controls, docs, deps and close-out audit passed | Local run, not hosted CI or every optional backend; the negative controls deliberately create failing test runs |
 | Recovery comparison | Fixed-length recovered and stored seeds use `aura_crypto::constant_time_eq`; the bypass mutation is detected | No claim that the entire recovery process is constant-time |
 | Campaign infrastructure | Sequential ASan runner (`format_version: 2`), `verify_w1_fuzz_evidence.py` self-consistency/checkout check and 12 fail-closed unit tests pass in `make test-w1` | Unkeyed SHA-256 self-consistency only; not a signed receipt, wall-clock proof or independent audit |
 | CORE shard | `make test-core` passed, including 5,000 portable fuzz iterations for each of six core targets | Not a substitute for wallet-specific or long-running fuzzing |
 | Portable core fuzz | `make fuzz-smoke`: 24,327,391 iterations, 0 crashes, 60 seconds total across six targets | Portable core harness, not a long-running wallet-specific or sanitizer campaign |
-| Wallet sanitizer fuzz | Three bounded 301-second runs, no crashes, recorded source hashes and corpora | Before adding the recovery-metadata fuzz target; weak test-only KDF for decrypt and tiny scrypt parameters; see [observation](w1-fuzz-extended-observation.md); not H3's 24-hour campaign |
-| Recovery metadata schema | 37 independent Python/Rust public cases (`w1_recovery_metadata_reference.py` + guard) plus 25 Rust cases and 4096/4097-byte UTF-8 boundaries; 4 focused mutation controls turn named tests red | Parse/serialize conformance only; not an independent external review or authentication of recovery metadata |
-| Recovery metadata sanitizer fuzz | Version-2 four-target run completed 61 s per target; recovery parser: 3,547,323 iterations, no artifacts; verified against live checkout | Limited duration and transformations; see [observation](w1-fuzz-extended-observation.md), not proof of complete rejection behavior |
+| Wallet sanitizer fuzz | Bounded sequential 301-second-per-target ASan runs (latest `w1-campaign-v2-oracles`, all four targets, no crashes, recorded source hashes and corpora) | Weak test-only KDF for decrypt and tiny scrypt parameters; see [observation](w1-fuzz-extended-observation.md); not H3's 24-hour campaign |
+| Recovery metadata schema | 37 independent Python/Rust public cases (`w1_recovery_metadata_reference.py` + guard) plus 25 Rust cases and 4096/4097-byte UTF-8 boundaries; the same matrix and boundaries run in the `fuzz_recovery_metadata` driver unit test with raw-text profile cross-checks; 6 focused mutation controls turn named tests red | Parse/serialize conformance only; not an independent external review or authentication of recovery metadata |
+| Recovery metadata sanitizer fuzz | Latest sustained version-2 run (`w1-campaign-v2-oracles`, 301 s per target): recovery parser 12,689,274 iterations, no artifacts; `verify_w1_fuzz_evidence.py --check-checkout` agrees with the live checkout | Limited duration and transformations; see [observation](w1-fuzz-extended-observation.md), not proof of complete rejection behavior |
 | Platform compile | W1 cross-checks passed for FreeBSD, Redox and Windows GNU | Compile only, no execution or filesystem semantics validated on those platforms |
 | Release policy | The CI's named release-mode normal-KDF-policy test passed with the insecure test feature enabled | The feature still exposes intentionally unsafe test-only methods and must never be enabled for production |
 
@@ -52,9 +52,11 @@ they must not be attributed to a different commit or to hosted CI.
    real numbered W1 phase patch against the correct predecessor, a phase receipt
    with gate logs/NC and checksums, and update plan, STATUS and CHANGELOG in the
    same phase. Preserve the historical evidence and source-drift ledger. The
-   current review patch is only a diff against `c749fc0`, whose W1 prototype and
-   unrelated security fixes are already committed; it is not the complete
-   W1-from-W0 phase patch and must not be called `0059` or treated as closure.
+   current review patch is a diff on top of upstream commit `125de72`
+   (`W1 update 2`), which itself records the earlier W1 increments after
+   `c749fc0`; the `c749fc0` W1 prototype and unrelated security fixes are
+   already committed upstream. It is not the complete W1-from-W0 phase patch
+   and must not be called `0059` or treated as closure.
 5. **Other mandatory gates.** `make test-sanitize` and `make test-determinism`
    currently print explicit SKIP messages; do not report them as passed. The
    `cargo deny` gate is planned for H1 and was not run in this environment.
@@ -67,8 +69,11 @@ they must not be attributed to a different commit or to hosted CI.
   `/home/user/w1-interop-v2-final.log` — earlier W1 tests (including 37
   recovery-marker Python/Rust cases and 12 campaign/verifier unit tests), 50
   wallet plus 2 fuzz-oracle mutation controls, and Python/Rust interop checks.
-  The current counts are 52 wallet plus 4 fuzz-oracle controls after the
-  post-GCM canonicalization and hex-case AAD additions.
+  The current counts are 52 wallet plus 15 fuzz-oracle controls after the
+  post-GCM canonicalization, hex-case AAD, parser-oracle and
+  recovery/scrypt-oracle additions. Latest final-snapshot runs are
+  `/home/user/w1-nc-oracles.log`, `/home/user/w1-gate-oracles.log`,
+  `/home/user/w1-interop-oracles.log` and `/home/user/w1-make-test-oracles.log`.
 - `/home/user/w1-make-test-schema.log` — earlier project-wide gate.
 - `/home/user/w1-make-test-recovery-final.log` — later run passed preceding
   stages but failed the close-out audit because the `fuzz/Cargo.toml` current

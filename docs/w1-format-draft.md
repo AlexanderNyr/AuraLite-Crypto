@@ -79,6 +79,51 @@ after JSON unescaping, BOM, trailing tokens and unsupported profile strings are
 rejected without substituting a default. Canonical output is compact JSON
 `{"normalization_profile":"<id>"}`. Parsing this marker does not authenticate it.
 
+### 2.2 Canonical JSON text rules (normative for tooling)
+
+These rules bind writers, strict parsers and reference tooling; they are
+exercised by the mutation controls in `tools/nc_w1.py` and
+`tools/nc_w1_fuzz.py` and by the shared fuzz drivers in `fuzz/src/lib.rs`.
+They are a candidate like the rest of this draft, not a frozen format.
+
+1. **Canonicalization.** Canonical JSON text of an object is compact (no
+   whitespace) with members sorted by name in Unicode scalar/UTF-8
+   lexicographic order, arrays in stored order, and the escaping rules of
+   section 4 step 3. The canonical recovery marker is exactly
+   `{"normalization_profile":"<id>"}`. Canonical text is what writers emit and
+   what `canonical_json` recomputes for AAD and for account comparison; parsers
+   accept any member order but MUST NOT accept a document whose semantic values
+   differ from what its canonical form would authenticate.
+2. **Member-name case.** JSON member names are case-sensitive:
+   `Normalization_profile`, `kDF` and similar lookalikes are unknown members,
+   not aliases. A strict parser MUST reject them (missing required member or
+   unknown member), never fold them. A normalization profile MUST be read from
+   the exact raw text spelling of `normalization_profile`, not only via a
+   struct accessor that could itself default; the parser fuzz oracle
+   cross-checks the accessor result against a second, raw-text extraction
+   (JSON-escape aware) of the same member.
+3. **Duplicate keys.** Duplicate member names at any covered depth are
+   rejected, including spellings that only differ by JSON escaping
+   (`{"kdf":…,"\u006bdf":…}`) or by Unicode escapes in the name. Rejection
+   happens before any KDF work or decryption. Serde's silent last-wins
+   behavior is not accepted; the strict parser MUST pre-scan for duplicates
+   after unescaping. The 4,096-byte marker carries the same rule.
+4. **Size limits.** A keystore document MUST NOT exceed `MAX_KEYSTORE_BYTES`
+   (8,192 bytes of UTF-8 text); a recovery marker MUST NOT exceed 4,096
+   measured in UTF-8 bytes. Oversize is a parse error reported before any KDF
+   or authentication work. The size check is exact in both directions: padding
+   that stays within the limit MUST still reach and pass the real parse
+   (rejecting it early would mask parser bugs), and `limit + 1` is rejected
+   even when the underlying document is otherwise valid.
+5. **Hex and address case.** Hex in `id`, `kdf.salt` and `cipher.nonce`
+   decodes case-insensitively, but the original spelling is signed into AAD:
+   changing only hex case in those fields breaks authentication. `ciphertext`
+   hex case is inert for account comparison. Account `public_key` and
+   `address` comparison after successful GCM is on canonical lowercase forms;
+   a uniform-uppercase bech32 address with a valid checksum compares equal to
+   its lowercase form, while mixed-case bech32 is a parse error. Case folding
+   never applies to member names or to mnemonic text.
+
 ## 3. Normalization and key derivation
 
 For mnemonic-derived seeds, English BIP-39 sentence and mnemonic passphrase

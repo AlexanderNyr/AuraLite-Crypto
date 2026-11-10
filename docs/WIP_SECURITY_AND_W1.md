@@ -97,6 +97,64 @@ unsafe/network filesystems, or name changes after the function returns. A
 post-publication error can leave a file behind. Non-Unix behavior has not
 received equivalent path, ACL, or durability hardening.
 
+## Recovery-metadata and scrypt-differential fuzz oracles (2026-11-08; W1 still open)
+
+`fuzz_recovery_metadata` and `fuzz_scrypt_differential` are now thin wrappers
+around shared drivers in `fuzz/src/lib.rs`, each with a deterministic unit
+test that runs in `make test-w1`, so the crash-only targets' guarantees are
+exercised outside fuzzing and can be mutation tested. The recovery driver
+requires every accepted marker to round-trip through canonical
+`{"normalization_profile":"<id>"}` output and cross-checks the
+`normalization_profile()` accessor against a second, raw-text (JSON-escape
+aware) extraction of the member, then applies metamorphic rejects: an
+escape-spelled duplicate member (`{"\u006eormalization_profile":…}`), one
+extra member and 4,097-byte oversized text must fail while the full 37-case
+`w1_recovery_metadata_reference.json` matrix and the 4,096-byte boundary stay
+accepted. The scrypt driver computes the pinned local fork
+(`third_party/scrypt-w1`, upstream `scrypt` 0.11.0) and the upstream `scrypt`
+crate side by side on deterministic inputs every iteration and panics on any
+divergence; its unit test pins fixed vectors.
+
+`tools/nc_w1_fuzz.py` now runs 15 fuzz-oracle negative controls: the previous
+eight (decrypt wrong-password/missing-AAD and parser extra/duplicate/oversize/
+profile-accessor) plus six recovery-oracle controls (size-limit, extra-member,
+escaped-duplicate, error-classification and profile-accessor/raw-text
+cross-check bypasses) and one scrypt-fork-divergence control, each with a
+named mutation anchor in `crates/aura-wallet/src/keystore.rs` or
+`third_party/scrypt-w1/src/lib.rs`. `make nc-w1` therefore passes 52/52
+wallet and 15/15 fuzz-oracle controls. A sustained version-2 ASan campaign
+(`/home/user/w1-campaign-v2-oracles`, seed base `20261170`, 301 s per target)
+completed for all four targets with zero artifacts and passed
+`verify_w1_fuzz_evidence.py --check-checkout`; the earlier
+`w1-campaign-v2-sustained` source manifest predates this refactor and now
+claims internal self-consistency only. These mutation controls and bounded
+runs show the selected tests detect the chosen defects; they are not a
+completeness or security proof, and W1 remains open.
+
+## Parser fuzz-oracle harness and mutation controls (2026-11-08; W1 still open)
+
+The strict-parser metamorphic checks that `fuzz_keystore_parse` derives from
+every accepted document now live in a shared driver
+(`fuzz/src/lib.rs::keystore_parse`) with a deterministic unit test, so they
+run in `make test-w1` and can be mutation tested. Besides stable serialization
+and the extra-field, escape-spelled duplicate key (`\u0066ormat`) and
+`MAX_KEYSTORE_BYTES + 1` rejects, the driver cross-checks
+`Keystore::normalization_profile()` against the raw document text — a second
+call to the same accessor cannot mask an accessor defect. The unit test feeds
+nine public fixtures (v1/v2, profile-bearing, uppercase-hex and valid-tag
+inconsistent variants) and requires each of them to parse, so a silently
+rejected fixture cannot leave the assertions unexercised; malformed,
+invalid-UTF-8 and oversized inputs must fail closed without panicking.
+
+`tools/nc_w1_fuzz.py` now runs 8 fuzz-oracle negative controls: the four
+decrypt-oracle controls (wrong-password bypass, missing AAD `id` /
+`seed_derivation` / `kdf`) plus parser controls for an extra-field accept,
+a duplicate-key accept, an oversize accept and a profile-accessor bypass —
+each turning exactly its named test red. `make nc-w1` therefore passes
+52/52 wallet and 8/8 fuzz-oracle controls. These mutation controls show the
+selected tests detect the chosen defects; they are not a completeness or
+security proof.
+
 ## Post-GCM account canonicalization, hex-case AAD and Unicode fork provenance (2026-11-08; W1 still open)
 
 New Python-generated fixtures carry **valid** AES-256-GCM tags (independently
