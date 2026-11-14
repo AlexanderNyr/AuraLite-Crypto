@@ -1,6 +1,6 @@
 # SECURITY_PLAN — threats, fuzzing, audit, incidents
 
-**Status:** 📋 PLAN (H0–H9)  
+**Status:** 🚧 IN PROGRESS — H0 ✅ (`patches/0063-H0-threat-model.patch`); H1–H7 open; ⏸ H8–H9 Stage 2  
 **Stage:** Stage 1: H0–H7. ⏸ Stage 2: H8–H9 (external audit, bug bounty, incident drills).  
 **Deliverable:** `patches/0086-H0-...` … `patches/0095-H9-...`
 **Dependencies:** runs in parallel with CORE (H0/H1 with C0). H0–H7 are mandatory
@@ -31,7 +31,7 @@ coverage measurement and crash triage. C9 did not claim any of those.
 
 | Phase | Title | DoD | Test gate |
 |---|---|---|---|
-| **H0** | Threat model | `docs/THREAT_MODEL.md`: assets, adversary (external/validator/insider), trust boundaries, 30+ scenarios | review gate; NC: scenario without an owner → red |
+| ✅ **H0** | Threat model | `docs/THREAT_MODEL.md`: assets, adversary (external/validator/insider), trust boundaries, 30+ scenarios | review gate; NC: scenario without an owner → red |
 | **H1** | Supply chain | `cargo deny`, `cargo audit`, pinning, SBOM (CycloneDX), gitleaks, release signatures | CI fails on a known vulnerable version; NC: remove deny → red |
 | **H2** | Crypto review | constant-time, zeroize, domain separation, malleability check, PQ plan (ML-DSA FIPS 204 / SLH-DSA FIPS 205 [7](https://csrc.nist.gov/news/2024/postquantum-cryptography-fips-approved)) | 50 crypto vectors + side-channel checklist; NC: shared domain → signature passes, red |
 | **H3** | Fuzzing | cargo-fuzz targets: codec, tx decode, RPC, p2p frames, WASM verifier, wallet keystore | 24 h total, 0 new crashes; NC: injected bug → fuzz finds it |
@@ -58,3 +58,24 @@ security of validators (documented as a requirement for O6).
 Stage 1: every critical component has a threat model, attacking test, NC,
 fuzzing target and/or model check (H0–H7).
 Stage 2 (⏸): external audit, bug bounty and incident drills (H8–H9).
+
+### H0 receipt (2026-11-11)
+
+- Deliverable: `patches/0063-H0-threat-model.patch` (complete H0 phase patch);
+  evidence in `docs/evidence/h0/`.
+- `docs/THREAT_MODEL.md`: assets A1–A8, adversaries
+  (ADV-EXT/VAL/INS/SUP/PHY), trust boundaries B1–B6 and **32 owned scenarios**
+  H0-S01..H0-S32 mapped to shipped mitigations (W0–W4, B/N/D phases) and
+  residual risks; owners are the seven roles of §5.
+- Named control: `scenario_without_an_owner` — `tools/nc_h0.py` NC-1 deletes
+  one Owner field (H0-S07) and requires the review gate to fail with
+  `error: scenario H0-S07: missing owner`.
+- Test gate: `tools/check_threat_model.py` (registered in `make test`)
+  enforces ≥30 scenarios, unique ids, required fields, known
+  class/boundary/asset references, owners in role, non-empty mitigations, and
+  field-by-field equality with the deterministic oracle output
+  (`tools/gen_h0_vectors.py` → `tools/fixtures/h0_threat_model_vectors.json`).
+- Mutation controls (`tools/nc_h0.py`, 6): owner dropped, duplicate id,
+  unknown class, unknown boundary, empty mitigations, fewer than 30
+  scenarios — 6/6 PASS.
+

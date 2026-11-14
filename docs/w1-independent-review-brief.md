@@ -45,8 +45,8 @@ not a contract or proof of independence.
 An external patch or archive is only transport. Before reviewing, establish a
 single immutable source snapshot, verify its digests and state whether the W1
 prototype already present in `c749fc0` and earlier changes are included. The
-local `AuraLite-W1-review.patch` applies on top of upstream commit `125de72`
-(`W1 update 2`), which itself records the earlier W1 increments after
+local `AuraLite-W1-review.patch` applies on top of upstream commit `1bd3c44`
+(`W1 update 3`), which itself records the earlier W1 increments after
 `c749fc0`; together with that commit it is **not** a complete patch from the
 W0 phase and is not proof of closure.
 

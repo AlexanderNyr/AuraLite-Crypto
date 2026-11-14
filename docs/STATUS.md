@@ -1,8 +1,8 @@
 # Implementation status — AuraLite-Crypto
 
 > Updated **in the same patch** as the phase's code (rule D9).
-> Snapshot date: **2026-10-29**, tree: "D0 landed — node baseline, **NODE_PLAN**
-> started; EXEC_PLAN complete". See [`CLOSEOUT_AUDIT.md`](CLOSEOUT_AUDIT.md) (CORE),
+> Snapshot date: **2026-11-08**, tree: "W1 closed — crypto keystore,
+> W1-FORMAT-v1 frozen; W0–W1 ✅, W2–W4 open". See [`CLOSEOUT_AUDIT.md`](CLOSEOUT_AUDIT.md) (CORE),
 > `docs/evidence/s7/report.md` (S7), `docs/evidence/x0/report.md` (X0),
 > `docs/evidence/x1/report.md` (X1), `docs/evidence/x2/report.md` (X2),
 > `docs/evidence/x3/report.md` (X3), `docs/evidence/x4/report.md` (X4),
@@ -65,7 +65,17 @@ and later validator-set work. B0 ✅
 (exit 2, six missing capabilities named with B1–B5). **B1 ✅**
 (`patches/0032-B1-poa-proposer.patch`) lands deterministic round-robin proposer +
 Ed25519 block signature — 2 implemented, 4 placeholders in `aura-consensus`.
-⏸ X9 (EVM lane), W/E/T/H/P/O remain out of scope for now.
+**Ledger continued (updated 2026-11-08):** B2–B3 ✅ (`patches/0033-…` …
+`patches/0034-…`), D2–D6 ✅ (`patches/0035-…` … `patches/0039-…`), N0–N2 ✅
+(`patches/0040-…` … `patches/0042-…`), B4–B5 ✅ (`patches/0043-…` …
+`patches/0044-…`), D7–D8 ✅ (`patches/0045-…` … `patches/0046-…`), N3–N8 ✅
+(`patches/0047-…` … `patches/0052-…`) and B6–B10 ✅ (`patches/0053-…` …
+`patches/0057-…`) — **NODE_PLAN, NET_PLAN and CONSENSUS_PLAN are COMPLETE**;
+W0 ✅ (`patches/0058-W0-wallet-baseline.patch`) and **W1 ✅**
+(`patches/0059-W1-crypto-keystore.patch`, W1-FORMAT-v1 frozen, testnet-only;
+the independent external security review is deferred to the Stage-2 audit by
+owner decision 2026-11-08). ⏸ X9 (EVM lane), W2–W7 and E/T/H/P/O remain open
+or out of scope for now.
 
 ## Maturity level
 

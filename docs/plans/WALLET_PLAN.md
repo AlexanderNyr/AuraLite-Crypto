@@ -1,6 +1,6 @@
 # WALLET_PLAN — keys, signing, wallet, ceremony
 
-**Status:** 🚧 IN PROGRESS — W0 ✅ (`patches/0058-W0-wallet-baseline.patch`); W1–W4 open; ⏸ W5–W7 Stage 2.  
+**Status:** 🚧 IN PROGRESS — W0 ✅ (`patches/0058-W0-wallet-baseline.patch`); W1 ✅ (`patches/0059-W1-crypto-keystore.patch`); W2 ✅ (`patches/0060-W2-wallet-cli.patch`); W3 ✅ (`patches/0061-W3-offline-signing.patch`); W4 ✅ (`patches/0062-W4-multisig.patch`); ⏸ W5–W7 Stage 2.  
 **Stage:** Stage 1: W0–W4. ⏸ Stage 2: W5–W7 (hardware keys, web wallet, genesis ceremony).  
 **Deliverable:** `patches/0058-W0-wallet-baseline.patch` … `patches/0065-W7-...`
 **Dependencies:** CORE C1–C4 (addresses/signatures), NODE D4 (RPC).
@@ -24,10 +24,10 @@ procedure for generating genesis keys.
 | Phase | Title | DoD | Test gate |
 |---|---|---|---|
 | ✅ **W0** | Baseline | audit of "where keys could end up" + threat notes | NC: key in a log → gate red (tree search) |
-| **W1** | Crypto keystore | BIP-39, testnet SLIP-0010 Ed25519 hardened path (D-W1-testnet), encryption, zeroize, versioned format | BIP-39 and SLIP-0010 vectors plus independently verified testnet-path vectors; 1000 wrong passwords → 0 decryptions; format fuzz |
-| **W2** | `aura-wallet` CLI | `new/import/list/balance/transfer/sign/broadcast/stake/vote` | 40 CLI vectors, including rejection of a tx with a foreign chain-id |
-| **W3** | Offline signing | unsigned/signed tx format, QR/USB, verification on the online machine | air-gapped scenario end-to-end; NC: signature with a foreign domain → reject |
-| **W4** | Multisig | M-of-N contract, signature collection, timeouts, member rotation | 3-of-5: 3 collected → success, 2 → reject; NC: threshold bypass → red |
+| ✅ **W1** | Crypto keystore | BIP-39, testnet SLIP-0010 Ed25519 hardened path (D-W1-testnet), encryption, zeroize, versioned format | BIP-39 and SLIP-0010 vectors plus independently verified testnet-path vectors; 1000 wrong passwords → 0 decryptions; format fuzz |
+| ✅ **W2** | `aura-wallet` CLI | `new/import/list/balance/transfer/sign/broadcast/stake/vote` | 40 CLI vectors, including rejection of a tx with a foreign chain-id |
+| ✅ **W3** | Offline signing | unsigned/signed tx format, QR/USB, verification on the online machine | air-gapped scenario end-to-end; NC: signature with a foreign domain → reject |
+| ✅ **W4** | Multisig | M-of-N contract, signature collection, timeouts, member rotation | 3-of-5: 3 collected → success, 2 → reject; NC: threshold bypass → red |
 | ⏸ **W5** | Hardware keys | HID/CCID-like device protocol, on-screen confirmation | 10 "human confirmed/denied" scenarios; NC: blind confirmation → red |
 | ⏸ **W6** | Web/browser wallet | WASM build of `aura-keys`, extension, deep links, phishing protection | signing shows the human the **real** tx fields; NC: recipient substitution in UI → red |
 | ⏸ **W7** | Genesis ceremony | offline generation, Shamir sharing, witness logs, destruction of temporary media | O5: not one private key in the repository/CI; pubkey set matches genesis hash |
@@ -46,15 +46,108 @@ mainnet and ⏸ Stage 2.
 - Implemented the tree-search secret-material scanner (`scan_text_for_key_leaks` and `audit_tree_for_key_leaks`), verified against the live workspace (`0` findings across all repository logs and files), a poisoned-log tree-search gate (`key in a log -> gate red`), and 64 deterministic vectors in `crates/aura-wallet/tests/fixtures/w0_key_audit.txt`.
 - `make nc-w0`: 6/6 library unit-test mutation controls pass (`339/339` cumulative negative controls). Evidence: `docs/evidence/w0/`.
 
-### W1 prototype (in progress; not a phase receipt)
+### W1 receipt (2026-11-08)
 
-The current working tree contains an experimental encrypted keystore and Ed25519
-SLIP-0010 derivation matching the accepted D-W1-testnet deviation. It does not
-claim literal BIP-32/44 or mainnet compatibility. W1 remains open pending
-a frozen interoperability specification, longer fuzzing, phase evidence and review;
-mainnet allocation and migration policy remain separate decisions. See
-[`WIP_SECURITY_AND_W1.md`](../WIP_SECURITY_AND_W1.md) for gates and limitations.
-W2–W4 remain open.
+- Deliverable: `patches/0059-W1-crypto-keystore.patch` (complete W1-from-W0
+  phase patch on top of the W0 tree).
+- Crypto keystore (`crates/aura-wallet`): English BIP-39 with per-field NFKD
+  normalization profiles (Unicode 15.1/18.0 forks with provenance guards),
+  PBKDF2-HMAC-SHA512 seed derivation, SLIP-0010 Ed25519 hardened derivation at
+  `m/44'/1'/0'/0'/i'` (D-W1-testnet; not literal BIP-32/44 and not a mainnet
+  allocation), versioned keystore format v1/v2 with Argon2id or legacy scrypt
+  KDF policy bounds, AES-256-GCM with canonical-JSON AAD, post-GCM account
+  binding, zeroization, and the recovery metadata marker bound to
+  normalization profiles. The interoperability format is frozen as
+  **W1-FORMAT-v1** (`docs/spec/keystore-format.md`, owner decision).
+- Test gate: official and independent BIP-39/SLIP-0010/testnet-path vectors
+  pass in `make test-w1`; 1,000 wrong passwords → 0 decryptions; format fuzz
+  (ASan/libFuzzer campaigns, the final one 1,800 s per target over four
+  targets with zero artifacts and checkout-verified manifests; run details in
+  [`docs/evidence/w1/report.md`](../evidence/w1/report.md)).
+- `make nc-w1`: 52/52 wallet plus 15/15 fuzz-oracle mutation controls pass
+  (67/67, 406/406 cumulative negative controls). Evidence:
+  `docs/evidence/w1/`.
+- Python/Rust interop: bidirectional fixture and fresh-generation checks
+  (`make test-w1-interop`) pass, including profile-sensitive U+A7F1 and
+  uppercase-hex header fixtures.
+- Scope and carries (owner decision, 2026-11-08): this closure is
+  **testnet-only**; the independent external security review is deferred to
+  the Stage-2 audit (local tests and the assistant's work are not external
+  review); H3's 24-hour total fuzz campaign stays on the H3 plan; mainnet
+  curve/path/coin-type allocation and migration policy remain separate
+  decisions. See [`WIP_SECURITY_AND_W1.md`](../WIP_SECURITY_AND_W1.md) for
+  the recorded limitations. W2–W4 remain open.
+
+### W2 receipt (2026-11-11)
+
+- Deliverable: `patches/0060-W2-wallet-cli.patch` (complete W2-from-W1 phase
+  patch on top of the W1 tree).
+- Wallet CLI (`crates/aura-wallet/src/cli.rs`):
+  `new/import/list/balance/transfer/sign/broadcast/stake/vote`; passwords,
+  mnemonics and entropy enter only via files (W0 `T-W0-2`); exit codes
+  0/64/65/69 with fixed messages; secrets never printed except the one-time
+  mnemonic of `new`.
+- Chain binding (named control): a tx, ballot or ledger bound to a foreign
+  chain-id is refused before signing (`error: foreign chain-id`, exit 65).
+- Test gate: 40 CLI vectors (`tests/fixtures/w2_cli_vectors.json`) from the
+  independent Python oracle (`tools/gen_w2_vectors.py`: BIP-39, SLIP-0010,
+  bech32, C4 wire encoder, BLAKE3, Ed25519; self-checked against RFC 8032 and
+  the W1 pinned identity), asserted byte-for-byte by `tests/w2_cli.rs` (42
+  tests: 40 vectors, fixture count guard, broadcast replay refusal).
+- Mutation controls (`tools/nc_w2.py`, 6): foreign chain-id accepted, ballot
+  chain binding dropped, password echoed into stdout, broadcast signature
+  verification skipped, stake payload encoding order swapped, nonce replay
+  accepted — each mutation turns its named test red (6/6 PASS).
+- Decisions D-W2-1 (file ledger behind the `Ledger` trait; an HTTP JSON-RPC
+  client transport slots in later), D-W2-2 (Ed25519 wallet ballots; B9 votes
+  are BLS validator signatures and the frozen keystore has no BLS keys),
+  D-W2-3 (canonical `wallet-stake-v1` payload), D-W2-4 (no secrets in argv or
+  output) recorded in `docs/w2-cli-plan.md`; evidence in `docs/evidence/w2/`.
+
+### W3 receipt (2026-11-11)
+
+- Deliverable: `patches/0061-W3-offline-signing.patch` (complete W3-from-W2
+  phase patch on top of the W2 tree).
+- Air-gapped split (`crates/aura-wallet/src/offline.rs` + CLI
+  `tx-prepare`/`tx-sign`/`tx-verify`/`qr-split`/`qr-join`): keyless online
+  prepare -> USB/QR transport -> offline keystore signing -> online
+  verification and broadcast. Deterministic `AURALITE-OFFLINE-V1` envelopes
+  (D-W3-1) and `ALO1:ii/nn` QR frames (D-W3-2); fixed verification order with
+  the W2 chain-binding message (D-W3-3); no new secrets (D-W3-4).
+- Named control: a signature under a foreign (domain-less) digest is refused
+  (`error: signature verification failed`, exit 65) — vector
+  `verify_foreign_domain`, mutation control NC-1 in `tools/nc_w3.py`.
+- Test gate: 24 CLI vectors (`tests/fixtures/w3_offline_vectors.json`) from
+  the independent oracle `tools/gen_w3_vectors.py`, asserted byte-for-byte by
+  `tests/w3_offline.rs` (25/25 with the count guard); groups prepare/sign/
+  verify/qr plus three full air-gapped end-to-end scenarios.
+- Mutation controls (`tools/nc_w3.py`, 6): foreign-domain signature accepted,
+  envelope checksum skipped, signer binding dropped, QR gap accepted, QR
+  duplicate accepted, `--against` comparison skipped — 6/6 PASS.
+
+### W4 receipt (2026-11-11)
+
+- Deliverable: `patches/0062-W4-multisig.patch` (complete W4-from-W3 phase
+  patch on top of the W3 tree).
+- Wallet-level M-of-N multisig (`crates/aura-wallet/src/multisig.rs` + CLI
+  `msig-init`/`msig-propose`/`msig-approve`/`msig-collect`): canonical
+  contract/proposal/approval documents with `BLAKE3` contract ids (D-W4-1),
+  the fixed AuraLite `contract` signature domain (D-W4-2), member rotation as
+  a `rotate` proposal under the old membership (D-W4-3) and deterministic
+  `--height` timeouts (D-W4-4).
+- Named control: `collect_2_of_5_rejected` — a bundle with fewer approvals
+  than the threshold is refused (`error: multisig: threshold not met (2/3)`,
+  exit 65); mutation control NC-1 in `tools/nc_w4.py` bypasses the threshold
+  and requires that test to go red.
+- Test gate: 3-of-5 — 3 collected -> success, 2 -> reject — over 22 CLI
+  vectors (`tests/fixtures/w4_multisig_vectors.json`) from the independent
+  oracle `tools/gen_w4_vectors.py`, asserted byte-for-byte by
+  `tests/w4_multisig.rs` (23/23 with the count guard). Cross-check pin: the
+  3-of-5 contract over the W1 smoke keys has the same id
+  (`a3ed446e…ff9eb6`) in the Rust implementation and the oracle.
+- Mutation controls (`tools/nc_w4.py`, 6): threshold bypassed, signature
+  verification skipped, duplicate approvals accepted, membership dropped,
+  expiry dropped, proposal binding dropped — 6/6 PASS.
 
 ## Risks
 

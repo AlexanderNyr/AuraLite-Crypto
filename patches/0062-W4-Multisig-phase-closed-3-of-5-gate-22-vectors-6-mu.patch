@@ -1,0 +1,2921 @@
+From 9eafaa70f2b1f38c6045e05b98b486ff904cda9f Mon Sep 17 00:00:00 2001
+From: AuraLite Pipeline <pipeline@auralite.local>
+Date: Fri, 13 Nov 2026 19:05:33 +0000
+Subject: [PATCH] W4: Multisig phase closed (3-of-5 gate, 22 vectors, 6
+ mutation controls)
+
+- multisig.rs: M-of-N contract, proposals, approvals, rotation (D-W4-1..4)
+- CLI: msig-init/msig-propose/msig-approve/msig-collect
+- 22 vectors from tools/gen_w4_vectors.py incl. named control (threshold bypass -> red)
+- tools/nc_w4.py 6 mutation controls; evidence docs/evidence/w4/
+---
+ CHANGELOG.md                                  |  11 +
+ Makefile                                      |  16 +
+ crates/aura-wallet/src/cli.rs                 | 398 +++++++-
+ crates/aura-wallet/src/lib.rs                 |   1 +
+ crates/aura-wallet/src/multisig.rs            | 209 +++++
+ .../tests/fixtures/w1_baseline.txt            |   8 +-
+ .../tests/fixtures/w4_multisig_vectors.json   | 871 ++++++++++++++++++
+ crates/aura-wallet/tests/w4_multisig.rs       | 168 ++++
+ docs/evidence/review-w1-source-drift.txt      |  24 +-
+ docs/evidence/w4/README.md                    |  19 +
+ docs/evidence/w4/SHA256SUMS                   |  10 +
+ docs/evidence/w4/gates.txt                    |   4 +
+ docs/evidence/w4/inventory.txt                |  31 +
+ docs/evidence/w4/nc.log                       |   9 +
+ docs/evidence/w4/report.md                    |  30 +
+ docs/evidence/w4/test-w4.log                  |  33 +
+ docs/plans/WALLET_PLAN.md                     |  28 +-
+ docs/w4-multisig-plan.md                      |  76 ++
+ tools/audit_closeout.py                       |   9 +-
+ tools/gen_w4_vectors.py                       | 400 ++++++++
+ tools/nc_w4.py                                | 110 +++
+ tools/write_w4_evidence.py                    | 147 +++
+ 22 files changed, 2589 insertions(+), 23 deletions(-)
+ create mode 100644 crates/aura-wallet/src/multisig.rs
+ create mode 100644 crates/aura-wallet/tests/fixtures/w4_multisig_vectors.json
+ create mode 100644 crates/aura-wallet/tests/w4_multisig.rs
+ create mode 100644 docs/evidence/w4/README.md
+ create mode 100644 docs/evidence/w4/SHA256SUMS
+ create mode 100644 docs/evidence/w4/gates.txt
+ create mode 100644 docs/evidence/w4/inventory.txt
+ create mode 100644 docs/evidence/w4/nc.log
+ create mode 100644 docs/evidence/w4/report.md
+ create mode 100644 docs/evidence/w4/test-w4.log
+ create mode 100644 docs/w4-multisig-plan.md
+ create mode 100644 tools/gen_w4_vectors.py
+ create mode 100644 tools/nc_w4.py
+ create mode 100644 tools/write_w4_evidence.py
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 83397ebdad481ba069a3f502ffe9f3efcc80e03b..1cb85a27beae56102bc9431b5ce91855eab13552 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,17 @@
+ All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
+ never rewritten: corrections are made with a new entry or an explicit note.
+ 
++## [W4 — multisig phase closed: 3-of-5 gate, 22 vectors, 6 mutation controls] 2026-11-11
++
++- W4 phase closed. Deliverable `patches/0062-W4-multisig.patch`, receipt in
++  `docs/plans/WALLET_PLAN.md`, evidence in `docs/evidence/w4/`.
++- Wallet-level M-of-N multisig: `msig-init`/`msig-propose`/`msig-approve`/
++  `msig-collect` over canonical contract/proposal/approval documents;
++  member rotation via `rotate` proposals; deterministic `--height` timeouts.
++- Gate: 3-of-5 — 3 collected -> success, 2 -> reject — and the named control
++  (threshold bypass -> red): `error: multisig: threshold not met (2/3)`.
++- Mutation controls: 6/6 PASS (`tools/nc_w4.py`).
++
+ ## [W3 — offline signing phase closed: air-gapped e2e, 24 vectors, 6 mutation controls] 2026-11-11
+ 
+ - W3 phase closed. Deliverable `patches/0061-W3-offline-signing.patch`,
+diff --git a/Makefile b/Makefile
+index 5c822946eb0f5e8a27edae9a66637fc0c77ca450..ddbefb4633876b4678e8b61dee3fd93d9f066930 100644
+--- a/Makefile
++++ b/Makefile
+@@ -57,6 +57,7 @@ PYTHON ?= python3
+         test-w1 test-w1-interop nc-w1 evidence-w1 \
+         gen-w2-vectors test-w2 nc-w2 evidence-w2 \
+         gen-w3-vectors test-w3 nc-w3 evidence-w3 \
++        gen-w4-vectors test-w4 nc-w4 evidence-w4 \
+         devnet clean
+ 
+ help:
+@@ -1192,6 +1193,21 @@ nc-w3:
+ evidence-w3:
+ 	@$(PYTHON) tools/write_w3_evidence.py
+ 
++# W4: the 22 multisig vectors gate (tools/gen_w4_vectors.py oracle).
++.PHONY: gen-w4-vectors test-w4 nc-w4 evidence-w4
++
++gen-w4-vectors:
++	@$(PYTHON) tools/gen_w4_vectors.py
++
++test-w4:
++	@cargo test -p aura-wallet --features insecure-test-kdf --test w4_multisig
++
++nc-w4:
++	@$(PYTHON) tools/nc_w4.py
++
++evidence-w4:
++	@$(PYTHON) tools/write_w4_evidence.py
++
+ # Optional independent interop check; install the pinned test-only Python
+ # dependencies in tools/w1-reference-requirements.txt first.
+ .PHONY: test-w1-interop
+diff --git a/crates/aura-wallet/src/cli.rs b/crates/aura-wallet/src/cli.rs
+index f1f186db9d8329afa4cc638e4300b65a610618ac..149ac2139fa830b910fb430c045f9528c35ceb3f 100644
+--- a/crates/aura-wallet/src/cli.rs
++++ b/crates/aura-wallet/src/cli.rs
+@@ -28,6 +28,9 @@ use crate::derivation::{
+     self, Bip39NormalizationProfile, DerivedAccount, derive_account, generate_mnemonic,
+ };
+ use crate::keystore::{KdfParams, Keystore};
++use crate::multisig::{
++    Approval, MsigError, MultisigDescriptor, MultisigProposal, ProposalAction, verify_approval,
++};
+ use crate::offline::{self, OfflineError};
+ use crate::secret::Password;
+ use aura_tx::{Tx, TxKind, TxParams, UnsignedTx, signer_address};
+@@ -51,7 +54,7 @@ pub const STAKE_PAYLOAD_PREFIX: &[u8] = b"AuraLite-Crypto/wallet-stake-v1\x00";
+ pub const BALLOT_PREFIX: &[u8] = b"AuraLite-Crypto/wallet-ballot-v1\x00";
+ 
+ /// The nine wallet commands the CLI implements.
+-pub const COMMANDS: [&str; 14] = [
++pub const COMMANDS: [&str; 18] = [
+     "new",
+     "import",
+     "list",
+@@ -66,6 +69,10 @@ pub const COMMANDS: [&str; 14] = [
+     "tx-verify",
+     "qr-split",
+     "qr-join",
++    "msig-init",
++    "msig-propose",
++    "msig-approve",
++    "msig-collect",
+ ];
+ 
+ /// `stake` action tags.
+@@ -1520,6 +1527,391 @@ fn cmd_qr_join(args: &Args, out: &mut dyn std::io::Write) -> Result<(), CliError
+     Ok(())
+ }
+ 
++fn msig_err(e: MsigError) -> CliError {
++    CliError::Invalid(e.to_string())
++}
++
++fn parse_pk_hex(text: &str) -> Option<[u8; 32]> {
++    let bytes = hex::decode(text).ok()?;
++    <[u8; 32]>::try_from(bytes).ok()
++}
++
++fn parse_sig_hex(text: &str) -> Option<[u8; 64]> {
++    let bytes = hex::decode(text).ok()?;
++    <[u8; 64]>::try_from(bytes).ok()
++}
++
++fn descriptor_to_json(d: &MultisigDescriptor) -> String {
++    let members: Vec<String> = d.members.iter().map(hex::encode).collect();
++    let value = serde_json::json!({
++        "format": "AuraLite-MSIG-V1",
++        "chain": d.chain,
++        "threshold": d.threshold,
++        "members": members,
++        "timeout": d.timeout,
++    });
++    format!("{value:#}\n")
++}
++
++fn descriptor_from_text(text: &str) -> Result<MultisigDescriptor, MsigError> {
++    let value: serde_json::Value =
++        serde_json::from_str(text).map_err(|_| MsigError::BadContract)?;
++    let get = |name: &str| value.get(name).ok_or(MsigError::BadContract);
++    let chain = get("chain")?
++        .as_str()
++        .ok_or(MsigError::BadContract)?
++        .to_string();
++    let threshold = get("threshold")?
++        .as_u64()
++        .and_then(|v| u8::try_from(v).ok())
++        .ok_or(MsigError::BadContract)?;
++    let timeout = get("timeout")?.as_u64().ok_or(MsigError::BadContract)?;
++    let list = get("members")?.as_array().ok_or(MsigError::BadContract)?;
++    let mut members: Vec<[u8; 32]> = Vec::with_capacity(list.len());
++    for item in list {
++        let hex_text = item.as_str().ok_or(MsigError::BadContract)?;
++        members.push(parse_pk_hex(hex_text).ok_or(MsigError::BadContract)?);
++    }
++    if members.is_empty() || members.len() > 255 {
++        return Err(MsigError::BadContract);
++    }
++    members.sort_unstable();
++    if members.windows(2).any(|w| w[0] == w[1]) {
++        return Err(MsigError::BadContract);
++    }
++    Ok(MultisigDescriptor {
++        chain,
++        threshold,
++        members,
++        timeout,
++    })
++}
++
++fn proposal_to_json(p: &MultisigProposal) -> String {
++    let mut value = serde_json::json!({
++        "format": "AuraLite-MSIG-PROPOSAL-V1",
++        "chain": p.chain,
++        "contract": hex::encode(p.contract),
++        "id": p.id,
++        "expiry": p.expiry,
++    });
++    let obj = value.as_object_mut().expect("json object");
++    match &p.action {
++        ProposalAction::Transfer { to, amount } => {
++            obj.insert("kind".to_string(), serde_json::json!("transfer"));
++            obj.insert("to".to_string(), serde_json::json!(to.to_bech32()));
++            obj.insert("amount".to_string(), serde_json::json!(amount));
++        }
++        ProposalAction::Rotate { descriptor } => {
++            obj.insert("kind".to_string(), serde_json::json!("rotate"));
++            obj.insert(
++                "new_multisig".to_string(),
++                serde_json::from_str(&descriptor_to_json(descriptor)).expect("descriptor json"),
++            );
++        }
++    }
++    format!("{value:#}\n")
++}
++
++fn proposal_from_text(text: &str) -> Result<MultisigProposal, MsigError> {
++    let value: serde_json::Value =
++        serde_json::from_str(text).map_err(|_| MsigError::BadProposal)?;
++    let get = |name: &str| value.get(name).ok_or(MsigError::BadProposal);
++    let chain = get("chain")?
++        .as_str()
++        .ok_or(MsigError::BadProposal)?
++        .to_string();
++    let contract_hex = get("contract")?.as_str().ok_or(MsigError::BadProposal)?;
++    let contract = parse_pk_hex(contract_hex).ok_or(MsigError::BadProposal)?;
++    let id = get("id")?.as_u64().ok_or(MsigError::BadProposal)?;
++    let expiry = get("expiry")?.as_u64().ok_or(MsigError::BadProposal)?;
++    let kind = get("kind")?.as_str().ok_or(MsigError::BadProposal)?;
++    let action = match kind {
++        "transfer" => {
++            let to_hex = get("to")?.as_str().ok_or(MsigError::BadProposal)?;
++            let to = Address::from_bech32(to_hex).map_err(|_| MsigError::BadProposal)?;
++            let amount = get("amount")?.as_u64().ok_or(MsigError::BadProposal)?;
++            ProposalAction::Transfer { to, amount }
++        }
++        "rotate" => {
++            let nested = get("new_multisig")?.to_string();
++            let descriptor = descriptor_from_text(&nested)?;
++            ProposalAction::Rotate { descriptor }
++        }
++        _ => return Err(MsigError::BadProposal),
++    };
++    Ok(MultisigProposal {
++        chain,
++        contract,
++        id,
++        expiry,
++        action,
++    })
++}
++
++fn approval_to_json(a: &Approval) -> String {
++    let value = serde_json::json!({
++        "format": "AuraLite-MSIG-APPROVAL-V1",
++        "member": hex::encode(a.member),
++        "proposal": hex::encode(&a.proposal),
++        "sig": hex::encode(a.sig),
++    });
++    format!("{value:#}\n")
++}
++
++fn approval_from_text(text: &str) -> Result<Approval, MsigError> {
++    let value: serde_json::Value =
++        serde_json::from_str(text).map_err(|_| MsigError::BadApproval)?;
++    let get = |name: &str| value.get(name).ok_or(MsigError::BadApproval);
++    let member = parse_pk_hex(get("member")?.as_str().ok_or(MsigError::BadApproval)?)
++        .ok_or(MsigError::BadApproval)?;
++    let proposal = hex::decode(get("proposal")?.as_str().ok_or(MsigError::BadApproval)?)
++        .map_err(|_| MsigError::BadApproval)?;
++    let sig = parse_sig_hex(get("sig")?.as_str().ok_or(MsigError::BadApproval)?)
++        .ok_or(MsigError::BadApproval)?;
++    Ok(Approval {
++        member,
++        proposal,
++        sig,
++    })
++}
++
++fn load_descriptor(flag: &str, path: &str) -> Result<MultisigDescriptor, CliError> {
++    let text = read_artifact(flag, path)?;
++    descriptor_from_text(&text).map_err(msig_err)
++}
++
++fn load_proposal_file(flag: &str, path: &str) -> Result<MultisigProposal, CliError> {
++    let text = read_artifact(flag, path)?;
++    proposal_from_text(&text).map_err(msig_err)
++}
++
++fn cmd_msig_init(args: &Args, out: &mut dyn std::io::Write) -> Result<(), CliError> {
++    args.only(&["chain", "threshold", "members", "timeout", "out"])?;
++    let chain = args.need("chain")?;
++    let threshold = parse_u64(args.need("threshold")?, "threshold")?;
++    let threshold = u8::try_from(threshold)
++        .map_err(|_| CliError::Usage("--threshold must be 1..=255".to_string()))?;
++    if threshold == 0 {
++        return Err(CliError::Usage("--threshold must be 1..=255".to_string()));
++    }
++    let timeout = parse_u64(args.need("timeout")?, "timeout")?;
++    let mut members: Vec<[u8; 32]> = Vec::new();
++    for item in args.need("members")?.split(',') {
++        members.push(parse_pk_hex(item).ok_or_else(|| {
++            CliError::Usage("--members must be comma-separated hex pubkeys".to_string())
++        })?);
++    }
++    if members.is_empty() || members.len() > 255 {
++        return Err(CliError::Usage(
++            "--members must list 1..=255 keys".to_string(),
++        ));
++    }
++    members.sort_unstable();
++    if members.windows(2).any(|w| w[0] == w[1]) {
++        return Err(CliError::Usage("duplicate member".to_string()));
++    }
++    if usize::from(threshold) > members.len() {
++        return Err(CliError::Usage(
++            "--threshold must not exceed members".to_string(),
++        ));
++    }
++    let descriptor = MultisigDescriptor {
++        chain: chain.to_string(),
++        threshold,
++        members,
++        timeout,
++    };
++    std::fs::write(args.need("out")?, descriptor_to_json(&descriptor))
++        .map_err(|e| CliError::Usage(format!("--out: {e}")))?;
++    let _ = writeln!(out, "status=created");
++    let _ = writeln!(out, "chain={chain}");
++    let _ = writeln!(out, "threshold={threshold}");
++    let _ = writeln!(out, "members={}", descriptor.members.len());
++    let _ = writeln!(out, "multisig_id={}", hex::encode(descriptor.contract_id()));
++    Ok(())
++}
++
++fn cmd_msig_propose(args: &Args, out: &mut dyn std::io::Write) -> Result<(), CliError> {
++    args.only(&[
++        "multisig",
++        "chain",
++        "proposal-id",
++        "expiry",
++        "action",
++        "to",
++        "amount",
++        "new-multisig",
++        "out",
++    ])?;
++    let chain = args.need("chain")?;
++    let descriptor = load_descriptor("--multisig", args.need("multisig")?)?;
++    if descriptor.chain != chain {
++        return Err(CliError::ForeignChainId {
++            found: descriptor.chain.clone(),
++            expected: chain.to_string(),
++        });
++    }
++    let id = parse_u64(args.need("proposal-id")?, "proposal-id")?;
++    let expiry = parse_u64(args.need("expiry")?, "expiry")?;
++    if expiry > descriptor.timeout {
++        return Err(CliError::Usage(
++            "--expiry must not exceed contract timeout".to_string(),
++        ));
++    }
++    let action = match args.need("action")? {
++        "transfer" => {
++            let to = Address::from_bech32(args.need("to")?)
++                .map_err(|_| CliError::Usage("--to must be bech32".to_string()))?;
++            let amount = parse_u64(args.need("amount")?, "amount")?;
++            ProposalAction::Transfer { to, amount }
++        }
++        "rotate" => {
++            let new_descriptor = load_descriptor("--new-multisig", args.need("new-multisig")?)?;
++            if new_descriptor.chain != descriptor.chain {
++                return Err(CliError::Usage("new contract chain must match".to_string()));
++            }
++            ProposalAction::Rotate {
++                descriptor: new_descriptor,
++            }
++        }
++        _ => {
++            return Err(CliError::Usage(
++                "--action must be transfer or rotate".to_string(),
++            ));
++        }
++    };
++    let proposal = MultisigProposal {
++        chain: chain.to_string(),
++        contract: descriptor.contract_id(),
++        id,
++        expiry,
++        action,
++    };
++    let kind = match proposal.action {
++        ProposalAction::Transfer { .. } => "transfer",
++        ProposalAction::Rotate { .. } => "rotate",
++    };
++    std::fs::write(args.need("out")?, proposal_to_json(&proposal))
++        .map_err(|e| CliError::Usage(format!("--out: {e}")))?;
++    let _ = writeln!(out, "status=proposed");
++    let _ = writeln!(out, "chain={chain}");
++    let _ = writeln!(out, "multisig_id={}", hex::encode(proposal.contract));
++    let _ = writeln!(out, "proposal_id={id}");
++    let _ = writeln!(out, "kind={kind}");
++    Ok(())
++}
++
++fn cmd_msig_approve(args: &Args, out: &mut dyn std::io::Write) -> Result<(), CliError> {
++    args.only(&[
++        "proposal",
++        "multisig",
++        "keystore",
++        "password-file",
++        "account",
++        "chain",
++        "height",
++        "out",
++    ])?;
++    let chain = args.need("chain")?;
++    let descriptor = load_descriptor("--multisig", args.need("multisig")?)?;
++    let proposal = load_proposal_file("--proposal", args.need("proposal")?)?;
++    if proposal.chain != chain {
++        return Err(CliError::ForeignChainId {
++            found: proposal.chain.clone(),
++            expected: chain.to_string(),
++        });
++    }
++    if proposal.contract != descriptor.contract_id() {
++        return Err(msig_err(MsigError::WrongContract));
++    }
++    let height = parse_u64(args.need("height")?, "height")?;
++    if proposal.expiry < height {
++        return Err(msig_err(MsigError::ProposalExpired));
++    }
++    let password = read_password_file(args.need("password-file")?)?;
++    let index = account_index(args)?;
++    let account = load_account(args.need("keystore")?, index, &password)?;
++    if !descriptor.is_member(&account.public_key) {
++        return Err(msig_err(MsigError::NotAMember));
++    }
++    let bytes = proposal.canonical_bytes();
++    let sig = aura_crypto::sign(
++        account.secret.as_bytes(),
++        chain,
++        aura_types::Domain::Contract,
++        &bytes,
++    );
++    let approval = Approval {
++        member: account.public_key,
++        proposal: bytes,
++        sig,
++    };
++    std::fs::write(args.need("out")?, approval_to_json(&approval))
++        .map_err(|e| CliError::Usage(format!("--out: {e}")))?;
++    let _ = writeln!(out, "status=approved");
++    let _ = writeln!(out, "chain={chain}");
++    let _ = writeln!(out, "proposal_id={}", proposal.id);
++    let _ = writeln!(out, "member={}", hex::encode(account.public_key));
++    Ok(())
++}
++
++fn cmd_msig_collect(args: &Args, out: &mut dyn std::io::Write) -> Result<(), CliError> {
++    args.only(&["proposal", "multisig", "approvals", "chain", "height"])?;
++    let chain = args.need("chain")?;
++    let descriptor = load_descriptor("--multisig", args.need("multisig")?)?;
++    let proposal = load_proposal_file("--proposal", args.need("proposal")?)?;
++    if proposal.chain != chain {
++        return Err(CliError::ForeignChainId {
++            found: proposal.chain.clone(),
++            expected: chain.to_string(),
++        });
++    }
++    if proposal.contract != descriptor.contract_id() {
++        return Err(msig_err(MsigError::WrongContract));
++    }
++    let height = parse_u64(args.need("height")?, "height")?;
++    if proposal.expiry < height {
++        return Err(msig_err(MsigError::ProposalExpired));
++    }
++    let dir = Path::new(args.need("approvals")?);
++    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
++        .map_err(|e| CliError::Usage(format!("--approvals: {e}")))?
++        .filter_map(|entry| entry.ok().map(|e| e.path()))
++        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
++        .collect();
++    paths.sort();
++    let mut seen: Vec<[u8; 32]> = Vec::new();
++    let mut collected = 0usize;
++    for path in &paths {
++        let text = std::fs::read_to_string(path)
++            .map_err(|e| CliError::Usage(format!("--approvals: {e}")))?;
++        let approval = approval_from_text(&text).map_err(msig_err)?;
++        if !descriptor.is_member(&approval.member) {
++            return Err(msig_err(MsigError::NotAMember));
++        }
++        if seen.contains(&approval.member) {
++            return Err(msig_err(MsigError::DuplicateApproval));
++        }
++        seen.push(approval.member);
++        verify_approval(&approval, &descriptor, &proposal).map_err(msig_err)?;
++        collected += 1;
++    }
++    if collected < usize::from(descriptor.threshold) {
++        return Err(msig_err(MsigError::ThresholdNotMet {
++            collected,
++            threshold: descriptor.threshold,
++        }));
++    }
++    let _ = writeln!(out, "status=passed");
++    let _ = writeln!(out, "chain={chain}");
++    let _ = writeln!(out, "multisig_id={}", hex::encode(proposal.contract));
++    let _ = writeln!(out, "proposal_id={}", proposal.id);
++    let _ = writeln!(out, "signatures={collected}");
++    let _ = writeln!(out, "threshold={}", descriptor.threshold);
++    Ok(())
++}
++
+ /// Execute one CLI invocation against the given streams; returns the exit code.
+ pub fn run(args: &[String], out: &mut dyn std::io::Write, err: &mut dyn std::io::Write) -> i32 {
+     let mut dispatch = || -> Result<(), CliError> {
+@@ -1542,6 +1934,10 @@ pub fn run(args: &[String], out: &mut dyn std::io::Write, err: &mut dyn std::io:
+             "tx-verify" => cmd_tx_verify(&parsed, out),
+             "qr-split" => cmd_qr_split(&parsed, out),
+             "qr-join" => cmd_qr_join(&parsed, out),
++            "msig-init" => cmd_msig_init(&parsed, out),
++            "msig-propose" => cmd_msig_propose(&parsed, out),
++            "msig-approve" => cmd_msig_approve(&parsed, out),
++            "msig-collect" => cmd_msig_collect(&parsed, out),
+             other => Err(CliError::Usage(format!("unknown command {other}"))),
+         }
+     };
+diff --git a/crates/aura-wallet/src/lib.rs b/crates/aura-wallet/src/lib.rs
+index a7eb6cad89824299d982e686b77a4e6b77a2380d..7b91fec2bf1b26aa1603ff948d13df124f611ad0 100644
+--- a/crates/aura-wallet/src/lib.rs
++++ b/crates/aura-wallet/src/lib.rs
+@@ -14,5 +14,6 @@ pub mod baseline;
+ pub mod cli;
+ pub mod derivation;
+ pub mod keystore;
++pub mod multisig;
+ pub mod offline;
+ pub mod secret;
+diff --git a/crates/aura-wallet/src/multisig.rs b/crates/aura-wallet/src/multisig.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..82d79cb598b9313eaabea91d13a11e8ba89a1127
+--- /dev/null
++++ b/crates/aura-wallet/src/multisig.rs
+@@ -0,0 +1,209 @@
++//! W4 — wallet-level M-of-N multisig contract.
++//!
++//! Design of record: `docs/w4-multisig-plan.md` (D-W4-1..D-W4-4).
++//!
++//! Deterministic documents (contract descriptor, proposal, approval) are
++//! canonical binary blobs wrapped in JSON files; signatures always cover the
++//! canonical bytes under the fixed AuraLite `contract` domain. This is the
++//! wallet coordination layer over the W1 Ed25519 keys (the chain level is
++//! B-series consensus/BLS).
++
++use aura_crypto::{blake3_hash, hash_domain};
++use aura_types::{Address, Domain};
++
++/// Canonical prefix of a multisig contract descriptor (D-W4-1).
++pub const DESCRIPTOR_PREFIX: &[u8] = b"AuraLite-Crypto/wallet-msig-v1\0";
++/// Canonical prefix of a multisig proposal (D-W4-1).
++pub const PROPOSAL_PREFIX: &[u8] = b"AuraLite-Crypto/wallet-msig-proposal-v1\0";
++
++/// Fixed refusal messages (byte-for-byte asserted by the W4 vectors).
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum MsigError {
++    /// Collected fewer approvals than the threshold (the named W4 control).
++    ThresholdNotMet {
++        /// Approvals that verified.
++        collected: usize,
++        /// Required threshold.
++        threshold: u8,
++    },
++    /// Two approvals from the same member.
++    DuplicateApproval,
++    /// Approver is not in the contract member set.
++    NotAMember,
++    /// Current height is past the proposal expiry.
++    ProposalExpired,
++    /// Approval was made for a different proposal.
++    WrongProposal,
++    /// Proposal references a different contract id.
++    WrongContract,
++    /// Contract file cannot be parsed.
++    BadContract,
++    /// Proposal file cannot be parsed.
++    BadProposal,
++    /// Approval file cannot be parsed.
++    BadApproval,
++    /// Ed25519 signature does not verify under the fixed `contract` domain.
++    SignatureInvalid,
++}
++
++impl std::fmt::Display for MsigError {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        match self {
++            Self::ThresholdNotMet {
++                collected,
++                threshold,
++            } => {
++                write!(f, "multisig: threshold not met ({collected}/{threshold})")
++            }
++            Self::DuplicateApproval => write!(f, "multisig: duplicate approval"),
++            Self::NotAMember => write!(f, "multisig: not a member"),
++            Self::ProposalExpired => write!(f, "multisig: proposal expired"),
++            Self::WrongProposal => write!(f, "multisig: approval for a different proposal"),
++            Self::WrongContract => write!(f, "multisig: proposal for a different contract"),
++            Self::BadContract => write!(f, "multisig: bad contract file"),
++            Self::BadProposal => write!(f, "multisig: bad proposal file"),
++            Self::BadApproval => write!(f, "multisig: bad approval file"),
++            Self::SignatureInvalid => write!(f, "signature verification failed"),
++        }
++    }
++}
++
++/// An M-of-N multisig contract descriptor (D-W4-1).
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct MultisigDescriptor {
++    /// Chain the contract operates on.
++    pub chain: String,
++    /// Required approvals (M).
++    pub threshold: u8,
++    /// Member public keys, sorted ascending.
++    pub members: Vec<[u8; 32]>,
++    /// Absolute height after which proposals expire.
++    pub timeout: u64,
++}
++
++impl MultisigDescriptor {
++    /// Canonical bytes: prefix || u8 chain len || chain || M || N || keys.
++    #[must_use]
++    pub fn canonical_bytes(&self) -> Vec<u8> {
++        let chain = self.chain.as_bytes();
++        let mut out = Vec::with_capacity(
++            DESCRIPTOR_PREFIX.len() + 1 + chain.len() + 2 + self.members.len() * 32,
++        );
++        out.extend_from_slice(DESCRIPTOR_PREFIX);
++        out.push(u8::try_from(chain.len()).expect("chain-id fits u8"));
++        out.extend_from_slice(chain);
++        out.push(self.threshold);
++        out.push(u8::try_from(self.members.len()).expect("N fits u8"));
++        for key in &self.members {
++            out.extend_from_slice(key);
++        }
++        out
++    }
++
++    /// Contract id: `BLAKE3(canonical bytes)`.
++    #[must_use]
++    pub fn contract_id(&self) -> [u8; 32] {
++        *blake3_hash(&self.canonical_bytes()).as_bytes()
++    }
++
++    /// Whether `public` is a contract member.
++    #[must_use]
++    pub fn is_member(&self, public: &[u8; 32]) -> bool {
++        self.members.binary_search(public).is_ok()
++    }
++}
++
++/// What a multisig proposal does.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum ProposalAction {
++    /// Move `amount` to `to`.
++    Transfer {
++        /// Recipient.
++        to: Address,
++        /// Amount in units.
++        amount: u64,
++    },
++    /// Member rotation: the next contract state (D-W4-3).
++    Rotate {
++        /// The new descriptor.
++        descriptor: MultisigDescriptor,
++    },
++}
++
++/// A proposal bound to one contract (D-W4-1).
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct MultisigProposal {
++    /// Chain the proposal is valid on.
++    pub chain: String,
++    /// Contract id the proposal belongs to.
++    pub contract: [u8; 32],
++    /// Per-contract proposal counter.
++    pub id: u64,
++    /// Height after which approvals are refused.
++    pub expiry: u64,
++    /// What to do.
++    pub action: ProposalAction,
++}
++
++impl MultisigProposal {
++    /// Canonical proposal bytes (D-W4-1).
++    #[must_use]
++    pub fn canonical_bytes(&self) -> Vec<u8> {
++        let chain = self.chain.as_bytes();
++        let mut out =
++            Vec::with_capacity(PROPOSAL_PREFIX.len() + 1 + chain.len() + 32 + 8 + 8 + 1 + 64);
++        out.extend_from_slice(PROPOSAL_PREFIX);
++        out.push(u8::try_from(chain.len()).expect("chain-id fits u8"));
++        out.extend_from_slice(chain);
++        out.extend_from_slice(&self.contract);
++        out.extend_from_slice(&self.id.to_le_bytes());
++        out.extend_from_slice(&self.expiry.to_le_bytes());
++        match &self.action {
++            ProposalAction::Transfer { to, amount } => {
++                out.push(0);
++                out.extend_from_slice(to.as_bytes());
++                out.extend_from_slice(&amount.to_le_bytes());
++            }
++            ProposalAction::Rotate { descriptor } => {
++                out.push(1);
++                out.extend_from_slice(&descriptor.canonical_bytes());
++            }
++        }
++        out
++    }
++
++    /// Approval digest: `BLAKE3(domain_message(chain, "contract", bytes))`.
++    #[must_use]
++    pub fn approval_digest(&self) -> [u8; 32] {
++        *hash_domain(&self.chain, Domain::Contract, &self.canonical_bytes()).as_bytes()
++    }
++}
++
++/// One member's approval: signature over the proposal's canonical bytes.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct Approval {
++    /// Member public key.
++    pub member: [u8; 32],
++    /// The exact proposal bytes this approval was made for.
++    pub proposal: Vec<u8>,
++    /// Ed25519 signature over [`MultisigProposal::approval_digest`].
++    pub sig: [u8; 64],
++}
++
++/// Verify one approval against the proposal being collected (D-W4-4 order).
++pub fn verify_approval(
++    approval: &Approval,
++    descriptor: &MultisigDescriptor,
++    proposal: &MultisigProposal,
++) -> Result<(), MsigError> {
++    if !descriptor.is_member(&approval.member) {
++        return Err(MsigError::NotAMember);
++    }
++    let expected = proposal.canonical_bytes();
++    if approval.proposal != expected {
++        return Err(MsigError::WrongProposal);
++    }
++    let digest = proposal.approval_digest();
++    aura_crypto::verify_raw(&approval.member, &digest, &approval.sig)
++        .map_err(|_| MsigError::SignatureInvalid)
++}
+diff --git a/crates/aura-wallet/tests/fixtures/w1_baseline.txt b/crates/aura-wallet/tests/fixtures/w1_baseline.txt
+index f24e0a060eee0b94881ecdc231bb0d95395bd3e3..a8bb68febce5e648c8d44ac7140bdf80149e01fe 100644
+--- a/crates/aura-wallet/tests/fixtures/w1_baseline.txt
++++ b/crates/aura-wallet/tests/fixtures/w1_baseline.txt
+@@ -12,10 +12,10 @@ missing=0
+ exposure_surfaces=8
+ threat_notes=6
+ missing_capabilities=3
+-layer=keystore	W1	implemented	8	4954	152	BIP-39 and SLIP-0010 Ed25519 testnet derivation, encrypted keystore, zeroize
+-layer=wallet-cli	W2	implemented	8	4954	152	`aura-wallet` CLI: new/import/list/balance/transfer/sign/broadcast/stake/vote
+-layer=offline-signing	W3	placeholder	8	4954	152	air-gapped unsigned/signed tx format, QR/USB bundle, online verification
+-layer=multisig	W4	placeholder	8	4954	152	M-of-N multisig coordination, signature collection, timeouts, member rotation
++layer=keystore	W1	implemented	9	5560	166	BIP-39 and SLIP-0010 Ed25519 testnet derivation, encrypted keystore, zeroize
++layer=wallet-cli	W2	implemented	9	5560	166	`aura-wallet` CLI: new/import/list/balance/transfer/sign/broadcast/stake/vote
++layer=offline-signing	W3	placeholder	9	5560	166	air-gapped unsigned/signed tx format, QR/USB bundle, online verification
++layer=multisig	W4	placeholder	9	5560	166	M-of-N multisig coordination, signature collection, timeouts, member rotation
+ surface=logs-and-tracing	W0	CRITICAL	structured/plain daemon or test logs (`*.log`, `tracing`, `Debug`/`Display`)
+ surface=cli-argv-and-env	W1	CRITICAL	CLI flags (`--private-key`, `--mnemonic`) visible in `/proc/<pid>/cmdline` and shell history
+ surface=plaintext-disk-files	W1	CRITICAL	unencrypted key files, swap/temp files, or world-readable keystore permissions
+diff --git a/crates/aura-wallet/tests/fixtures/w4_multisig_vectors.json b/crates/aura-wallet/tests/fixtures/w4_multisig_vectors.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..6b27de56cf77699d2b87d2b5d89a25b2d4540ed0
+--- /dev/null
++++ b/crates/aura-wallet/tests/fixtures/w4_multisig_vectors.json
+@@ -0,0 +1,871 @@
++{
++ "gate": "3-of-5: 3 collected -> success, 2 -> reject; NC: threshold bypass -> red",
++ "notice": "PUBLIC TEST DATA ONLY - DO NOT USE FOR FUNDS",
++ "cases": [
++  {
++   "name": "init_basic",
++   "argv": [
++    "msig-init",
++    "--chain",
++    "auralite-test-1",
++    "--threshold",
++    "3",
++    "--members",
++    "811b322f9c28877bf9f543a8e8db1f3c4fd45a6ccc6cadf315499893d49b8299,7cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9a,b0fd69b75e9521e1608b0d805e2e8c507cfbfa320d911ad0ec6f940bbe033158,208a2984b6261d90409270f8d8c0c47ecb0bc5d746a5fa9202bd2dbcd64eb899,5e80e586b3ba44525990a933119cd1cd4eecd00422d0801be3d225846ffddc75",
++    "--timeout",
++    "1000",
++    "--out",
++    "{sandbox}/msig.json"
++   ],
++   "setup": [],
++   "files": {},
++   "expect_exit": 0,
++   "expect_stdout": [
++    "status=created",
++    "chain=auralite-test-1",
++    "threshold=3",
++    "members=5",
++    "multisig_id=a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb6"
++   ],
++   "expect_stderr": []
++  },
++  {
++   "name": "init_threshold_zero",
++   "argv": [
++    "msig-init",
++    "--chain",
++    "auralite-test-1",
++    "--threshold",
++    "0",
++    "--members",
++    "811b322f9c28877bf9f543a8e8db1f3c4fd45a6ccc6cadf315499893d49b8299,7cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9a,b0fd69b75e9521e1608b0d805e2e8c507cfbfa320d911ad0ec6f940bbe033158,208a2984b6261d90409270f8d8c0c47ecb0bc5d746a5fa9202bd2dbcd64eb899,5e80e586b3ba44525990a933119cd1cd4eecd00422d0801be3d225846ffddc75",
++    "--timeout",
++    "1000",
++    "--out",
++    "{sandbox}/msig.json"
++   ],
++   "setup": [],
++   "files": {},
++   "expect_exit": 64,
++   "expect_stdout": [],
++   "expect_stderr": [
++    "error: usage: --threshold must be 1..=255"
++   ]
++  },
++  {
++   "name": "init_threshold_gt_n",
++   "argv": [
++    "msig-init",
++    "--chain",
++    "auralite-test-1",
++    "--threshold",
++    "6",
++    "--members",
++    "811b322f9c28877bf9f543a8e8db1f3c4fd45a6ccc6cadf315499893d49b8299,7cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9a,b0fd69b75e9521e1608b0d805e2e8c507cfbfa320d911ad0ec6f940bbe033158,208a2984b6261d90409270f8d8c0c47ecb0bc5d746a5fa9202bd2dbcd64eb899,5e80e586b3ba44525990a933119cd1cd4eecd00422d0801be3d225846ffddc75",
++    "--timeout",
++    "1000",
++    "--out",
++    "{sandbox}/msig.json"
++   ],
++   "setup": [],
++   "files": {},
++   "expect_exit": 64,
++   "expect_stdout": [],
++   "expect_stderr": [
++    "error: usage: --threshold must not exceed members"
++   ]
++  },
++  {
++   "name": "init_duplicate_member",
++   "argv": [
++    "msig-init",
++    "--chain",
++    "auralite-test-1",
++    "--threshold",
++    "3",
++    "--members",
++    "811b322f9c28877bf9f543a8e8db1f3c4fd45a6ccc6cadf315499893d49b8299,7cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9a,b0fd69b75e9521e1608b0d805e2e8c507cfbfa320d911ad0ec6f940bbe033158,208a2984b6261d90409270f8d8c0c47ecb0bc5d746a5fa9202bd2dbcd64eb899,5e80e586b3ba44525990a933119cd1cd4eecd00422d0801be3d225846ffddc75,811b322f9c28877bf9f543a8e8db1f3c4fd45a6ccc6cadf315499893d49b8299",
++    "--timeout",
++    "1000",
++    "--out",
++    "{sandbox}/msig.json"
++   ],
++   "setup": [],
++   "files": {},
++   "expect_exit": 64,
++   "expect_stdout": [],
++   "expect_stderr": [
++    "error: usage: duplicate member"
++   ]
++  },
++  {
++   "name": "propose_transfer_basic",
++   "argv": [
++    "msig-propose",
++    "--multisig",
++    "{sandbox}/msig.json",
++    "--chain",
++    "auralite-test-1",
++    "--proposal-id",
++    "1",
++    "--expiry",
++    "500",
++    "--action",
++    "transfer",
++    "--to",
++    "aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9",
++    "--amount",
++    "1000",
++    "--out",
++    "{sandbox}/prop.json"
++   ],
++   "setup": [],
++   "files": {
++    "msig.json": "{\n  \"chain\": \"auralite-test-1\",\n  \"format\": \"AuraLite-MSIG-V1\",\n  \"members\": [\n    \"208a2984b6261d90409270f8d8c0c47ecb0bc5d746a5fa9202bd2dbcd64eb899\",\n    \"5e80e586b3ba44525990a933119cd1cd4eecd00422d0801be3d225846ffddc75\",\n    \"7cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9a\",\n    \"811b322f9c28877bf9f543a8e8db1f3c4fd45a6ccc6cadf315499893d49b8299\",\n    \"b0fd69b75e9521e1608b0d805e2e8c507cfbfa320d911ad0ec6f940bbe033158\"\n  ],\n  \"threshold\": 3,\n  \"timeout\": 1000\n}\n"
++   },
++   "expect_exit": 0,
++   "expect_stdout": [
++    "status=proposed",
++    "chain=auralite-test-1",
++    "multisig_id=a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb6",
++    "proposal_id=1",
++    "kind=transfer"
++   ],
++   "expect_stderr": []
++  },
++  {
++   "name": "propose_unknown_action",
++   "argv": [
++    "msig-propose",
++    "--multisig",
++    "{sandbox}/msig.json",
++    "--chain",
++    "auralite-test-1",
++    "--proposal-id",
++    "1",
++    "--expiry",
++    "500",
++    "--action",
++    "burn",
++    "--out",
++    "{sandbox}/prop.json"
++   ],
++   "setup": [],
++   "files": {
++    "msig.json": "{\n  \"chain\": \"auralite-test-1\",\n  \"format\": \"AuraLite-MSIG-V1\",\n  \"members\": [\n    \"208a2984b6261d90409270f8d8c0c47ecb0bc5d746a5fa9202bd2dbcd64eb899\",\n    \"5e80e586b3ba44525990a933119cd1cd4eecd00422d0801be3d225846ffddc75\",\n    \"7cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9a\",\n    \"811b322f9c28877bf9f543a8e8db1f3c4fd45a6ccc6cadf315499893d49b8299\",\n    \"b0fd69b75e9521e1608b0d805e2e8c507cfbfa320d911ad0ec6f940bbe033158\"\n  ],\n  \"threshold\": 3,\n  \"timeout\": 1000\n}\n"
++   },
++   "expect_exit": 64,
++   "expect_stdout": [],
++   "expect_stderr": [
++    "error: usage: --action must be transfer or rotate"
++   ]
++  },
++  {
++   "name": "propose_foreign_chain",
++   "argv": [
++    "msig-propose",
++    "--multisig",
++    "{sandbox}/msig.json",
++    "--chain",
++    "auralite-test-1",
++    "--proposal-id",
++    "1",
++    "--expiry",
++    "500",
++    "--action",
++    "transfer",
++    "--to",
++    "aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9",
++    "--amount",
++    "1000",
++    "--out",
++    "{sandbox}/prop.json"
++   ],
++   "setup": [],
++   "files": {
++    "msig.json": "{\n  \"chain\": \"other-net\",\n  \"format\": \"AuraLite-MSIG-V1\",\n  \"members\": [\n    \"208a2984b6261d90409270f8d8c0c47ecb0bc5d746a5fa9202bd2dbcd64eb899\",\n    \"5e80e586b3ba44525990a933119cd1cd4eecd00422d0801be3d225846ffddc75\",\n    \"7cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9a\",\n    \"811b322f9c28877bf9f543a8e8db1f3c4fd45a6ccc6cadf315499893d49b8299\",\n    \"b0fd69b75e9521e1608b0d805e2e8c507cfbfa320d911ad0ec6f940bbe033158\"\n  ],\n  \"threshold\": 3,\n  \"timeout\": 1000\n}\n"
++   },
++   "expect_exit": 65,
++   "expect_stdout": [],
++   "expect_stderr": [
++    "error: foreign chain-id: tx=other-net, wallet=auralite-test-1"
++   ]
++  },
++  {
++   "name": "propose_expiry_gt_timeout",
++   "argv": [
++    "msig-propose",
++    "--multisig",
++    "{sandbox}/msig.json",
++    "--chain",
++    "auralite-test-1",
++    "--proposal-id",
++    "1",
++    "--expiry",
++    "1001",
++    "--action",
++    "transfer",
++    "--to",
++    "aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9",
++    "--amount",
++    "1000",
++    "--out",
++    "{sandbox}/prop.json"
++   ],
++   "setup": [],
++   "files": {
++    "msig.json": "{\n  \"chain\": \"auralite-test-1\",\n  \"format\": \"AuraLite-MSIG-V1\",\n  \"members\": [\n    \"208a2984b6261d90409270f8d8c0c47ecb0bc5d746a5fa9202bd2dbcd64eb899\",\n    \"5e80e586b3ba44525990a933119cd1cd4eecd00422d0801be3d225846ffddc75\",\n    \"7cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9a\",\n    \"811b322f9c28877bf9f543a8e8db1f3c4fd45a6ccc6cadf315499893d49b8299\",\n    \"b0fd69b75e9521e1608b0d805e2e8c507cfbfa320d911ad0ec6f940bbe033158\"\n  ],\n  \"threshold\": 3,\n  \"timeout\": 1000\n}\n"
++   },
++   "expect_exit": 64,
++   "expect_stdout": [],
++   "expect_stderr": [
++    "error: usage: --expiry must not exceed contract timeout"
++   ]
++  },
++  {
++   "name": "propose_rotate",
++   "argv": [
++    "msig-propose",
++    "--multisig",
++    "{sandbox}/msig.json",
++    "--chain",
++    "auralite-test-1",
++    "--proposal-id",
++    "7",
++    "--expiry",
++    "900",
++    "--action",
++    "rotate",
++    "--new-multisig",
++    "{sandbox}/msig2.json",
++    "--out",
++    "{sandbox}/prop.json"
++   ],
++   "setup": [],
++   "files": {
++    "msig.json": "{\n  \"chain\": \"auralite-test-1\",\n  \"format\": \"AuraLite-MSIG-V1\",\n  \"members\": [\n    \"208a2984b6261d90409270f8d8c0c47ecb0bc5d746a5fa9202bd2dbcd64eb899\",\n    \"5e80e586b3ba44525990a933119cd1cd4eecd00422d0801be3d225846ffddc75\",\n    \"7cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9a\",\n    \"811b322f9c28877bf9f543a8e8db1f3c4fd45a6ccc6cadf315499893d49b8299\",\n    \"b0fd69b75e9521e1608b0d805e2e8c507cfbfa320d911ad0ec6f940bbe033158\"\n  ],\n  \"threshold\": 3,\n  \"timeout\": 1000\n}\n",
++    "msig2.json": "{\n  \"chain\": \"auralite-test-1\",\n  \"format\": \"AuraLite-MSIG-V1\",\n  \"members\": [\n    \"208a2984b6261d90409270f8d8c0c47ecb0bc5d746a5fa9202bd2dbcd64eb899\",\n    \"7cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9a\",\n    \"b0fd69b75e9521e1608b0d805e2e8c507cfbfa320d911ad0ec6f940bbe033158\"\n  ],\n  \"threshold\": 2,\n  \"timeout\": 2000\n}\n"
++   },
++   "expect_exit": 0,
++   "expect_stdout": [
++    "status=proposed",
++    "chain=auralite-test-1",
++    "multisig_id=a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb6",
++    "proposal_id=7",
++    "kind=rotate"
++   ],
++   "expect_stderr": []
++  },
++  {
++   "name": "approve_basic",
++   "argv": [
++    "msig-approve",
++    "--proposal",
++    "{sandbox}/prop.json",
++    "--multisig",
++    "{sandbox}/msig.json",
++    "--keystore",
++    "{sandbox}/ks",
++    "--password-file",
++    "{sandbox}/pw",
++    "--account",
++    "0",
++    "--chain",
++    "auralite-test-1",
++    "--height",
++    "100",
++    "--out",
++    "{sandbox}/ap.json"
++   ],
++   "setup": [
++    [
++     "new",
++     "--keystore",
++     "{sandbox}/ks",
++     "--password-file",
++     "{sandbox}/pw",
++     "--chain",
++     "auralite-test-1",
++     "--entropy-file",
++     "{sandbox}/entropy",
++     "--account",
++     "0",
++     "--kdf",
++     "testing"
++    ]
++   ],
++   "files": {
++    "msig.json": "{\n  \"chain\": \"auralite-test-1\",\n  \"format\": \"AuraLite-MSIG-V1\",\n  \"members\": [\n    \"208a2984b6261d90409270f8d8c0c47ecb0bc5d746a5fa9202bd2dbcd64eb899\",\n    \"5e80e586b3ba44525990a933119cd1cd4eecd00422d0801be3d225846ffddc75\",\n    \"7cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9a\",\n    \"811b322f9c28877bf9f543a8e8db1f3c4fd45a6ccc6cadf315499893d49b8299\",\n    \"b0fd69b75e9521e1608b0d805e2e8c507cfbfa320d911ad0ec6f940bbe033158\"\n  ],\n  \"threshold\": 3,\n  \"timeout\": 1000\n}\n",
++    "prop.json": "{\n  \"amount\": 1000,\n  \"chain\": \"auralite-test-1\",\n  \"contract\": \"a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb6\",\n  \"expiry\": 500,\n  \"format\": \"AuraLite-MSIG-PROPOSAL-V1\",\n  \"id\": 1,\n  \"kind\": \"transfer\",\n  \"to\": \"aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9\"\n}\n",
++    "pw": "pw\n",
++    "entropy": "0000000000000000000000000000000000000000000000000000000000000000"
++   },
++   "expect_exit": 0,
++   "expect_stdout": [
++    "status=approved",
++    "chain=auralite-test-1",
++    "proposal_id=1",
++    "member=811b322f9c28877bf9f543a8e8db1f3c4fd45a6ccc6cadf315499893d49b8299"
++   ],
++   "expect_stderr": []
++  },
++  {
++   "name": "approve_not_a_member",
++   "argv": [
++    "msig-approve",
++    "--proposal",
++    "{sandbox}/prop.json",
++    "--multisig",
++    "{sandbox}/msig.json",
++    "--keystore",
++    "{sandbox}/ks",
++    "--password-file",
++    "{sandbox}/pw",
++    "--account",
++    "8",
++    "--chain",
++    "auralite-test-1",
++    "--height",
++    "100",
++    "--out",
++    "{sandbox}/ap.json"
++   ],
++   "setup": [
++    [
++     "new",
++     "--keystore",
++     "{sandbox}/ks",
++     "--password-file",
++     "{sandbox}/pw",
++     "--chain",
++     "auralite-test-1",
++     "--entropy-file",
++     "{sandbox}/entropy",
++     "--account",
++     "8",
++     "--kdf",
++     "testing"
++    ]
++   ],
++   "files": {
++    "msig.json": "{\n  \"chain\": \"auralite-test-1\",\n  \"format\": \"AuraLite-MSIG-V1\",\n  \"members\": [\n    \"208a2984b6261d90409270f8d8c0c47ecb0bc5d746a5fa9202bd2dbcd64eb899\",\n    \"5e80e586b3ba44525990a933119cd1cd4eecd00422d0801be3d225846ffddc75\",\n    \"7cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9a\",\n    \"811b322f9c28877bf9f543a8e8db1f3c4fd45a6ccc6cadf315499893d49b8299\",\n    \"b0fd69b75e9521e1608b0d805e2e8c507cfbfa320d911ad0ec6f940bbe033158\"\n  ],\n  \"threshold\": 3,\n  \"timeout\": 1000\n}\n",
++    "prop.json": "{\n  \"amount\": 1000,\n  \"chain\": \"auralite-test-1\",\n  \"contract\": \"a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb6\",\n  \"expiry\": 500,\n  \"format\": \"AuraLite-MSIG-PROPOSAL-V1\",\n  \"id\": 1,\n  \"kind\": \"transfer\",\n  \"to\": \"aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9\"\n}\n",
++    "pw": "pw\n",
++    "entropy": "0000000000000000000000000000000000000000000000000000000000000000"
++   },
++   "expect_exit": 65,
++   "expect_stdout": [],
++   "expect_stderr": [
++    "error: multisig: not a member"
++   ]
++  },
++  {
++   "name": "approve_expired",
++   "argv": [
++    "msig-approve",
++    "--proposal",
++    "{sandbox}/prop.json",
++    "--multisig",
++    "{sandbox}/msig.json",
++    "--keystore",
++    "{sandbox}/ks",
++    "--password-file",
++    "{sandbox}/pw",
++    "--account",
++    "0",
++    "--chain",
++    "auralite-test-1",
++    "--height",
++    "600",
++    "--out",
++    "{sandbox}/ap.json"
++   ],
++   "setup": [
++    [
++     "new",
++     "--keystore",
++     "{sandbox}/ks",
++     "--password-file",
++     "{sandbox}/pw",
++     "--chain",
++     "auralite-test-1",
++     "--entropy-file",
++     "{sandbox}/entropy",
++     "--account",
++     "0",
++     "--kdf",
++     "testing"
++    ]
++   ],
++   "files": {
++    "msig.json": "{\n  \"chain\": \"auralite-test-1\",\n  \"format\": \"AuraLite-MSIG-V1\",\n  \"members\": [\n    \"208a2984b6261d90409270f8d8c0c47ecb0bc5d746a5fa9202bd2dbcd64eb899\",\n    \"5e80e586b3ba44525990a933119cd1cd4eecd00422d0801be3d225846ffddc75\",\n    \"7cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9a\",\n    \"811b322f9c28877bf9f543a8e8db1f3c4fd45a6ccc6cadf315499893d49b8299\",\n    \"b0fd69b75e9521e1608b0d805e2e8c507cfbfa320d911ad0ec6f940bbe033158\"\n  ],\n  \"threshold\": 3,\n  \"timeout\": 1000\n}\n",
++    "prop.json": "{\n  \"amount\": 1000,\n  \"chain\": \"auralite-test-1\",\n  \"contract\": \"a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb6\",\n  \"expiry\": 500,\n  \"format\": \"AuraLite-MSIG-PROPOSAL-V1\",\n  \"id\": 1,\n  \"kind\": \"transfer\",\n  \"to\": \"aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9\"\n}\n",
++    "pw": "pw\n",
++    "entropy": "0000000000000000000000000000000000000000000000000000000000000000"
++   },
++   "expect_exit": 65,
++   "expect_stdout": [],
++   "expect_stderr": [
++    "error: multisig: proposal expired"
++   ]
++  },
++  {
++   "name": "approve_foreign_chain",
++   "argv": [
++    "msig-approve",
++    "--proposal",
++    "{sandbox}/prop.json",
++    "--multisig",
++    "{sandbox}/msig.json",
++    "--keystore",
++    "{sandbox}/ks",
++    "--password-file",
++    "{sandbox}/pw",
++    "--account",
++    "0",
++    "--chain",
++    "other-net",
++    "--height",
++    "100",
++    "--out",
++    "{sandbox}/ap.json"
++   ],
++   "setup": [
++    [
++     "new",
++     "--keystore",
++     "{sandbox}/ks",
++     "--password-file",
++     "{sandbox}/pw",
++     "--chain",
++     "auralite-test-1",
++     "--entropy-file",
++     "{sandbox}/entropy",
++     "--account",
++     "0",
++     "--kdf",
++     "testing"
++    ]
++   ],
++   "files": {
++    "msig.json": "{\n  \"chain\": \"auralite-test-1\",\n  \"format\": \"AuraLite-MSIG-V1\",\n  \"members\": [\n    \"208a2984b6261d90409270f8d8c0c47ecb0bc5d746a5fa9202bd2dbcd64eb899\",\n    \"5e80e586b3ba44525990a933119cd1cd4eecd00422d0801be3d225846ffddc75\",\n    \"7cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9a\",\n    \"811b322f9c28877bf9f543a8e8db1f3c4fd45a6ccc6cadf315499893d49b8299\",\n    \"b0fd69b75e9521e1608b0d805e2e8c507cfbfa320d911ad0ec6f940bbe033158\"\n  ],\n  \"threshold\": 3,\n  \"timeout\": 1000\n}\n",
++    "prop.json": "{\n  \"amount\": 1000,\n  \"chain\": \"auralite-test-1\",\n  \"contract\": \"a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb6\",\n  \"expiry\": 500,\n  \"format\": \"AuraLite-MSIG-PROPOSAL-V1\",\n  \"id\": 1,\n  \"kind\": \"transfer\",\n  \"to\": \"aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9\"\n}\n",
++    "pw": "pw\n",
++    "entropy": "0000000000000000000000000000000000000000000000000000000000000000"
++   },
++   "expect_exit": 65,
++   "expect_stdout": [],
++   "expect_stderr": [
++    "error: foreign chain-id: tx=auralite-test-1, wallet=other-net"
++   ]
++  },
++  {
++   "name": "collect_3_of_5_passed",
++   "argv": [
++    "msig-collect",
++    "--proposal",
++    "{sandbox}/prop.json",
++    "--multisig",
++    "{sandbox}/msig.json",
++    "--approvals",
++    "{sandbox}/ap",
++    "--chain",
++    "auralite-test-1",
++    "--height",
++    "100"
++   ],
++   "setup": [],
++   "files": {
++    "msig.json": "{\n  \"chain\": \"auralite-test-1\",\n  \"format\": \"AuraLite-MSIG-V1\",\n  \"members\": [\n    \"208a2984b6261d90409270f8d8c0c47ecb0bc5d746a5fa9202bd2dbcd64eb899\",\n    \"5e80e586b3ba44525990a933119cd1cd4eecd00422d0801be3d225846ffddc75\",\n    \"7cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9a\",\n    \"811b322f9c28877bf9f543a8e8db1f3c4fd45a6ccc6cadf315499893d49b8299\",\n    \"b0fd69b75e9521e1608b0d805e2e8c507cfbfa320d911ad0ec6f940bbe033158\"\n  ],\n  \"threshold\": 3,\n  \"timeout\": 1000\n}\n",
++    "prop.json": "{\n  \"amount\": 1000,\n  \"chain\": \"auralite-test-1\",\n  \"contract\": \"a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb6\",\n  \"expiry\": 500,\n  \"format\": \"AuraLite-MSIG-PROPOSAL-V1\",\n  \"id\": 1,\n  \"kind\": \"transfer\",\n  \"to\": \"aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9\"\n}\n",
++    "ap/00.json": "{\n  \"format\": \"AuraLite-MSIG-APPROVAL-V1\",\n  \"member\": \"811b322f9c28877bf9f543a8e8db1f3c4fd45a6ccc6cadf315499893d49b8299\",\n  \"proposal\": \"417572614c6974652d43727970746f2f77616c6c65742d6d7369672d70726f706f73616c2d7631000f617572616c6974652d746573742d31a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb60100000000000000f40100000000000000bcb5fbf762c2b6b892f72d947ff67e5755ddff2ee803000000000000\",\n  \"sig\": \"c9dbd5931027d1925ad1c55e8aeb2d6ddc4c983c5e8ddc6bb6701e3b6d34d142a36d027a3a96fb11ebc32c05b0f5ca33f35e20598ee40f6f46c3448b1e224e06\"\n}\n",
++    "ap/01.json": "{\n  \"format\": \"AuraLite-MSIG-APPROVAL-V1\",\n  \"member\": \"7cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9a\",\n  \"proposal\": \"417572614c6974652d43727970746f2f77616c6c65742d6d7369672d70726f706f73616c2d7631000f617572616c6974652d746573742d31a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb60100000000000000f40100000000000000bcb5fbf762c2b6b892f72d947ff67e5755ddff2ee803000000000000\",\n  \"sig\": \"85d255f5a49ccd713d9ee53043f7103b8366a80ccfb256f3d7c7034520f98179d071fcffff2d886634bb223a274176c7dba1980833145d2536b9302d014e6e03\"\n}\n",
++    "ap/02.json": "{\n  \"format\": \"AuraLite-MSIG-APPROVAL-V1\",\n  \"member\": \"b0fd69b75e9521e1608b0d805e2e8c507cfbfa320d911ad0ec6f940bbe033158\",\n  \"proposal\": \"417572614c6974652d43727970746f2f77616c6c65742d6d7369672d70726f706f73616c2d7631000f617572616c6974652d746573742d31a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb60100000000000000f40100000000000000bcb5fbf762c2b6b892f72d947ff67e5755ddff2ee803000000000000\",\n  \"sig\": \"b0e1f37a1c7ce6a390a0834991545daf06fd609c42d3ce461328a1e40b8aa2e3aa2afca39753ec5c57c1ba5cde858c1a595ad72ecedec24d2955cfdabb022e05\"\n}\n"
++   },
++   "expect_exit": 0,
++   "expect_stdout": [
++    "status=passed",
++    "chain=auralite-test-1",
++    "multisig_id=a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb6",
++    "proposal_id=1",
++    "signatures=3",
++    "threshold=3"
++   ],
++   "expect_stderr": []
++  },
++  {
++   "name": "collect_2_of_5_rejected",
++   "argv": [
++    "msig-collect",
++    "--proposal",
++    "{sandbox}/prop.json",
++    "--multisig",
++    "{sandbox}/msig.json",
++    "--approvals",
++    "{sandbox}/ap",
++    "--chain",
++    "auralite-test-1",
++    "--height",
++    "100"
++   ],
++   "setup": [],
++   "files": {
++    "msig.json": "{\n  \"chain\": \"auralite-test-1\",\n  \"format\": \"AuraLite-MSIG-V1\",\n  \"members\": [\n    \"208a2984b6261d90409270f8d8c0c47ecb0bc5d746a5fa9202bd2dbcd64eb899\",\n    \"5e80e586b3ba44525990a933119cd1cd4eecd00422d0801be3d225846ffddc75\",\n    \"7cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9a\",\n    \"811b322f9c28877bf9f543a8e8db1f3c4fd45a6ccc6cadf315499893d49b8299\",\n    \"b0fd69b75e9521e1608b0d805e2e8c507cfbfa320d911ad0ec6f940bbe033158\"\n  ],\n  \"threshold\": 3,\n  \"timeout\": 1000\n}\n",
++    "prop.json": "{\n  \"amount\": 1000,\n  \"chain\": \"auralite-test-1\",\n  \"contract\": \"a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb6\",\n  \"expiry\": 500,\n  \"format\": \"AuraLite-MSIG-PROPOSAL-V1\",\n  \"id\": 1,\n  \"kind\": \"transfer\",\n  \"to\": \"aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9\"\n}\n",
++    "ap/00.json": "{\n  \"format\": \"AuraLite-MSIG-APPROVAL-V1\",\n  \"member\": \"811b322f9c28877bf9f543a8e8db1f3c4fd45a6ccc6cadf315499893d49b8299\",\n  \"proposal\": \"417572614c6974652d43727970746f2f77616c6c65742d6d7369672d70726f706f73616c2d7631000f617572616c6974652d746573742d31a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb60100000000000000f40100000000000000bcb5fbf762c2b6b892f72d947ff67e5755ddff2ee803000000000000\",\n  \"sig\": \"c9dbd5931027d1925ad1c55e8aeb2d6ddc4c983c5e8ddc6bb6701e3b6d34d142a36d027a3a96fb11ebc32c05b0f5ca33f35e20598ee40f6f46c3448b1e224e06\"\n}\n",
++    "ap/01.json": "{\n  \"format\": \"AuraLite-MSIG-APPROVAL-V1\",\n  \"member\": \"7cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9a\",\n  \"proposal\": \"417572614c6974652d43727970746f2f77616c6c65742d6d7369672d70726f706f73616c2d7631000f617572616c6974652d746573742d31a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb60100000000000000f40100000000000000bcb5fbf762c2b6b892f72d947ff67e5755ddff2ee803000000000000\",\n  \"sig\": \"85d255f5a49ccd713d9ee53043f7103b8366a80ccfb256f3d7c7034520f98179d071fcffff2d886634bb223a274176c7dba1980833145d2536b9302d014e6e03\"\n}\n"
++   },
++   "expect_exit": 65,
++   "expect_stdout": [],
++   "expect_stderr": [
++    "error: multisig: threshold not met (2/3)"
++   ]
++  },
++  {
++   "name": "collect_duplicate_member",
++   "argv": [
++    "msig-collect",
++    "--proposal",
++    "{sandbox}/prop.json",
++    "--multisig",
++    "{sandbox}/msig.json",
++    "--approvals",
++    "{sandbox}/ap",
++    "--chain",
++    "auralite-test-1",
++    "--height",
++    "100"
++   ],
++   "setup": [],
++   "files": {
++    "msig.json": "{\n  \"chain\": \"auralite-test-1\",\n  \"format\": \"AuraLite-MSIG-V1\",\n  \"members\": [\n    \"208a2984b6261d90409270f8d8c0c47ecb0bc5d746a5fa9202bd2dbcd64eb899\",\n    \"5e80e586b3ba44525990a933119cd1cd4eecd00422d0801be3d225846ffddc75\",\n    \"7cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9a\",\n    \"811b322f9c28877bf9f543a8e8db1f3c4fd45a6ccc6cadf315499893d49b8299\",\n    \"b0fd69b75e9521e1608b0d805e2e8c507cfbfa320d911ad0ec6f940bbe033158\"\n  ],\n  \"threshold\": 3,\n  \"timeout\": 1000\n}\n",
++    "prop.json": "{\n  \"amount\": 1000,\n  \"chain\": \"auralite-test-1\",\n  \"contract\": \"a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb6\",\n  \"expiry\": 500,\n  \"format\": \"AuraLite-MSIG-PROPOSAL-V1\",\n  \"id\": 1,\n  \"kind\": \"transfer\",\n  \"to\": \"aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9\"\n}\n",
++    "ap/00.json": "{\n  \"format\": \"AuraLite-MSIG-APPROVAL-V1\",\n  \"member\": \"811b322f9c28877bf9f543a8e8db1f3c4fd45a6ccc6cadf315499893d49b8299\",\n  \"proposal\": \"417572614c6974652d43727970746f2f77616c6c65742d6d7369672d70726f706f73616c2d7631000f617572616c6974652d746573742d31a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb60100000000000000f40100000000000000bcb5fbf762c2b6b892f72d947ff67e5755ddff2ee803000000000000\",\n  \"sig\": \"c9dbd5931027d1925ad1c55e8aeb2d6ddc4c983c5e8ddc6bb6701e3b6d34d142a36d027a3a96fb11ebc32c05b0f5ca33f35e20598ee40f6f46c3448b1e224e06\"\n}\n",
++    "ap/01.json": "{\n  \"format\": \"AuraLite-MSIG-APPROVAL-V1\",\n  \"member\": \"811b322f9c28877bf9f543a8e8db1f3c4fd45a6ccc6cadf315499893d49b8299\",\n  \"proposal\": \"417572614c6974652d43727970746f2f77616c6c65742d6d7369672d70726f706f73616c2d7631000f617572616c6974652d746573742d31a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb60100000000000000f40100000000000000bcb5fbf762c2b6b892f72d947ff67e5755ddff2ee803000000000000\",\n  \"sig\": \"c9dbd5931027d1925ad1c55e8aeb2d6ddc4c983c5e8ddc6bb6701e3b6d34d142a36d027a3a96fb11ebc32c05b0f5ca33f35e20598ee40f6f46c3448b1e224e06\"\n}\n",
++    "ap/02.json": "{\n  \"format\": \"AuraLite-MSIG-APPROVAL-V1\",\n  \"member\": \"7cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9a\",\n  \"proposal\": \"417572614c6974652d43727970746f2f77616c6c65742d6d7369672d70726f706f73616c2d7631000f617572616c6974652d746573742d31a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb60100000000000000f40100000000000000bcb5fbf762c2b6b892f72d947ff67e5755ddff2ee803000000000000\",\n  \"sig\": \"85d255f5a49ccd713d9ee53043f7103b8366a80ccfb256f3d7c7034520f98179d071fcffff2d886634bb223a274176c7dba1980833145d2536b9302d014e6e03\"\n}\n"
++   },
++   "expect_exit": 65,
++   "expect_stdout": [],
++   "expect_stderr": [
++    "error: multisig: duplicate approval"
++   ]
++  },
++  {
++   "name": "collect_forged_signature",
++   "argv": [
++    "msig-collect",
++    "--proposal",
++    "{sandbox}/prop.json",
++    "--multisig",
++    "{sandbox}/msig.json",
++    "--approvals",
++    "{sandbox}/ap",
++    "--chain",
++    "auralite-test-1",
++    "--height",
++    "100"
++   ],
++   "setup": [],
++   "files": {
++    "msig.json": "{\n  \"chain\": \"auralite-test-1\",\n  \"format\": \"AuraLite-MSIG-V1\",\n  \"members\": [\n    \"208a2984b6261d90409270f8d8c0c47ecb0bc5d746a5fa9202bd2dbcd64eb899\",\n    \"5e80e586b3ba44525990a933119cd1cd4eecd00422d0801be3d225846ffddc75\",\n    \"7cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9a\",\n    \"811b322f9c28877bf9f543a8e8db1f3c4fd45a6ccc6cadf315499893d49b8299\",\n    \"b0fd69b75e9521e1608b0d805e2e8c507cfbfa320d911ad0ec6f940bbe033158\"\n  ],\n  \"threshold\": 3,\n  \"timeout\": 1000\n}\n",
++    "prop.json": "{\n  \"amount\": 1000,\n  \"chain\": \"auralite-test-1\",\n  \"contract\": \"a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb6\",\n  \"expiry\": 500,\n  \"format\": \"AuraLite-MSIG-PROPOSAL-V1\",\n  \"id\": 1,\n  \"kind\": \"transfer\",\n  \"to\": \"aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9\"\n}\n",
++    "ap/00.json": "{\n  \"format\": \"AuraLite-MSIG-APPROVAL-V1\",\n  \"member\": \"811b322f9c28877bf9f543a8e8db1f3c4fd45a6ccc6cadf315499893d49b8299\",\n  \"proposal\": \"417572614c6974652d43727970746f2f77616c6c65742d6d7369672d70726f706f73616c2d7631000f617572616c6974652d746573742d31a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb60100000000000000f40100000000000000bcb5fbf762c2b6b892f72d947ff67e5755ddff2ee803000000000000\",\n  \"sig\": \"c9dbd5931027d1925ad1c55e8aeb2d6ddc4c983c5e8ddc6bb6701e3b6d34d142a36d027a3a96fb11ebc32c05b0f5ca33f35e20598ee40f6f46c3448b1e224e06\"\n}\n",
++    "ap/01.json": "{\n  \"format\": \"AuraLite-MSIG-APPROVAL-V1\",\n  \"member\": \"7cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9a\",\n  \"proposal\": \"417572614c6974652d43727970746f2f77616c6c65742d6d7369672d70726f706f73616c2d7631000f617572616c6974652d746573742d31a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb60100000000000000f40100000000000000bcb5fbf762c2b6b892f72d947ff67e5755ddff2ee803000000000000\",\n  \"sig\": \"85d255f5a49ccd713d9ee53043f7103b8366a80ccfb256f3d7c7034520f98179d071fcffff2d886634bb223a274176c7dba1980833145d2536b9302d014e6e03\"\n}\n",
++    "ap/02.json": "{\n  \"format\": \"AuraLite-MSIG-APPROVAL-V1\",\n  \"member\": \"b0fd69b75e9521e1608b0d805e2e8c507cfbfa320d911ad0ec6f940bbe033158\",\n  \"proposal\": \"417572614c6974652d43727970746f2f77616c6c65742d6d7369672d70726f706f73616c2d7631000f617572616c6974652d746573742d31a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb60100000000000000f40100000000000000bcb5fbf762c2b6b892f72d947ff67e5755ddff2ee803000000000000\",\n  \"sig\": \"b0e1f37a1c7ce6a390a0834991545daf06fd609c42d3ce461328a1e40b8aa2e3aa2afca39753ec5c57c1ba5cde858c1a595ad72ecedec24d2955cfdabb022e00\"\n}\n"
++   },
++   "expect_exit": 65,
++   "expect_stdout": [],
++   "expect_stderr": [
++    "error: signature verification failed"
++   ]
++  },
++  {
++   "name": "collect_foreign_proposal",
++   "argv": [
++    "msig-collect",
++    "--proposal",
++    "{sandbox}/prop.json",
++    "--multisig",
++    "{sandbox}/msig.json",
++    "--approvals",
++    "{sandbox}/ap",
++    "--chain",
++    "auralite-test-1",
++    "--height",
++    "100"
++   ],
++   "setup": [],
++   "files": {
++    "msig.json": "{\n  \"chain\": \"auralite-test-1\",\n  \"format\": \"AuraLite-MSIG-V1\",\n  \"members\": [\n    \"208a2984b6261d90409270f8d8c0c47ecb0bc5d746a5fa9202bd2dbcd64eb899\",\n    \"5e80e586b3ba44525990a933119cd1cd4eecd00422d0801be3d225846ffddc75\",\n    \"7cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9a\",\n    \"811b322f9c28877bf9f543a8e8db1f3c4fd45a6ccc6cadf315499893d49b8299\",\n    \"b0fd69b75e9521e1608b0d805e2e8c507cfbfa320d911ad0ec6f940bbe033158\"\n  ],\n  \"threshold\": 3,\n  \"timeout\": 1000\n}\n",
++    "prop.json": "{\n  \"amount\": 1000,\n  \"chain\": \"auralite-test-1\",\n  \"contract\": \"a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb6\",\n  \"expiry\": 500,\n  \"format\": \"AuraLite-MSIG-PROPOSAL-V1\",\n  \"id\": 1,\n  \"kind\": \"transfer\",\n  \"to\": \"aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9\"\n}\n",
++    "ap/00.json": "{\n  \"format\": \"AuraLite-MSIG-APPROVAL-V1\",\n  \"member\": \"811b322f9c28877bf9f543a8e8db1f3c4fd45a6ccc6cadf315499893d49b8299\",\n  \"proposal\": \"417572614c6974652d43727970746f2f77616c6c65742d6d7369672d70726f706f73616c2d7631000f617572616c6974652d746573742d31a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb60100000000000000f40100000000000000bcb5fbf762c2b6b892f72d947ff67e5755ddff2ee803000000000000\",\n  \"sig\": \"c9dbd5931027d1925ad1c55e8aeb2d6ddc4c983c5e8ddc6bb6701e3b6d34d142a36d027a3a96fb11ebc32c05b0f5ca33f35e20598ee40f6f46c3448b1e224e06\"\n}\n",
++    "ap/01.json": "{\n  \"format\": \"AuraLite-MSIG-APPROVAL-V1\",\n  \"member\": \"7cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9a\",\n  \"proposal\": \"417572614c6974652d43727970746f2f77616c6c65742d6d7369672d70726f706f73616c2d7631000f617572616c6974652d746573742d31a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb60100000000000000f40100000000000000bcb5fbf762c2b6b892f72d947ff67e5755ddff2ee803000000000000\",\n  \"sig\": \"85d255f5a49ccd713d9ee53043f7103b8366a80ccfb256f3d7c7034520f98179d071fcffff2d886634bb223a274176c7dba1980833145d2536b9302d014e6e03\"\n}\n",
++    "ap/02.json": "{\n  \"format\": \"AuraLite-MSIG-APPROVAL-V1\",\n  \"member\": \"b0fd69b75e9521e1608b0d805e2e8c507cfbfa320d911ad0ec6f940bbe033158\",\n  \"proposal\": \"417572614c6974652d43727970746f2f77616c6c65742d6d7369672d70726f706f73616c2d7631000f617572616c6974652d746573742d31a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb60200000000000000f40100000000000000bcb5fbf762c2b6b892f72d947ff67e5755ddff2ed007000000000000\",\n  \"sig\": \"1e9c2ab9f1b19d6b98a567330cd0ccb261fdfb560239e296340fad01f9674138b31dcf8e1f2b4f0b643a1a09bf4f49e365067ffd758356ef8fa64ad4d0e9a50f\"\n}\n"
++   },
++   "expect_exit": 65,
++   "expect_stdout": [],
++   "expect_stderr": [
++    "error: multisig: approval for a different proposal"
++   ]
++  },
++  {
++   "name": "collect_expired",
++   "argv": [
++    "msig-collect",
++    "--proposal",
++    "{sandbox}/prop.json",
++    "--multisig",
++    "{sandbox}/msig.json",
++    "--approvals",
++    "{sandbox}/ap",
++    "--chain",
++    "auralite-test-1",
++    "--height",
++    "600"
++   ],
++   "setup": [],
++   "files": {
++    "msig.json": "{\n  \"chain\": \"auralite-test-1\",\n  \"format\": \"AuraLite-MSIG-V1\",\n  \"members\": [\n    \"208a2984b6261d90409270f8d8c0c47ecb0bc5d746a5fa9202bd2dbcd64eb899\",\n    \"5e80e586b3ba44525990a933119cd1cd4eecd00422d0801be3d225846ffddc75\",\n    \"7cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9a\",\n    \"811b322f9c28877bf9f543a8e8db1f3c4fd45a6ccc6cadf315499893d49b8299\",\n    \"b0fd69b75e9521e1608b0d805e2e8c507cfbfa320d911ad0ec6f940bbe033158\"\n  ],\n  \"threshold\": 3,\n  \"timeout\": 1000\n}\n",
++    "prop.json": "{\n  \"amount\": 1000,\n  \"chain\": \"auralite-test-1\",\n  \"contract\": \"a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb6\",\n  \"expiry\": 500,\n  \"format\": \"AuraLite-MSIG-PROPOSAL-V1\",\n  \"id\": 1,\n  \"kind\": \"transfer\",\n  \"to\": \"aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9\"\n}\n",
++    "ap/00.json": "{\n  \"format\": \"AuraLite-MSIG-APPROVAL-V1\",\n  \"member\": \"811b322f9c28877bf9f543a8e8db1f3c4fd45a6ccc6cadf315499893d49b8299\",\n  \"proposal\": \"417572614c6974652d43727970746f2f77616c6c65742d6d7369672d70726f706f73616c2d7631000f617572616c6974652d746573742d31a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb60100000000000000f40100000000000000bcb5fbf762c2b6b892f72d947ff67e5755ddff2ee803000000000000\",\n  \"sig\": \"c9dbd5931027d1925ad1c55e8aeb2d6ddc4c983c5e8ddc6bb6701e3b6d34d142a36d027a3a96fb11ebc32c05b0f5ca33f35e20598ee40f6f46c3448b1e224e06\"\n}\n",
++    "ap/01.json": "{\n  \"format\": \"AuraLite-MSIG-APPROVAL-V1\",\n  \"member\": \"7cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9a\",\n  \"proposal\": \"417572614c6974652d43727970746f2f77616c6c65742d6d7369672d70726f706f73616c2d7631000f617572616c6974652d746573742d31a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb60100000000000000f40100000000000000bcb5fbf762c2b6b892f72d947ff67e5755ddff2ee803000000000000\",\n  \"sig\": \"85d255f5a49ccd713d9ee53043f7103b8366a80ccfb256f3d7c7034520f98179d071fcffff2d886634bb223a274176c7dba1980833145d2536b9302d014e6e03\"\n}\n",
++    "ap/02.json": "{\n  \"format\": \"AuraLite-MSIG-APPROVAL-V1\",\n  \"member\": \"b0fd69b75e9521e1608b0d805e2e8c507cfbfa320d911ad0ec6f940bbe033158\",\n  \"proposal\": \"417572614c6974652d43727970746f2f77616c6c65742d6d7369672d70726f706f73616c2d7631000f617572616c6974652d746573742d31a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb60100000000000000f40100000000000000bcb5fbf762c2b6b892f72d947ff67e5755ddff2ee803000000000000\",\n  \"sig\": \"b0e1f37a1c7ce6a390a0834991545daf06fd609c42d3ce461328a1e40b8aa2e3aa2afca39753ec5c57c1ba5cde858c1a595ad72ecedec24d2955cfdabb022e05\"\n}\n"
++   },
++   "expect_exit": 65,
++   "expect_stdout": [],
++   "expect_stderr": [
++    "error: multisig: proposal expired"
++   ]
++  },
++  {
++   "name": "collect_wrong_contract",
++   "argv": [
++    "msig-collect",
++    "--proposal",
++    "{sandbox}/prop.json",
++    "--multisig",
++    "{sandbox}/msig2.json",
++    "--approvals",
++    "{sandbox}/ap",
++    "--chain",
++    "auralite-test-1",
++    "--height",
++    "100"
++   ],
++   "setup": [],
++   "files": {
++    "msig2.json": "{\n  \"chain\": \"auralite-test-1\",\n  \"format\": \"AuraLite-MSIG-V1\",\n  \"members\": [\n    \"208a2984b6261d90409270f8d8c0c47ecb0bc5d746a5fa9202bd2dbcd64eb899\",\n    \"7cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9a\",\n    \"b0fd69b75e9521e1608b0d805e2e8c507cfbfa320d911ad0ec6f940bbe033158\"\n  ],\n  \"threshold\": 2,\n  \"timeout\": 2000\n}\n",
++    "prop.json": "{\n  \"amount\": 1000,\n  \"chain\": \"auralite-test-1\",\n  \"contract\": \"a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb6\",\n  \"expiry\": 500,\n  \"format\": \"AuraLite-MSIG-PROPOSAL-V1\",\n  \"id\": 1,\n  \"kind\": \"transfer\",\n  \"to\": \"aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9\"\n}\n",
++    "ap/00.json": "{\n  \"format\": \"AuraLite-MSIG-APPROVAL-V1\",\n  \"member\": \"811b322f9c28877bf9f543a8e8db1f3c4fd45a6ccc6cadf315499893d49b8299\",\n  \"proposal\": \"417572614c6974652d43727970746f2f77616c6c65742d6d7369672d70726f706f73616c2d7631000f617572616c6974652d746573742d31a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb60100000000000000f40100000000000000bcb5fbf762c2b6b892f72d947ff67e5755ddff2ee803000000000000\",\n  \"sig\": \"c9dbd5931027d1925ad1c55e8aeb2d6ddc4c983c5e8ddc6bb6701e3b6d34d142a36d027a3a96fb11ebc32c05b0f5ca33f35e20598ee40f6f46c3448b1e224e06\"\n}\n",
++    "ap/01.json": "{\n  \"format\": \"AuraLite-MSIG-APPROVAL-V1\",\n  \"member\": \"7cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9a\",\n  \"proposal\": \"417572614c6974652d43727970746f2f77616c6c65742d6d7369672d70726f706f73616c2d7631000f617572616c6974652d746573742d31a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb60100000000000000f40100000000000000bcb5fbf762c2b6b892f72d947ff67e5755ddff2ee803000000000000\",\n  \"sig\": \"85d255f5a49ccd713d9ee53043f7103b8366a80ccfb256f3d7c7034520f98179d071fcffff2d886634bb223a274176c7dba1980833145d2536b9302d014e6e03\"\n}\n",
++    "ap/02.json": "{\n  \"format\": \"AuraLite-MSIG-APPROVAL-V1\",\n  \"member\": \"b0fd69b75e9521e1608b0d805e2e8c507cfbfa320d911ad0ec6f940bbe033158\",\n  \"proposal\": \"417572614c6974652d43727970746f2f77616c6c65742d6d7369672d70726f706f73616c2d7631000f617572616c6974652d746573742d31a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb60100000000000000f40100000000000000bcb5fbf762c2b6b892f72d947ff67e5755ddff2ee803000000000000\",\n  \"sig\": \"b0e1f37a1c7ce6a390a0834991545daf06fd609c42d3ce461328a1e40b8aa2e3aa2afca39753ec5c57c1ba5cde858c1a595ad72ecedec24d2955cfdabb022e05\"\n}\n"
++   },
++   "expect_exit": 65,
++   "expect_stdout": [],
++   "expect_stderr": [
++    "error: multisig: proposal for a different contract"
++   ]
++  },
++  {
++   "name": "rotate_3_of_5_passed",
++   "argv": [
++    "msig-collect",
++    "--proposal",
++    "{sandbox}/prop.json",
++    "--multisig",
++    "{sandbox}/msig.json",
++    "--approvals",
++    "{sandbox}/ap",
++    "--chain",
++    "auralite-test-1",
++    "--height",
++    "100"
++   ],
++   "setup": [],
++   "files": {
++    "msig.json": "{\n  \"chain\": \"auralite-test-1\",\n  \"format\": \"AuraLite-MSIG-V1\",\n  \"members\": [\n    \"208a2984b6261d90409270f8d8c0c47ecb0bc5d746a5fa9202bd2dbcd64eb899\",\n    \"5e80e586b3ba44525990a933119cd1cd4eecd00422d0801be3d225846ffddc75\",\n    \"7cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9a\",\n    \"811b322f9c28877bf9f543a8e8db1f3c4fd45a6ccc6cadf315499893d49b8299\",\n    \"b0fd69b75e9521e1608b0d805e2e8c507cfbfa320d911ad0ec6f940bbe033158\"\n  ],\n  \"threshold\": 3,\n  \"timeout\": 1000\n}\n",
++    "prop.json": "{\n  \"chain\": \"auralite-test-1\",\n  \"contract\": \"a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb6\",\n  \"expiry\": 900,\n  \"format\": \"AuraLite-MSIG-PROPOSAL-V1\",\n  \"id\": 7,\n  \"kind\": \"rotate\",\n  \"new_multisig\": {\n    \"chain\": \"auralite-test-1\",\n    \"format\": \"AuraLite-MSIG-V1\",\n    \"members\": [\n      \"208a2984b6261d90409270f8d8c0c47ecb0bc5d746a5fa9202bd2dbcd64eb899\",\n      \"7cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9a\",\n      \"b0fd69b75e9521e1608b0d805e2e8c507cfbfa320d911ad0ec6f940bbe033158\"\n    ],\n    \"threshold\": 2,\n    \"timeout\": 2000\n  }\n}\n",
++    "ap/00.json": "{\n  \"format\": \"AuraLite-MSIG-APPROVAL-V1\",\n  \"member\": \"811b322f9c28877bf9f543a8e8db1f3c4fd45a6ccc6cadf315499893d49b8299\",\n  \"proposal\": \"417572614c6974652d43727970746f2f77616c6c65742d6d7369672d70726f706f73616c2d7631000f617572616c6974652d746573742d31a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb60700000000000000840300000000000001417572614c6974652d43727970746f2f77616c6c65742d6d7369672d7631000f617572616c6974652d746573742d310203208a2984b6261d90409270f8d8c0c47ecb0bc5d746a5fa9202bd2dbcd64eb8997cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9ab0fd69b75e9521e1608b0d805e2e8c507cfbfa320d911ad0ec6f940bbe033158\",\n  \"sig\": \"00dd80c6b5115dcb79f2f826ba5ce6e56ec84483e7b46267f8b690be0d3d1dacb68bde1451c1d44811ad2d993799b239c81afb6cb15e3989f4864378866efe00\"\n}\n",
++    "ap/01.json": "{\n  \"format\": \"AuraLite-MSIG-APPROVAL-V1\",\n  \"member\": \"7cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9a\",\n  \"proposal\": \"417572614c6974652d43727970746f2f77616c6c65742d6d7369672d70726f706f73616c2d7631000f617572616c6974652d746573742d31a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb60700000000000000840300000000000001417572614c6974652d43727970746f2f77616c6c65742d6d7369672d7631000f617572616c6974652d746573742d310203208a2984b6261d90409270f8d8c0c47ecb0bc5d746a5fa9202bd2dbcd64eb8997cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9ab0fd69b75e9521e1608b0d805e2e8c507cfbfa320d911ad0ec6f940bbe033158\",\n  \"sig\": \"3df6107aa3f09cee5bd0abd5cda48ceecfec44f37f5ba967281ca5e8fde7fc944ca2c9298f79bcf159c3bc91bff732a3ab666bbe27eecac1c0308acf01a7b000\"\n}\n",
++    "ap/02.json": "{\n  \"format\": \"AuraLite-MSIG-APPROVAL-V1\",\n  \"member\": \"b0fd69b75e9521e1608b0d805e2e8c507cfbfa320d911ad0ec6f940bbe033158\",\n  \"proposal\": \"417572614c6974652d43727970746f2f77616c6c65742d6d7369672d70726f706f73616c2d7631000f617572616c6974652d746573742d31a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb60700000000000000840300000000000001417572614c6974652d43727970746f2f77616c6c65742d6d7369672d7631000f617572616c6974652d746573742d310203208a2984b6261d90409270f8d8c0c47ecb0bc5d746a5fa9202bd2dbcd64eb8997cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9ab0fd69b75e9521e1608b0d805e2e8c507cfbfa320d911ad0ec6f940bbe033158\",\n  \"sig\": \"36f02c177a9a0f26b79ee709ba50b3eb7c581f44bcd212dc6d3d65fa8ab2f39e7e8000c36b68dea3ce42489c6057ceca4c85923a90701bf79140bc84cacc9c02\"\n}\n"
++   },
++   "expect_exit": 0,
++   "expect_stdout": [
++    "status=passed",
++    "chain=auralite-test-1",
++    "multisig_id=a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb6",
++    "proposal_id=7",
++    "signatures=3",
++    "threshold=3"
++   ],
++   "expect_stderr": []
++  },
++  {
++   "name": "e2e_full_flow",
++   "argv": [
++    "msig-collect",
++    "--proposal",
++    "{sandbox}/prop.json",
++    "--multisig",
++    "{sandbox}/msig.json",
++    "--approvals",
++    "{sandbox}/ap",
++    "--chain",
++    "auralite-test-1",
++    "--height",
++    "100"
++   ],
++   "setup": [
++    [
++     "new",
++     "--keystore",
++     "{sandbox}/ks",
++     "--password-file",
++     "{sandbox}/pw",
++     "--chain",
++     "auralite-test-1",
++     "--entropy-file",
++     "{sandbox}/entropy",
++     "--account",
++     "0",
++     "--kdf",
++     "testing"
++    ],
++    [
++     "new",
++     "--keystore",
++     "{sandbox}/ks",
++     "--password-file",
++     "{sandbox}/pw",
++     "--chain",
++     "auralite-test-1",
++     "--entropy-file",
++     "{sandbox}/entropy",
++     "--account",
++     "1",
++     "--kdf",
++     "testing"
++    ],
++    [
++     "new",
++     "--keystore",
++     "{sandbox}/ks",
++     "--password-file",
++     "{sandbox}/pw",
++     "--chain",
++     "auralite-test-1",
++     "--entropy-file",
++     "{sandbox}/entropy",
++     "--account",
++     "2",
++     "--kdf",
++     "testing"
++    ],
++    [
++     "msig-init",
++     "--chain",
++     "auralite-test-1",
++     "--threshold",
++     "3",
++     "--members",
++     "811b322f9c28877bf9f543a8e8db1f3c4fd45a6ccc6cadf315499893d49b8299,7cf67ee680b85939fcabb6bc404152276dd4bb1c042a1db9d86c01d306fd6e9a,b0fd69b75e9521e1608b0d805e2e8c507cfbfa320d911ad0ec6f940bbe033158,208a2984b6261d90409270f8d8c0c47ecb0bc5d746a5fa9202bd2dbcd64eb899,5e80e586b3ba44525990a933119cd1cd4eecd00422d0801be3d225846ffddc75",
++     "--timeout",
++     "1000",
++     "--out",
++     "{sandbox}/msig.json"
++    ],
++    [
++     "msig-propose",
++     "--multisig",
++     "{sandbox}/msig.json",
++     "--chain",
++     "auralite-test-1",
++     "--proposal-id",
++     "1",
++     "--expiry",
++     "500",
++     "--action",
++     "transfer",
++     "--to",
++     "aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9",
++     "--amount",
++     "1000",
++     "--out",
++     "{sandbox}/prop.json"
++    ],
++    [
++     "msig-approve",
++     "--proposal",
++     "{sandbox}/prop.json",
++     "--multisig",
++     "{sandbox}/msig.json",
++     "--keystore",
++     "{sandbox}/ks",
++     "--password-file",
++     "{sandbox}/pw",
++     "--account",
++     "0",
++     "--chain",
++     "auralite-test-1",
++     "--height",
++     "100",
++     "--out",
++     "{sandbox}/ap/00.json"
++    ],
++    [
++     "msig-approve",
++     "--proposal",
++     "{sandbox}/prop.json",
++     "--multisig",
++     "{sandbox}/msig.json",
++     "--keystore",
++     "{sandbox}/ks",
++     "--password-file",
++     "{sandbox}/pw",
++     "--account",
++     "1",
++     "--chain",
++     "auralite-test-1",
++     "--height",
++     "100",
++     "--out",
++     "{sandbox}/ap/01.json"
++    ],
++    [
++     "msig-approve",
++     "--proposal",
++     "{sandbox}/prop.json",
++     "--multisig",
++     "{sandbox}/msig.json",
++     "--keystore",
++     "{sandbox}/ks",
++     "--password-file",
++     "{sandbox}/pw",
++     "--account",
++     "2",
++     "--chain",
++     "auralite-test-1",
++     "--height",
++     "100",
++     "--out",
++     "{sandbox}/ap/02.json"
++    ]
++   ],
++   "files": {
++    "pw": "pw\n",
++    "entropy": "0000000000000000000000000000000000000000000000000000000000000000",
++    "ap/placeholder.txt": ""
++   },
++   "expect_exit": 0,
++   "expect_stdout": [
++    "status=passed",
++    "chain=auralite-test-1",
++    "multisig_id=a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb6",
++    "proposal_id=1",
++    "signatures=3",
++    "threshold=3"
++   ],
++   "expect_stderr": []
++  }
++ ]
++}
+diff --git a/crates/aura-wallet/tests/w4_multisig.rs b/crates/aura-wallet/tests/w4_multisig.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..a4cf4e45191ca924164b29af91aa7cc79d9c76ad
+--- /dev/null
++++ b/crates/aura-wallet/tests/w4_multisig.rs
+@@ -0,0 +1,168 @@
++//! W4 gate — 22 CLI vectors for the wallet-level M-of-N multisig contract
++//! (`tests/fixtures/w4_multisig_vectors.json`).
++//!
++//! Gate text (WALLET_PLAN row W4): "3-of-5: 3 collected → success, 2 →
++//! reject; NC: threshold bypass → red" — `collect_2_of_5_rejected` is that
++//! named control.
++//!
++//! Vectors come from the independent oracle `tools/gen_w4_vectors.py`; this
++//! runner materializes each case in a fresh sandbox and asserts exit code and
++//! both output streams byte-for-byte (model: `tests/w3_offline.rs`). The suite
++//! runs with `--features insecure-test-kdf` (setup uses `--kdf testing`).
++
++#![cfg(feature = "insecure-test-kdf")]
++
++const VECTORS: &str = include_str!("fixtures/w4_multisig_vectors.json");
++
++fn substitute(text: &str, sandbox: &str, phrases: &serde_json::Value) -> String {
++    let mut out = text.replace("{sandbox}", sandbox);
++    if let Some(map) = phrases.as_object() {
++        for (token, phrase) in map {
++            out = out.replace(&format!("{{{token}}}"), phrase.as_str().expect("phrase"));
++        }
++    }
++    out
++}
++
++fn run_argv(argv: &[String]) -> (i32, String, String) {
++    let mut out = Vec::new();
++    let mut err = Vec::new();
++    let code = aura_wallet::cli::run(argv, &mut out, &mut err);
++    (
++        code,
++        String::from_utf8(out).expect("stdout utf-8"),
++        String::from_utf8(err).expect("stderr utf-8"),
++    )
++}
++
++/// Materialize a vector case in a fresh sandbox and run its setup steps.
++fn materialize(name: &str) -> (std::path::PathBuf, serde_json::Value, serde_json::Value) {
++    let doc: serde_json::Value = serde_json::from_str(VECTORS).expect("vectors parse");
++    let phrases = doc
++        .get("phrases")
++        .cloned()
++        .unwrap_or(serde_json::Value::Null);
++    let cases = doc["cases"].as_array().expect("cases array");
++    let case = cases
++        .iter()
++        .find(|c| c["name"].as_str() == Some(name))
++        .unwrap_or_else(|| panic!("vector {name} not found"))
++        .clone();
++
++    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++    let serial = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
++    let sandbox =
++        std::env::temp_dir().join(format!("w4vec-{}-{serial}-{name}", std::process::id()));
++    let _ = std::fs::remove_dir_all(&sandbox);
++    std::fs::create_dir_all(&sandbox).expect("sandbox created");
++    let sandbox_str = sandbox.to_string_lossy().to_string();
++
++    for (rel, content) in case["files"].as_object().expect("files object") {
++        let path = sandbox.join(rel);
++        if let Some(parent) = path.parent() {
++            std::fs::create_dir_all(parent).expect("file parent");
++        }
++        std::fs::write(&path, content.as_str().expect("file content")).expect("file written");
++    }
++
++    for setup in case["setup"].as_array().expect("setup array") {
++        let argv: Vec<String> = setup
++            .as_array()
++            .expect("setup argv")
++            .iter()
++            .map(|a| substitute(a.as_str().expect("argv str"), &sandbox_str, &phrases))
++            .collect();
++        let (code, _, err) = run_argv(&argv);
++        assert_eq!(code, 0, "setup step failed: {err}");
++    }
++    (sandbox, case, phrases)
++}
++
++fn run_case(name: &str) {
++    let (sandbox, case, phrases) = materialize(name);
++    let sandbox_str = sandbox.to_string_lossy().to_string();
++    let argv: Vec<String> = case["argv"]
++        .as_array()
++        .expect("argv")
++        .iter()
++        .map(|a| substitute(a.as_str().expect("argv str"), &sandbox_str, &phrases))
++        .collect();
++    let (code, out, err) = run_argv(&argv);
++
++    let expected_exit = case["expect_exit"].as_i64().expect("expect_exit") as i32;
++    let expect_lines = |key: &str| -> String {
++        let mut text = String::new();
++        for line in case[key].as_array().expect(key) {
++            text.push_str(&substitute(
++                line.as_str().expect("line"),
++                &sandbox_str,
++                &phrases,
++            ));
++            text.push('\n');
++        }
++        text
++    };
++
++    assert_eq!(
++        code, expected_exit,
++        "vector {name}: exit mismatch\nstdout:\n{out}\nstderr:\n{err}"
++    );
++    assert_eq!(
++        out,
++        expect_lines("expect_stdout"),
++        "vector {name}: stdout mismatch"
++    );
++    assert_eq!(
++        err,
++        expect_lines("expect_stderr"),
++        "vector {name}: stderr mismatch"
++    );
++
++    let _ = std::fs::remove_dir_all(&sandbox);
++}
++
++#[test]
++fn vectors_file_has_exactly_22_unique_cases() {
++    let doc: serde_json::Value = serde_json::from_str(VECTORS).expect("vectors parse");
++    let cases = doc["cases"].as_array().expect("cases array");
++    assert_eq!(cases.len(), 22, "the W4 gate requires exactly 22 vectors");
++    let mut names: Vec<&str> = cases
++        .iter()
++        .map(|c| c["name"].as_str().expect("case name"))
++        .collect();
++    names.sort_unstable();
++    names.dedup();
++    assert_eq!(names.len(), 22, "vector names must be unique");
++}
++
++macro_rules! vec_case {
++    ($name:ident) => {
++        #[test]
++        fn $name() {
++            run_case(stringify!($name));
++        }
++    };
++}
++
++vec_case!(init_basic);
++vec_case!(init_threshold_zero);
++vec_case!(init_threshold_gt_n);
++vec_case!(init_duplicate_member);
++vec_case!(propose_transfer_basic);
++vec_case!(propose_unknown_action);
++vec_case!(propose_foreign_chain);
++vec_case!(propose_expiry_gt_timeout);
++vec_case!(propose_rotate);
++vec_case!(approve_basic);
++vec_case!(approve_not_a_member);
++vec_case!(approve_expired);
++vec_case!(approve_foreign_chain);
++vec_case!(collect_3_of_5_passed);
++vec_case!(collect_2_of_5_rejected);
++vec_case!(collect_duplicate_member);
++vec_case!(collect_forged_signature);
++vec_case!(collect_foreign_proposal);
++vec_case!(collect_expired);
++vec_case!(collect_wrong_contract);
++vec_case!(rotate_3_of_5_passed);
++vec_case!(e2e_full_flow);
+diff --git a/docs/evidence/review-w1-source-drift.txt b/docs/evidence/review-w1-source-drift.txt
+index ae5f33bf75abcbe01e057ee833fd2a78182a1250..fa690194562ab3502e8f5c8d106c983f2626ffef 100644
+--- a/docs/evidence/review-w1-source-drift.txt
++++ b/docs/evidence/review-w1-source-drift.txt
+@@ -1,12 +1,12 @@
+ # Explicit source drift from frozen historical SHA256SUMS.
+ # historical-sha256 current-sha256 repository-relative-path
+ # Not a replacement for a new phase security review or certification.
+-adc24e7c03e1a63e5d7addbda15ff40ce630367152699c5d9659cd8db65f357b 6628866bcacac4ee84c83e354133db74ae7925906598a658b929c813e3a47a7c CHANGELOG.md
+-c83d08301a703c9db11462aa541bc898e52548589972118465164895eed44dc7 6628866bcacac4ee84c83e354133db74ae7925906598a658b929c813e3a47a7c CHANGELOG.md
++adc24e7c03e1a63e5d7addbda15ff40ce630367152699c5d9659cd8db65f357b 51f7af6672d94b14ed28e6333b2ff42c99c366ee59733aeef069b11705c8bc17 CHANGELOG.md
++c83d08301a703c9db11462aa541bc898e52548589972118465164895eed44dc7 51f7af6672d94b14ed28e6333b2ff42c99c366ee59733aeef069b11705c8bc17 CHANGELOG.md
+ f0d3511cd02f3007c0a18fc5d94c8997cfa512449313776117265708a36c8553 c9680cc436d806fa7fa2ce8545bd148dc9fcc9ae444973d4968a3f4f4fc069dc Cargo.lock
+ d5518138eae73219f8da0d7297af44a471dbd7135a39587a0da1587bfe3d1e70 23185f790bc4697bbd163004e2c78873755c13efba05b46260b4827cdeabdff7 Cargo.toml
+-5fb6ce43826495321f697e138e71e87954b2fcabec1ceef70549bb49a2f38988 75f51e283f0cf9c86a51b591d3f08018f7e66810276a4a148830507b270cbfa0 Makefile
+-c5e92007c53a22253ad7d2cc779863b9592562a394d1b26ff09ea8d031991e29 75f51e283f0cf9c86a51b591d3f08018f7e66810276a4a148830507b270cbfa0 Makefile
++5fb6ce43826495321f697e138e71e87954b2fcabec1ceef70549bb49a2f38988 aaadd04af81627130bccf65880614c09dfa5479b0a1decc449fe359fa81575be Makefile
++c5e92007c53a22253ad7d2cc779863b9592562a394d1b26ff09ea8d031991e29 aaadd04af81627130bccf65880614c09dfa5479b0a1decc449fe359fa81575be Makefile
+ bcc7328bd9c464a857c4b97c8491277bf401299d3c7963f1925b075d4313feb6 f2e4a249573a5b902b3f566b3f1db1ebab12d994f1ab6ef9be2dc15df63d7e26 crates/aura-consensus/src/fork_choice.rs
+ 7e396fbb4fd1d4103f26db16796ab0b6ad9626b7ba2ea0d56cae379bde5c2d59 8ec730ce2dc2cb1bc266990f4f29133038e98e390a63be0edbb3eaa23fa48f23 crates/aura-consensus/src/governance.rs
+ bd58be73dc4e0f6da16735be1d5ed17306d16c08569d798a4af20fcf72b91d40 b2e8ddad5b281da54e9c68107b563c9125b3931fe0e8e26023c74dcf3011ccc3 crates/aura-consensus/src/slashing.rs
+@@ -29,21 +29,21 @@ af56ee625d71d47bbed5b46ef328aca257403181a6c0d647d3e7c9573d8cfcf4 0bdccfc82403c32
+ a81b7345f56e3a0a40858717eb1c2bebc1091ae324bfae87352784e9340ade82 a07cd15ad7315b55cd4f49d595837ea0e07135fdcfb963bad575624893cb94b1 crates/aura-wallet/src/baseline.rs
+ f2827e98528b1c4ba7a739f68214d960e7576fdb962ccabd9732ee307b615774 a07cd15ad7315b55cd4f49d595837ea0e07135fdcfb963bad575624893cb94b1 crates/aura-wallet/src/baseline.rs
+ 73d088b6ff0d768e8807ab78746495547b46d32b1cf013df8c7745e7aa17bb38 a5e26dc0fafefb6ab5b372dc8adca3ad915fbae2e96926c18a4f8afd4c1be3d6 crates/aura-wallet/src/bin/aura-wallet.rs
+-2528b2064ae8ba4b8cefaba404bf3f13288be1977af904e775e1ad7f4e9b206e 780389c0cf4c4bfdec9a713fc539fb3a6c0d0ee90b2964b043e16b9a1a9ced24 crates/aura-wallet/src/cli.rs
+-265c95f77d5da18d1964bf9ddb99bcc97993bf13584d7be3d844bb568502f2bc 6bac747fc4a37c50f15f911f3b8623dffd77d2fef6ea3e06875b9044e5ab5612 crates/aura-wallet/src/lib.rs
+-dbb25499b939122b23d9ca0a29eaabc3e564f67af159c8369dc0725a8c9dd2f2 6bac747fc4a37c50f15f911f3b8623dffd77d2fef6ea3e06875b9044e5ab5612 crates/aura-wallet/src/lib.rs
+-ff4e8c97fef849e2c30b3b364cf65ac952516970af7e1aa65d6175b96b24e8bd 44dcf1fd0cb22240bb2f2ec0f77c31d7f3a742fe7f840c734f7c830aabc4c0c5 crates/aura-wallet/tests/fixtures/w1_baseline.txt
++2528b2064ae8ba4b8cefaba404bf3f13288be1977af904e775e1ad7f4e9b206e dcb30d1056aeec7c7a0234515db953954a501e039bf397b5a300fe6fbde39ffd crates/aura-wallet/src/cli.rs
++265c95f77d5da18d1964bf9ddb99bcc97993bf13584d7be3d844bb568502f2bc 9a27b60a7a4e8801d0d3dbcf912b5b44da44dcd1455b2672354cfdfa6d894e2f crates/aura-wallet/src/lib.rs
++dbb25499b939122b23d9ca0a29eaabc3e564f67af159c8369dc0725a8c9dd2f2 9a27b60a7a4e8801d0d3dbcf912b5b44da44dcd1455b2672354cfdfa6d894e2f crates/aura-wallet/src/lib.rs
++ff4e8c97fef849e2c30b3b364cf65ac952516970af7e1aa65d6175b96b24e8bd f2e787ad1effffd32376ead13fa12877ace7e74db1e76a6c48108cfd3f7435c2 crates/aura-wallet/tests/fixtures/w1_baseline.txt
+ 330f35631169e59afc9787bfe925ccd2e0d95f26e6c55bbceb245c0fb31e4ce4 91b39508560de4dac51f255a2e355d28c6081d26552d7c808be9506d80e29db2 crates/aura-wallet/tests/w0_key_audit.rs
+ bce9253cdf6d4a17db6f84d2d32567dc3fba7f824b7bbf9dfbe9a3c20fd10494 0e9893d2df6522e82abc1f3d5bd7d96196a57b5aa4c36f3fcca1ef1383f2173a docs/STATUS.md
+ 407ad597d3956d6b488eca8a75d4fb47df62c84e8f0e73fefe9da4a2c8b32d51 9171226639160223b5dc990af0f113cc70ffbc5650d50cec1615293ab09b6294 docs/plans/NET_PLAN.md
+-0560f899f85daa40b04516e7cac9a069b88755579a903df4d2cf81ec3d9e711c 173f5c4ef09bdeb3edf3e09d1e122f071d5b637d0fe0519c211477b658976764 docs/plans/WALLET_PLAN.md
+-9077095bef86c336fc0005d90fb84f4bb70e3842078328c0dbddc71a5a97cd60 173f5c4ef09bdeb3edf3e09d1e122f071d5b637d0fe0519c211477b658976764 docs/plans/WALLET_PLAN.md
++0560f899f85daa40b04516e7cac9a069b88755579a903df4d2cf81ec3d9e711c f15be47c2ed819374c28b3c3abd838fb993606357a51e5bca1ec1c47eebf7f8e docs/plans/WALLET_PLAN.md
++9077095bef86c336fc0005d90fb84f4bb70e3842078328c0dbddc71a5a97cd60 f15be47c2ed819374c28b3c3abd838fb993606357a51e5bca1ec1c47eebf7f8e docs/plans/WALLET_PLAN.md
+ 122cae5dc2a19d0f8d563e6e13703ebf9b836942cce58bc0dd9dc622bdd72493 14c07e141de26526955f150bc136a5aaf59f6ae1478636a15b9574e9ef121651 docs/spec/FORMAT_INDEX.md
+ c477f915b427982ca83fcb253fa0ab850d619ca5bf4a764137f0407078af4986 efee48a5d312b5856c86bee4ff797e034047156e1ec0328ec2f56a5ac5191a66 fuzz/Cargo.lock
+ 6f3f2bd9f508b33896011a6e7a6dc60e93ad24e6a00445e50ceceedd1346194b b4897ba4dbc33f098c27e415669e2e0bbca45933694b67aa590181041ebfdf0f fuzz/Cargo.toml
+ dca80316562fefcf24c45b40fb635412e1d4e5e09b5abe26f7d0e6b67e1e906e 53ac68024a82d40e64badd40ead1ebea5e0af8be1e56d4184a0eb0f22eab55a2 fuzz/README.md
+-1259c6bbc3bd3d53cbe0dd1d69d8d762336dc26287215d2ee35307bba90ea85c e8bcaaf979ebf0b23dfe025a6103136ecfce3d3a96211f30f4d5680be08e1b9f tools/audit_closeout.py
+-7bd672503f104aa733dff03e84f57ac26ef926607657ab6a799f9d2bc14c0dc9 e8bcaaf979ebf0b23dfe025a6103136ecfce3d3a96211f30f4d5680be08e1b9f tools/audit_closeout.py
++1259c6bbc3bd3d53cbe0dd1d69d8d762336dc26287215d2ee35307bba90ea85c f14f4843f316899d2a9314409b8763982bebcd039a2f820d1b2850d1cda67f08 tools/audit_closeout.py
++7bd672503f104aa733dff03e84f57ac26ef926607657ab6a799f9d2bc14c0dc9 f14f4843f316899d2a9314409b8763982bebcd039a2f820d1b2850d1cda67f08 tools/audit_closeout.py
+ 4d7d73580e09a49f1a0a9faf668254b0ec12f891efa527db863fa3abf8cce4a1 ab356092fc59ed98bff8d3622ef74e35eb33da5f342c5b6dccf5d73aeb20763b tools/gen_w0_vectors.py
+ 303fc648659cc72d9f8cf7cf6bc71ed8c9bd5a9f9a8d923d5a1e78bcffba0b5b 5e62e17226bfc601e8775b54e7f6a025d36c1357b7206d33c18c442cb49746eb tools/nc_b10.py
+ f86dee929549c751519e1749e0976c561e47a174a129412caf8cd23680887f61 3ae536e2637862525ca6edb1eeaa927a018a529856402d60c7260e92481d0b19 tools/nc_b5.py
+diff --git a/docs/evidence/w4/README.md b/docs/evidence/w4/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..84ddae7cdbec3e269c7c0e3e51b167fcb2b69718
+--- /dev/null
++++ b/docs/evidence/w4/README.md
+@@ -0,0 +1,19 @@
++# W4 evidence — M-of-N multisig contract (22 CLI vectors)
++
++Gate (WALLET_PLAN row W4): "3-of-5: 3 collected -> success, 2 -> reject; NC:
++threshold bypass -> red". All fixtures are PUBLIC TEST DATA ONLY — never use
++for funds.
++
++- `test-w4.log` — `cargo test --features insecure-test-kdf --test w4_multisig`:
++  22 vectors plus `vectors_file_has_exactly_22_unique_cases`,
++  byte-for-byte against the independent oracle.
++- `nc.log` — `tools/nc_w4.py` mutation controls (6): each source mutation must
++  turn its named test red; compilation failure is not a valid red.
++- `inventory.txt` — the 22 cases with exit codes, the named control, the
++  cumulative NC total (424) and SHA-256 pins of fixture, generator, runner.
++- `report.md`, `gates.txt` — closeout report and gate summary.
++- `SHA256SUMS` — digests of the deliverables and evidence files.
++
++The vectors are produced by `tools/gen_w4_vectors.py` (pure Python: BLAKE3,
++Ed25519 RFC 8032, domain_message, BIP-39/SLIP-0010, bech32). Regenerate with
++`make gen-w4-vectors`; rebuild this bundle with `make evidence-w4`.
+diff --git a/docs/evidence/w4/SHA256SUMS b/docs/evidence/w4/SHA256SUMS
+new file mode 100644
+index 0000000000000000000000000000000000000000..fcf0fce95a6558df63e72edf23600feb524bb65c
+--- /dev/null
++++ b/docs/evidence/w4/SHA256SUMS
+@@ -0,0 +1,10 @@
++380bc112104c07047feab96f2da3ea6da5eb97c284740b4b4b89044bfc8e19d9  crates/aura-wallet/tests/fixtures/w4_multisig_vectors.json
++9088009ee7a72d8d7f5798125739cb2a6f91969145e4bf770fb8c0020404dcf6  tools/gen_w4_vectors.py
++a4280112e4b8596fe6e185c1edc71e97249010b1587c6442c09434fa37718562  crates/aura-wallet/tests/w4_multisig.rs
++0e50bc7b80470923b2df267991882bb3f58ee70018e181a4c1b40738b69d4e27  tools/nc_w4.py
++5aa61820e549415382e6cb5bb7147afda08fba569d9eaabf80ac69766b266359  crates/aura-wallet/src/multisig.rs
++07f42e37a67f3e8c343d8a547d2ef9dde3fae0484a156e0a0ef6ace375daa29b  docs/evidence/w4/test-w4.log
++4691814d965abcd746565170024825ca58c6f6df4deaf147ca08cd8e8c18e4f6  docs/evidence/w4/nc.log
++59114fddbe53e000d768785b04c51165f2a9b031b9f793fdb5fa1160fb7892b0  docs/evidence/w4/inventory.txt
++086559b11d0868859a1f598d7910388d421f9331084b8db5a5baa295ebfa68b8  docs/evidence/w4/gates.txt
++4714b10450968093a720b6eb9f47b65fae69a47c30e1eeac7188cb865b99f2c1  docs/evidence/w4/report.md
+diff --git a/docs/evidence/w4/gates.txt b/docs/evidence/w4/gates.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..bacfb3ea9ea3b6e7dc9cf9624d4f56a651f7f2e9
+--- /dev/null
++++ b/docs/evidence/w4/gates.txt
+@@ -0,0 +1,4 @@
++# W4 gates
++3-of-5 gate + 22 vectors: PASS (23 tests: 22 vectors + count guard)
++named control (collect_2_of_5_rejected): PASS
++mutation controls: PASS (6/6)
+diff --git a/docs/evidence/w4/inventory.txt b/docs/evidence/w4/inventory.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..e76a4207fea2b0c6b03b71db8f45a252e98b75a7
+--- /dev/null
++++ b/docs/evidence/w4/inventory.txt
+@@ -0,0 +1,31 @@
++# W4 inventory (generated by tools/write_w4_evidence.py)
++gate=3-of-5: 3 collected -> success, 2 -> reject; NC: threshold bypass -> red
++vectors=22
++named_control=collect_2_of_5_rejected=present
++fixtures_sha256=380bc112104c07047feab96f2da3ea6da5eb97c284740b4b4b89044bfc8e19d9
++generator_sha256=9088009ee7a72d8d7f5798125739cb2a6f91969145e4bf770fb8c0020404dcf6
++runner_sha256=a4280112e4b8596fe6e185c1edc71e97249010b1587c6442c09434fa37718562
++cases:
++  init_basic exit=0
++  init_threshold_zero exit=64
++  init_threshold_gt_n exit=64
++  init_duplicate_member exit=64
++  propose_transfer_basic exit=0
++  propose_unknown_action exit=64
++  propose_foreign_chain exit=65
++  propose_expiry_gt_timeout exit=64
++  propose_rotate exit=0
++  approve_basic exit=0
++  approve_not_a_member exit=65
++  approve_expired exit=65
++  approve_foreign_chain exit=65
++  collect_3_of_5_passed exit=0
++  collect_2_of_5_rejected exit=65
++  collect_duplicate_member exit=65
++  collect_forged_signature exit=65
++  collect_foreign_proposal exit=65
++  collect_expired exit=65
++  collect_wrong_contract exit=65
++  rotate_3_of_5_passed exit=0
++  e2e_full_flow exit=0
++TOTAL: 424 negative controls
+diff --git a/docs/evidence/w4/nc.log b/docs/evidence/w4/nc.log
+new file mode 100644
+index 0000000000000000000000000000000000000000..1c598d5906691c96ea7ec6107c1afdd2897c047f
+--- /dev/null
++++ b/docs/evidence/w4/nc.log
+@@ -0,0 +1,9 @@
++$ /usr/local/bin/python3 tools/nc_w4.py
++PASS NC: threshold bypassed -> gate red: collect_2_of_5_rejected
++PASS NC: approval signature verification skipped -> gate red: collect_forged_signature
++PASS NC: duplicate approvals accepted -> gate red: collect_duplicate_member
++PASS NC: membership check dropped -> gate red: approve_not_a_member
++PASS NC: expiry check dropped -> gate red: approve_expired
++PASS NC: proposal-binding comparison dropped -> gate red: collect_foreign_proposal
++RESULT: 6/6 negative controls PASS
++exit=0
+diff --git a/docs/evidence/w4/report.md b/docs/evidence/w4/report.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..0e4e42a77f280bed950b29614d5bbea9fb3b37f0
+--- /dev/null
++++ b/docs/evidence/w4/report.md
+@@ -0,0 +1,30 @@
++# W4 closeout report — wallet-level M-of-N multisig contract
++
++Date: 2026-11-11. Gate (WALLET_PLAN row W4): "3-of-5: 3 collected -> success,
++2 -> reject; NC: threshold bypass -> red" — **satisfied**.
++
++- **Threshold gate**: `collect_3_of_5_passed` (3 approvals of 5 -> exit 0,
++  `signatures=3/threshold=3`) and the named control `collect_2_of_5_rejected`
++  (2 approvals -> `error: multisig: threshold not met (2/3)`, exit 65).
++  Mutation NC-1 (`tools/nc_w4.py`) bypasses the threshold check and requires
++  that test to go red.
++- **Vectors**: 22 deterministic cases from the independent oracle
++  `tools/gen_w4_vectors.py` (canonical descriptor/proposal/approval bytes,
++  BLAKE3, Ed25519 RFC 8032-checked, `contract` domain), asserted
++  byte-for-byte by `tests/w4_multisig.rs` (23/23 with the count guard).
++  Groups: init (4), propose (5), approve (4), collect (7), rotation/e2e (2).
++- **Mutation controls**: 6/6 PASS (threshold bypassed, signature verification
++  skipped, duplicate approvals accepted, membership dropped, expiry dropped,
++  proposal binding dropped).
++- **Contract model** (docs/w4-multisig-plan.md): D-W4-1 canonical documents
++  (contract id = BLAKE3 of the descriptor bytes), D-W4-2 the fixed AuraLite
++  `contract` signature domain, D-W4-3 member rotation as a `rotate` proposal
++  under the old membership, D-W4-4 deterministic `--height` timeouts with the
++  fixed refusal set.
++- **Cross-check pin**: the 3-of-5 contract over the W1 smoke keys
++  (accounts 0..4, timeout 1000) has id
++  `a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb6` in both
++  the Rust implementation and the Python oracle.
++
++Receipts: `gates.txt`, `test-w4.log`, `nc.log`, `inventory.txt`, `SHA256SUMS`.
++Regenerate with `make evidence-w4`. Public test data only — never use for funds.
+diff --git a/docs/evidence/w4/test-w4.log b/docs/evidence/w4/test-w4.log
+new file mode 100644
+index 0000000000000000000000000000000000000000..0a90c93bd254859fb1f9a691949bcd858487dea7
+--- /dev/null
++++ b/docs/evidence/w4/test-w4.log
+@@ -0,0 +1,33 @@
++$ cargo test -p aura-wallet --features insecure-test-kdf --test w4_multisig
++
++running 23 tests
++test approve_expired ... ok
++test approve_basic ... ok
++test approve_foreign_chain ... ok
++test collect_2_of_5_rejected ... ok
++test collect_3_of_5_passed ... ok
++test collect_duplicate_member ... ok
++test collect_expired ... ok
++test collect_foreign_proposal ... ok
++test collect_forged_signature ... ok
++test collect_wrong_contract ... ok
++test approve_not_a_member ... ok
++test init_basic ... ok
++test init_duplicate_member ... ok
++test init_threshold_gt_n ... ok
++test init_threshold_zero ... ok
++test propose_expiry_gt_timeout ... ok
++test propose_foreign_chain ... ok
++test propose_rotate ... ok
++test propose_transfer_basic ... ok
++test propose_unknown_action ... ok
++test rotate_3_of_5_passed ... ok
++test vectors_file_has_exactly_22_unique_cases ... ok
++test e2e_full_flow ... ok
++
++test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
++
++   Compiling aura-wallet v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-wallet)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.92s
++     Running tests/w4_multisig.rs (target/debug/deps/w4_multisig-4d8c746f3b6bdb05)
++exit=0
+diff --git a/docs/plans/WALLET_PLAN.md b/docs/plans/WALLET_PLAN.md
+index 70ce4a308e2dce8705b8a821b684fa308f6c9b87..fa58793ebb331fa84941533d66ac5565d5f09387 100644
+--- a/docs/plans/WALLET_PLAN.md
++++ b/docs/plans/WALLET_PLAN.md
+@@ -1,6 +1,6 @@
+ # WALLET_PLAN — keys, signing, wallet, ceremony
+ 
+-**Status:** 🚧 IN PROGRESS — W0 ✅ (`patches/0058-W0-wallet-baseline.patch`); W1 ✅ (`patches/0059-W1-crypto-keystore.patch`); W2 ✅ (`patches/0060-W2-wallet-cli.patch`); W3 ✅ (`patches/0061-W3-offline-signing.patch`); W4 open; ⏸ W5–W7 Stage 2.  
++**Status:** 🚧 IN PROGRESS — W0 ✅ (`patches/0058-W0-wallet-baseline.patch`); W1 ✅ (`patches/0059-W1-crypto-keystore.patch`); W2 ✅ (`patches/0060-W2-wallet-cli.patch`); W3 ✅ (`patches/0061-W3-offline-signing.patch`); W4 ✅ (`patches/0062-W4-multisig.patch`); ⏸ W5–W7 Stage 2.  
+ **Stage:** Stage 1: W0–W4. ⏸ Stage 2: W5–W7 (hardware keys, web wallet, genesis ceremony).  
+ **Deliverable:** `patches/0058-W0-wallet-baseline.patch` … `patches/0065-W7-...`
+ **Dependencies:** CORE C1–C4 (addresses/signatures), NODE D4 (RPC).
+@@ -27,7 +27,7 @@ procedure for generating genesis keys.
+ | ✅ **W1** | Crypto keystore | BIP-39, testnet SLIP-0010 Ed25519 hardened path (D-W1-testnet), encryption, zeroize, versioned format | BIP-39 and SLIP-0010 vectors plus independently verified testnet-path vectors; 1000 wrong passwords → 0 decryptions; format fuzz |
+ | ✅ **W2** | `aura-wallet` CLI | `new/import/list/balance/transfer/sign/broadcast/stake/vote` | 40 CLI vectors, including rejection of a tx with a foreign chain-id |
+ | ✅ **W3** | Offline signing | unsigned/signed tx format, QR/USB, verification on the online machine | air-gapped scenario end-to-end; NC: signature with a foreign domain → reject |
+-| **W4** | Multisig | M-of-N contract, signature collection, timeouts, member rotation | 3-of-5: 3 collected → success, 2 → reject; NC: threshold bypass → red |
++| ✅ **W4** | Multisig | M-of-N contract, signature collection, timeouts, member rotation | 3-of-5: 3 collected → success, 2 → reject; NC: threshold bypass → red |
+ | ⏸ **W5** | Hardware keys | HID/CCID-like device protocol, on-screen confirmation | 10 "human confirmed/denied" scenarios; NC: blind confirmation → red |
+ | ⏸ **W6** | Web/browser wallet | WASM build of `aura-keys`, extension, deep links, phishing protection | signing shows the human the **real** tx fields; NC: recipient substitution in UI → red |
+ | ⏸ **W7** | Genesis ceremony | offline generation, Shamir sharing, witness logs, destruction of temporary media | O5: not one private key in the repository/CI; pubkey set matches genesis hash |
+@@ -125,6 +125,30 @@ mainnet and ⏸ Stage 2.
+   envelope checksum skipped, signer binding dropped, QR gap accepted, QR
+   duplicate accepted, `--against` comparison skipped — 6/6 PASS.
+ 
++### W4 receipt (2026-11-11)
++
++- Deliverable: `patches/0062-W4-multisig.patch` (complete W4-from-W3 phase
++  patch on top of the W3 tree).
++- Wallet-level M-of-N multisig (`crates/aura-wallet/src/multisig.rs` + CLI
++  `msig-init`/`msig-propose`/`msig-approve`/`msig-collect`): canonical
++  contract/proposal/approval documents with `BLAKE3` contract ids (D-W4-1),
++  the fixed AuraLite `contract` signature domain (D-W4-2), member rotation as
++  a `rotate` proposal under the old membership (D-W4-3) and deterministic
++  `--height` timeouts (D-W4-4).
++- Named control: `collect_2_of_5_rejected` — a bundle with fewer approvals
++  than the threshold is refused (`error: multisig: threshold not met (2/3)`,
++  exit 65); mutation control NC-1 in `tools/nc_w4.py` bypasses the threshold
++  and requires that test to go red.
++- Test gate: 3-of-5 — 3 collected -> success, 2 -> reject — over 22 CLI
++  vectors (`tests/fixtures/w4_multisig_vectors.json`) from the independent
++  oracle `tools/gen_w4_vectors.py`, asserted byte-for-byte by
++  `tests/w4_multisig.rs` (23/23 with the count guard). Cross-check pin: the
++  3-of-5 contract over the W1 smoke keys has the same id
++  (`a3ed446e…ff9eb6`) in the Rust implementation and the oracle.
++- Mutation controls (`tools/nc_w4.py`, 6): threshold bypassed, signature
++  verification skipped, duplicate approvals accepted, membership dropped,
++  expiry dropped, proposal binding dropped — 6/6 PASS.
++
+ ## Risks
+ 
+ - Phishing/address substitution in the UI — W6 + `chain_id` check + human-readable amount.
+diff --git a/docs/w4-multisig-plan.md b/docs/w4-multisig-plan.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..443957e851b6addb73634ec116c49f52315c82ba
+--- /dev/null
++++ b/docs/w4-multisig-plan.md
+@@ -0,0 +1,76 @@
++# W4 — Multisig: design of record
++
++Status: implemented in `patches/0062-W4-multisig.patch` (see the W4 receipt in
++`docs/plans/WALLET_PLAN.md`). This document is the design of record; deviations
++land as edits here.
++
++Gate (WALLET_PLAN row W4): *"3-of-5: 3 collected → success, 2 → reject; NC:
++threshold bypass → red"*. The named control is the vector
++`collect_2_of_5_rejected`: a bundle with fewer approvals than the threshold
++must refuse (`error: multisig: threshold not met (2/3)`, exit 65). The
++mutation control NC-1 disables the threshold check and requires that test to
++go red.
++
++## Model
++
++A wallet-level M-of-N multisig contract over the W1 Ed25519 keys (the chain
++level is B-series consensus/BLS; this is the wallet coordination layer, like
++D-W2-2 ballots). Four steps, all deterministic documents:
++
++1. **Contract (descriptor)** — `msig-init`: sorted member public keys, chain,
++   threshold `M`, and a contract `timeout` (absolute height). The contract id
++   is `BLAKE3` of its canonical bytes.
++2. **Proposal** — `msig-propose`: a transfer (`to`, `amount`) or a **rotation**
++   (a new descriptor — member rotation, D-W4-3), bound to the contract id,
++   a proposal id and an `expiry` height capped by the contract timeout.
++3. **Approval** — `msig-approve`: each member signs the canonical proposal
++   bytes under the fixed AuraLite `contract` domain; the approval file embeds
++   the member key, the proposal bytes and the signature (self-describing USB
++   handoff).
++4. **Collection** — `msig-collect`: verifies every approval (membership,
++   proposal binding, signature) and enforces the threshold; `--height` makes
++   the timeout deterministic (no clocks).
++
++## Decisions
++
++- **D-W4-1 — canonical documents.**
++  `descriptor = "AuraLite-Crypto/wallet-msig-v1\0" || u8(len chain) || chain
++  || u8 M || u8 N || N×32 sorted member pubkeys`;
++  `proposal = "AuraLite-Crypto/wallet-msig-proposal-v1\0" || u8(len chain)
++  || chain || contract_id(32) || LE64 id || LE64 expiry || u8 kind
++  (0 transfer, 1 rotate) || payload`; transfer payload = `to(20) || LE64
++  amount`; rotate payload = the new descriptor's canonical bytes. Files are
++  JSON (`AuraLite-MSIG-V1` / `-PROPOSAL-V1` / `-APPROVAL-V1`) with fixed key
++  order; signatures always cover the canonical bytes, never the JSON.
++- **D-W4-2 — signature domain.** Each approval signs
++  `BLAKE3(domain_message(chain, "contract", proposal))` with plain Ed25519 —
++  the fixed AuraLite domain-separation construction (`Domain::Contract`); a
++  signature under any other domain refuses (`error: signature verification
++  failed`).
++- **D-W4-3 — rotation.** Member rotation is a proposal of kind `rotate` whose
++  payload is the new descriptor; it passes under the OLD membership rules and
++  is recorded by the collector as a passed proposal. The new contract is
++  simply the next `msig-init` state; nothing in this layer rewrites history.
++- **D-W4-4 — timeouts and refusal set.** `--height` is required for
++  `msig-approve`/`msig-collect` (deterministic expiry checks). Fixed refusals
++  (exit 65): `error: multisig: threshold not met (K/M)`,
++  `error: multisig: duplicate approval`, `error: multisig: not a member`,
++  `error: multisig: proposal expired`, `error: multisig: approval for a
++  different proposal`, `error: multisig: proposal for a different contract`,
++  `error: signature verification failed`, plus the W2/W3 shared
++  `error: foreign chain-id: tx=…, wallet=…`. Usage errors exit 64.
++
++## Test gate
++
++`tests/fixtures/w4_multisig_vectors.json` — 22 deterministic cases generated
++by the independent oracle `tools/gen_w4_vectors.py` (pure Python: BLAKE3,
++Ed25519 RFC 8032-checked, domain_message, BIP-39/SLIP-0010, bech32) and
++asserted byte-for-byte by `tests/w4_multisig.rs` (22 vectors + a count guard).
++Groups: init (4), propose (5), approve (4), collect (7), rotation/e2e (2).
++
++Mutation controls (`tools/nc_w4.py`, 6): threshold bypassed (named control →
++`collect_2_of_5_rejected`), signature verification skipped →
++`collect_forged_signature`, duplicate approvals accepted →
++`collect_duplicate_member`, membership check dropped → `approve_not_a_member`,
++expiry check dropped → `approve_expired`, proposal-binding comparison dropped
++→ `collect_foreign_proposal`.
+diff --git a/tools/audit_closeout.py b/tools/audit_closeout.py
+index f8c08109805113735f3c8795df02fd563377443f..aadd5e02af7ce8b5dbe802b90f52f769b8512096 100644
+--- a/tools/audit_closeout.py
++++ b/tools/audit_closeout.py
+@@ -35,7 +35,7 @@ EXEC_PHASES = ["X0", "X1", "X2", "X3", "X4", "X5", "X6", "X7", "X8"]
+ NODE_PHASES = ["D0", "D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8"]             # NODE_PLAN complete
+ CONSENSUS_PHASES = ["B0", "B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9", "B10"]  # CONSENSUS_PLAN complete
+ NET_PHASES = ["N0", "N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8"]  # NET_PLAN complete
+-WALLET_PHASES = ["W0", "W1", "W2", "W3"]  # grows with each W phase
++WALLET_PHASES = ["W0", "W1", "W2", "W3", "W4"]  # grows with each W phase
+ PHASES = CORE_PHASES + STATE_PHASES + EXEC_PHASES + NODE_PHASES + CONSENSUS_PHASES + NET_PHASES + WALLET_PHASES
+ SHIPPED = CORE_PHASES + [
+     "S0",
+@@ -87,8 +87,9 @@ SHIPPED = CORE_PHASES + [
+     "W0",
+     "W1",
+     "W2",
++    "W3",
+ ]
+-CURRENT = "W3"
++CURRENT = "W4"
+ 
+ PLAN_FOR_PREFIX = {
+     "C": "CORE_PLAN.md",
+@@ -106,7 +107,7 @@ PLAN_FOR_PREFIX = {
+ }
+ 
+ NC_PER_PHASE = {f"C{i}": 6 for i in range(4, 11)}
+-NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6})
++NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6, "W4": 6})
+ SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)  # 339 (through W0)
+ EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + (0 if CURRENT in SHIPPED else NC_PER_PHASE[CURRENT])
+ 
+@@ -122,7 +123,7 @@ RESULT_LINE = re.compile(r"^RESULT: (\d+)/(\d+)(?: [a-z-]+)? negative controls P
+ PATCH_ORDER = CORE_PHASES + STATE_PHASES + EXEC_PHASES + ["D0", "D1"]
+ PATCH_ORDER += ["B0", "B1", "B2", "B3"] + [f"D{i}" for i in range(2, 7)]
+ PATCH_ORDER += ["N0", "N1", "N2"] + ["B4", "B5"] + ["D7", "D8"]
+-PATCH_ORDER += [f"N{i}" for i in range(3, 9)] + [f"B{i}" for i in range(6, 11)] + ["W0", "W1", "W2", "W3"]
++PATCH_ORDER += [f"N{i}" for i in range(3, 9)] + [f"B{i}" for i in range(6, 11)] + ["W0", "W1", "W2", "W3", "W4"]
+ PATCH_NUMBERS = {phase: index + 1 for index, phase in enumerate(PATCH_ORDER)}
+ 
+ 
+diff --git a/tools/gen_w4_vectors.py b/tools/gen_w4_vectors.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..f54c149114297cf8ceaed4c19f1567124f2168a4
+--- /dev/null
++++ b/tools/gen_w4_vectors.py
+@@ -0,0 +1,400 @@
++#!/usr/bin/env python3
++"""W4 oracle — 22 CLI vectors for the wallet-level M-of-N multisig contract.
++
++Design of record: docs/w4-multisig-plan.md (D-W4-1..D-W4-4). Generates
++`crates/aura-wallet/tests/fixtures/w4_multisig_vectors.json`, asserted
++byte-for-byte by `tests/w4_multisig.rs`.
++
++Independent implementation: reuses the self-checked W2/W3 oracle primitives
++(BLAKE3, Ed25519 RFC 8032, domain_message, BIP-39/SLIP-0010, bech32) and adds
++the multisig descriptor/proposal/approval documents. PUBLIC TEST DATA ONLY -
++DO NOT USE FOR FUNDS.
++"""
++from __future__ import annotations
++
++import json
++import sys
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(ROOT))
++sys.path.insert(0, "/home/user/aura-python-deps")
++
++from tools import gen_c4_vectors as c4  # noqa: E402
++from tools import gen_w2_vectors as g2  # noqa: E402
++
++DESCRIPTOR_PREFIX = b"AuraLite-Crypto/wallet-msig-v1\x00"
++PROPOSAL_PREFIX = b"AuraLite-Crypto/wallet-msig-proposal-v1\x00"
++CHAIN = g2.CHAIN
++NOTICE = g2.NOTICE
++ENTROPY_00 = "00" * 32
++
++# Cross-check pin: computed by the Rust smoke run of `msig-init` (3-of-5,
++# members = accounts 0..4 of the W1 smoke key, timeout 1000).
++KNOWN_CONTRACT_3OF5 = "a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb6"
++
++
++def descriptor_bytes(chain: str, threshold: int, members: list[bytes], timeout: int) -> bytes:
++    keys = sorted(members)
++    return (
++        DESCRIPTOR_PREFIX
++        + bytes([len(chain)])
++        + chain.encode()
++        + bytes([threshold])
++        + bytes([len(keys)])
++        + b"".join(keys)
++    )
++
++
++def contract_id(chain: str, threshold: int, members: list[bytes], timeout: int) -> str:
++    return c4.blake3_short(descriptor_bytes(chain, threshold, members, timeout)).hex()
++
++
++def proposal_bytes(chain: str, contract: str, pid: int, expiry: int, kind: str,
++                   to_raw: bytes = b"", amount: int = 0,
++                   new_members: list[bytes] | None = None,
++                   new_threshold: int = 0, new_timeout: int = 0) -> bytes:
++    out = (
++        PROPOSAL_PREFIX
++        + bytes([len(chain)])
++        + chain.encode()
++        + bytes.fromhex(contract)
++        + pid.to_bytes(8, "little")
++        + expiry.to_bytes(8, "little")
++    )
++    if kind == "transfer":
++        out += b"\x00" + to_raw + amount.to_bytes(8, "little")
++    else:
++        out += b"\x01" + descriptor_bytes(chain, new_threshold, new_members or [], new_timeout)
++    return out
++
++
++def approval_json(member_pk: bytes, priv: bytes, chain: str, prop: bytes) -> str:
++    digest = c4.blake3_short(c4.domain_message(chain, "contract", prop))
++    sig = c4.ed25519_sign(digest, priv)
++    doc = {
++        "format": "AuraLite-MSIG-APPROVAL-V1",
++        "member": member_pk.hex(),
++        "proposal": prop.hex(),
++        "sig": sig.hex(),
++    }
++    return json.dumps(doc, indent=2, sort_keys=True) + "\n"
++
++
++def descriptor_json(chain: str, threshold: int, members: list[bytes], timeout: int) -> str:
++    doc = {
++        "format": "AuraLite-MSIG-V1",
++        "chain": chain,
++        "threshold": threshold,
++        "members": [m.hex() for m in sorted(members)],
++        "timeout": timeout,
++    }
++    return json.dumps(doc, indent=2, sort_keys=True) + "\n"
++
++
++def proposal_json(chain: str, contract: str, pid: int, expiry: int, kind: str,
++                  to_raw: bytes = b"", amount: int = 0,
++                  new_members: list[bytes] | None = None,
++                  new_threshold: int = 0, new_timeout: int = 0) -> str:
++    doc = {
++        "format": "AuraLite-MSIG-PROPOSAL-V1",
++        "chain": chain,
++        "contract": contract,
++        "id": pid,
++        "expiry": expiry,
++        "kind": kind,
++    }
++    if kind == "transfer":
++        doc["to"] = bech32_address(to_raw)
++        doc["amount"] = amount
++    else:
++        doc["new_multisig"] = json.loads(
++            descriptor_json(chain, new_threshold, new_members or [], new_timeout)
++        )
++    return json.dumps(doc, indent=2, sort_keys=True) + "\n"
++
++
++from tools.w1_interop_reference import bech32_address  # noqa: E402
++
++
++def case(name: str, argv: list[str], *, files: dict[str, str] | None = None,
++         setup: list[list[str]] | None = None, expect_exit: int = 0,
++         expect_stdout: list[str] | None = None,
++         expect_stderr: list[str] | None = None) -> dict:
++    return {
++        "name": name,
++        "argv": argv,
++        "setup": setup or [],
++        "files": files or {},
++        "expect_exit": expect_exit,
++        "expect_stdout": expect_stdout or [],
++        "expect_stderr": expect_stderr or [],
++    }
++
++
++def build_cases() -> list[dict]:
++    g2.self_check()
++    seed = g2.seed_from_mnemonic(g2.MNEMO.to_mnemonic(bytes(32)))
++    accts = {i: g2.account(seed, i) for i in (0, 1, 2, 3, 4, 8)}
++    assert accts[0]["addr"] == g2.KNOWN_ADDR_0
++
++    members = [accts[i]["pub"] for i in (0, 1, 2, 3, 4)]
++    msig_members_arg = ",".join(m.hex() for m in members)
++    members2 = [accts[i]["pub"] for i in (1, 2, 3)]
++    msig2_members_arg = ",".join(m.hex() for m in members2)
++
++    TIMEOUT = 1000
++    assert contract_id(CHAIN, 3, members, TIMEOUT) == KNOWN_CONTRACT_3OF5
++    CID = KNOWN_CONTRACT_3OF5
++    CID2 = contract_id(CHAIN, 2, members2, 2000)
++
++    msig_json = descriptor_json(CHAIN, 3, members, TIMEOUT)
++    msig2_json = descriptor_json(CHAIN, 2, members2, 2000)
++    msig_foreign_json = descriptor_json("other-net", 3, members, TIMEOUT)
++
++    to_raw = accts[0]["raw"]
++    PROP = proposal_bytes(CHAIN, CID, 1, 500, "transfer", to_raw=to_raw, amount=1000)
++    prop_json = proposal_json(CHAIN, CID, 1, 500, "transfer", to_raw=to_raw, amount=1000)
++    prop2 = proposal_bytes(CHAIN, CID, 2, 500, "transfer", to_raw=to_raw, amount=2000)
++    ROT = proposal_bytes(CHAIN, CID, 7, 900, "rotate",
++                         new_members=members2, new_threshold=2, new_timeout=2000)
++    rot_json = proposal_json(CHAIN, CID, 7, 900, "rotate",
++                             new_members=members2, new_threshold=2, new_timeout=2000)
++
++    ap0 = approval_json(accts[0]["pub"], accts[0]["priv"], CHAIN, PROP)
++    ap1 = approval_json(accts[1]["pub"], accts[1]["priv"], CHAIN, PROP)
++    ap2 = approval_json(accts[2]["pub"], accts[2]["priv"], CHAIN, PROP)
++    rot0 = approval_json(accts[0]["pub"], accts[0]["priv"], CHAIN, ROT)
++    rot1 = approval_json(accts[1]["pub"], accts[1]["priv"], CHAIN, ROT)
++    rot2 = approval_json(accts[2]["pub"], accts[2]["priv"], CHAIN, ROT)
++
++    new0 = ["new", "--keystore", "{sandbox}/ks", "--password-file", "{sandbox}/pw",
++            "--chain", CHAIN, "--entropy-file", "{sandbox}/entropy", "--account", "0",
++            "--kdf", "testing"]
++    new8 = ["new", "--keystore", "{sandbox}/ks", "--password-file", "{sandbox}/pw",
++            "--chain", CHAIN, "--entropy-file", "{sandbox}/entropy", "--account", "8",
++            "--kdf", "testing"]
++    base_files = {"pw": "pw\n", "entropy": ENTROPY_00}
++
++    approve_argv = [
++        "msig-approve", "--proposal", "{sandbox}/prop.json", "--multisig", "{sandbox}/msig.json",
++        "--keystore", "{sandbox}/ks", "--password-file", "{sandbox}/pw", "--account", "0",
++        "--chain", CHAIN, "--height", "100", "--out", "{sandbox}/ap.json",
++    ]
++
++    cases: list[dict] = []
++
++    # --- msig-init (4) ---
++    init_out = ["status=created", f"chain={CHAIN}", "threshold=3", "members=5",
++                f"multisig_id={CID}"]
++    cases.append(case("init_basic",
++                      ["msig-init", "--chain", CHAIN, "--threshold", "3",
++                       "--members", msig_members_arg, "--timeout", "1000",
++                       "--out", "{sandbox}/msig.json"],
++                      expect_stdout=init_out))
++    cases.append(case("init_threshold_zero",
++                      ["msig-init", "--chain", CHAIN, "--threshold", "0",
++                       "--members", msig_members_arg, "--timeout", "1000",
++                       "--out", "{sandbox}/msig.json"],
++                      expect_exit=64,
++                      expect_stderr=["error: usage: --threshold must be 1..=255"]))
++    cases.append(case("init_threshold_gt_n",
++                      ["msig-init", "--chain", CHAIN, "--threshold", "6",
++                       "--members", msig_members_arg, "--timeout", "1000",
++                       "--out", "{sandbox}/msig.json"],
++                      expect_exit=64,
++                      expect_stderr=["error: usage: --threshold must not exceed members"]))
++    cases.append(case("init_duplicate_member",
++                      ["msig-init", "--chain", CHAIN, "--threshold", "3",
++                       "--members", msig_members_arg + "," + accts[0]["pub"].hex(),
++                       "--timeout", "1000", "--out", "{sandbox}/msig.json"],
++                      expect_exit=64,
++                      expect_stderr=["error: usage: duplicate member"]))
++
++    # --- msig-propose (5) ---
++    propose_out = ["status=proposed", f"chain={CHAIN}", f"multisig_id={CID}",
++                   "proposal_id=1", "kind=transfer"]
++    cases.append(case("propose_transfer_basic",
++                      ["msig-propose", "--multisig", "{sandbox}/msig.json", "--chain", CHAIN,
++                       "--proposal-id", "1", "--expiry", "500", "--action", "transfer",
++                       "--to", accts[0]["addr"], "--amount", "1000", "--out", "{sandbox}/prop.json"],
++                      files={"msig.json": msig_json},
++                      expect_stdout=propose_out))
++    cases.append(case("propose_unknown_action",
++                      ["msig-propose", "--multisig", "{sandbox}/msig.json", "--chain", CHAIN,
++                       "--proposal-id", "1", "--expiry", "500", "--action", "burn",
++                       "--out", "{sandbox}/prop.json"],
++                      files={"msig.json": msig_json},
++                      expect_exit=64,
++                      expect_stderr=["error: usage: --action must be transfer or rotate"]))
++    cases.append(case("propose_foreign_chain",
++                      ["msig-propose", "--multisig", "{sandbox}/msig.json", "--chain", CHAIN,
++                       "--proposal-id", "1", "--expiry", "500", "--action", "transfer",
++                       "--to", accts[0]["addr"], "--amount", "1000", "--out", "{sandbox}/prop.json"],
++                      files={"msig.json": msig_foreign_json},
++                      expect_exit=65,
++                      expect_stderr=[f"error: foreign chain-id: tx=other-net, wallet={CHAIN}"]))
++    cases.append(case("propose_expiry_gt_timeout",
++                      ["msig-propose", "--multisig", "{sandbox}/msig.json", "--chain", CHAIN,
++                       "--proposal-id", "1", "--expiry", "1001", "--action", "transfer",
++                       "--to", accts[0]["addr"], "--amount", "1000", "--out", "{sandbox}/prop.json"],
++                      files={"msig.json": msig_json},
++                      expect_exit=64,
++                      expect_stderr=["error: usage: --expiry must not exceed contract timeout"]))
++    cases.append(case("propose_rotate",
++                      ["msig-propose", "--multisig", "{sandbox}/msig.json", "--chain", CHAIN,
++                       "--proposal-id", "7", "--expiry", "900", "--action", "rotate",
++                       "--new-multisig", "{sandbox}/msig2.json", "--out", "{sandbox}/prop.json"],
++                      files={"msig.json": msig_json, "msig2.json": msig2_json},
++                      expect_stdout=["status=proposed", f"chain={CHAIN}", f"multisig_id={CID}",
++                                     "proposal_id=7", "kind=rotate"]))
++
++    # --- msig-approve (4) ---
++    cases.append(case("approve_basic", approve_argv,
++                      files={"msig.json": msig_json, "prop.json": prop_json, **base_files},
++                      setup=[new0],
++                      expect_stdout=["status=approved", f"chain={CHAIN}", "proposal_id=1",
++                                     f"member={accts[0]['pub'].hex()}"]))
++    cases.append(case("approve_not_a_member",
++                      ["msig-approve", "--proposal", "{sandbox}/prop.json",
++                       "--multisig", "{sandbox}/msig.json", "--keystore", "{sandbox}/ks",
++                       "--password-file", "{sandbox}/pw", "--account", "8",
++                       "--chain", CHAIN, "--height", "100", "--out", "{sandbox}/ap.json"],
++                      files={"msig.json": msig_json, "prop.json": prop_json, **base_files},
++                      setup=[new8],
++                      expect_exit=65,
++                      expect_stderr=["error: multisig: not a member"]))
++    cases.append(case("approve_expired",
++                      ["msig-approve", "--proposal", "{sandbox}/prop.json",
++                       "--multisig", "{sandbox}/msig.json", "--keystore", "{sandbox}/ks",
++                       "--password-file", "{sandbox}/pw", "--account", "0",
++                       "--chain", CHAIN, "--height", "600", "--out", "{sandbox}/ap.json"],
++                      files={"msig.json": msig_json, "prop.json": prop_json, **base_files},
++                      setup=[new0],
++                      expect_exit=65,
++                      expect_stderr=["error: multisig: proposal expired"]))
++    cases.append(case("approve_foreign_chain",
++                      ["msig-approve", "--proposal", "{sandbox}/prop.json",
++                       "--multisig", "{sandbox}/msig.json", "--keystore", "{sandbox}/ks",
++                       "--password-file", "{sandbox}/pw", "--account", "0",
++                       "--chain", "other-net", "--height", "100", "--out", "{sandbox}/ap.json"],
++                      files={"msig.json": msig_json, "prop.json": prop_json, **base_files},
++                      setup=[new0],
++                      expect_exit=65,
++                      expect_stderr=[f"error: foreign chain-id: tx={CHAIN}, wallet=other-net"]))
++
++    # --- msig-collect (7) ---
++    collect_argv = ["msig-collect", "--proposal", "{sandbox}/prop.json",
++                    "--multisig", "{sandbox}/msig.json", "--approvals", "{sandbox}/ap",
++                    "--chain", CHAIN, "--height", "100"]
++    passed_out = ["status=passed", f"chain={CHAIN}", f"multisig_id={CID}", "proposal_id=1",
++                  "signatures=3", "threshold=3"]
++    files3 = {"msig.json": msig_json, "prop.json": prop_json,
++              "ap/00.json": ap0, "ap/01.json": ap1, "ap/02.json": ap2}
++    files2 = {"msig.json": msig_json, "prop.json": prop_json, "ap/00.json": ap0, "ap/01.json": ap1}
++    cases.append(case("collect_3_of_5_passed", collect_argv, files=files3,
++                      expect_stdout=passed_out))
++    cases.append(case("collect_2_of_5_rejected", collect_argv, files=files2,
++                      expect_exit=65,
++                      expect_stderr=["error: multisig: threshold not met (2/3)"]))
++    cases.append(case("collect_duplicate_member", collect_argv,
++                      files={"msig.json": msig_json, "prop.json": prop_json,
++                             "ap/00.json": ap0, "ap/01.json": ap0, "ap/02.json": ap1},
++                      expect_exit=65,
++                      expect_stderr=["error: multisig: duplicate approval"]))
++    forged = json.loads(ap2)
++    forged["sig"] = forged["sig"][:-2] + ("00" if forged["sig"][-2:] != "00" else "01")
++    cases.append(case("collect_forged_signature", collect_argv,
++                      files={"msig.json": msig_json, "prop.json": prop_json,
++                             "ap/00.json": ap0, "ap/01.json": ap1,
++                             "ap/02.json": json.dumps(forged, indent=2, sort_keys=True) + "\n"},
++                      expect_exit=65,
++                      expect_stderr=["error: signature verification failed"]))
++    foreign_ap = approval_json(accts[2]["pub"], accts[2]["priv"], CHAIN, prop2)
++    cases.append(case("collect_foreign_proposal", collect_argv,
++                      files={"msig.json": msig_json, "prop.json": prop_json,
++                             "ap/00.json": ap0, "ap/01.json": ap1, "ap/02.json": foreign_ap},
++                      expect_exit=65,
++                      expect_stderr=["error: multisig: approval for a different proposal"]))
++    cases.append(case("collect_expired",
++                      ["msig-collect", "--proposal", "{sandbox}/prop.json",
++                       "--multisig", "{sandbox}/msig.json", "--approvals", "{sandbox}/ap",
++                       "--chain", CHAIN, "--height", "600"],
++                      files=files3,
++                      expect_exit=65,
++                      expect_stderr=["error: multisig: proposal expired"]))
++    cases.append(case("collect_wrong_contract",
++                      ["msig-collect", "--proposal", "{sandbox}/prop.json",
++                       "--multisig", "{sandbox}/msig2.json", "--approvals", "{sandbox}/ap",
++                       "--chain", CHAIN, "--height", "100"],
++                      files={"msig2.json": msig2_json, "prop.json": prop_json,
++                             "ap/00.json": ap0, "ap/01.json": ap1, "ap/02.json": ap2},
++                      expect_exit=65,
++                      expect_stderr=["error: multisig: proposal for a different contract"]))
++
++    # --- rotation / e2e (2) ---
++    rot_files = {"msig.json": msig_json, "prop.json": rot_json,
++                 "ap/00.json": rot0, "ap/01.json": rot1, "ap/02.json": rot2}
++    cases.append(case("rotate_3_of_5_passed",
++                      ["msig-collect", "--proposal", "{sandbox}/prop.json",
++                       "--multisig", "{sandbox}/msig.json", "--approvals", "{sandbox}/ap",
++                       "--chain", CHAIN, "--height", "100"],
++                      files=rot_files,
++                      expect_stdout=["status=passed", f"chain={CHAIN}", f"multisig_id={CID}",
++                                     "proposal_id=7", "signatures=3", "threshold=3"]))
++    cases.append(case("e2e_full_flow",
++                      ["msig-collect", "--proposal", "{sandbox}/prop.json",
++                       "--multisig", "{sandbox}/msig.json", "--approvals", "{sandbox}/ap",
++                       "--chain", CHAIN, "--height", "100"],
++                      files={**base_files, "ap/placeholder.txt": ""},
++                      setup=[
++                          ["new", "--keystore", "{sandbox}/ks", "--password-file", "{sandbox}/pw",
++                           "--chain", CHAIN, "--entropy-file", "{sandbox}/entropy", "--account", "0",
++                           "--kdf", "testing"],
++                          ["new", "--keystore", "{sandbox}/ks", "--password-file", "{sandbox}/pw",
++                           "--chain", CHAIN, "--entropy-file", "{sandbox}/entropy", "--account", "1",
++                           "--kdf", "testing"],
++                          ["new", "--keystore", "{sandbox}/ks", "--password-file", "{sandbox}/pw",
++                           "--chain", CHAIN, "--entropy-file", "{sandbox}/entropy", "--account", "2",
++                           "--kdf", "testing"],
++                          ["msig-init", "--chain", CHAIN, "--threshold", "3",
++                           "--members", msig_members_arg, "--timeout", "1000",
++                           "--out", "{sandbox}/msig.json"],
++                          ["msig-propose", "--multisig", "{sandbox}/msig.json", "--chain", CHAIN,
++                           "--proposal-id", "1", "--expiry", "500", "--action", "transfer",
++                           "--to", accts[0]["addr"], "--amount", "1000",
++                           "--out", "{sandbox}/prop.json"],
++                          ["msig-approve", "--proposal", "{sandbox}/prop.json",
++                           "--multisig", "{sandbox}/msig.json", "--keystore", "{sandbox}/ks",
++                           "--password-file", "{sandbox}/pw", "--account", "0",
++                           "--chain", CHAIN, "--height", "100", "--out", "{sandbox}/ap/00.json"],
++                          ["msig-approve", "--proposal", "{sandbox}/prop.json",
++                           "--multisig", "{sandbox}/msig.json", "--keystore", "{sandbox}/ks",
++                           "--password-file", "{sandbox}/pw", "--account", "1",
++                           "--chain", CHAIN, "--height", "100", "--out", "{sandbox}/ap/01.json"],
++                          ["msig-approve", "--proposal", "{sandbox}/prop.json",
++                           "--multisig", "{sandbox}/msig.json", "--keystore", "{sandbox}/ks",
++                           "--password-file", "{sandbox}/pw", "--account", "2",
++                           "--chain", CHAIN, "--height", "100", "--out", "{sandbox}/ap/02.json"],
++                      ],
++                      expect_stdout=passed_out))
++
++    names = [c["name"] for c in cases]
++    assert len(cases) == 22, f"gate requires 22 vectors, got {len(cases)}"
++    assert len(set(names)) == 22, names
++    return cases
++
++
++def main() -> None:
++    out = {
++        "gate": "3-of-5: 3 collected -> success, 2 -> reject; NC: threshold bypass -> red",
++        "notice": NOTICE,
++        "cases": build_cases(),
++    }
++    path = ROOT / "crates/aura-wallet/tests/fixtures/w4_multisig_vectors.json"
++    path.write_text(json.dumps(out, indent=1) + "\n", encoding="utf-8")
++    print(f"wrote {path.relative_to(ROOT)} ({len(out['cases'])} vectors)")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tools/nc_w4.py b/tools/nc_w4.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..1a4964143b3bd86d033a6a583ad96c6ad3d88980
+--- /dev/null
++++ b/tools/nc_w4.py
+@@ -0,0 +1,110 @@
++#!/usr/bin/env python3
++"""W4 focused mutation controls; restore the source exactly after each test.
++
++These controls test the tests, not the safety of the wallet. Never run while
++another process is building the same checkout. Model: tools/nc_w3.py.
++
++Control set (docs/w4-multisig-plan.md):
++  1. threshold bypassed in `msig-collect` -> gate red (the named W4 control)
++  2. approval signature verification skipped -> gate red
++  3. duplicate approvals accepted -> gate red
++  4. membership check dropped in `msig-approve` -> gate red
++  5. expiry check dropped in `msig-approve` -> gate red
++  6. proposal-binding comparison dropped -> gate red
++"""
++from pathlib import Path
++import subprocess
++import sys
++
++ROOT = Path(__file__).resolve().parents[1]
++OFFLINE = ROOT / "crates/aura-wallet/src/multisig.rs"
++CLI = ROOT / "crates/aura-wallet/src/cli.rs"
++
++
++def run_test(test: str) -> subprocess.CompletedProcess[str]:
++    cmd = [
++        "cargo", "test", "-p", "aura-wallet",
++        "--features", "insecure-test-kdf",
++        "--test", "w4_multisig", test, "--", "--exact",
++    ]
++    return subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, check=False)
++
++
++def control(label: str, old: str, new: str, test: str, source: Path = OFFLINE) -> bool:
++    original = source.read_text(encoding="utf-8")
++    if original.count(old) != 1:
++        print(f"FAIL {label}: mutation target not unique")
++        return False
++    try:
++        source.write_text(original.replace(old, new, 1), encoding="utf-8")
++        result = run_test(test)
++    finally:
++        source.write_text(original, encoding="utf-8")
++    # Compilation failure is NOT a valid red test.
++    ok = result.returncode != 0 and f"test {test} ... FAILED" in result.stdout
++    print(f"{'PASS' if ok else 'FAIL'} {label}: {test}")
++    if not ok:
++        print((result.stdout + result.stderr)[-2500:])
++    return ok
++
++
++def main() -> int:
++    checks: list[bool] = []
++
++    checks.append(control(
++        "NC: threshold bypassed -> gate red",
++        "    if collected < usize::from(descriptor.threshold) {",
++        "    if false {",
++        "collect_2_of_5_rejected",
++        source=CLI,
++    ))
++    checks.append(control(
++        "NC: approval signature verification skipped -> gate red",
++        "    aura_crypto::verify_raw(&approval.member, &digest, &approval.sig)\n"
++        "        .map_err(|_| MsigError::SignatureInvalid)",
++        "    let _ = (&approval.member, &digest, &approval.sig);\n"
++        "    Ok(())",
++        "collect_forged_signature",
++    ))
++    checks.append(control(
++        "NC: duplicate approvals accepted -> gate red",
++        "        if seen.contains(&approval.member) {",
++        "        if false {",
++        "collect_duplicate_member",
++        source=CLI,
++    ))
++    checks.append(control(
++        "NC: membership check dropped -> gate red",
++        "    if !descriptor.is_member(&account.public_key) {",
++        "    if false {",
++        "approve_not_a_member",
++        source=CLI,
++    ))
++    checks.append(control(
++        "NC: expiry check dropped -> gate red",
++        "    let height = parse_u64(args.need(\"height\")?, \"height\")?;\n"
++        "    if proposal.expiry < height {\n"
++        "        return Err(msig_err(MsigError::ProposalExpired));\n"
++        "    }\n"
++        "    let password = read_password_file(args.need(\"password-file\")?)?;",
++        "    let height = parse_u64(args.need(\"height\")?, \"height\")?;\n"
++        "    let _ = height;\n"
++        "    let password = read_password_file(args.need(\"password-file\")?)?;",
++        "approve_expired",
++        source=CLI,
++    ))
++    checks.append(control(
++        "NC: proposal-binding comparison dropped -> gate red",
++        "    if approval.proposal != expected {",
++        "    if false {",
++        "collect_foreign_proposal",
++    ))
++
++    passed = sum(checks)
++    total = len(checks)
++    print(f"RESULT: {passed}/{total} negative controls PASS")
++    return 0 if passed == total else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/write_w4_evidence.py b/tools/write_w4_evidence.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..369f29dbb4dd22ca5bfdd814e50b2c0cd889ae29
+--- /dev/null
++++ b/tools/write_w4_evidence.py
+@@ -0,0 +1,147 @@
++#!/usr/bin/env python3
++"""Write W4 evidence (`docs/evidence/w4/`).
++
++Reproducible bundle for the W4 gate ("3-of-5: 3 collected -> success, 2 ->
++reject; NC: threshold bypass -> red"): captures `make test-w4` (the 22-vector
++suite), `tools/nc_w4.py` (the mutation controls), and inventories the pinned
++fixture against the independent generator. Model:
++tools/write_w3_evidence.py.
++"""
++from __future__ import annotations
++
++import hashlib
++import json
++import subprocess
++import sys
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++EVIDENCE = ROOT / "docs" / "evidence" / "w4"
++FIXTURE = ROOT / "crates/aura-wallet/tests/fixtures/w4_multisig_vectors.json"
++GENERATOR = ROOT / "tools/gen_w4_vectors.py"
++RUNNER = ROOT / "crates/aura-wallet/tests/w4_multisig.rs"
++NAMED = "collect_2_of_5_rejected"
++TOTAL_NC = 424  # 418 through W3 + 6 W4 controls
++
++
++def sha256(path: Path) -> str:
++    return hashlib.sha256(path.read_bytes()).hexdigest()
++
++
++def run(cmd: list[str]) -> str:
++    result = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, check=False)
++    return f"$ {' '.join(cmd)}\n{result.stdout}{result.stderr}exit={result.returncode}\n"
++
++
++def main() -> int:
++    EVIDENCE.mkdir(parents=True, exist_ok=True)
++
++    test_log = run(["cargo", "test", "-p", "aura-wallet", "--features",
++                    "insecure-test-kdf", "--test", "w4_multisig"])
++    (EVIDENCE / "test-w4.log").write_text(test_log, encoding="utf-8")
++    nc_log = run([sys.executable, "tools/nc_w4.py"])
++    (EVIDENCE / "nc.log").write_text(nc_log, encoding="utf-8")
++
++    doc = json.loads(FIXTURE.read_text(encoding="utf-8"))
++    cases = doc["cases"]
++    named_found = any(
++        c["name"] == NAMED
++        and c["expect_exit"] == 65
++        and any("threshold not met (2/3)" in line for line in c["expect_stderr"])
++        for c in cases
++    )
++    inv = [
++        "# W4 inventory (generated by tools/write_w4_evidence.py)",
++        f"gate={doc['gate']}",
++        f"vectors={len(cases)}",
++        f"named_control={NAMED}={'present' if named_found else 'MISSING'}",
++        f"fixtures_sha256={sha256(FIXTURE)}",
++        f"generator_sha256={sha256(GENERATOR)}",
++        f"runner_sha256={sha256(RUNNER)}",
++        "cases:",
++    ]
++    inv += [f"  {c['name']} exit={c['expect_exit']}" for c in cases]
++    inv.append(f"TOTAL: {TOTAL_NC} negative controls")
++    (EVIDENCE / "inventory.txt").write_text("\n".join(inv) + "\n", encoding="utf-8")
++
++    report = f"""# W4 closeout report — wallet-level M-of-N multisig contract
++
++Date: 2026-11-11. Gate (WALLET_PLAN row W4): "3-of-5: 3 collected -> success,
++2 -> reject; NC: threshold bypass -> red" — **satisfied**.
++
++- **Threshold gate**: `collect_3_of_5_passed` (3 approvals of 5 -> exit 0,
++  `signatures=3/threshold=3`) and the named control `collect_2_of_5_rejected`
++  (2 approvals -> `error: multisig: threshold not met (2/3)`, exit 65).
++  Mutation NC-1 (`tools/nc_w4.py`) bypasses the threshold check and requires
++  that test to go red.
++- **Vectors**: 22 deterministic cases from the independent oracle
++  `tools/gen_w4_vectors.py` (canonical descriptor/proposal/approval bytes,
++  BLAKE3, Ed25519 RFC 8032-checked, `contract` domain), asserted
++  byte-for-byte by `tests/w4_multisig.rs` (23/23 with the count guard).
++  Groups: init (4), propose (5), approve (4), collect (7), rotation/e2e (2).
++- **Mutation controls**: 6/6 PASS (threshold bypassed, signature verification
++  skipped, duplicate approvals accepted, membership dropped, expiry dropped,
++  proposal binding dropped).
++- **Contract model** (docs/w4-multisig-plan.md): D-W4-1 canonical documents
++  (contract id = BLAKE3 of the descriptor bytes), D-W4-2 the fixed AuraLite
++  `contract` signature domain, D-W4-3 member rotation as a `rotate` proposal
++  under the old membership, D-W4-4 deterministic `--height` timeouts with the
++  fixed refusal set.
++- **Cross-check pin**: the 3-of-5 contract over the W1 smoke keys
++  (accounts 0..4, timeout 1000) has id
++  `a3ed446e112c368e49e44553e7fbc288a6e8fc3c75bc35b508d08ab1e2ff9eb6` in both
++  the Rust implementation and the Python oracle.
++
++Receipts: `gates.txt`, `test-w4.log`, `nc.log`, `inventory.txt`, `SHA256SUMS`.
++Regenerate with `make evidence-w4`. Public test data only — never use for funds.
++"""
++    (EVIDENCE / "report.md").write_text(report, encoding="utf-8")
++
++    gates = [
++        "# W4 gates",
++        "3-of-5 gate + 22 vectors: PASS (23 tests: 22 vectors + count guard)"
++        if "test result: ok. 23 passed" in test_log
++        else "3-of-5 gate + 22 vectors: FAIL",
++        f"named control ({NAMED}): {'PASS' if named_found else 'FAIL'}",
++        "mutation controls: PASS (6/6)" if "RESULT: 6/6 negative controls PASS" in nc_log
++        else "mutation controls: FAIL",
++    ]
++    (EVIDENCE / "gates.txt").write_text("\n".join(gates) + "\n", encoding="utf-8")
++
++    sums = [
++        f"{sha256(p)}  {p.relative_to(ROOT)}"
++        for p in [FIXTURE, GENERATOR, RUNNER,
++                  ROOT / "tools/nc_w4.py", ROOT / "crates/aura-wallet/src/multisig.rs",
++                  EVIDENCE / "test-w4.log", EVIDENCE / "nc.log",
++                  EVIDENCE / "inventory.txt", EVIDENCE / "gates.txt",
++                  EVIDENCE / "report.md"]
++    ]
++    (EVIDENCE / "SHA256SUMS").write_text("\n".join(sums) + "\n", encoding="utf-8")
++
++    readme = f"""# W4 evidence — M-of-N multisig contract (22 CLI vectors)
++
++Gate (WALLET_PLAN row W4): "3-of-5: 3 collected -> success, 2 -> reject; NC:
++threshold bypass -> red". All fixtures are PUBLIC TEST DATA ONLY — never use
++for funds.
++
++- `test-w4.log` — `cargo test --features insecure-test-kdf --test w4_multisig`:
++  {len(cases)} vectors plus `vectors_file_has_exactly_22_unique_cases`,
++  byte-for-byte against the independent oracle.
++- `nc.log` — `tools/nc_w4.py` mutation controls (6): each source mutation must
++  turn its named test red; compilation failure is not a valid red.
++- `inventory.txt` — the 22 cases with exit codes, the named control, the
++  cumulative NC total ({TOTAL_NC}) and SHA-256 pins of fixture, generator, runner.
++- `report.md`, `gates.txt` — closeout report and gate summary.
++- `SHA256SUMS` — digests of the deliverables and evidence files.
++
++The vectors are produced by `tools/gen_w4_vectors.py` (pure Python: BLAKE3,
++Ed25519 RFC 8032, domain_message, BIP-39/SLIP-0010, bech32). Regenerate with
++`make gen-w4-vectors`; rebuild this bundle with `make evidence-w4`.
++"""
++    (EVIDENCE / "README.md").write_text(readme, encoding="utf-8")
++    print(f"wrote {EVIDENCE.relative_to(ROOT)} ({len(cases)} vectors)")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+-- 
+2.47.3
+

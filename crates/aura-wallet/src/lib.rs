@@ -11,6 +11,9 @@
 #![deny(missing_docs)]
 
 pub mod baseline;
+pub mod cli;
 pub mod derivation;
 pub mod keystore;
+pub mod multisig;
+pub mod offline;
 pub mod secret;

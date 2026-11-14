@@ -18,6 +18,7 @@ fails if a file in `docs/spec/` is not listed here.
 | D3 | [`mempool.md`](mempool.md) | nonce lanes, tip priority, replacement bump, bounded eviction, reorg reinsertion |
 | D4 | [`json-rpc.md`](json-rpc.md) | JSON-RPC 2.0 methods, HTTP/WS transports, errors, resource bounds, commit subscriptions |
 | D5 | [`grpc-rest.md`](grpc-rest.md) | protobuf gRPC service, REST gateway, OpenAPI, additive v1.1 compatibility |
+| W1 | [`keystore-format.md`](keystore-format.md) | W1-FORMAT-v1 (frozen 2026-11-08): keystore document v1/v2, recovery metadata marker, canonical JSON/AAD bytes, KDF policy bounds, normalization profiles |
 
 C0–C3 have no standalone format spec: the canonical types are defined by
 `crates/aura-types` and pinned by `crates/aura-types/tests/fixtures/c1_golden.txt`,

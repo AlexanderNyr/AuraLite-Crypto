@@ -132,6 +132,16 @@ impl UnsignedTx {
         writer.into_bytes()
     }
 
+    /// Canonical wire bytes of the unsigned part (W3 envelope body).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        encode_to_bytes(self)
+    }
+
+    /// Decode an unsigned transaction with full C2 canonicality (W3).
+    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, TxError> {
+        Ok(decode_canonical::<UnsignedTx>(bytes)?)
+    }
+
     /// Sign with a seed. The seed's public key must derive to `self.signer`.
     pub fn sign(&self, seed: &[u8; 32]) -> Result<Tx, TxError> {
         let public_key = ed25519_public_key(seed);

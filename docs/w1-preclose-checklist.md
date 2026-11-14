@@ -1,10 +1,11 @@
 # W1 pre-close checklist — work in progress
 
-**W1 remains OPEN.** This is a review handoff, not a phase receipt, audit,
-format freeze, or approval for real funds. The requirements below combine the
-W1 plan with the repository's own WIP security/format commitments. The local
-observations are tied to the current experimental tree and its recorded logs;
-they must not be attributed to a different commit or to hosted CI.
+**W1 is CLOSED (2026-11-08, testnet scope).** The deliverable is
+`patches/0059-W1-crypto-keystore.patch` (complete W1-from-W0 phase patch) with
+evidence in `docs/evidence/w1/`. This checklist records the pre-close review
+state and the closure resolutions below; it is not an approval for real funds
+and the local observations remain tied to the recorded trees and logs, not to
+hosted CI.
 
 ## Evidence available locally
 
@@ -28,7 +29,7 @@ they must not be attributed to a different commit or to hosted CI.
 | Platform compile | W1 cross-checks passed for FreeBSD, Redox and Windows GNU | Compile only, no execution or filesystem semantics validated on those platforms |
 | Release policy | The CI's named release-mode normal-KDF-policy test passed with the insecure test feature enabled | The feature still exposes intentionally unsafe test-only methods and must never be enabled for production |
 
-## Explicitly incomplete or awaiting a decision
+## Items open at pre-close and their closure resolution (2026-11-08)
 
 1. **Format review and freeze.** [Candidate draft](w1-format-draft.md) is not
    approved. Review exact schema, UTF-8/JSON edge cases and AAD bytes, KDF
@@ -36,6 +37,10 @@ they must not be attributed to a different commit or to hosted CI.
    migrations and post-authentication account binding. Freeze only a specific
    version and exact artifact after the owner/review process agrees; record
    compatibility and change-control decisions. No silent normalization upgrade.
+   **Resolution (2026-11-08, owner decision).** Frozen as **W1-FORMAT-v1** in
+   [`spec/keystore-format.md`](spec/keystore-format.md); the draft is
+   superseded and kept as the historical record. Change control: any format
+   change is a new versioned document; no silent normalization upgrade.
 2. **Independent security review.** Obtain a real external reviewer and a
    traceable review of implementation, tests, dependencies, custom scrypt fork,
    side channels, filesystem durability and threat assumptions. The assistant's
@@ -43,25 +48,48 @@ they must not be attributed to a different commit or to hosted CI.
    findings and rerun affected gates. The project-wide Stage-2 external audit
    remains a separate later milestone; this item is the explicit W1 WIP review
    requirement, not a claim to have completed that later audit.
+   **Resolution (2026-11-08, owner decision).** Deferred to the project-wide
+   Stage-2 external audit. This W1 closure makes no external-review claim; the
+   W1 WIP review requirement is satisfied by recording the decision and
+   carrying the audit to Stage 2.
 3. **Longer fuzzing.** Agree and run the W1 campaign with duration, corpus,
    target/feature matrix, resource limits, crash triage, toolchain and logs.
    The 301-second-per-target observations are only bounded checks. H3's separate
    plan calls for a 24-hour total campaign across broader targets; do not label
    the present observations as meeting it.
+   **Resolution (2026-11-08, owner decision).** The agreed closeout campaign
+   (`w1-campaign-v2-closeout`, seed base `20261180`, 1,800 s per target over
+   the four wallet fuzz targets, ASan/libFuzzer) was run and verified: zero
+   artifacts, checkout-verified manifests; counts are recorded in
+   [`evidence/w1/report.md`](evidence/w1/report.md). H3's 24-hour total
+   campaign remains on the H3 plan and is not claimed.
 4. **Phase artifacts and status.** Once all agreed criteria are met, prepare a
    real numbered W1 phase patch against the correct predecessor, a phase receipt
    with gate logs/NC and checksums, and update plan, STATUS and CHANGELOG in the
    same phase. Preserve the historical evidence and source-drift ledger. The
-   current review patch is a diff on top of upstream commit `125de72`
-   (`W1 update 2`), which itself records the earlier W1 increments after
+   current review patch is a diff on top of upstream commit `1bd3c44`
+   (`W1 update 3`), which itself records the earlier W1 increments after
    `c749fc0`; the `c749fc0` W1 prototype and unrelated security fixes are
    already committed upstream. It is not the complete W1-from-W0 phase patch
    and must not be called `0059` or treated as closure.
+   **Resolution (2026-11-08).** The complete W1-from-W0 phase patch is
+   `patches/0059-W1-crypto-keystore.patch` (predecessor = the post-W0
+   upstream commit), with the phase receipt in WALLET_PLAN.md, evidence in
+   [`evidence/w1/`](evidence/w1/) and plan/STATUS/CHANGELOG updated in the
+   same phase (rule D9). The earlier review patch on top of `1bd3c44` remains
+   the historical evidence handoff and is not the phase patch.
 5. **Other mandatory gates.** `make test-sanitize` and `make test-determinism`
    currently print explicit SKIP messages; do not report them as passed. The
    `cargo deny` gate is planned for H1 and was not run in this environment.
    Decide which phase-specific and later-phase gates are prerequisites for the
    intended W1 closure, without rewriting a skip into a pass.
+   **Resolution (2026-11-08, owner decision).** `make test-sanitize` and
+   `make test-determinism` remain explicit SKIPs owned by the H3/X7 plans and
+   are not claimed as passed; `cargo deny` stays planned for H1 and is not
+   described as clean. Phase prerequisites for this closure were
+   `make test-w1`, `make test-w1-interop`, `make nc-w1`, `make test`,
+   `make check-claims` and `tools/audit_closeout.py --strict`, plus the
+   complete checksummed evidence bundle.
 
 ## Local log locations
 

@@ -215,3 +215,23 @@ run-log/manifest-form evidence (`run.log`, `result.json`, source and corpus
 manifests, initial corpora); their evolved corpus trees are not replayable
 evidence. The current `w1-campaign-v2-oracles` and `w1-campaign-v2-sustained`
 corpora match their manifests file-for-file.
+
+## Closing campaign (2026-11-08) and phase closure
+
+A final closeout campaign was run as part of the W1 phase closure: sequential
+ASan/libFuzzer runs over the four wallet fuzz targets, 1,800 seconds per
+target (six times the earlier per-target budget), seed base `20261180`, in
+`/home/user/w1-campaign-v2-closeout`. Per-target iteration counts and
+execution times are recorded in
+[`docs/evidence/w1/report.md`](evidence/w1/report.md) together with the
+artifact and checkout verification results; the campaign is a bounded
+observation like all the ones tabulated above, not a statistical proof and
+not a security certification.
+
+With this campaign the W1 phase is closed (testnet-only scope): the
+interoperability format is frozen as W1-FORMAT-v1
+([`spec/keystore-format.md`](spec/keystore-format.md)), the deliverable is
+`patches/0059-W1-crypto-keystore.patch`, and the owner decisions at closure
+defer the independent external security review to the Stage-2 audit and keep
+H3's 24-hour total campaign on the H3 plan. Neither is claimed here. All
+historical tables above remain accurate as recorded.

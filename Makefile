@@ -54,6 +54,11 @@ PYTHON ?= python3
         gen-n7-vectors test-n7 nc-n7 evidence-n7 \
         gen-n8-vectors test-n8 nc-n8 evidence-n8 \
         gen-w0-vectors test-w0 nc-w0 evidence-w0 \
+        test-w1 test-w1-interop nc-w1 evidence-w1 \
+        gen-w2-vectors test-w2 nc-w2 evidence-w2 \
+        gen-w3-vectors test-w3 nc-w3 evidence-w3 \
+        gen-w4-vectors test-w4 nc-w4 evidence-w4 \
+        gen-h0-vectors check-h0 nc-h0 evidence-h0 \
         devnet clean
 
 help:
@@ -237,6 +242,8 @@ test: deps-check
 	@$(PYTHON) tools/nc_p2p_review.py
 	@echo "== docs drift guard =="
 	@$(PYTHON) tools/check_claims.py
+	@echo "== threat model review gate =="
+	@$(PYTHON) tools/check_threat_model.py
 	@echo "== dependency gate =="
 	@$(PYTHON) tools/check_deps.py
 	@echo "== local scrypt fork provenance =="
@@ -1121,6 +1128,9 @@ nc-w0:
 evidence-w0:
 	@$(PYTHON) tools/write_w0_evidence.py
 
+evidence-w1:
+	@$(PYTHON) tools/write_w1_evidence.py
+
 devnet:
 	@$(PYTHON) tools/run_devnet.py
 
@@ -1155,6 +1165,66 @@ test-w1:
 nc-w1:
 	@$(PYTHON) tools/nc_w1.py
 	@$(PYTHON) tools/nc_w1_fuzz.py
+
+# W2: the 40 CLI vectors gate (tools/gen_w2_vectors.py oracle; see docs/w2-cli-plan.md).
+.PHONY: gen-w2-vectors test-w2 nc-w2
+
+gen-w2-vectors:
+	@$(PYTHON) tools/gen_w2_vectors.py
+
+test-w2:
+	@cargo test -p aura-wallet --features insecure-test-kdf --test w2_cli
+
+nc-w2:
+	@$(PYTHON) tools/nc_w2.py
+
+evidence-w2:
+	@$(PYTHON) tools/write_w2_evidence.py
+
+# W3: the 24 air-gapped offline-signing vectors gate (tools/gen_w3_vectors.py oracle).
+.PHONY: gen-w3-vectors test-w3 nc-w3 evidence-w3
+
+gen-w3-vectors:
+	@$(PYTHON) tools/gen_w3_vectors.py
+
+test-w3:
+	@cargo test -p aura-wallet --features insecure-test-kdf --test w3_offline
+
+nc-w3:
+	@$(PYTHON) tools/nc_w3.py
+
+evidence-w3:
+	@$(PYTHON) tools/write_w3_evidence.py
+
+# W4: the 22 multisig vectors gate (tools/gen_w4_vectors.py oracle).
+.PHONY: gen-w4-vectors test-w4 nc-w4 evidence-w4
+
+gen-w4-vectors:
+	@$(PYTHON) tools/gen_w4_vectors.py
+
+test-w4:
+	@cargo test -p aura-wallet --features insecure-test-kdf --test w4_multisig
+
+nc-w4:
+	@$(PYTHON) tools/nc_w4.py
+
+evidence-w4:
+	@$(PYTHON) tools/write_w4_evidence.py
+
+# H0: the threat-model review gate (tools/check_threat_model.py).
+.PHONY: gen-h0-vectors check-h0 nc-h0 evidence-h0
+
+gen-h0-vectors:
+	@$(PYTHON) tools/gen_h0_vectors.py
+
+check-h0:
+	@$(PYTHON) tools/check_threat_model.py
+
+nc-h0:
+	@$(PYTHON) tools/nc_h0.py
+
+evidence-h0:
+	@$(PYTHON) tools/write_h0_evidence.py
 
 # Optional independent interop check; install the pinned test-only Python
 # dependencies in tools/w1-reference-requirements.txt first.

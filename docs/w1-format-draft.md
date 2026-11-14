@@ -1,11 +1,10 @@
 # W1 testnet keystore interoperability — candidate draft
 
-**Status: DRAFT, not frozen, not approved, not a security specification.** This
-document describes the current experimental W1 prototype for independent review.
-The repository implementation remains authoritative where this draft and code
-disagree. Do not use prototype keys or files for real funds. Completing this
-draft, obtaining a review, deciding compatibility, and recording the phase gate
-are prerequisites to W1 closure; the presence of this file does not satisfy them.
+**Status: SUPERSEDED BY THE FROZEN SPEC.** This candidate draft was frozen
+verbatim as [docs/spec/keystore-format.md](spec/keystore-format.md)
+(**W1-FORMAT-v1**, owner decision 2026-11-08, W1 phase closure). This file is
+kept as the historical pre-freeze record; do not edit it. The frozen
+specification and its change-control rules are authoritative.
 
 Reference implementation: `crates/aura-wallet/src/keystore.rs` and
 `derivation.rs`; narrative and filesystem caveats: [w1-keystore-prototype.md](w1-keystore-prototype.md).

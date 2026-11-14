@@ -97,6 +97,28 @@ unsafe/network filesystems, or name changes after the function returns. A
 post-publication error can leave a file behind. Non-Unix behavior has not
 received equivalent path, ACL, or durability hardening.
 
+## W1 phase closure (2026-11-08; testnet scope)
+
+W1 is closed as a phase. Deliverable `patches/0059-W1-crypto-keystore.patch`
+(complete W1-from-W0 phase patch), receipt in `docs/plans/WALLET_PLAN.md`,
+evidence in `docs/evidence/w1/` (gates, 67/67 NC log, checksums, report,
+inventory). The interoperability format is frozen as **W1-FORMAT-v1**
+(`docs/spec/keystore-format.md`) by owner decision. The closeout ASan campaign
+(`/home/user/w1-campaign-v2-closeout`, seed base `20261180`, 1,800 s per
+target over the four wallet fuzz targets) completed with zero artifacts and
+checkout-verified manifests.
+
+Owner decisions recorded at closure: this closure is **testnet-only**; the
+independent external security review is **deferred to the Stage-2 audit** and
+is not claimed here (local tests, mutation controls, Python/Rust references
+and the assistant's work are not external review); H3's 24-hour total fuzz
+campaign remains on the H3 plan and the bounded W1 campaigns are not claimed
+to meet it; `make test-sanitize` and `make test-determinism` remain explicit
+SKIPs owned by the H3/X7 plans, `cargo deny` stays planned for H1, and none
+of them are claimed as passed; mainnet curve/path/coin-type allocation and
+migration policy remain separate decisions. All historical limitations below
+remain accurate for the closed phase and are preserved unchanged.
+
 ## Recovery-metadata and scrypt-differential fuzz oracles (2026-11-08; W1 still open)
 
 `fuzz_recovery_metadata` and `fuzz_scrypt_differential` are now thin wrappers

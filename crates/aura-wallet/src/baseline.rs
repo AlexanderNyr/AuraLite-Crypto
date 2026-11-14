@@ -93,10 +93,10 @@ impl Layer {
     }
 
     /// True when this layer's source file declares public wallet logic.
-    /// W1 lands the keystore; W2–W4 remain placeholders.
+    /// W1 lands the keystore and W2 the wallet CLI; W3–W4 remain placeholders.
     #[must_use]
     pub fn has_wallet_logic(&self) -> bool {
-        matches!(self.name, "keystore")
+        matches!(self.name, "keystore" | "wallet-cli")
     }
 }
 
@@ -1188,8 +1188,12 @@ mod tests {
         let root = default_workspace_root();
         let s = survey(&root).expect("survey workspace");
         assert_eq!(s.layers.len(), 4);
-        assert_eq!(s.implemented(), 1, "W1 keystore is implemented");
-        assert_eq!(s.placeholders(), 3, "W2-W4 remain placeholders");
+        assert_eq!(
+            s.implemented(),
+            2,
+            "W1 keystore and W2 wallet-cli are implemented"
+        );
+        assert_eq!(s.placeholders(), 2, "W3-W4 remain placeholders");
         assert_eq!(s.missing(), 0);
     }
 

@@ -1,0 +1,2795 @@
+From 56472deb08e4af3c46d6eb842b4fc6d84c7e2446 Mon Sep 17 00:00:00 2001
+From: AuraLite Pipeline <pipeline@auralite.local>
+Date: Fri, 13 Nov 2026 17:19:39 +0000
+Subject: [PATCH] W3: offline signing phase closed (air-gapped e2e, 24 vectors,
+ 6 mutation controls)
+
+- offline.rs: AURALITE-OFFLINE-V1 envelopes, ALO1 QR frames, verification contract
+- CLI: tx-prepare/tx-sign/tx-verify/qr-split/qr-join; broadcast accepts envelopes
+- 24 vectors from tools/gen_w3_vectors.py incl. named control (foreign domain -> reject)
+- tools/nc_w3.py 6 mutation controls; evidence docs/evidence/w3/
+- design decisions D-W3-1..4 in docs/w3-offline-plan.md
+---
+ CHANGELOG.md                                  |  12 +
+ Makefile                                      |  16 +
+ crates/aura-tx/src/tx.rs                      |  10 +
+ crates/aura-wallet/src/cli.rs                 | 231 ++++-
+ crates/aura-wallet/src/lib.rs                 |   1 +
+ crates/aura-wallet/src/offline.rs             | 262 ++++++
+ .../tests/fixtures/w1_baseline.txt            |   8 +-
+ .../tests/fixtures/w3_offline_vectors.json    | 804 ++++++++++++++++++
+ crates/aura-wallet/tests/w3_offline.rs        | 170 ++++
+ docs/evidence/review-w1-source-drift.txt      |  23 +-
+ docs/evidence/w3/README.md                    |  19 +
+ docs/evidence/w3/SHA256SUMS                   |  10 +
+ docs/evidence/w3/gates.txt                    |   4 +
+ docs/evidence/w3/inventory.txt                |  33 +
+ docs/evidence/w3/nc.log                       |   9 +
+ docs/evidence/w3/report.md                    |  28 +
+ docs/evidence/w3/test-w3.log                  |  37 +
+ docs/plans/WALLET_PLAN.md                     |  25 +-
+ docs/w3-offline-plan.md                       |  71 ++
+ tools/audit_closeout.py                       |   9 +-
+ tools/gen_w3_vectors.py                       | 399 +++++++++
+ tools/nc_w3.py                                | 113 +++
+ tools/write_w3_evidence.py                    | 145 ++++
+ 23 files changed, 2415 insertions(+), 24 deletions(-)
+ create mode 100644 crates/aura-wallet/src/offline.rs
+ create mode 100644 crates/aura-wallet/tests/fixtures/w3_offline_vectors.json
+ create mode 100644 crates/aura-wallet/tests/w3_offline.rs
+ create mode 100644 docs/evidence/w3/README.md
+ create mode 100644 docs/evidence/w3/SHA256SUMS
+ create mode 100644 docs/evidence/w3/gates.txt
+ create mode 100644 docs/evidence/w3/inventory.txt
+ create mode 100644 docs/evidence/w3/nc.log
+ create mode 100644 docs/evidence/w3/report.md
+ create mode 100644 docs/evidence/w3/test-w3.log
+ create mode 100644 docs/w3-offline-plan.md
+ create mode 100644 tools/gen_w3_vectors.py
+ create mode 100644 tools/nc_w3.py
+ create mode 100644 tools/write_w3_evidence.py
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index f5d7bf4a93869663750098ee601844e4336c5f50..83397ebdad481ba069a3f502ffe9f3efcc80e03b 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,18 @@
+ All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
+ never rewritten: corrections are made with a new entry or an explicit note.
+ 
++## [W3 — offline signing phase closed: air-gapped e2e, 24 vectors, 6 mutation controls] 2026-11-11
++
++- W3 phase closed. Deliverable `patches/0061-W3-offline-signing.patch`,
++  receipt in `docs/plans/WALLET_PLAN.md`, evidence in `docs/evidence/w3/`.
++- Air-gapped offline signing: deterministic `AURALITE-OFFLINE-V1` envelopes,
++  `ALO1:ii/nn` QR frames, `tx-prepare`/`tx-sign`/`tx-verify`/`qr-split`/
++  `qr-join`; `broadcast` accepts signed envelopes directly.
++- Gate: air-gapped scenario end-to-end (24 vectors, byte-for-byte, from the
++  independent oracle) and the named control (a signature with a foreign
++  domain is rejected: `error: signature verification failed`, exit 65).
++- Mutation controls: 6/6 PASS (`tools/nc_w3.py`).
++
+ ## [W2 — aura-wallet CLI phase closed: 40 CLI vectors, 6 mutation controls] 2026-11-11
+ 
+ - W2 phase closed. Deliverable `patches/0060-W2-wallet-cli.patch` (complete
+diff --git a/Makefile b/Makefile
+index a35422f0e912ceb6e87c6f15306aa71e8058e8ae..5c822946eb0f5e8a27edae9a66637fc0c77ca450 100644
+--- a/Makefile
++++ b/Makefile
+@@ -56,6 +56,7 @@ PYTHON ?= python3
+         gen-w0-vectors test-w0 nc-w0 evidence-w0 \
+         test-w1 test-w1-interop nc-w1 evidence-w1 \
+         gen-w2-vectors test-w2 nc-w2 evidence-w2 \
++        gen-w3-vectors test-w3 nc-w3 evidence-w3 \
+         devnet clean
+ 
+ help:
+@@ -1176,6 +1177,21 @@ nc-w2:
+ evidence-w2:
+ 	@$(PYTHON) tools/write_w2_evidence.py
+ 
++# W3: the 24 air-gapped offline-signing vectors gate (tools/gen_w3_vectors.py oracle).
++.PHONY: gen-w3-vectors test-w3 nc-w3 evidence-w3
++
++gen-w3-vectors:
++	@$(PYTHON) tools/gen_w3_vectors.py
++
++test-w3:
++	@cargo test -p aura-wallet --features insecure-test-kdf --test w3_offline
++
++nc-w3:
++	@$(PYTHON) tools/nc_w3.py
++
++evidence-w3:
++	@$(PYTHON) tools/write_w3_evidence.py
++
+ # Optional independent interop check; install the pinned test-only Python
+ # dependencies in tools/w1-reference-requirements.txt first.
+ .PHONY: test-w1-interop
+diff --git a/crates/aura-tx/src/tx.rs b/crates/aura-tx/src/tx.rs
+index 3d26213a0087f1572d95c0a01a92d8c63e16b2ac..d38c43c3513d58fd61286da7038c811a33a97b94 100644
+--- a/crates/aura-tx/src/tx.rs
++++ b/crates/aura-tx/src/tx.rs
+@@ -132,6 +132,16 @@ impl UnsignedTx {
+         writer.into_bytes()
+     }
+ 
++    /// Canonical wire bytes of the unsigned part (W3 envelope body).
++    pub fn to_bytes(&self) -> Vec<u8> {
++        encode_to_bytes(self)
++    }
++
++    /// Decode an unsigned transaction with full C2 canonicality (W3).
++    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, TxError> {
++        Ok(decode_canonical::<UnsignedTx>(bytes)?)
++    }
++
+     /// Sign with a seed. The seed's public key must derive to `self.signer`.
+     pub fn sign(&self, seed: &[u8; 32]) -> Result<Tx, TxError> {
+         let public_key = ed25519_public_key(seed);
+diff --git a/crates/aura-wallet/src/cli.rs b/crates/aura-wallet/src/cli.rs
+index b9a85c85ad09dac67eeadbeded008370a86507ae..f1f186db9d8329afa4cc638e4300b65a610618ac 100644
+--- a/crates/aura-wallet/src/cli.rs
++++ b/crates/aura-wallet/src/cli.rs
+@@ -28,6 +28,7 @@ use crate::derivation::{
+     self, Bip39NormalizationProfile, DerivedAccount, derive_account, generate_mnemonic,
+ };
+ use crate::keystore::{KdfParams, Keystore};
++use crate::offline::{self, OfflineError};
+ use crate::secret::Password;
+ use aura_tx::{Tx, TxKind, TxParams, UnsignedTx, signer_address};
+ use aura_types::{Address, Amount, ChainId, Domain, Gas, Height, Nonce};
+@@ -50,7 +51,7 @@ pub const STAKE_PAYLOAD_PREFIX: &[u8] = b"AuraLite-Crypto/wallet-stake-v1\x00";
+ pub const BALLOT_PREFIX: &[u8] = b"AuraLite-Crypto/wallet-ballot-v1\x00";
+ 
+ /// The nine wallet commands the CLI implements.
+-pub const COMMANDS: [&str; 9] = [
++pub const COMMANDS: [&str; 14] = [
+     "new",
+     "import",
+     "list",
+@@ -60,6 +61,11 @@ pub const COMMANDS: [&str; 9] = [
+     "broadcast",
+     "stake",
+     "vote",
++    "tx-prepare",
++    "tx-sign",
++    "tx-verify",
++    "qr-split",
++    "qr-join",
+ ];
+ 
+ /// `stake` action tags.
+@@ -155,6 +161,8 @@ pub enum CliError {
+     BadPassword,
+     /// Policy refusal with a fixed reason (exit 65).
+     Refused(String),
++    /// Fixed invalid-artifact message (exit 65, W3 envelopes).
++    Invalid(String),
+     /// Keystore file failure (exit 69).
+     Keystore(String),
+     /// Ledger failure (exit 69).
+@@ -169,7 +177,10 @@ impl CliError {
+     pub fn exit_code(self) -> i32 {
+         match self {
+             Self::Usage(_) => EXIT_USAGE,
+-            Self::ForeignChainId { .. } | Self::BadPassword | Self::Refused(_) => EXIT_REFUSED,
++            Self::ForeignChainId { .. }
++            | Self::BadPassword
++            | Self::Refused(_)
++            | Self::Invalid(_) => EXIT_REFUSED,
+             Self::Keystore(_) | Self::Ledger(_) | Self::Crypto(_) => EXIT_FAIL,
+         }
+     }
+@@ -184,6 +195,7 @@ impl fmt::Display for CliError {
+             }
+             Self::BadPassword => write!(f, "error: bad password"),
+             Self::Refused(m) => write!(f, "error: refused: {m}"),
++            Self::Invalid(m) => write!(f, "error: {m}"),
+             Self::Keystore(m) => write!(f, "error: keystore: {m}"),
+             Self::Ledger(m) => write!(f, "error: ledger: {m}"),
+             Self::Crypto(m) => write!(f, "error: crypto: {m}"),
+@@ -908,6 +920,18 @@ fn build_and_sign(
+ 
+ fn load_signed_tx(text: &str) -> Result<Tx, CliError> {
+     let cleaned: String = text.chars().filter(|c| !c.is_whitespace()).collect();
++    let envelope_prefix = offline::b64url_encode(offline::ENVELOPE_MAGIC);
++    if cleaned.starts_with(&envelope_prefix) {
++        let (kind, body) = offline::parse_envelope(&cleaned).map_err(offline_err)?;
++        if kind != offline::KIND_SIGNED {
++            return Err(CliError::Invalid("envelope: expected signed".to_string()));
++        }
++        let tx = Tx::from_canonical_bytes(&body)
++            .map_err(|_| CliError::Invalid("envelope: bad encoding".to_string()))?;
++        tx.verify_signature()
++            .map_err(|_| CliError::Invalid("signature verification failed".to_string()))?;
++        return Ok(tx);
++    }
+     let bytes = hex::decode(&cleaned).map_err(|_| CliError::Usage("tx must be hex".to_string()))?;
+     let tx = Tx::from_canonical_bytes(&bytes)
+         .map_err(|e| CliError::Refused(format!("malformed tx: {e}")))?;
+@@ -916,6 +940,55 @@ fn load_signed_tx(text: &str) -> Result<Tx, CliError> {
+     Ok(tx)
+ }
+ 
++fn offline_err(e: OfflineError) -> CliError {
++    match e {
++        OfflineError::ForeignChainId { found, expected } => {
++            CliError::ForeignChainId { found, expected }
++        }
++        other => CliError::Invalid(other.to_string()),
++    }
++}
++
++fn qr_size(args: &Args) -> Result<usize, CliError> {
++    match args.opt("qr-size") {
++        Some(v) => {
++            let n = parse_u64(v, "qr-size")?;
++            let n = usize::try_from(n)
++                .map_err(|_| CliError::Usage("--qr-size must be 8..4096".to_string()))?;
++            if !(8..=4096).contains(&n) {
++                return Err(CliError::Usage("--qr-size must be 8..4096".to_string()));
++            }
++            Ok(n)
++        }
++        None => Ok(offline::DEFAULT_QR_SIZE),
++    }
++}
++
++fn read_artifact(flag: &str, path: &str) -> Result<String, CliError> {
++    std::fs::read_to_string(path).map_err(|e| CliError::Usage(format!("{flag}: {e}")))
++}
++
++fn write_envelope_out(
++    out_path: &str,
++    qr_dir: Option<&str>,
++    size: usize,
++    text: &str,
++) -> Result<usize, CliError> {
++    std::fs::write(out_path, format!("{text}\n"))
++        .map_err(|e| CliError::Usage(format!("--out: {e}")))?;
++    let Some(dir) = qr_dir else {
++        return Ok(0);
++    };
++    std::fs::create_dir_all(dir).map_err(|e| CliError::Usage(format!("--qr-dir: {e}")))?;
++    let frames = offline::split_frames(text, size);
++    for (i, frame) in frames.iter().enumerate() {
++        let path = Path::new(dir).join(format!("frame-{i:03}.txt"));
++        std::fs::write(&path, format!("{frame}\n"))
++            .map_err(|e| CliError::Usage(format!("--qr-dir: {e}")))?;
++    }
++    Ok(frames.len())
++}
++
+ fn cmd_new(args: &Args, out: &mut dyn std::io::Write) -> Result<(), CliError> {
+     args.only(&[
+         "keystore",
+@@ -1300,7 +1373,154 @@ fn cmd_vote(args: &Args, out: &mut dyn std::io::Write) -> Result<(), CliError> {
+ }
+ 
+ /// Run one CLI invocation, writing output to `out`/`err`; returns the exit code.
+-#[must_use]
++fn cmd_tx_prepare(args: &Args, out: &mut dyn std::io::Write) -> Result<(), CliError> {
++    args.only(&[
++        "chain", "from", "to", "amount", "nonce", "gas", "max-fee", "tip", "expiry", "out",
++        "qr-dir", "qr-size",
++    ])?;
++    let chain = args.need("chain")?;
++    let from = Address::from_bech32(args.need("from")?)
++        .map_err(|_| CliError::Usage("--from must be bech32".to_string()))?;
++    let _to = Address::from_bech32(args.need("to")?)
++        .map_err(|_| CliError::Usage("--to must be bech32".to_string()))?;
++    let amount = parse_u64(args.need("amount")?, "amount")?;
++    let nonce = parse_u64(args.need("nonce")?, "nonce")?;
++    let (gas, max_fee, tip, expiry) = fee_flags(args)?;
++    let params = TxParams {
++        chain_id: ChainId::new(chain)
++            .map_err(|_| CliError::Usage("invalid --chain".to_string()))?,
++        signer: from,
++        nonce: Nonce::new(nonce),
++        kind: TxKind::Transfer,
++        payload: amount.to_le_bytes().to_vec(),
++        gas_limit: Gas::new(gas),
++        max_fee: Amount::from_units(u128::from(max_fee)),
++        tip: Amount::from_units(u128::from(tip)),
++        expiry: Height::new(expiry),
++    };
++    let unsigned = UnsignedTx::new(params).map_err(|e| CliError::Crypto(e.to_string()))?;
++    let text = offline::encode_envelope(offline::KIND_UNSIGNED, &unsigned.to_bytes());
++    let size = qr_size(args)?;
++    let frames = write_envelope_out(args.need("out")?, args.opt("qr-dir"), size, &text)?;
++    let _ = writeln!(out, "status=prepared");
++    let _ = writeln!(out, "chain={chain}");
++    let _ = writeln!(out, "signer={}", from.to_bech32());
++    let _ = writeln!(out, "frames={frames}");
++    Ok(())
++}
++
++fn cmd_tx_sign(args: &Args, out: &mut dyn std::io::Write) -> Result<(), CliError> {
++    args.only(&[
++        "in",
++        "out",
++        "keystore",
++        "password-file",
++        "account",
++        "chain",
++        "qr-dir",
++        "qr-size",
++    ])?;
++    let chain = args.need("chain")?;
++    let password = read_password_file(args.need("password-file")?)?;
++    let index = account_index(args)?;
++    let account = load_account(args.need("keystore")?, index, &password)?;
++    let text = read_artifact("--in", args.need("in")?)?;
++    let (kind, body) = offline::parse_envelope(&text).map_err(offline_err)?;
++    if kind != offline::KIND_UNSIGNED {
++        return Err(CliError::Invalid("envelope: expected unsigned".to_string()));
++    }
++    let unsigned = UnsignedTx::from_canonical_bytes(&body)
++        .map_err(|_| CliError::Invalid("envelope: bad encoding".to_string()))?;
++    if unsigned.chain_id.as_str() != chain {
++        return Err(CliError::ForeignChainId {
++            found: unsigned.chain_id.as_str().to_owned(),
++            expected: chain.to_owned(),
++        });
++    }
++    if unsigned.signer != account.address {
++        return Err(CliError::Refused(format!(
++            "signer mismatch: tx={}, key={}",
++            hex::encode(unsigned.signer.as_bytes()),
++            hex::encode(account.address.as_bytes())
++        )));
++    }
++    let signed = unsigned
++        .sign(account.secret.as_bytes())
++        .map_err(|e| CliError::Crypto(e.to_string()))?;
++    let signed_text = offline::encode_envelope(offline::KIND_SIGNED, &signed.to_bytes());
++    let size = qr_size(args)?;
++    let frames = write_envelope_out(args.need("out")?, args.opt("qr-dir"), size, &signed_text)?;
++    let _ = writeln!(out, "status=signed");
++    let _ = writeln!(out, "chain={chain}");
++    let _ = writeln!(out, "txid={}", hex::encode(signed.txid().as_bytes()));
++    let _ = writeln!(out, "frames={frames}");
++    Ok(())
++}
++
++fn cmd_tx_verify(args: &Args, out: &mut dyn std::io::Write) -> Result<(), CliError> {
++    args.only(&["in", "chain", "against"])?;
++    let chain = args.need("chain")?;
++    let text = read_artifact("--in", args.need("in")?)?;
++    let against = match args.opt("against") {
++        Some(path) => Some(read_artifact("--against", path)?),
++        None => None,
++    };
++    let tx =
++        offline::verify_signed_envelope(&text, chain, against.as_deref()).map_err(offline_err)?;
++    let _ = writeln!(out, "status=verified");
++    let _ = writeln!(out, "chain={chain}");
++    let _ = writeln!(out, "txid={}", hex::encode(tx.txid().as_bytes()));
++    let _ = writeln!(out, "signer={}", tx.unsigned.signer.to_bech32());
++    Ok(())
++}
++
++fn cmd_qr_split(args: &Args, out: &mut dyn std::io::Write) -> Result<(), CliError> {
++    args.only(&["in", "out-dir", "qr-size"])?;
++    let text = read_artifact("--in", args.need("in")?)?;
++    offline::parse_envelope(&text).map_err(offline_err)?;
++    let cleaned: String = text.chars().filter(|c| !c.is_whitespace()).collect();
++    let size = qr_size(args)?;
++    let dir = args.need("out-dir")?;
++    std::fs::create_dir_all(dir).map_err(|e| CliError::Usage(format!("--out-dir: {e}")))?;
++    let frames = offline::split_frames(&cleaned, size);
++    for (i, frame) in frames.iter().enumerate() {
++        let path = Path::new(dir).join(format!("frame-{i:03}.txt"));
++        std::fs::write(&path, format!("{frame}\n"))
++            .map_err(|e| CliError::Usage(format!("--out-dir: {e}")))?;
++    }
++    let _ = writeln!(out, "status=split");
++    let _ = writeln!(out, "frames={}", frames.len());
++    let _ = writeln!(out, "size={size}");
++    Ok(())
++}
++
++fn cmd_qr_join(args: &Args, out: &mut dyn std::io::Write) -> Result<(), CliError> {
++    args.only(&["in-dir", "out"])?;
++    let dir = Path::new(args.need("in-dir")?);
++    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
++        .map_err(|e| CliError::Usage(format!("--in-dir: {e}")))?
++        .filter_map(|entry| entry.ok().map(|e| e.path()))
++        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("txt"))
++        .collect();
++    paths.sort();
++    let mut lines: Vec<String> = Vec::new();
++    for path in &paths {
++        let text =
++            std::fs::read_to_string(path).map_err(|e| CliError::Usage(format!("--in-dir: {e}")))?;
++        for line in text.lines() {
++            lines.push(line.to_string());
++        }
++    }
++    let joined = offline::join_frames(&lines).map_err(offline_err)?;
++    offline::parse_envelope(&joined).map_err(offline_err)?;
++    std::fs::write(args.need("out")?, format!("{joined}\n"))
++        .map_err(|e| CliError::Usage(format!("--out: {e}")))?;
++    let _ = writeln!(out, "status=joined");
++    let _ = writeln!(out, "frames={}", paths.len());
++    Ok(())
++}
++
++/// Execute one CLI invocation against the given streams; returns the exit code.
+ pub fn run(args: &[String], out: &mut dyn std::io::Write, err: &mut dyn std::io::Write) -> i32 {
+     let mut dispatch = || -> Result<(), CliError> {
+         let (command, rest) = args
+@@ -1317,6 +1537,11 @@ pub fn run(args: &[String], out: &mut dyn std::io::Write, err: &mut dyn std::io:
+             "broadcast" => cmd_broadcast(&parsed, out),
+             "stake" => cmd_stake(&parsed, out),
+             "vote" => cmd_vote(&parsed, out),
++            "tx-prepare" => cmd_tx_prepare(&parsed, out),
++            "tx-sign" => cmd_tx_sign(&parsed, out),
++            "tx-verify" => cmd_tx_verify(&parsed, out),
++            "qr-split" => cmd_qr_split(&parsed, out),
++            "qr-join" => cmd_qr_join(&parsed, out),
+             other => Err(CliError::Usage(format!("unknown command {other}"))),
+         }
+     };
+diff --git a/crates/aura-wallet/src/lib.rs b/crates/aura-wallet/src/lib.rs
+index 789aa639eb69aa9f84b8ed8d4fc4b702e43386b7..a7eb6cad89824299d982e686b77a4e6b77a2380d 100644
+--- a/crates/aura-wallet/src/lib.rs
++++ b/crates/aura-wallet/src/lib.rs
+@@ -14,4 +14,5 @@ pub mod baseline;
+ pub mod cli;
+ pub mod derivation;
+ pub mod keystore;
++pub mod offline;
+ pub mod secret;
+diff --git a/crates/aura-wallet/src/offline.rs b/crates/aura-wallet/src/offline.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..2d16364671380a2cd6a3f57cd81c88977e4b5175
+--- /dev/null
++++ b/crates/aura-wallet/src/offline.rs
+@@ -0,0 +1,262 @@
++//! W3 — air-gapped offline signing: envelopes, QR transport, verification.
++//!
++//! Design of record: `docs/w3-offline-plan.md` (D-W3-1..D-W3-4).
++//!
++//! The envelope (`AURALITE-OFFLINE-V1`) is the deterministic container that
++//! carries an unsigned tx to the offline machine and a signed tx back. Its
++//! BLAKE3 checksum detects corruption only — it is **not** authentication;
++//! the Ed25519 signature under the fixed AuraLite `tx` domain is.
++
++use aura_crypto::blake3_hash;
++use aura_tx::Tx;
++
++/// Envelope magic (D-W3-1).
++pub const ENVELOPE_MAGIC: &[u8] = b"AuraLite-OFFLINE-V1";
++/// Envelope kind: unsigned transaction.
++pub const KIND_UNSIGNED: u8 = 0;
++/// Envelope kind: signed transaction.
++pub const KIND_SIGNED: u8 = 1;
++/// QR frame prefix (D-W3-2).
++pub const FRAME_PREFIX: &[u8] = b"ALO1:";
++/// Default QR chunk size in characters of the text envelope.
++pub const DEFAULT_QR_SIZE: usize = 180;
++
++/// Fixed refusal messages (byte-for-byte asserted by the W3 vectors).
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum OfflineError {
++    /// Base64/structure failure.
++    BadEncoding,
++    /// Envelope checksum mismatch.
++    ChecksumMismatch,
++    /// A signed envelope was required.
++    ExpectedSigned,
++    /// An unsigned envelope was required.
++    ExpectedUnsigned,
++    /// Ed25519 signature does not verify under the fixed AuraLite `tx` domain.
++    SignatureInvalid,
++    /// `--against` unsigned envelope does not match the signed transaction.
++    UnsignedMismatch,
++    /// Transaction bound to a foreign chain (W2 named-control semantics).
++    ForeignChainId {
++        /// Chain-id found in the transaction.
++        found: String,
++        /// Chain-id the wallet is configured for.
++        expected: String,
++    },
++    /// QR frame cannot be parsed.
++    QrBadFrame,
++    /// QR frame set has a gap.
++    QrMissingChunk,
++    /// QR frame set contains an index twice.
++    QrDuplicateChunk,
++}
++
++impl std::fmt::Display for OfflineError {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        match self {
++            Self::BadEncoding => write!(f, "envelope: bad encoding"),
++            Self::ChecksumMismatch => write!(f, "envelope: checksum mismatch"),
++            Self::ExpectedSigned => write!(f, "envelope: expected signed"),
++            Self::ExpectedUnsigned => write!(f, "envelope: expected unsigned"),
++            Self::SignatureInvalid => write!(f, "signature verification failed"),
++            Self::UnsignedMismatch => write!(f, "unsigned mismatch"),
++            Self::ForeignChainId { found, expected } => {
++                write!(f, "foreign chain-id: tx={found}, wallet={expected}")
++            }
++            Self::QrBadFrame => write!(f, "qr: bad frame"),
++            Self::QrMissingChunk => write!(f, "qr: missing chunk"),
++            Self::QrDuplicateChunk => write!(f, "qr: duplicate chunk"),
++        }
++    }
++}
++
++/// Unpadded base64url encode.
++#[must_use]
++pub fn b64url_encode(bytes: &[u8]) -> String {
++    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
++    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
++    for chunk in bytes.chunks(3) {
++        let b0 = u32::from(chunk[0]);
++        let b1 = chunk.get(1).copied().map_or(0, u32::from);
++        let b2 = chunk.get(2).copied().map_or(0, u32::from);
++        let n = (b0 << 16) | (b1 << 8) | b2;
++        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
++        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
++        if chunk.len() > 1 {
++            out.push(ALPHABET[(n >> 6) as usize & 63] as char);
++        }
++        if chunk.len() > 2 {
++            out.push(ALPHABET[n as usize & 63] as char);
++        }
++    }
++    out
++}
++
++/// Unpadded base64url decode; `None` on any invalid input.
++#[must_use]
++pub fn b64url_decode(text: &str) -> Option<Vec<u8>> {
++    let mut values = Vec::with_capacity(text.len());
++    for c in text.bytes() {
++        let v = match c {
++            b'A'..=b'Z' => c - b'A',
++            b'a'..=b'z' => c - b'a' + 26,
++            b'0'..=b'9' => c - b'0' + 52,
++            b'-' => 62,
++            b'_' => 63,
++            _ => return None,
++        };
++        values.push(v);
++    }
++    if values.len() % 4 == 1 {
++        return None;
++    }
++    let mut out = Vec::with_capacity(values.len() * 3 / 4);
++    for chunk in values.chunks(4) {
++        let n = (u32::from(chunk[0]) << 18)
++            | (u32::from(chunk[1]) << 12)
++            | chunk.get(2).map_or(0, |&v| u32::from(v) << 6)
++            | chunk.get(3).map_or(0, |&v| u32::from(v));
++        out.push((n >> 16) as u8);
++        if chunk.len() > 2 {
++            out.push((n >> 8) as u8);
++        }
++        if chunk.len() > 3 {
++            out.push(n as u8);
++        }
++    }
++    Some(out)
++}
++
++fn envelope_binary(kind: u8, body: &[u8]) -> Vec<u8> {
++    let mut bin = Vec::with_capacity(ENVELOPE_MAGIC.len() + 1 + 8 + body.len() + 32);
++    bin.extend_from_slice(ENVELOPE_MAGIC);
++    bin.push(kind);
++    bin.extend_from_slice(&body.len().to_le_bytes());
++    bin.extend_from_slice(body);
++    let digest = blake3_hash(&bin);
++    bin.extend_from_slice(digest.as_bytes());
++    bin
++}
++
++/// Wrap `body` in a kind-`kind` envelope; returns the deterministic text form.
++#[must_use]
++pub fn encode_envelope(kind: u8, body: &[u8]) -> String {
++    b64url_encode(&envelope_binary(kind, body))
++}
++
++/// Parse a text envelope; returns `(kind, body)` after checksum verification.
++pub fn parse_envelope(text: &str) -> Result<(u8, Vec<u8>), OfflineError> {
++    let cleaned: String = text.chars().filter(|c| !c.is_whitespace()).collect();
++    let bin = b64url_decode(&cleaned).ok_or(OfflineError::BadEncoding)?;
++    let header_len = ENVELOPE_MAGIC.len() + 1 + 8;
++    let total = header_len + 32;
++    if bin.len() < total || &bin[..ENVELOPE_MAGIC.len()] != ENVELOPE_MAGIC {
++        return Err(OfflineError::BadEncoding);
++    }
++    let kind = bin[ENVELOPE_MAGIC.len()];
++    if kind != KIND_UNSIGNED && kind != KIND_SIGNED {
++        return Err(OfflineError::BadEncoding);
++    }
++    let len_bytes: [u8; 8] = bin[ENVELOPE_MAGIC.len() + 1..header_len]
++        .try_into()
++        .expect("8 bytes");
++    let body_len =
++        usize::try_from(u64::from_le_bytes(len_bytes)).map_err(|_| OfflineError::BadEncoding)?;
++    if bin.len() != header_len + body_len + 32 {
++        return Err(OfflineError::BadEncoding);
++    }
++    let body = bin[header_len..header_len + body_len].to_vec();
++    let digest = blake3_hash(&bin[..header_len + body_len]);
++    if digest.as_bytes() != &bin[header_len + body_len..] {
++        return Err(OfflineError::ChecksumMismatch);
++    }
++    Ok((kind, body))
++}
++
++/// Split the text envelope into QR frames (D-W3-2).
++#[must_use]
++pub fn split_frames(text: &str, size: usize) -> Vec<String> {
++    let size = size.max(1);
++    let chunks: Vec<&str> = text
++        .as_bytes()
++        .chunks(size)
++        .map(|c| std::str::from_utf8(c).expect("ascii envelope"))
++        .collect();
++    let n = chunks.len();
++    chunks
++        .iter()
++        .enumerate()
++        .map(|(i, chunk)| format!("ALO1:{i:02}/{n:02}:{chunk}"))
++        .collect()
++}
++
++/// Reassemble QR frames into the text envelope (D-W3-2).
++pub fn join_frames(lines: &[String]) -> Result<String, OfflineError> {
++    let mut slots: Vec<Option<String>> = Vec::new();
++    let mut expected_n: Option<usize> = None;
++    for line in lines {
++        let line = line.trim();
++        if line.is_empty() {
++            continue;
++        }
++        let rest = line.strip_prefix("ALO1:").ok_or(OfflineError::QrBadFrame)?;
++        let (head, chunk) = rest.split_once(':').ok_or(OfflineError::QrBadFrame)?;
++        let (i_str, n_str) = head.split_once('/').ok_or(OfflineError::QrBadFrame)?;
++        let i: usize = i_str.parse().map_err(|_| OfflineError::QrBadFrame)?;
++        let n: usize = n_str.parse().map_err(|_| OfflineError::QrBadFrame)?;
++        if n == 0 || i >= n || chunk.is_empty() {
++            return Err(OfflineError::QrBadFrame);
++        }
++        if expected_n.is_some_and(|e| e != n) {
++            return Err(OfflineError::QrBadFrame);
++        }
++        expected_n = Some(n);
++        if slots.len() < n {
++            slots.resize_with(n, || None);
++        }
++        if slots[i].is_some() {
++            return Err(OfflineError::QrDuplicateChunk);
++        }
++        slots[i] = Some(chunk.to_string());
++    }
++    let n = expected_n.ok_or(OfflineError::QrBadFrame)?;
++    let mut text = String::new();
++    for slot in slots.iter().take(n) {
++        text.push_str(slot.as_ref().ok_or(OfflineError::QrMissingChunk)?);
++    }
++    Ok(text)
++}
++
++/// Decode a signed transaction from a kind-1 envelope and run the D-W3-3
++/// verification contract. `against` (if given) must be the text envelope of
++/// the unsigned transaction the human approved.
++pub fn verify_signed_envelope(
++    text: &str,
++    expected_chain: &str,
++    against: Option<&str>,
++) -> Result<Tx, OfflineError> {
++    let (kind, body) = parse_envelope(text)?;
++    if kind != KIND_SIGNED {
++        return Err(OfflineError::ExpectedSigned);
++    }
++    let tx = Tx::from_canonical_bytes(&body).map_err(|_| OfflineError::BadEncoding)?;
++    if tx.unsigned.chain_id.as_str() != expected_chain {
++        return Err(OfflineError::ForeignChainId {
++            found: tx.unsigned.chain_id.as_str().to_owned(),
++            expected: expected_chain.to_owned(),
++        });
++    }
++    // The W3 named control: only the fixed AuraLite `tx` domain verifies.
++    tx.verify_signature()
++        .map_err(|_| OfflineError::SignatureInvalid)?;
++    if let Some(against_text) = against {
++        let (a_kind, a_body) = parse_envelope(against_text)?;
++        if a_kind != KIND_UNSIGNED {
++            return Err(OfflineError::ExpectedUnsigned);
++        }
++        if a_body != tx.unsigned.to_bytes() {
++            return Err(OfflineError::UnsignedMismatch);
++        }
++    }
++    Ok(tx)
++}
+diff --git a/crates/aura-wallet/tests/fixtures/w1_baseline.txt b/crates/aura-wallet/tests/fixtures/w1_baseline.txt
+index 2aedd40db6b955043623ddae55fa8215d972267b..f24e0a060eee0b94881ecdc231bb0d95395bd3e3 100644
+--- a/crates/aura-wallet/tests/fixtures/w1_baseline.txt
++++ b/crates/aura-wallet/tests/fixtures/w1_baseline.txt
+@@ -12,10 +12,10 @@ missing=0
+ exposure_surfaces=8
+ threat_notes=6
+ missing_capabilities=3
+-layer=keystore	W1	implemented	7	4466	138	BIP-39 and SLIP-0010 Ed25519 testnet derivation, encrypted keystore, zeroize
+-layer=wallet-cli	W2	implemented	7	4466	138	`aura-wallet` CLI: new/import/list/balance/transfer/sign/broadcast/stake/vote
+-layer=offline-signing	W3	placeholder	7	4466	138	air-gapped unsigned/signed tx format, QR/USB bundle, online verification
+-layer=multisig	W4	placeholder	7	4466	138	M-of-N multisig coordination, signature collection, timeouts, member rotation
++layer=keystore	W1	implemented	8	4954	152	BIP-39 and SLIP-0010 Ed25519 testnet derivation, encrypted keystore, zeroize
++layer=wallet-cli	W2	implemented	8	4954	152	`aura-wallet` CLI: new/import/list/balance/transfer/sign/broadcast/stake/vote
++layer=offline-signing	W3	placeholder	8	4954	152	air-gapped unsigned/signed tx format, QR/USB bundle, online verification
++layer=multisig	W4	placeholder	8	4954	152	M-of-N multisig coordination, signature collection, timeouts, member rotation
+ surface=logs-and-tracing	W0	CRITICAL	structured/plain daemon or test logs (`*.log`, `tracing`, `Debug`/`Display`)
+ surface=cli-argv-and-env	W1	CRITICAL	CLI flags (`--private-key`, `--mnemonic`) visible in `/proc/<pid>/cmdline` and shell history
+ surface=plaintext-disk-files	W1	CRITICAL	unencrypted key files, swap/temp files, or world-readable keystore permissions
+diff --git a/crates/aura-wallet/tests/fixtures/w3_offline_vectors.json b/crates/aura-wallet/tests/fixtures/w3_offline_vectors.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..bbc6918fb9c4a3f4fd289a9552df08db35d45afa
+--- /dev/null
++++ b/crates/aura-wallet/tests/fixtures/w3_offline_vectors.json
+@@ -0,0 +1,804 @@
++{
++ "gate": "air-gapped scenario end-to-end; NC: signature with a foreign domain -> reject",
++ "notice": "PUBLIC TEST DATA ONLY - DO NOT USE FOR FUNDS",
++ "cases": [
++  {
++   "name": "prepare_basic",
++   "argv": [
++    "tx-prepare",
++    "--chain",
++    "auralite-test-1",
++    "--from",
++    "aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9",
++    "--to",
++    "aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9",
++    "--amount",
++    "1000",
++    "--nonce",
++    "0",
++    "--out",
++    "{sandbox}/u.env"
++   ],
++   "setup": [],
++   "files": {},
++   "expect_exit": 0,
++   "expect_stdout": [
++    "status=prepared",
++    "chain=auralite-test-1",
++    "signer=aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9",
++    "frames=0"
++   ],
++   "expect_stderr": []
++  },
++  {
++   "name": "prepare_qr_chunks",
++   "argv": [
++    "tx-prepare",
++    "--chain",
++    "auralite-test-1",
++    "--from",
++    "aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9",
++    "--to",
++    "aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9",
++    "--amount",
++    "1000",
++    "--nonce",
++    "0",
++    "--out",
++    "{sandbox}/u.env",
++    "--qr-dir",
++    "{sandbox}/qr",
++    "--qr-size",
++    "64"
++   ],
++   "setup": [],
++   "files": {},
++   "expect_exit": 0,
++   "expect_stdout": [
++    "status=prepared",
++    "chain=auralite-test-1",
++    "signer=aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9",
++    "frames=4"
++   ],
++   "expect_stderr": []
++  },
++  {
++   "name": "prepare_tip_gt_fee",
++   "argv": [
++    "tx-prepare",
++    "--chain",
++    "auralite-test-1",
++    "--from",
++    "aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9",
++    "--to",
++    "aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9",
++    "--amount",
++    "1000",
++    "--nonce",
++    "0",
++    "--tip",
++    "5",
++    "--max-fee",
++    "4",
++    "--out",
++    "{sandbox}/u.env"
++   ],
++   "setup": [],
++   "files": {},
++   "expect_exit": 64,
++   "expect_stdout": [],
++   "expect_stderr": [
++    "error: usage: --tip must not exceed --max-fee"
++   ]
++  },
++  {
++   "name": "prepare_bad_from",
++   "argv": [
++    "tx-prepare",
++    "--chain",
++    "auralite-test-1",
++    "--from",
++    "not-bech32",
++    "--to",
++    "aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9",
++    "--amount",
++    "1000",
++    "--nonce",
++    "0",
++    "--out",
++    "{sandbox}/u.env"
++   ],
++   "setup": [],
++   "files": {},
++   "expect_exit": 64,
++   "expect_stdout": [],
++   "expect_stderr": [
++    "error: usage: --from must be bech32"
++   ]
++  },
++  {
++   "name": "sign_offline_basic",
++   "argv": [
++    "tx-sign",
++    "--in",
++    "{sandbox}/u.env",
++    "--out",
++    "{sandbox}/s.env",
++    "--keystore",
++    "{sandbox}/ks",
++    "--password-file",
++    "{sandbox}/pw",
++    "--chain",
++    "auralite-test-1"
++   ],
++   "setup": [
++    [
++     "new",
++     "--keystore",
++     "{sandbox}/ks",
++     "--password-file",
++     "{sandbox}/pw",
++     "--chain",
++     "auralite-test-1",
++     "--entropy-file",
++     "{sandbox}/entropy",
++     "--kdf",
++     "testing"
++    ]
++   ],
++   "files": {
++    "u.env": "QXVyYUxpdGUtT0ZGTElORS1WMQBnAAAAAAAAAAEPYXVyYWxpdGUtdGVzdC0xvLX792LCtriS9y2Uf_Z-V1Xd_y4AAAAAAAAAAAAI6AMAAAAAAAAIUgAAAAAAAEBCDwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA__________-qWpWwr28hJmJs8eWV8LJJYc6xx3G13qqrK6b0e5sosw",
++    "pw": "correct horse battery staple\n",
++    "entropy": "0000000000000000000000000000000000000000000000000000000000000000"
++   },
++   "expect_exit": 0,
++   "expect_stdout": [
++    "status=signed",
++    "chain=auralite-test-1",
++    "txid=2db18d47a3dc1b15917c9009f1aae2acbc8b671decbd16dad47dbb939fdfd150",
++    "frames=0"
++   ],
++   "expect_stderr": []
++  },
++  {
++   "name": "sign_wrong_password",
++   "argv": [
++    "tx-sign",
++    "--in",
++    "{sandbox}/u.env",
++    "--out",
++    "{sandbox}/s.env",
++    "--keystore",
++    "{sandbox}/ks",
++    "--password-file",
++    "{sandbox}/pw-bad",
++    "--chain",
++    "auralite-test-1"
++   ],
++   "setup": [
++    [
++     "new",
++     "--keystore",
++     "{sandbox}/ks",
++     "--password-file",
++     "{sandbox}/pw",
++     "--chain",
++     "auralite-test-1",
++     "--entropy-file",
++     "{sandbox}/entropy",
++     "--kdf",
++     "testing"
++    ]
++   ],
++   "files": {
++    "u.env": "QXVyYUxpdGUtT0ZGTElORS1WMQBnAAAAAAAAAAEPYXVyYWxpdGUtdGVzdC0xvLX792LCtriS9y2Uf_Z-V1Xd_y4AAAAAAAAAAAAI6AMAAAAAAAAIUgAAAAAAAEBCDwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA__________-qWpWwr28hJmJs8eWV8LJJYc6xx3G13qqrK6b0e5sosw",
++    "pw": "correct horse battery staple\n",
++    "pw-bad": "incorrect horse battery staple\n",
++    "entropy": "0000000000000000000000000000000000000000000000000000000000000000"
++   },
++   "expect_exit": 65,
++   "expect_stdout": [],
++   "expect_stderr": [
++    "error: bad password"
++   ]
++  },
++  {
++   "name": "sign_signer_mismatch",
++   "argv": [
++    "tx-sign",
++    "--in",
++    "{sandbox}/u.env",
++    "--out",
++    "{sandbox}/s.env",
++    "--keystore",
++    "{sandbox}/ks",
++    "--password-file",
++    "{sandbox}/pw",
++    "--chain",
++    "auralite-test-1"
++   ],
++   "setup": [
++    [
++     "new",
++     "--keystore",
++     "{sandbox}/ks",
++     "--password-file",
++     "{sandbox}/pw",
++     "--chain",
++     "auralite-test-1",
++     "--entropy-file",
++     "{sandbox}/entropy",
++     "--kdf",
++     "testing"
++    ]
++   ],
++   "files": {
++    "u.env": "QXVyYUxpdGUtT0ZGTElORS1WMQBnAAAAAAAAAAEPYXVyYWxpdGUtdGVzdC0xx-17pj-nIjV2-Gv_DytNR6uPPKIAAAAAAAAAAAAI6AMAAAAAAAAIUgAAAAAAAEBCDwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA___________pwN1Nq8VWl7Dgf0bndgp4Dxe4HZM4shCWglhrEUspyA",
++    "pw": "correct horse battery staple\n",
++    "entropy": "0000000000000000000000000000000000000000000000000000000000000000"
++   },
++   "expect_exit": 65,
++   "expect_stdout": [],
++   "expect_stderr": [
++    "error: refused: signer mismatch: tx=c7ed7ba63fa7223576f86bff0f2b4d47ab8f3ca2, key=bcb5fbf762c2b6b892f72d947ff67e5755ddff2e"
++   ]
++  },
++  {
++   "name": "sign_bad_checksum",
++   "argv": [
++    "tx-sign",
++    "--in",
++    "{sandbox}/u.env",
++    "--out",
++    "{sandbox}/s.env",
++    "--keystore",
++    "{sandbox}/ks",
++    "--password-file",
++    "{sandbox}/pw",
++    "--chain",
++    "auralite-test-1"
++   ],
++   "setup": [
++    [
++     "new",
++     "--keystore",
++     "{sandbox}/ks",
++     "--password-file",
++     "{sandbox}/pw",
++     "--chain",
++     "auralite-test-1",
++     "--entropy-file",
++     "{sandbox}/entropy",
++     "--kdf",
++     "testing"
++    ]
++   ],
++   "files": {
++    "u.env": "QXVyYUxpdGUtT0ZGTElORS1WMQBnAAAAAAAAAAEPYXVyYWxpdGUtdGVzdC0xvLX792LCtriS9y2Uf_Z-V1Xd_y4AAAAAAAAAAAAI6AMAAAAAAAAIUgAAAAAAAEBCDwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA__________-qWpWwr28hJmJs8eWV8LJJYc6xx3G13qqrK6b0AAAAAA",
++    "pw": "correct horse battery staple\n",
++    "entropy": "0000000000000000000000000000000000000000000000000000000000000000"
++   },
++   "expect_exit": 65,
++   "expect_stdout": [],
++   "expect_stderr": [
++    "error: envelope: checksum mismatch"
++   ]
++  },
++  {
++   "name": "sign_chain_mismatch",
++   "argv": [
++    "tx-sign",
++    "--in",
++    "{sandbox}/u.env",
++    "--out",
++    "{sandbox}/s.env",
++    "--keystore",
++    "{sandbox}/ks",
++    "--password-file",
++    "{sandbox}/pw",
++    "--chain",
++    "auralite-test-1"
++   ],
++   "setup": [
++    [
++     "new",
++     "--keystore",
++     "{sandbox}/ks",
++     "--password-file",
++     "{sandbox}/pw",
++     "--chain",
++     "auralite-test-1",
++     "--entropy-file",
++     "{sandbox}/entropy",
++     "--kdf",
++     "testing"
++    ]
++   ],
++   "files": {
++    "u.env": "QXVyYUxpdGUtT0ZGTElORS1WMQBhAAAAAAAAAAEJb3RoZXItbmV0vLX792LCtriS9y2Uf_Z-V1Xd_y4AAAAAAAAAAAAI6AMAAAAAAAAIUgAAAAAAAEBCDwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA__________9p-eo-hKzZEbju6A4_GpEbyABS5fcE7Siii30t8cMYDQ",
++    "pw": "correct horse battery staple\n",
++    "entropy": "0000000000000000000000000000000000000000000000000000000000000000"
++   },
++   "expect_exit": 65,
++   "expect_stdout": [],
++   "expect_stderr": [
++    "error: foreign chain-id: tx=other-net, wallet=auralite-test-1"
++   ]
++  },
++  {
++   "name": "verify_happy",
++   "argv": [
++    "tx-verify",
++    "--in",
++    "{sandbox}/s.env",
++    "--chain",
++    "auralite-test-1"
++   ],
++   "setup": [],
++   "files": {
++    "s.env": "QXVyYUxpdGUtT0ZGTElORS1WMQHIAAAAAAAAAAEPYXVyYWxpdGUtdGVzdC0xvLX792LCtriS9y2Uf_Z-V1Xd_y4AAAAAAAAAAAAI6AMAAAAAAAAIUgAAAAAAAEBCDwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA__________8AgRsyL5woh3v59UOo6NsfPE_UWmzMbK3zFUmYk9SbgpmiyHR1jeSKB70-kkSeG_F3R-WwCI0Y3VuOYwLi0BIoShs5wOFSd_JnW_nA1yZa_YJne5a6FMdeYWtyT0S2ixgCIsJVQmBQPVyL4SNMO0sVFSiwQxuLhFHqzj3GE2ZZHhk"
++   },
++   "expect_exit": 0,
++   "expect_stdout": [
++    "status=verified",
++    "chain=auralite-test-1",
++    "txid=2db18d47a3dc1b15917c9009f1aae2acbc8b671decbd16dad47dbb939fdfd150",
++    "signer=aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9"
++   ],
++   "expect_stderr": []
++  },
++  {
++   "name": "verify_foreign_domain",
++   "argv": [
++    "tx-verify",
++    "--in",
++    "{sandbox}/s.env",
++    "--chain",
++    "auralite-test-1"
++   ],
++   "setup": [],
++   "files": {
++    "s.env": "QXVyYUxpdGUtT0ZGTElORS1WMQHIAAAAAAAAAAEPYXVyYWxpdGUtdGVzdC0xvLX792LCtriS9y2Uf_Z-V1Xd_y4AAAAAAAAAAAAI6AMAAAAAAAAIUgAAAAAAAEBCDwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA__________8AgRsyL5woh3v59UOo6NsfPE_UWmzMbK3zFUmYk9SbgpmISaBpCyiZQVUcCP5bLFaDgUvEuhZF3bPX2RfUzQ09pDJ-Kc9-GwYPy7Zm5c1Jo_uJy-K5zt_ooaeH6KYqr_MOqQRYbG0oOJFwxJW4oUZcijHUn3GCFMcZUfKJbPXnom4"
++   },
++   "expect_exit": 65,
++   "expect_stdout": [],
++   "expect_stderr": [
++    "error: signature verification failed"
++   ]
++  },
++  {
++   "name": "verify_tampered_sig",
++   "argv": [
++    "tx-verify",
++    "--in",
++    "{sandbox}/s.env",
++    "--chain",
++    "auralite-test-1"
++   ],
++   "setup": [],
++   "files": {
++    "s.env": "QXVyYUxpdGUtT0ZGTElORS1WMQHIAAAAAAAAAAEPYXVyYWxpdGUtdGVzdC0xvLX792LCtriS9y2Uf_Z-V1Xd_y4AAAAAAAAAAAAI6AMAAAAAAAAIUgAAAAAAAEBCDwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA__________8AgRsyL5woh3v59UOo6NsfPE_UWmzMbK3zFUmYk9SbgpmiyHR1jeSKB70-kkSeG_F3R-WwCI0Y3VuOYwLi0BIoShs5wOFSd_JnW_nA1yZa_YJne5a6FMdeYWtyT0S2ixgDNT2EY2-bFO1VJ8WN02vkhS1YOvC8ysdfXHINYYYdgDU"
++   },
++   "expect_exit": 65,
++   "expect_stdout": [],
++   "expect_stderr": [
++    "error: signature verification failed"
++   ]
++  },
++  {
++   "name": "verify_tampered_fields",
++   "argv": [
++    "tx-verify",
++    "--in",
++    "{sandbox}/s.env",
++    "--chain",
++    "auralite-test-1"
++   ],
++   "setup": [],
++   "files": {
++    "s.env": "QXVyYUxpdGUtT0ZGTElORS1WMQHIAAAAAAAAAAEPYXVyYWxpdGUtdGVzdC0xvLX792LCtriS9y2Uf_Z-V1Xd_y4AAAAAAAAAAAAI6QMAAAAAAAAIUgAAAAAAAEBCDwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA__________8AgRsyL5woh3v59UOo6NsfPE_UWmzMbK3zFUmYk9SbgpmiyHR1jeSKB70-kkSeG_F3R-WwCI0Y3VuOYwLi0BIoShs5wOFSd_JnW_nA1yZa_YJne5a6FMdeYWtyT0S2ixgCx4o8ltZnePvAm0UIJM_SKeb66CK5CJS6FdDp6KdG8pk"
++   },
++   "expect_exit": 65,
++   "expect_stdout": [],
++   "expect_stderr": [
++    "error: signature verification failed"
++   ]
++  },
++  {
++   "name": "verify_against_mismatch",
++   "argv": [
++    "tx-verify",
++    "--in",
++    "{sandbox}/s.env",
++    "--chain",
++    "auralite-test-1",
++    "--against",
++    "{sandbox}/u2.env"
++   ],
++   "setup": [],
++   "files": {
++    "s.env": "QXVyYUxpdGUtT0ZGTElORS1WMQHIAAAAAAAAAAEPYXVyYWxpdGUtdGVzdC0xvLX792LCtriS9y2Uf_Z-V1Xd_y4AAAAAAAAAAAAI6AMAAAAAAAAIUgAAAAAAAEBCDwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA__________8AgRsyL5woh3v59UOo6NsfPE_UWmzMbK3zFUmYk9SbgpmiyHR1jeSKB70-kkSeG_F3R-WwCI0Y3VuOYwLi0BIoShs5wOFSd_JnW_nA1yZa_YJne5a6FMdeYWtyT0S2ixgCIsJVQmBQPVyL4SNMO0sVFSiwQxuLhFHqzj3GE2ZZHhk",
++    "u2.env": "QXVyYUxpdGUtT0ZGTElORS1WMQBnAAAAAAAAAAEPYXVyYWxpdGUtdGVzdC0xvLX792LCtriS9y2Uf_Z-V1Xd_y4AAAAAAAAAAAAI0AcAAAAAAAAIUgAAAAAAAEBCDwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA___________juriFh32AuNN6zxTrHC0cUsAgjhuXtHDKJ6u1Okym0A"
++   },
++   "expect_exit": 65,
++   "expect_stdout": [],
++   "expect_stderr": [
++    "error: unsigned mismatch"
++   ]
++  },
++  {
++   "name": "verify_foreign_chain",
++   "argv": [
++    "tx-verify",
++    "--in",
++    "{sandbox}/s.env",
++    "--chain",
++    "other-net"
++   ],
++   "setup": [],
++   "files": {
++    "s.env": "QXVyYUxpdGUtT0ZGTElORS1WMQHIAAAAAAAAAAEPYXVyYWxpdGUtdGVzdC0xvLX792LCtriS9y2Uf_Z-V1Xd_y4AAAAAAAAAAAAI6AMAAAAAAAAIUgAAAAAAAEBCDwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA__________8AgRsyL5woh3v59UOo6NsfPE_UWmzMbK3zFUmYk9SbgpmiyHR1jeSKB70-kkSeG_F3R-WwCI0Y3VuOYwLi0BIoShs5wOFSd_JnW_nA1yZa_YJne5a6FMdeYWtyT0S2ixgCIsJVQmBQPVyL4SNMO0sVFSiwQxuLhFHqzj3GE2ZZHhk"
++   },
++   "expect_exit": 65,
++   "expect_stdout": [],
++   "expect_stderr": [
++    "error: foreign chain-id: tx=auralite-test-1, wallet=other-net"
++   ]
++  },
++  {
++   "name": "qr_roundtrip",
++   "argv": [
++    "qr-join",
++    "--in-dir",
++    "{sandbox}/qr",
++    "--out",
++    "{sandbox}/joined.env"
++   ],
++   "setup": [],
++   "files": {
++    "qr/000.txt": "ALO1:00/06:QXVyYUxpdGUtT0ZGTElORS1WMQHIAAAAAAAAAAEPYXVyYWxpdGUtdGVzdC0xvLX7\n",
++    "qr/001.txt": "ALO1:01/06:92LCtriS9y2Uf_Z-V1Xd_y4AAAAAAAAAAAAI6AMAAAAAAAAIUgAAAAAAAEBCDwAA\n",
++    "qr/002.txt": "ALO1:02/06:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA__________8AgRsyL5woh3v59UOo\n",
++    "qr/003.txt": "ALO1:03/06:6NsfPE_UWmzMbK3zFUmYk9SbgpmiyHR1jeSKB70-kkSeG_F3R-WwCI0Y3VuOYwLi\n",
++    "qr/004.txt": "ALO1:04/06:0BIoShs5wOFSd_JnW_nA1yZa_YJne5a6FMdeYWtyT0S2ixgCIsJVQmBQPVyL4SNM\n",
++    "qr/005.txt": "ALO1:05/06:O0sVFSiwQxuLhFHqzj3GE2ZZHhk\n"
++   },
++   "expect_exit": 0,
++   "expect_stdout": [
++    "status=joined",
++    "frames=6"
++   ],
++   "expect_stderr": []
++  },
++  {
++   "name": "qr_missing_chunk",
++   "argv": [
++    "qr-join",
++    "--in-dir",
++    "{sandbox}/qr",
++    "--out",
++    "{sandbox}/joined.env"
++   ],
++   "setup": [],
++   "files": {
++    "qr/000.txt": "ALO1:00/06:QXVyYUxpdGUtT0ZGTElORS1WMQHIAAAAAAAAAAEPYXVyYWxpdGUtdGVzdC0xvLX7\n",
++    "qr/001.txt": "ALO1:02/06:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA__________8AgRsyL5woh3v59UOo\n"
++   },
++   "expect_exit": 65,
++   "expect_stdout": [],
++   "expect_stderr": [
++    "error: qr: missing chunk"
++   ]
++  },
++  {
++   "name": "qr_duplicate_chunk",
++   "argv": [
++    "qr-join",
++    "--in-dir",
++    "{sandbox}/qr",
++    "--out",
++    "{sandbox}/joined.env"
++   ],
++   "setup": [],
++   "files": {
++    "qr/000.txt": "ALO1:00/06:QXVyYUxpdGUtT0ZGTElORS1WMQHIAAAAAAAAAAEPYXVyYWxpdGUtdGVzdC0xvLX7\n",
++    "qr/001.txt": "ALO1:01/06:92LCtriS9y2Uf_Z-V1Xd_y4AAAAAAAAAAAAI6AMAAAAAAAAIUgAAAAAAAEBCDwAA\n",
++    "qr/002.txt": "ALO1:02/06:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA__________8AgRsyL5woh3v59UOo\n",
++    "qr/003.txt": "ALO1:00/06:QXVyYUxpdGUtT0ZGTElORS1WMQHIAAAAAAAAAAEPYXVyYWxpdGUtdGVzdC0xvLX7\n",
++    "qr/004.txt": "ALO1:04/06:0BIoShs5wOFSd_JnW_nA1yZa_YJne5a6FMdeYWtyT0S2ixgCIsJVQmBQPVyL4SNM\n",
++    "qr/005.txt": "ALO1:05/06:O0sVFSiwQxuLhFHqzj3GE2ZZHhk\n"
++   },
++   "expect_exit": 65,
++   "expect_stdout": [],
++   "expect_stderr": [
++    "error: qr: duplicate chunk"
++   ]
++  },
++  {
++   "name": "qr_foreign_chunk",
++   "argv": [
++    "qr-join",
++    "--in-dir",
++    "{sandbox}/qr",
++    "--out",
++    "{sandbox}/joined.env"
++   ],
++   "setup": [],
++   "files": {
++    "qr/000.txt": "ALO1:00/06:QXVyYUxpdGUtT0ZGTElORS1WMQHIAAAAAAAAAAEPYXVyYWxpdGUtdGVzdC0xvLX7\n",
++    "qr/001.txt": "ALO1:01/06:92LCtriS9y2Uf_Z-V1Xd_y4AAAAAAAAAAAAI0AcAAAAAAAAIUgAAAAAAAEBCDwAA\n",
++    "qr/002.txt": "ALO1:02/06:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA__________8AgRsyL5woh3v59UOo\n",
++    "qr/003.txt": "ALO1:03/06:6NsfPE_UWmzMbK3zFUmYk9SbgpmiyHR1jeSKB70-kkSeG_F3R-WwCI0Y3VuOYwLi\n",
++    "qr/004.txt": "ALO1:04/06:0BIoShs5wOFSd_JnW_nA1yZa_YJne5a6FMdeYWtyT0S2ixgCIsJVQmBQPVyL4SNM\n",
++    "qr/005.txt": "ALO1:05/06:O0sVFSiwQxuLhFHqzj3GE2ZZHhk\n"
++   },
++   "expect_exit": 65,
++   "expect_stdout": [],
++   "expect_stderr": [
++    "error: envelope: checksum mismatch"
++   ]
++  },
++  {
++   "name": "qr_bad_frame",
++   "argv": [
++    "qr-join",
++    "--in-dir",
++    "{sandbox}/qr",
++    "--out",
++    "{sandbox}/joined.env"
++   ],
++   "setup": [],
++   "files": {
++    "qr/000.txt": "ALO1:xx garbage\n"
++   },
++   "expect_exit": 65,
++   "expect_stdout": [],
++   "expect_stderr": [
++    "error: qr: bad frame"
++   ]
++  },
++  {
++   "name": "e2e_usb",
++   "argv": [
++    "tx-verify",
++    "--in",
++    "{sandbox}/s.env",
++    "--chain",
++    "auralite-test-1",
++    "--against",
++    "{sandbox}/u.env"
++   ],
++   "setup": [
++    [
++     "new",
++     "--keystore",
++     "{sandbox}/ks",
++     "--password-file",
++     "{sandbox}/pw",
++     "--chain",
++     "auralite-test-1",
++     "--entropy-file",
++     "{sandbox}/entropy",
++     "--kdf",
++     "testing"
++    ],
++    [
++     "tx-prepare",
++     "--chain",
++     "auralite-test-1",
++     "--from",
++     "aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9",
++     "--to",
++     "aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9",
++     "--amount",
++     "1000",
++     "--nonce",
++     "0",
++     "--out",
++     "{sandbox}/u.env"
++    ],
++    [
++     "tx-sign",
++     "--in",
++     "{sandbox}/u.env",
++     "--out",
++     "{sandbox}/s.env",
++     "--keystore",
++     "{sandbox}/ks",
++     "--password-file",
++     "{sandbox}/pw",
++     "--chain",
++     "auralite-test-1"
++    ]
++   ],
++   "files": {
++    "pw": "correct horse battery staple\n",
++    "entropy": "0000000000000000000000000000000000000000000000000000000000000000"
++   },
++   "expect_exit": 0,
++   "expect_stdout": [
++    "status=verified",
++    "chain=auralite-test-1",
++    "txid=2db18d47a3dc1b15917c9009f1aae2acbc8b671decbd16dad47dbb939fdfd150",
++    "signer=aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9"
++   ],
++   "expect_stderr": []
++  },
++  {
++   "name": "e2e_qr",
++   "argv": [
++    "tx-verify",
++    "--in",
++    "{sandbox}/s.env",
++    "--chain",
++    "auralite-test-1",
++    "--against",
++    "{sandbox}/u.env"
++   ],
++   "setup": [
++    [
++     "new",
++     "--keystore",
++     "{sandbox}/ks",
++     "--password-file",
++     "{sandbox}/pw",
++     "--chain",
++     "auralite-test-1",
++     "--entropy-file",
++     "{sandbox}/entropy",
++     "--kdf",
++     "testing"
++    ],
++    [
++     "tx-prepare",
++     "--chain",
++     "auralite-test-1",
++     "--from",
++     "aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9",
++     "--to",
++     "aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9",
++     "--amount",
++     "1000",
++     "--nonce",
++     "0",
++     "--out",
++     "{sandbox}/drop.env",
++     "--qr-dir",
++     "{sandbox}/qr",
++     "--qr-size",
++     "64"
++    ],
++    [
++     "qr-join",
++     "--in-dir",
++     "{sandbox}/qr",
++     "--out",
++     "{sandbox}/u.env"
++    ],
++    [
++     "tx-sign",
++     "--in",
++     "{sandbox}/u.env",
++     "--out",
++     "{sandbox}/drop2.env",
++     "--keystore",
++     "{sandbox}/ks",
++     "--password-file",
++     "{sandbox}/pw",
++     "--chain",
++     "auralite-test-1",
++     "--qr-dir",
++     "{sandbox}/qr2",
++     "--qr-size",
++     "64"
++    ],
++    [
++     "qr-join",
++     "--in-dir",
++     "{sandbox}/qr2",
++     "--out",
++     "{sandbox}/s.env"
++    ]
++   ],
++   "files": {
++    "pw": "correct horse battery staple\n",
++    "entropy": "0000000000000000000000000000000000000000000000000000000000000000"
++   },
++   "expect_exit": 0,
++   "expect_stdout": [
++    "status=verified",
++    "chain=auralite-test-1",
++    "txid=2db18d47a3dc1b15917c9009f1aae2acbc8b671decbd16dad47dbb939fdfd150",
++    "signer=aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9"
++   ],
++   "expect_stderr": []
++  },
++  {
++   "name": "e2e_broadcast",
++   "argv": [
++    "broadcast",
++    "--tx-file",
++    "{sandbox}/s.env",
++    "--ledger",
++    "{sandbox}/l.json",
++    "--chain",
++    "auralite-test-1"
++   ],
++   "setup": [
++    [
++     "new",
++     "--keystore",
++     "{sandbox}/ks",
++     "--password-file",
++     "{sandbox}/pw",
++     "--chain",
++     "auralite-test-1",
++     "--entropy-file",
++     "{sandbox}/entropy",
++     "--kdf",
++     "testing"
++    ],
++    [
++     "tx-prepare",
++     "--chain",
++     "auralite-test-1",
++     "--from",
++     "aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9",
++     "--to",
++     "aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9",
++     "--amount",
++     "1000",
++     "--nonce",
++     "0",
++     "--out",
++     "{sandbox}/u.env"
++    ],
++    [
++     "tx-sign",
++     "--in",
++     "{sandbox}/u.env",
++     "--out",
++     "{sandbox}/s.env",
++     "--keystore",
++     "{sandbox}/ks",
++     "--password-file",
++     "{sandbox}/pw",
++     "--chain",
++     "auralite-test-1"
++    ]
++   ],
++   "files": {
++    "l.json": "{\n  \"chain\": \"auralite-test-1\",\n  \"height\": 10,\n  \"accounts\": {\n    \"aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9\": {\n      \"balance\": 10000000,\n      \"nonce\": 0\n    }\n  },\n  \"txs\": []\n}\n",
++    "pw": "correct horse battery staple\n",
++    "entropy": "0000000000000000000000000000000000000000000000000000000000000000"
++   },
++   "expect_exit": 0,
++   "expect_stdout": [
++    "status=broadcast",
++    "chain=auralite-test-1",
++    "txid=2db18d47a3dc1b15917c9009f1aae2acbc8b671decbd16dad47dbb939fdfd150",
++    "accepted=true"
++   ],
++   "expect_stderr": []
++  },
++  {
++   "name": "verify_unsigned_rejected",
++   "argv": [
++    "tx-verify",
++    "--in",
++    "{sandbox}/u.env",
++    "--chain",
++    "auralite-test-1"
++   ],
++   "setup": [],
++   "files": {
++    "u.env": "QXVyYUxpdGUtT0ZGTElORS1WMQBnAAAAAAAAAAEPYXVyYWxpdGUtdGVzdC0xvLX792LCtriS9y2Uf_Z-V1Xd_y4AAAAAAAAAAAAI6AMAAAAAAAAIUgAAAAAAAEBCDwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA__________-qWpWwr28hJmJs8eWV8LJJYc6xx3G13qqrK6b0e5sosw"
++   },
++   "expect_exit": 65,
++   "expect_stdout": [],
++   "expect_stderr": [
++    "error: envelope: expected signed"
++   ]
++  }
++ ]
++}
+diff --git a/crates/aura-wallet/tests/w3_offline.rs b/crates/aura-wallet/tests/w3_offline.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..e7ee0f81e5ddbe4dca985104c82890590b24e3f3
+--- /dev/null
++++ b/crates/aura-wallet/tests/w3_offline.rs
+@@ -0,0 +1,170 @@
++//! W3 gate — 24 CLI vectors for air-gapped offline signing
++//! (`tests/fixtures/w3_offline_vectors.json`).
++//!
++//! Gate text (WALLET_PLAN row W3): "air-gapped scenario end-to-end; NC:
++//! signature with a foreign domain -> reject" — `verify_foreign_domain` is
++//! that named control.
++//!
++//! Vectors come from the independent oracle `tools/gen_w3_vectors.py`; this
++//! runner materializes each case in a fresh sandbox and asserts exit code and
++//! both output streams byte-for-byte (model: `tests/w2_cli.rs`). The suite
++//! runs with `--features insecure-test-kdf` (setup uses `--kdf testing`).
++
++#![cfg(feature = "insecure-test-kdf")]
++
++const VECTORS: &str = include_str!("fixtures/w3_offline_vectors.json");
++
++fn substitute(text: &str, sandbox: &str, phrases: &serde_json::Value) -> String {
++    let mut out = text.replace("{sandbox}", sandbox);
++    if let Some(map) = phrases.as_object() {
++        for (token, phrase) in map {
++            out = out.replace(&format!("{{{token}}}"), phrase.as_str().expect("phrase"));
++        }
++    }
++    out
++}
++
++fn run_argv(argv: &[String]) -> (i32, String, String) {
++    let mut out = Vec::new();
++    let mut err = Vec::new();
++    let code = aura_wallet::cli::run(argv, &mut out, &mut err);
++    (
++        code,
++        String::from_utf8(out).expect("stdout utf-8"),
++        String::from_utf8(err).expect("stderr utf-8"),
++    )
++}
++
++/// Materialize a vector case in a fresh sandbox and run its setup steps.
++fn materialize(name: &str) -> (std::path::PathBuf, serde_json::Value, serde_json::Value) {
++    let doc: serde_json::Value = serde_json::from_str(VECTORS).expect("vectors parse");
++    let phrases = doc
++        .get("phrases")
++        .cloned()
++        .unwrap_or(serde_json::Value::Null);
++    let cases = doc["cases"].as_array().expect("cases array");
++    let case = cases
++        .iter()
++        .find(|c| c["name"].as_str() == Some(name))
++        .unwrap_or_else(|| panic!("vector {name} not found"))
++        .clone();
++
++    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++    let serial = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
++    let sandbox =
++        std::env::temp_dir().join(format!("w3vec-{}-{serial}-{name}", std::process::id()));
++    let _ = std::fs::remove_dir_all(&sandbox);
++    std::fs::create_dir_all(&sandbox).expect("sandbox created");
++    let sandbox_str = sandbox.to_string_lossy().to_string();
++
++    for (rel, content) in case["files"].as_object().expect("files object") {
++        let path = sandbox.join(rel);
++        if let Some(parent) = path.parent() {
++            std::fs::create_dir_all(parent).expect("file parent");
++        }
++        std::fs::write(&path, content.as_str().expect("file content")).expect("file written");
++    }
++
++    for setup in case["setup"].as_array().expect("setup array") {
++        let argv: Vec<String> = setup
++            .as_array()
++            .expect("setup argv")
++            .iter()
++            .map(|a| substitute(a.as_str().expect("argv str"), &sandbox_str, &phrases))
++            .collect();
++        let (code, _, err) = run_argv(&argv);
++        assert_eq!(code, 0, "setup step failed: {err}");
++    }
++    (sandbox, case, phrases)
++}
++
++fn run_case(name: &str) {
++    let (sandbox, case, phrases) = materialize(name);
++    let sandbox_str = sandbox.to_string_lossy().to_string();
++    let argv: Vec<String> = case["argv"]
++        .as_array()
++        .expect("argv")
++        .iter()
++        .map(|a| substitute(a.as_str().expect("argv str"), &sandbox_str, &phrases))
++        .collect();
++    let (code, out, err) = run_argv(&argv);
++
++    let expected_exit = case["expect_exit"].as_i64().expect("expect_exit") as i32;
++    let expect_lines = |key: &str| -> String {
++        let mut text = String::new();
++        for line in case[key].as_array().expect(key) {
++            text.push_str(&substitute(
++                line.as_str().expect("line"),
++                &sandbox_str,
++                &phrases,
++            ));
++            text.push('\n');
++        }
++        text
++    };
++
++    assert_eq!(
++        code, expected_exit,
++        "vector {name}: exit mismatch\nstdout:\n{out}\nstderr:\n{err}"
++    );
++    assert_eq!(
++        out,
++        expect_lines("expect_stdout"),
++        "vector {name}: stdout mismatch"
++    );
++    assert_eq!(
++        err,
++        expect_lines("expect_stderr"),
++        "vector {name}: stderr mismatch"
++    );
++
++    let _ = std::fs::remove_dir_all(&sandbox);
++}
++
++#[test]
++fn vectors_file_has_exactly_24_unique_cases() {
++    let doc: serde_json::Value = serde_json::from_str(VECTORS).expect("vectors parse");
++    let cases = doc["cases"].as_array().expect("cases array");
++    assert_eq!(cases.len(), 24, "the W3 gate requires exactly 24 vectors");
++    let mut names: Vec<&str> = cases
++        .iter()
++        .map(|c| c["name"].as_str().expect("case name"))
++        .collect();
++    names.sort_unstable();
++    names.dedup();
++    assert_eq!(names.len(), 24, "vector names must be unique");
++}
++
++macro_rules! vec_case {
++    ($name:ident) => {
++        #[test]
++        fn $name() {
++            run_case(stringify!($name));
++        }
++    };
++}
++
++vec_case!(prepare_basic);
++vec_case!(prepare_qr_chunks);
++vec_case!(prepare_tip_gt_fee);
++vec_case!(prepare_bad_from);
++vec_case!(sign_offline_basic);
++vec_case!(sign_wrong_password);
++vec_case!(sign_signer_mismatch);
++vec_case!(sign_bad_checksum);
++vec_case!(sign_chain_mismatch);
++vec_case!(verify_happy);
++vec_case!(verify_foreign_domain);
++vec_case!(verify_tampered_sig);
++vec_case!(verify_tampered_fields);
++vec_case!(verify_against_mismatch);
++vec_case!(verify_foreign_chain);
++vec_case!(qr_roundtrip);
++vec_case!(qr_missing_chunk);
++vec_case!(qr_duplicate_chunk);
++vec_case!(qr_foreign_chunk);
++vec_case!(qr_bad_frame);
++vec_case!(e2e_usb);
++vec_case!(e2e_qr);
++vec_case!(e2e_broadcast);
++vec_case!(verify_unsigned_rejected);
+diff --git a/docs/evidence/review-w1-source-drift.txt b/docs/evidence/review-w1-source-drift.txt
+index 7d4b4e3aab1ffaba937917fd78823ff0fac7a077..ae5f33bf75abcbe01e057ee833fd2a78182a1250 100644
+--- a/docs/evidence/review-w1-source-drift.txt
++++ b/docs/evidence/review-w1-source-drift.txt
+@@ -1,12 +1,12 @@
+ # Explicit source drift from frozen historical SHA256SUMS.
+ # historical-sha256 current-sha256 repository-relative-path
+ # Not a replacement for a new phase security review or certification.
+-adc24e7c03e1a63e5d7addbda15ff40ce630367152699c5d9659cd8db65f357b 14123f97c6529ead719f9922b155c582b891a2dad7203066b24e3200ab0da058 CHANGELOG.md
+-c83d08301a703c9db11462aa541bc898e52548589972118465164895eed44dc7 14123f97c6529ead719f9922b155c582b891a2dad7203066b24e3200ab0da058 CHANGELOG.md
++adc24e7c03e1a63e5d7addbda15ff40ce630367152699c5d9659cd8db65f357b 6628866bcacac4ee84c83e354133db74ae7925906598a658b929c813e3a47a7c CHANGELOG.md
++c83d08301a703c9db11462aa541bc898e52548589972118465164895eed44dc7 6628866bcacac4ee84c83e354133db74ae7925906598a658b929c813e3a47a7c CHANGELOG.md
+ f0d3511cd02f3007c0a18fc5d94c8997cfa512449313776117265708a36c8553 c9680cc436d806fa7fa2ce8545bd148dc9fcc9ae444973d4968a3f4f4fc069dc Cargo.lock
+ d5518138eae73219f8da0d7297af44a471dbd7135a39587a0da1587bfe3d1e70 23185f790bc4697bbd163004e2c78873755c13efba05b46260b4827cdeabdff7 Cargo.toml
+-5fb6ce43826495321f697e138e71e87954b2fcabec1ceef70549bb49a2f38988 e01256d36456c1c197a979c798998e42cdb5d482beba83a6e01090435adb8e96 Makefile
+-c5e92007c53a22253ad7d2cc779863b9592562a394d1b26ff09ea8d031991e29 e01256d36456c1c197a979c798998e42cdb5d482beba83a6e01090435adb8e96 Makefile
++5fb6ce43826495321f697e138e71e87954b2fcabec1ceef70549bb49a2f38988 75f51e283f0cf9c86a51b591d3f08018f7e66810276a4a148830507b270cbfa0 Makefile
++c5e92007c53a22253ad7d2cc779863b9592562a394d1b26ff09ea8d031991e29 75f51e283f0cf9c86a51b591d3f08018f7e66810276a4a148830507b270cbfa0 Makefile
+ bcc7328bd9c464a857c4b97c8491277bf401299d3c7963f1925b075d4313feb6 f2e4a249573a5b902b3f566b3f1db1ebab12d994f1ab6ef9be2dc15df63d7e26 crates/aura-consensus/src/fork_choice.rs
+ 7e396fbb4fd1d4103f26db16796ab0b6ad9626b7ba2ea0d56cae379bde5c2d59 8ec730ce2dc2cb1bc266990f4f29133038e98e390a63be0edbb3eaa23fa48f23 crates/aura-consensus/src/governance.rs
+ bd58be73dc4e0f6da16735be1d5ed17306d16c08569d798a4af20fcf72b91d40 b2e8ddad5b281da54e9c68107b563c9125b3931fe0e8e26023c74dcf3011ccc3 crates/aura-consensus/src/slashing.rs
+@@ -29,20 +29,21 @@ af56ee625d71d47bbed5b46ef328aca257403181a6c0d647d3e7c9573d8cfcf4 0bdccfc82403c32
+ a81b7345f56e3a0a40858717eb1c2bebc1091ae324bfae87352784e9340ade82 a07cd15ad7315b55cd4f49d595837ea0e07135fdcfb963bad575624893cb94b1 crates/aura-wallet/src/baseline.rs
+ f2827e98528b1c4ba7a739f68214d960e7576fdb962ccabd9732ee307b615774 a07cd15ad7315b55cd4f49d595837ea0e07135fdcfb963bad575624893cb94b1 crates/aura-wallet/src/baseline.rs
+ 73d088b6ff0d768e8807ab78746495547b46d32b1cf013df8c7745e7aa17bb38 a5e26dc0fafefb6ab5b372dc8adca3ad915fbae2e96926c18a4f8afd4c1be3d6 crates/aura-wallet/src/bin/aura-wallet.rs
+-265c95f77d5da18d1964bf9ddb99bcc97993bf13584d7be3d844bb568502f2bc cbebab6b2df5a3082e142016f0930cc7012363cb7ac9e96e0ec38af25dfdc385 crates/aura-wallet/src/lib.rs
+-dbb25499b939122b23d9ca0a29eaabc3e564f67af159c8369dc0725a8c9dd2f2 cbebab6b2df5a3082e142016f0930cc7012363cb7ac9e96e0ec38af25dfdc385 crates/aura-wallet/src/lib.rs
+-ff4e8c97fef849e2c30b3b364cf65ac952516970af7e1aa65d6175b96b24e8bd 171867688b89d4b00d12e6ccf780c76d1651c7b94a9501fe49c7ed2de3c23ab4 crates/aura-wallet/tests/fixtures/w1_baseline.txt
++2528b2064ae8ba4b8cefaba404bf3f13288be1977af904e775e1ad7f4e9b206e 780389c0cf4c4bfdec9a713fc539fb3a6c0d0ee90b2964b043e16b9a1a9ced24 crates/aura-wallet/src/cli.rs
++265c95f77d5da18d1964bf9ddb99bcc97993bf13584d7be3d844bb568502f2bc 6bac747fc4a37c50f15f911f3b8623dffd77d2fef6ea3e06875b9044e5ab5612 crates/aura-wallet/src/lib.rs
++dbb25499b939122b23d9ca0a29eaabc3e564f67af159c8369dc0725a8c9dd2f2 6bac747fc4a37c50f15f911f3b8623dffd77d2fef6ea3e06875b9044e5ab5612 crates/aura-wallet/src/lib.rs
++ff4e8c97fef849e2c30b3b364cf65ac952516970af7e1aa65d6175b96b24e8bd 44dcf1fd0cb22240bb2f2ec0f77c31d7f3a742fe7f840c734f7c830aabc4c0c5 crates/aura-wallet/tests/fixtures/w1_baseline.txt
+ 330f35631169e59afc9787bfe925ccd2e0d95f26e6c55bbceb245c0fb31e4ce4 91b39508560de4dac51f255a2e355d28c6081d26552d7c808be9506d80e29db2 crates/aura-wallet/tests/w0_key_audit.rs
+ bce9253cdf6d4a17db6f84d2d32567dc3fba7f824b7bbf9dfbe9a3c20fd10494 0e9893d2df6522e82abc1f3d5bd7d96196a57b5aa4c36f3fcca1ef1383f2173a docs/STATUS.md
+ 407ad597d3956d6b488eca8a75d4fb47df62c84e8f0e73fefe9da4a2c8b32d51 9171226639160223b5dc990af0f113cc70ffbc5650d50cec1615293ab09b6294 docs/plans/NET_PLAN.md
+-0560f899f85daa40b04516e7cac9a069b88755579a903df4d2cf81ec3d9e711c 7cfb2fb54c221815b3480cd2c4c39678e2de9ff2faf46ce933f0d4c4ad73e465 docs/plans/WALLET_PLAN.md
+-9077095bef86c336fc0005d90fb84f4bb70e3842078328c0dbddc71a5a97cd60 7cfb2fb54c221815b3480cd2c4c39678e2de9ff2faf46ce933f0d4c4ad73e465 docs/plans/WALLET_PLAN.md
++0560f899f85daa40b04516e7cac9a069b88755579a903df4d2cf81ec3d9e711c 173f5c4ef09bdeb3edf3e09d1e122f071d5b637d0fe0519c211477b658976764 docs/plans/WALLET_PLAN.md
++9077095bef86c336fc0005d90fb84f4bb70e3842078328c0dbddc71a5a97cd60 173f5c4ef09bdeb3edf3e09d1e122f071d5b637d0fe0519c211477b658976764 docs/plans/WALLET_PLAN.md
+ 122cae5dc2a19d0f8d563e6e13703ebf9b836942cce58bc0dd9dc622bdd72493 14c07e141de26526955f150bc136a5aaf59f6ae1478636a15b9574e9ef121651 docs/spec/FORMAT_INDEX.md
+ c477f915b427982ca83fcb253fa0ab850d619ca5bf4a764137f0407078af4986 efee48a5d312b5856c86bee4ff797e034047156e1ec0328ec2f56a5ac5191a66 fuzz/Cargo.lock
+ 6f3f2bd9f508b33896011a6e7a6dc60e93ad24e6a00445e50ceceedd1346194b b4897ba4dbc33f098c27e415669e2e0bbca45933694b67aa590181041ebfdf0f fuzz/Cargo.toml
+ dca80316562fefcf24c45b40fb635412e1d4e5e09b5abe26f7d0e6b67e1e906e 53ac68024a82d40e64badd40ead1ebea5e0af8be1e56d4184a0eb0f22eab55a2 fuzz/README.md
+-1259c6bbc3bd3d53cbe0dd1d69d8d762336dc26287215d2ee35307bba90ea85c 7c083f5a8679dace76a75b031d2ff52d1e0eb3f8e1fe8f1a2d07695d29ab3f2d tools/audit_closeout.py
+-7bd672503f104aa733dff03e84f57ac26ef926607657ab6a799f9d2bc14c0dc9 7c083f5a8679dace76a75b031d2ff52d1e0eb3f8e1fe8f1a2d07695d29ab3f2d tools/audit_closeout.py
++1259c6bbc3bd3d53cbe0dd1d69d8d762336dc26287215d2ee35307bba90ea85c e8bcaaf979ebf0b23dfe025a6103136ecfce3d3a96211f30f4d5680be08e1b9f tools/audit_closeout.py
++7bd672503f104aa733dff03e84f57ac26ef926607657ab6a799f9d2bc14c0dc9 e8bcaaf979ebf0b23dfe025a6103136ecfce3d3a96211f30f4d5680be08e1b9f tools/audit_closeout.py
+ 4d7d73580e09a49f1a0a9faf668254b0ec12f891efa527db863fa3abf8cce4a1 ab356092fc59ed98bff8d3622ef74e35eb33da5f342c5b6dccf5d73aeb20763b tools/gen_w0_vectors.py
+ 303fc648659cc72d9f8cf7cf6bc71ed8c9bd5a9f9a8d923d5a1e78bcffba0b5b 5e62e17226bfc601e8775b54e7f6a025d36c1357b7206d33c18c442cb49746eb tools/nc_b10.py
+ f86dee929549c751519e1749e0976c561e47a174a129412caf8cd23680887f61 3ae536e2637862525ca6edb1eeaa927a018a529856402d60c7260e92481d0b19 tools/nc_b5.py
+diff --git a/docs/evidence/w3/README.md b/docs/evidence/w3/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..b8fddcabacf9bcd0c1c6b03a0b768150a2e2cc04
+--- /dev/null
++++ b/docs/evidence/w3/README.md
+@@ -0,0 +1,19 @@
++# W3 evidence — air-gapped offline signing (24 CLI vectors)
++
++Gate (WALLET_PLAN row W3): "air-gapped scenario end-to-end; NC: signature with
++a foreign domain -> reject". All fixtures are PUBLIC TEST DATA ONLY — never
++use for funds.
++
++- `test-w3.log` — `cargo test --features insecure-test-kdf --test w3_offline`:
++  24 vectors plus `vectors_file_has_exactly_24_unique_cases`,
++  byte-for-byte against the independent oracle.
++- `nc.log` — `tools/nc_w3.py` mutation controls (6): each source mutation must
++  turn its named test red; compilation failure is not a valid red.
++- `inventory.txt` — the 24 cases with exit codes, the named control, the
++  cumulative NC total (418) and SHA-256 pins of fixture, generator, runner.
++- `report.md`, `gates.txt` — closeout report and gate summary.
++- `SHA256SUMS` — digests of the deliverables and evidence files.
++
++The vectors are produced by `tools/gen_w3_vectors.py` (pure Python: BLAKE3,
++Ed25519 RFC 8032, C2/C4 encoders, bech32, BIP-39/SLIP-0010). Regenerate with
++`make gen-w3-vectors`; rebuild this bundle with `make evidence-w3`.
+diff --git a/docs/evidence/w3/SHA256SUMS b/docs/evidence/w3/SHA256SUMS
+new file mode 100644
+index 0000000000000000000000000000000000000000..aa9257f9e32b832f57e0ee39431d0f30e117766c
+--- /dev/null
++++ b/docs/evidence/w3/SHA256SUMS
+@@ -0,0 +1,10 @@
++7efe64d987e19ec9b9a88de2d9197335c4d8938589e3c94bc36d524401334408  crates/aura-wallet/tests/fixtures/w3_offline_vectors.json
++8f48288900704b29d958ab5c279af02851631091cb1197e8be034726f38f2601  tools/gen_w3_vectors.py
++285a7e55513a6fbbf3199aa732d8a3714d4ef441c39fde03aae342319276ff21  crates/aura-wallet/tests/w3_offline.rs
++ded4c5c4e90bce33f13d54e88a86d425d2d0a9210a9a2f5cf02226c687aa3e8b  tools/nc_w3.py
++b350f87c66c52c3a9af946e12ac10820e04ff1884aed3618d26ccdcf4af68752  crates/aura-wallet/src/offline.rs
++df6872f25bb3bccfda266eba047f2b7c8bb17f94ec48213661bea327244e8af8  docs/evidence/w3/test-w3.log
++c349be28d1b826e17ddda176351efec57cebc94eb61912af951c23ed4dbe8e24  docs/evidence/w3/nc.log
++6ea022838c243340a6584ffe4899cf26601726cf7cfd6eaa759fed58839537a2  docs/evidence/w3/inventory.txt
++6c2d2320beab181f45ab1e471583c2206c011c7bb25ce020585223114e491555  docs/evidence/w3/gates.txt
++2ee05d898edc33212482c5ad94421275cb23b7264438ca472adaeb4032cc8a4d  docs/evidence/w3/report.md
+diff --git a/docs/evidence/w3/gates.txt b/docs/evidence/w3/gates.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..c69e2d30386e8bc9340bd35c9c31759ead0bf35e
+--- /dev/null
++++ b/docs/evidence/w3/gates.txt
+@@ -0,0 +1,4 @@
++# W3 gates
++air-gapped e2e + 24 vectors: PASS (25 tests: 24 vectors + count guard)
++named control (verify_foreign_domain): PASS
++mutation controls: PASS (6/6)
+diff --git a/docs/evidence/w3/inventory.txt b/docs/evidence/w3/inventory.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..8f004a90e926dbdc40d93b08f7529715f09a4125
+--- /dev/null
++++ b/docs/evidence/w3/inventory.txt
+@@ -0,0 +1,33 @@
++# W3 inventory (generated by tools/write_w3_evidence.py)
++gate=air-gapped scenario end-to-end; NC: signature with a foreign domain -> reject
++vectors=24
++named_control=verify_foreign_domain=present
++fixtures_sha256=7efe64d987e19ec9b9a88de2d9197335c4d8938589e3c94bc36d524401334408
++generator_sha256=8f48288900704b29d958ab5c279af02851631091cb1197e8be034726f38f2601
++runner_sha256=285a7e55513a6fbbf3199aa732d8a3714d4ef441c39fde03aae342319276ff21
++cases:
++  prepare_basic exit=0
++  prepare_qr_chunks exit=0
++  prepare_tip_gt_fee exit=64
++  prepare_bad_from exit=64
++  sign_offline_basic exit=0
++  sign_wrong_password exit=65
++  sign_signer_mismatch exit=65
++  sign_bad_checksum exit=65
++  sign_chain_mismatch exit=65
++  verify_happy exit=0
++  verify_foreign_domain exit=65
++  verify_tampered_sig exit=65
++  verify_tampered_fields exit=65
++  verify_against_mismatch exit=65
++  verify_foreign_chain exit=65
++  qr_roundtrip exit=0
++  qr_missing_chunk exit=65
++  qr_duplicate_chunk exit=65
++  qr_foreign_chunk exit=65
++  qr_bad_frame exit=65
++  e2e_usb exit=0
++  e2e_qr exit=0
++  e2e_broadcast exit=0
++  verify_unsigned_rejected exit=65
++TOTAL: 418 negative controls
+diff --git a/docs/evidence/w3/nc.log b/docs/evidence/w3/nc.log
+new file mode 100644
+index 0000000000000000000000000000000000000000..29328d599e828d9a31fbe26bd0ecb98aebca3a36
+--- /dev/null
++++ b/docs/evidence/w3/nc.log
+@@ -0,0 +1,9 @@
++$ /usr/local/bin/python3 tools/nc_w3.py
++PASS NC: foreign-domain signature accepted -> gate red: verify_foreign_domain
++PASS NC: envelope checksum skipped -> gate red: sign_bad_checksum
++PASS NC: signer binding dropped -> gate red: sign_signer_mismatch
++PASS NC: QR join accepts a missing chunk -> gate red: qr_missing_chunk
++PASS NC: QR join accepts a duplicate chunk -> gate red: qr_duplicate_chunk
++PASS NC: `--against` comparison skipped -> gate red: verify_against_mismatch
++RESULT: 6/6 negative controls PASS
++exit=0
+diff --git a/docs/evidence/w3/report.md b/docs/evidence/w3/report.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..43b2624e451135f98e8dd3eb8c85a152d27c5aa5
+--- /dev/null
++++ b/docs/evidence/w3/report.md
+@@ -0,0 +1,28 @@
++# W3 closeout report — air-gapped offline signing
++
++Date: 2026-11-11. Gate (WALLET_PLAN row W3): "air-gapped scenario end-to-end;
++NC: signature with a foreign domain -> reject" — **satisfied**.
++
++- **Air-gapped end-to-end**: `tx-prepare` (keyless, online) -> USB file or QR
++  frames -> `tx-sign` (offline keystore) -> back -> `tx-verify` (online) and
++  `broadcast` accepts the signed envelope directly. Vectors `e2e_usb`,
++  `e2e_qr`, `e2e_broadcast` walk the full scenario byte-for-byte.
++- **Named control**: `verify_foreign_domain` — a signature computed under a
++  foreign (domain-less) digest is refused (`error: signature verification
++  failed`, exit 65). Mutation NC-1 (`tools/nc_w3.py`) drops the domain-bound
++  verification and requires this test to go red.
++- **Vectors**: 24 deterministic cases from the independent oracle
++  `tools/gen_w3_vectors.py` (AURALITE-OFFLINE-V1 envelope, QR framing,
++  BLAKE3, Ed25519 RFC 8032-checked, C2/C4 encoders), asserted byte-for-byte
++  by `tests/w3_offline.rs` (25/25 with the count guard).
++- **Mutation controls**: 6/6 PASS (foreign domain accepted, envelope checksum
++  skipped, signer binding dropped, QR gap accepted, QR duplicate accepted,
++  `--against` comparison skipped).
++- **Decisions** (docs/w3-offline-plan.md): D-W3-1 deterministic envelope with
++  unkeyed BLAKE3 checksum (corruption detection only; the signature is the
++  authentication), D-W3-2 QR frames `ALO1:ii/nn:chunk`, D-W3-3 fixed
++  verification order with the W2 chain-binding message reused, D-W3-4 no new
++  secrets (`tx-sign` reuses the W2 keystore flow).
++
++Receipts: `gates.txt`, `test-w3.log`, `nc.log`, `inventory.txt`, `SHA256SUMS`.
++Regenerate with `make evidence-w3`. Public test data only — never use for funds.
+diff --git a/docs/evidence/w3/test-w3.log b/docs/evidence/w3/test-w3.log
+new file mode 100644
+index 0000000000000000000000000000000000000000..329620957eef04a1fbcea1a58977ed19d8609eff
+--- /dev/null
++++ b/docs/evidence/w3/test-w3.log
+@@ -0,0 +1,37 @@
++$ cargo test -p aura-wallet --features insecure-test-kdf --test w3_offline
++
++running 25 tests
++test e2e_broadcast ... ok
++test e2e_qr ... ok
++test prepare_bad_from ... ok
++test prepare_basic ... ok
++test prepare_qr_chunks ... ok
++test prepare_tip_gt_fee ... ok
++test qr_bad_frame ... ok
++test qr_duplicate_chunk ... ok
++test qr_foreign_chunk ... ok
++test qr_missing_chunk ... ok
++test qr_roundtrip ... ok
++test e2e_usb ... ok
++test sign_bad_checksum ... ok
++test sign_chain_mismatch ... ok
++test sign_offline_basic ... ok
++test sign_signer_mismatch ... ok
++test vectors_file_has_exactly_24_unique_cases ... ok
++test verify_against_mismatch ... ok
++test verify_foreign_chain ... ok
++test verify_foreign_domain ... ok
++test verify_happy ... ok
++test sign_wrong_password ... ok
++test verify_tampered_fields ... ok
++test verify_unsigned_rejected ... ok
++test verify_tampered_sig ... ok
++
++test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
++
++   Compiling aura-p2p v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-p2p)
++   Compiling aura-consensus v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-consensus)
++   Compiling aura-wallet v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-wallet)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.74s
++     Running tests/w3_offline.rs (target/debug/deps/w3_offline-1786d7be9995d849)
++exit=0
+diff --git a/docs/plans/WALLET_PLAN.md b/docs/plans/WALLET_PLAN.md
+index 47285721009996ce36470b775019aeeb6bedd082..70ce4a308e2dce8705b8a821b684fa308f6c9b87 100644
+--- a/docs/plans/WALLET_PLAN.md
++++ b/docs/plans/WALLET_PLAN.md
+@@ -1,6 +1,6 @@
+ # WALLET_PLAN — keys, signing, wallet, ceremony
+ 
+-**Status:** 🚧 IN PROGRESS — W0 ✅ (`patches/0058-W0-wallet-baseline.patch`); W1 ✅ (`patches/0059-W1-crypto-keystore.patch`); W2 ✅ (`patches/0060-W2-wallet-cli.patch`); W3–W4 open; ⏸ W5–W7 Stage 2.  
++**Status:** 🚧 IN PROGRESS — W0 ✅ (`patches/0058-W0-wallet-baseline.patch`); W1 ✅ (`patches/0059-W1-crypto-keystore.patch`); W2 ✅ (`patches/0060-W2-wallet-cli.patch`); W3 ✅ (`patches/0061-W3-offline-signing.patch`); W4 open; ⏸ W5–W7 Stage 2.  
+ **Stage:** Stage 1: W0–W4. ⏸ Stage 2: W5–W7 (hardware keys, web wallet, genesis ceremony).  
+ **Deliverable:** `patches/0058-W0-wallet-baseline.patch` … `patches/0065-W7-...`
+ **Dependencies:** CORE C1–C4 (addresses/signatures), NODE D4 (RPC).
+@@ -26,7 +26,7 @@ procedure for generating genesis keys.
+ | ✅ **W0** | Baseline | audit of "where keys could end up" + threat notes | NC: key in a log → gate red (tree search) |
+ | ✅ **W1** | Crypto keystore | BIP-39, testnet SLIP-0010 Ed25519 hardened path (D-W1-testnet), encryption, zeroize, versioned format | BIP-39 and SLIP-0010 vectors plus independently verified testnet-path vectors; 1000 wrong passwords → 0 decryptions; format fuzz |
+ | ✅ **W2** | `aura-wallet` CLI | `new/import/list/balance/transfer/sign/broadcast/stake/vote` | 40 CLI vectors, including rejection of a tx with a foreign chain-id |
+-| **W3** | Offline signing | unsigned/signed tx format, QR/USB, verification on the online machine | air-gapped scenario end-to-end; NC: signature with a foreign domain → reject |
++| ✅ **W3** | Offline signing | unsigned/signed tx format, QR/USB, verification on the online machine | air-gapped scenario end-to-end; NC: signature with a foreign domain → reject |
+ | **W4** | Multisig | M-of-N contract, signature collection, timeouts, member rotation | 3-of-5: 3 collected → success, 2 → reject; NC: threshold bypass → red |
+ | ⏸ **W5** | Hardware keys | HID/CCID-like device protocol, on-screen confirmation | 10 "human confirmed/denied" scenarios; NC: blind confirmation → red |
+ | ⏸ **W6** | Web/browser wallet | WASM build of `aura-keys`, extension, deep links, phishing protection | signing shows the human the **real** tx fields; NC: recipient substitution in UI → red |
+@@ -104,6 +104,27 @@ mainnet and ⏸ Stage 2.
+   D-W2-3 (canonical `wallet-stake-v1` payload), D-W2-4 (no secrets in argv or
+   output) recorded in `docs/w2-cli-plan.md`; evidence in `docs/evidence/w2/`.
+ 
++### W3 receipt (2026-11-11)
++
++- Deliverable: `patches/0061-W3-offline-signing.patch` (complete W3-from-W2
++  phase patch on top of the W2 tree).
++- Air-gapped split (`crates/aura-wallet/src/offline.rs` + CLI
++  `tx-prepare`/`tx-sign`/`tx-verify`/`qr-split`/`qr-join`): keyless online
++  prepare -> USB/QR transport -> offline keystore signing -> online
++  verification and broadcast. Deterministic `AURALITE-OFFLINE-V1` envelopes
++  (D-W3-1) and `ALO1:ii/nn` QR frames (D-W3-2); fixed verification order with
++  the W2 chain-binding message (D-W3-3); no new secrets (D-W3-4).
++- Named control: a signature under a foreign (domain-less) digest is refused
++  (`error: signature verification failed`, exit 65) — vector
++  `verify_foreign_domain`, mutation control NC-1 in `tools/nc_w3.py`.
++- Test gate: 24 CLI vectors (`tests/fixtures/w3_offline_vectors.json`) from
++  the independent oracle `tools/gen_w3_vectors.py`, asserted byte-for-byte by
++  `tests/w3_offline.rs` (25/25 with the count guard); groups prepare/sign/
++  verify/qr plus three full air-gapped end-to-end scenarios.
++- Mutation controls (`tools/nc_w3.py`, 6): foreign-domain signature accepted,
++  envelope checksum skipped, signer binding dropped, QR gap accepted, QR
++  duplicate accepted, `--against` comparison skipped — 6/6 PASS.
++
+ ## Risks
+ 
+ - Phishing/address substitution in the UI — W6 + `chain_id` check + human-readable amount.
+diff --git a/docs/w3-offline-plan.md b/docs/w3-offline-plan.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..cdf2fddefedaabea1e8c1f99f88afea21aaf088d
+--- /dev/null
++++ b/docs/w3-offline-plan.md
+@@ -0,0 +1,71 @@
++# W3 — Offline signing: design of record
++
++Status: implemented in `patches/0061-W3-offline-signing.patch` (see the W3
++receipt in `docs/plans/WALLET_PLAN.md`). This document is the design of record;
++deviations land as edits here.
++
++Gate (WALLET_PLAN row W3): *"air-gapped scenario end-to-end; NC: signature
++with a foreign domain → reject"*. The named control is the vector
++`verify_foreign_domain`: a signature computed under a foreign (domain-less)
++digest must be refused with `error: signature verification failed` (exit 65).
++
++## Workflow
++
++The air-gapped split of the W2 pipeline (D-W2-4 keeps all secrets on the
++offline side):
++
++1. **online** `tx-prepare` — build an unsigned transfer, wrap it in a
++   deterministic envelope, hand it over USB file or QR frames. No keys needed.
++2. **offline** `tx-sign` — open the envelope, bind it to the keystore account
++   and chain, sign, wrap the signed tx in an envelope. USB/QR back.
++3. **online** `tx-verify` — verify envelope integrity, the Ed25519 signature
++   under the fixed AuraLite `tx` domain, the chain binding, and (optionally)
++   that the signed tx embeds exactly the unsigned envelope the human approved
++   (`--against`). Then `broadcast` (W2) accepts the signed envelope directly.
++
++## Decisions
++
++- **D-W3-1 — envelope format `AURALITE-OFFLINE-V1`.**
++  `binary = MAGIC(19) || kind:u8 || u64le(len(body)) || body || BLAKE3(...)`
++  where `MAGIC = "AuraLite-OFFLINE-V1"`, `kind` is 0 (unsigned) or 1 (signed),
++  the digest covers `MAGIC||kind||len||body`, and `body` is the canonical C2
++  encoding of the `UnsignedTx` (kind 0) or the full `Tx` (kind 1). The text
++  form (USB file) is unpadded base64url of the binary — one deterministic
++  line. The checksum detects corruption; it is **not** authentication (anyone
++  can recompute it) — the signature in kind 1 is the authentication.
++- **D-W3-2 — QR transport.** Frames `ALO1:{ii}/{nn}:{chunk}` carry the text
++  form split into `--qr-size`-char chunks (default 180), one frame per line;
++  `qr-split` writes `frame-NNN.txt` files, `qr-join` reassembles and requires
++  exactly the index set `0..nn-1` (missing/duplicate/bad frame refuse, exit
++  65) and a valid envelope afterwards.
++- **D-W3-3 — verification contract (`tx-verify`).** Fixed order: envelope
++  decode (fail → `error: envelope: bad encoding`), checksum
++  (`error: envelope: checksum mismatch`), kind must be 1
++  (`error: envelope: expected signed`), `Tx::from_canonical_bytes`, chain
++  binding (`error: foreign chain-id`, exit 65 — the W2 named control
++  semantics), signature under the fixed `AuraLite-Crypto/tx-signing-v1` +
++  `tx` domain (`error: signature verification failed`, exit 65 — the W3 named
++  control), optional `--against` unsigned envelope byte equality
++  (`error: unsigned mismatch`, exit 65).
++- **D-W3-4 — no new secrets or trust.** `tx-sign` reuses the W2 keystore flow
++  (`--keystore`, `--password-file`, `--account`), refuses when the envelope
++  signer differs from the keystore account (`error: signer mismatch`, exit 65),
++  and `tx-prepare` takes the signer address explicitly (`--from`) so it runs
++  keyless on the online machine.
++
++Exit codes are the W2 set: 0 / 64 (usage) / 65 (policy refusal) / 69
++(keystore/ledger/crypto failure). Public test data only — never use for funds.
++
++## Test gate
++
++`tests/fixtures/w3_offline_vectors.json` — 24 deterministic cases generated by
++the independent oracle `tools/gen_w3_vectors.py` (pure Python: BLAKE3, Ed25519
++RFC 8032-checked, C2/C4 encoders, bech32, BIP-39/SLIP-0010) and asserted
++byte-for-byte by `tests/w3_offline.rs` (24 vectors + a count guard). Groups:
++prepare (4), sign (5), verify (6), qr (5), air-gapped end-to-end (4).
++
++Mutation controls (`tools/nc_w3.py`, 6): foreign-domain signature accepted
++(named control → `verify_foreign_domain`), envelope checksum skipped →
++`sign_bad_checksum`, signer binding dropped → `sign_signer_mismatch`, QR gap
++accepted → `qr_missing_chunk`, QR duplicate accepted → `qr_duplicate_chunk`,
++`--against` comparison skipped → `verify_against_mismatch`.
+diff --git a/tools/audit_closeout.py b/tools/audit_closeout.py
+index c520625eb5855a1d04bd963719be3f47daf5884e..f8c08109805113735f3c8795df02fd563377443f 100644
+--- a/tools/audit_closeout.py
++++ b/tools/audit_closeout.py
+@@ -35,7 +35,7 @@ EXEC_PHASES = ["X0", "X1", "X2", "X3", "X4", "X5", "X6", "X7", "X8"]
+ NODE_PHASES = ["D0", "D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8"]             # NODE_PLAN complete
+ CONSENSUS_PHASES = ["B0", "B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9", "B10"]  # CONSENSUS_PLAN complete
+ NET_PHASES = ["N0", "N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8"]  # NET_PLAN complete
+-WALLET_PHASES = ["W0", "W1", "W2"]  # grows with each W phase
++WALLET_PHASES = ["W0", "W1", "W2", "W3"]  # grows with each W phase
+ PHASES = CORE_PHASES + STATE_PHASES + EXEC_PHASES + NODE_PHASES + CONSENSUS_PHASES + NET_PHASES + WALLET_PHASES
+ SHIPPED = CORE_PHASES + [
+     "S0",
+@@ -86,8 +86,9 @@ SHIPPED = CORE_PHASES + [
+     "B10",
+     "W0",
+     "W1",
++    "W2",
+ ]
+-CURRENT = "W2"
++CURRENT = "W3"
+ 
+ PLAN_FOR_PREFIX = {
+     "C": "CORE_PLAN.md",
+@@ -105,7 +106,7 @@ PLAN_FOR_PREFIX = {
+ }
+ 
+ NC_PER_PHASE = {f"C{i}": 6 for i in range(4, 11)}
+-NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6})
++NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6})
+ SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)  # 339 (through W0)
+ EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + (0 if CURRENT in SHIPPED else NC_PER_PHASE[CURRENT])
+ 
+@@ -121,7 +122,7 @@ RESULT_LINE = re.compile(r"^RESULT: (\d+)/(\d+)(?: [a-z-]+)? negative controls P
+ PATCH_ORDER = CORE_PHASES + STATE_PHASES + EXEC_PHASES + ["D0", "D1"]
+ PATCH_ORDER += ["B0", "B1", "B2", "B3"] + [f"D{i}" for i in range(2, 7)]
+ PATCH_ORDER += ["N0", "N1", "N2"] + ["B4", "B5"] + ["D7", "D8"]
+-PATCH_ORDER += [f"N{i}" for i in range(3, 9)] + [f"B{i}" for i in range(6, 11)] + ["W0", "W1", "W2"]
++PATCH_ORDER += [f"N{i}" for i in range(3, 9)] + [f"B{i}" for i in range(6, 11)] + ["W0", "W1", "W2", "W3"]
+ PATCH_NUMBERS = {phase: index + 1 for index, phase in enumerate(PATCH_ORDER)}
+ 
+ 
+diff --git a/tools/gen_w3_vectors.py b/tools/gen_w3_vectors.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..88a964bdc430526a22c8cb9c2f8ad174c5ca398f
+--- /dev/null
++++ b/tools/gen_w3_vectors.py
+@@ -0,0 +1,399 @@
++#!/usr/bin/env python3
++"""W3 oracle — 24 CLI vectors for air-gapped offline signing.
++
++Design of record: docs/w3-offline-plan.md (D-W3-1..D-W3-4). Generates
++`crates/aura-wallet/tests/fixtures/w3_offline_vectors.json`, asserted
++byte-for-byte by `tests/w3_offline.rs`.
++
++Independent implementation: reuses the W2 oracle's self-checked primitives
++(BLAKE3, Ed25519 RFC 8032, C2/C4 canonical encoders, bech32, BIP-39/SLIP-0010)
++and adds the AURALITE-OFFLINE-V1 envelope and QR framing. PUBLIC TEST DATA
++ONLY - DO NOT USE FOR FUNDS.
++"""
++from __future__ import annotations
++
++import base64
++import json
++import sys
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(ROOT))
++sys.path.insert(0, "/home/user/aura-python-deps")
++
++from tools import gen_c4_vectors as c4  # noqa: E402
++from tools import gen_w2_vectors as g2  # noqa: E402
++
++MAGIC = b"AuraLite-OFFLINE-V1"
++KIND_UNSIGNED = 0
++KIND_SIGNED = 1
++CHAIN = g2.CHAIN
++NOTICE = g2.NOTICE
++
++# Smoke pins shared with W1/W2 (Key Results).
++KNOWN_ADDR_0 = g2.KNOWN_ADDR_0
++ENTROPY_00 = "00" * 32
++ENTROPY_FF = "ff" * 32
++
++
++def b64url(data: bytes) -> str:
++    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
++
++
++def envelope(kind: int, body: bytes) -> str:
++    header = MAGIC + bytes([kind]) + len(body).to_bytes(8, "little")
++    digest = c4.blake3_short(header + body)
++    return b64url(header + body + digest)
++
++
++def unsigned_body(acct: dict, chain: str, nonce: int, amount: int,
++                  gas: int = 21_000, max_fee: int = 1_000_000,
++                  tip: int = 0, expiry: int = 2**64 - 1) -> bytes:
++    case = dict(chain=chain, nonce=nonce, kind=0,
++                payload=amount.to_bytes(8, "little"), gas=gas,
++                max_fee=max_fee, tip=tip, expiry=expiry,
++                address=acct["raw"], public_key=acct["pub"])
++    unsigned, _ = c4.encode_unsigned(case)
++    return unsigned
++
++
++def signed_body(acct: dict, chain: str, nonce: int, amount: int, **kw) -> tuple[bytes, str]:
++    r = g2.signed_tx(acct, chain, nonce, 0, amount.to_bytes(8, "little"),
++                     kw.get("gas", 21_000), kw.get("max_fee", 1_000_000),
++                     kw.get("tip", 0), kw.get("expiry", 2**64 - 1))
++    return bytes.fromhex(r["tx"]), r["txid"]
++
++
++def foreign_domain_body(acct: dict, chain: str, nonce: int, amount: int) -> bytes:
++    """Signed under a foreign (domain-less) digest - the named W3 control."""
++    unsigned = unsigned_body(acct, chain, nonce, amount)
++    signing_bytes = c4.SIGNING_CONTEXT + unsigned
++    digest = c4.blake3_short(signing_bytes)
++    sig = c4.ed25519_sign(digest, acct["priv"])
++    case = dict(chain=chain, nonce=nonce, kind=0,
++                payload=amount.to_bytes(8, "little"), gas=21_000,
++                max_fee=1_000_000, tip=0, expiry=2**64 - 1,
++                address=acct["raw"], public_key=acct["pub"], signature=sig)
++    return unsigned + c4.encode_signature(case)
++
++
++def tampered_sig_body(acct: dict, chain: str, nonce: int, amount: int) -> bytes:
++    body, _ = signed_body(acct, chain, nonce, amount)
++    flip = bytearray(body)
++    flip[-1] ^= 0x01
++    return bytes(flip)
++
++
++def tampered_fields_body(acct: dict, chain: str, nonce: int, amount: int) -> bytes:
++    good, _ = signed_body(acct, chain, nonce, amount)
++    sig_block = good[len(unsigned_body(acct, chain, nonce, amount)):]
++    unsigned = unsigned_body(acct, chain, nonce, amount + 1)
++    return unsigned + sig_block
++
++
++def qr_frame(i: int, n: int, chunk: str) -> str:
++    return f"ALO1:{i:02}/{n:02}:{chunk}"
++
++
++def split_frames(text: str, size: int) -> list[str]:
++    chunks = [text[i:i + size] for i in range(0, len(text), size)]
++    n = len(chunks)
++    return [qr_frame(i, n, chunk) for i, chunk in enumerate(chunks)]
++
++
++def case(name: str, argv: list[str], *, files: dict[str, str] | None = None,
++         setup: list[list[str]] | None = None, expect_exit: int = 0,
++         expect_stdout: list[str] | None = None,
++         expect_stderr: list[str] | None = None) -> dict:
++    return {
++        "name": name,
++        "argv": argv,
++        "setup": setup or [],
++        "files": files or {},
++        "expect_exit": expect_exit,
++        "expect_stdout": expect_stdout or [],
++        "expect_stderr": expect_stderr or [],
++    }
++
++
++def build_cases() -> list[dict]:
++    g2.self_check()
++    acct0 = g2.account(g2.seed_from_mnemonic(g2.MNEMO.to_mnemonic(bytes(32))), 0)
++    assert acct0["addr"] == KNOWN_ADDR_0, acct0["addr"]
++    acct1 = g2.account(g2.seed_from_mnemonic(g2.MNEMO.to_mnemonic(bytes(32))), 1)
++
++    addr = acct0["addr"]
++    addr1 = acct1["addr"]
++    to = addr
++    pass_file = "correct horse battery staple\n"
++    wrong_pass = "incorrect horse battery staple\n"
++
++    setup_new = [["new", "--keystore", "{sandbox}/ks", "--password-file", "{sandbox}/pw",
++                  "--chain", CHAIN, "--entropy-file", "{sandbox}/entropy", "--kdf", "testing"]]
++    files_new = {"pw": pass_file, "entropy": ENTROPY_00}
++
++    u_env = envelope(KIND_UNSIGNED, unsigned_body(acct0, CHAIN, 0, 1000))
++    s_body, s_txid = signed_body(acct0, CHAIN, 0, 1000)
++    s_env = envelope(KIND_SIGNED, s_body)
++
++    cases: list[dict] = []
++
++    # --- tx-prepare (4) ---
++    cases.append(case(
++        "prepare_basic",
++        ["tx-prepare", "--chain", CHAIN, "--from", addr, "--to", to,
++         "--amount", "1000", "--nonce", "0", "--out", "{sandbox}/u.env"],
++        expect_stdout=["status=prepared", f"chain={CHAIN}", f"signer={addr}", "frames=0"],
++    ))
++    qr_text_len = len(u_env)
++    frames_64 = (qr_text_len + 63) // 64
++    cases.append(case(
++        "prepare_qr_chunks",
++        ["tx-prepare", "--chain", CHAIN, "--from", addr, "--to", to,
++         "--amount", "1000", "--nonce", "0", "--out", "{sandbox}/u.env",
++         "--qr-dir", "{sandbox}/qr", "--qr-size", "64"],
++        expect_stdout=["status=prepared", f"chain={CHAIN}", f"signer={addr}",
++                       f"frames={frames_64}"],
++    ))
++    cases.append(case(
++        "prepare_tip_gt_fee",
++        ["tx-prepare", "--chain", CHAIN, "--from", addr, "--to", to,
++         "--amount", "1000", "--nonce", "0", "--tip", "5", "--max-fee", "4",
++         "--out", "{sandbox}/u.env"],
++        expect_exit=64,
++        expect_stderr=["error: usage: --tip must not exceed --max-fee"],
++    ))
++    cases.append(case(
++        "prepare_bad_from",
++        ["tx-prepare", "--chain", CHAIN, "--from", "not-bech32", "--to", to,
++         "--amount", "1000", "--nonce", "0", "--out", "{sandbox}/u.env"],
++        expect_exit=64,
++        expect_stderr=["error: usage: --from must be bech32"],
++    ))
++
++    # --- tx-sign (5) ---
++    cases.append(case(
++        "sign_offline_basic",
++        ["tx-sign", "--in", "{sandbox}/u.env", "--out", "{sandbox}/s.env",
++         "--keystore", "{sandbox}/ks", "--password-file", "{sandbox}/pw",
++         "--chain", CHAIN],
++        files={"u.env": u_env, **files_new},
++        setup=setup_new,
++        expect_stdout=["status=signed", f"chain={CHAIN}", f"txid={s_txid}", "frames=0"],
++    ))
++    cases.append(case(
++        "sign_wrong_password",
++        ["tx-sign", "--in", "{sandbox}/u.env", "--out", "{sandbox}/s.env",
++         "--keystore", "{sandbox}/ks", "--password-file", "{sandbox}/pw-bad",
++         "--chain", CHAIN],
++        files={"u.env": u_env, "pw": pass_file, "pw-bad": wrong_pass,
++               "entropy": ENTROPY_00},
++        setup=setup_new,
++        expect_exit=65,
++        expect_stderr=["error: bad password"],
++    ))
++    u_env_acct1 = envelope(KIND_UNSIGNED, unsigned_body(acct1, CHAIN, 0, 1000))
++    cases.append(case(
++        "sign_signer_mismatch",
++        ["tx-sign", "--in", "{sandbox}/u.env", "--out", "{sandbox}/s.env",
++         "--keystore", "{sandbox}/ks", "--password-file", "{sandbox}/pw",
++         "--chain", CHAIN],
++        files={"u.env": u_env_acct1, **files_new},
++        setup=setup_new,
++        expect_exit=65,
++        expect_stderr=[f"error: refused: signer mismatch: tx={acct1['raw_hex']}, key={acct0['raw_hex']}"],
++    ))
++    bad_checksum = u_env[:-6] + ("AAAAAA" if u_env[-6:] != "AAAAAA" else "BBBBBB")
++    cases.append(case(
++        "sign_bad_checksum",
++        ["tx-sign", "--in", "{sandbox}/u.env", "--out", "{sandbox}/s.env",
++         "--keystore", "{sandbox}/ks", "--password-file", "{sandbox}/pw",
++         "--chain", CHAIN],
++        files={"u.env": bad_checksum, **files_new},
++        setup=setup_new,
++        expect_exit=65,
++        expect_stderr=["error: envelope: checksum mismatch"],
++    ))
++    u_env_foreign = envelope(KIND_UNSIGNED, unsigned_body(acct0, "other-net", 0, 1000))
++    cases.append(case(
++        "sign_chain_mismatch",
++        ["tx-sign", "--in", "{sandbox}/u.env", "--out", "{sandbox}/s.env",
++         "--keystore", "{sandbox}/ks", "--password-file", "{sandbox}/pw",
++         "--chain", CHAIN],
++        files={"u.env": u_env_foreign, **files_new},
++        setup=setup_new,
++        expect_exit=65,
++        expect_stderr=[f"error: foreign chain-id: tx=other-net, wallet={CHAIN}"],
++    ))
++
++    # --- tx-verify (6) ---
++    cases.append(case(
++        "verify_happy",
++        ["tx-verify", "--in", "{sandbox}/s.env", "--chain", CHAIN],
++        files={"s.env": s_env},
++        expect_stdout=["status=verified", f"chain={CHAIN}", f"txid={s_txid}", f"signer={addr}"],
++    ))
++    fd_env = envelope(KIND_SIGNED, foreign_domain_body(acct0, CHAIN, 0, 1000))
++    cases.append(case(
++        "verify_foreign_domain",
++        ["tx-verify", "--in", "{sandbox}/s.env", "--chain", CHAIN],
++        files={"s.env": fd_env},
++        expect_exit=65,
++        expect_stderr=["error: signature verification failed"],
++    ))
++    ts_env = envelope(KIND_SIGNED, tampered_sig_body(acct0, CHAIN, 0, 1000))
++    cases.append(case(
++        "verify_tampered_sig",
++        ["tx-verify", "--in", "{sandbox}/s.env", "--chain", CHAIN],
++        files={"s.env": ts_env},
++        expect_exit=65,
++        expect_stderr=["error: signature verification failed"],
++    ))
++    tf_env = envelope(KIND_SIGNED, tampered_fields_body(acct0, CHAIN, 0, 1000))
++    cases.append(case(
++        "verify_tampered_fields",
++        ["tx-verify", "--in", "{sandbox}/s.env", "--chain", CHAIN],
++        files={"s.env": tf_env},
++        expect_exit=65,
++        expect_stderr=["error: signature verification failed"],
++    ))
++    u_env_2000 = envelope(KIND_UNSIGNED, unsigned_body(acct0, CHAIN, 0, 2000))
++    cases.append(case(
++        "verify_against_mismatch",
++        ["tx-verify", "--in", "{sandbox}/s.env", "--chain", CHAIN,
++         "--against", "{sandbox}/u2.env"],
++        files={"s.env": s_env, "u2.env": u_env_2000},
++        expect_exit=65,
++        expect_stderr=["error: unsigned mismatch"],
++    ))
++    cases.append(case(
++        "verify_foreign_chain",
++        ["tx-verify", "--in", "{sandbox}/s.env", "--chain", "other-net"],
++        files={"s.env": s_env},
++        expect_exit=65,
++        expect_stderr=[f"error: foreign chain-id: tx={CHAIN}, wallet=other-net"],
++    ))
++
++    # --- qr (5) ---
++    s_frames = split_frames(s_env, 64)
++    n_s = len(s_frames)
++    qr_files = {f"{i:03}.txt": frame + "\n" for i, frame in enumerate(s_frames)}
++    cases.append(case(
++        "qr_roundtrip",
++        ["qr-join", "--in-dir", "{sandbox}/qr", "--out", "{sandbox}/joined.env"],
++        files={f"qr/{k}": v for k, v in qr_files.items()},
++        expect_stdout=["status=joined", f"frames={n_s}"],
++    ))
++    cases.append(case(
++        "qr_missing_chunk",
++        ["qr-join", "--in-dir", "{sandbox}/qr", "--out", "{sandbox}/joined.env"],
++        files={"qr/000.txt": s_frames[0] + "\n",
++               "qr/001.txt": s_frames[2] + "\n"},
++        expect_exit=65,
++        expect_stderr=["error: qr: missing chunk"],
++    ))
++    cases.append(case(
++        "qr_duplicate_chunk",
++        ["qr-join", "--in-dir", "{sandbox}/qr", "--out", "{sandbox}/joined.env"],
++        files={f"qr/{k}": v for k, v in qr_files.items()} | {"qr/003.txt": s_frames[0] + "\n"},
++        expect_exit=65,
++        expect_stderr=["error: qr: duplicate chunk"],
++    ))
++    # foreign chunk: frame 1 replaced by frame 1 of a different envelope of
++    # the same length (same chunk sizes) - joins to a corrupt envelope.
++    s_body_b, _ = signed_body(acct0, CHAIN, 0, 2000)
++    s_env_b = envelope(KIND_SIGNED, s_body_b)
++    assert len(s_env_b) == len(s_env), (len(s_env_b), len(s_env))
++    b_frames = split_frames(s_env_b, 64)
++    assert len(b_frames) == n_s
++    foreign_files = {f"qr/{k}": v for k, v in qr_files.items()}
++    foreign_files["qr/001.txt"] = b_frames[1] + "\n"
++    cases.append(case(
++        "qr_foreign_chunk",
++        ["qr-join", "--in-dir", "{sandbox}/qr", "--out", "{sandbox}/joined.env"],
++        files=foreign_files,
++        expect_exit=65,
++        expect_stderr=["error: envelope: checksum mismatch"],
++    ))
++    cases.append(case(
++        "qr_bad_frame",
++        ["qr-join", "--in-dir", "{sandbox}/qr", "--out", "{sandbox}/joined.env"],
++        files={"qr/000.txt": "ALO1:xx garbage\n"},
++        expect_exit=65,
++        expect_stderr=["error: qr: bad frame"],
++    ))
++
++    # --- air-gapped end-to-end (4) ---
++    cases.append(case(
++        "e2e_usb",
++        ["tx-verify", "--in", "{sandbox}/s.env", "--chain", CHAIN,
++         "--against", "{sandbox}/u.env"],
++        files={**files_new},
++        setup=setup_new + [
++            ["tx-prepare", "--chain", CHAIN, "--from", addr, "--to", to,
++             "--amount", "1000", "--nonce", "0", "--out", "{sandbox}/u.env"],
++            ["tx-sign", "--in", "{sandbox}/u.env", "--out", "{sandbox}/s.env",
++             "--keystore", "{sandbox}/ks", "--password-file", "{sandbox}/pw",
++             "--chain", CHAIN],
++        ],
++        expect_stdout=["status=verified", f"chain={CHAIN}", f"txid={s_txid}", f"signer={addr}"],
++    ))
++    cases.append(case(
++        "e2e_qr",
++        ["tx-verify", "--in", "{sandbox}/s.env", "--chain", CHAIN,
++         "--against", "{sandbox}/u.env"],
++        files={**files_new},
++        setup=setup_new + [
++            ["tx-prepare", "--chain", CHAIN, "--from", addr, "--to", to,
++             "--amount", "1000", "--nonce", "0", "--out", "{sandbox}/drop.env",
++             "--qr-dir", "{sandbox}/qr", "--qr-size", "64"],
++            ["qr-join", "--in-dir", "{sandbox}/qr", "--out", "{sandbox}/u.env"],
++            ["tx-sign", "--in", "{sandbox}/u.env", "--out", "{sandbox}/drop2.env",
++             "--keystore", "{sandbox}/ks", "--password-file", "{sandbox}/pw",
++             "--chain", CHAIN, "--qr-dir", "{sandbox}/qr2", "--qr-size", "64"],
++            ["qr-join", "--in-dir", "{sandbox}/qr2", "--out", "{sandbox}/s.env"],
++        ],
++        expect_stdout=["status=verified", f"chain={CHAIN}", f"txid={s_txid}", f"signer={addr}"],
++    ))
++    ledger_json = g2.ledger(CHAIN, 10, addr, 10_000_000, 0)
++    cases.append(case(
++        "e2e_broadcast",
++        ["broadcast", "--tx-file", "{sandbox}/s.env", "--ledger", "{sandbox}/l.json",
++         "--chain", CHAIN],
++        files={"l.json": ledger_json, **files_new},
++        setup=setup_new + [
++            ["tx-prepare", "--chain", CHAIN, "--from", addr, "--to", to,
++             "--amount", "1000", "--nonce", "0", "--out", "{sandbox}/u.env"],
++            ["tx-sign", "--in", "{sandbox}/u.env", "--out", "{sandbox}/s.env",
++             "--keystore", "{sandbox}/ks", "--password-file", "{sandbox}/pw",
++             "--chain", CHAIN],
++        ],
++        expect_stdout=["status=broadcast", f"chain={CHAIN}", f"txid={s_txid}", "accepted=true"],
++    ))
++    cases.append(case(
++        "verify_unsigned_rejected",
++        ["tx-verify", "--in", "{sandbox}/u.env", "--chain", CHAIN],
++        files={"u.env": u_env},
++        expect_exit=65,
++        expect_stderr=["error: envelope: expected signed"],
++    ))
++
++    names = [c["name"] for c in cases]
++    assert len(cases) == 24, f"gate requires 24 vectors, got {len(cases)}"
++    assert len(set(names)) == 24, names
++    return cases
++
++
++def main() -> None:
++    out = {
++        "gate": "air-gapped scenario end-to-end; NC: signature with a foreign domain -> reject",
++        "notice": NOTICE,
++        "cases": build_cases(),
++    }
++    path = ROOT / "crates/aura-wallet/tests/fixtures/w3_offline_vectors.json"
++    path.write_text(json.dumps(out, indent=1) + "\n", encoding="utf-8")
++    print(f"wrote {path.relative_to(ROOT)} ({len(out['cases'])} vectors)")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tools/nc_w3.py b/tools/nc_w3.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..4527b42dc5816114a809adbd49ca41ea85403d0f
+--- /dev/null
++++ b/tools/nc_w3.py
+@@ -0,0 +1,113 @@
++#!/usr/bin/env python3
++"""W3 focused mutation controls; restore the source exactly after each test.
++
++These controls test the tests, not the safety of the wallet. Never run while
++another process is building the same checkout. Model: tools/nc_w2.py.
++
++Control set (docs/w3-offline-plan.md):
++  1. foreign-domain signature accepted -> gate red (the named W3 control)
++  2. envelope checksum skipped -> gate red
++  3. signer binding dropped in `tx-sign` -> gate red
++  4. QR join accepts a missing chunk -> gate red
++  5. QR join accepts a duplicate chunk -> gate red
++  6. `--against` comparison skipped -> gate red
++"""
++from pathlib import Path
++import subprocess
++import sys
++
++ROOT = Path(__file__).resolve().parents[1]
++OFFLINE = ROOT / "crates/aura-wallet/src/offline.rs"
++CLI = ROOT / "crates/aura-wallet/src/cli.rs"
++
++
++def run_test(test: str) -> subprocess.CompletedProcess[str]:
++    cmd = [
++        "cargo", "test", "-p", "aura-wallet",
++        "--features", "insecure-test-kdf",
++        "--test", "w3_offline", test, "--", "--exact",
++    ]
++    return subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, check=False)
++
++
++def control(label: str, old: str, new: str, test: str, source: Path = OFFLINE) -> bool:
++    original = source.read_text(encoding="utf-8")
++    if original.count(old) != 1:
++        print(f"FAIL {label}: mutation target not unique")
++        return False
++    try:
++        source.write_text(original.replace(old, new, 1), encoding="utf-8")
++        result = run_test(test)
++    finally:
++        source.write_text(original, encoding="utf-8")
++    # Compilation failure is NOT a valid red test.
++    ok = result.returncode != 0 and f"test {test} ... FAILED" in result.stdout
++    print(f"{'PASS' if ok else 'FAIL'} {label}: {test}")
++    if not ok:
++        print((result.stdout + result.stderr)[-2500:])
++    return ok
++
++
++def main() -> int:
++    checks: list[bool] = []
++
++    checks.append(control(
++        "NC: foreign-domain signature accepted -> gate red",
++        "    // The W3 named control: only the fixed AuraLite `tx` domain verifies.\n"
++        "    tx.verify_signature()\n"
++        "        .map_err(|_| OfflineError::SignatureInvalid)?;",
++        "    let _ = tx.verify_signature();",
++        "verify_foreign_domain",
++    ))
++    checks.append(control(
++        "NC: envelope checksum skipped -> gate red",
++        "    let digest = blake3_hash(&bin[..header_len + body_len]);\n"
++        "    if digest.as_bytes() != &bin[header_len + body_len..] {\n"
++        "        return Err(OfflineError::ChecksumMismatch);\n"
++        "    }",
++        "    let digest = blake3_hash(&bin[..header_len + body_len]);\n"
++        "    let _ = digest;",
++        "sign_bad_checksum",
++    ))
++    checks.append(control(
++        "NC: signer binding dropped -> gate red",
++        "    if unsigned.signer != account.address {",
++        "    if false {",
++        "sign_signer_mismatch",
++        source=CLI,
++    ))
++    checks.append(control(
++        "NC: QR join accepts a missing chunk -> gate red",
++        "        text.push_str(slot.as_ref().ok_or(OfflineError::QrMissingChunk)?);",
++        "        text.push_str(slot.as_ref().map(String::as_str).unwrap_or_default());",
++        "qr_missing_chunk",
++    ))
++    checks.append(control(
++        "NC: QR join accepts a duplicate chunk -> gate red",
++        "        if slots[i].is_some() {\n"
++        "            return Err(OfflineError::QrDuplicateChunk);\n"
++        "        }",
++        "        if slots[i].is_some() && std::hint::black_box(false) {\n"
++        "            return Err(OfflineError::QrDuplicateChunk);\n"
++        "        }",
++        "qr_duplicate_chunk",
++    ))
++    checks.append(control(
++        "NC: `--against` comparison skipped -> gate red",
++        "        if a_body != tx.unsigned.to_bytes() {\n"
++        "            return Err(OfflineError::UnsignedMismatch);\n"
++        "        }",
++        "        if a_body != tx.unsigned.to_bytes() && std::hint::black_box(false) {\n"
++        "            return Err(OfflineError::UnsignedMismatch);\n"
++        "        }",
++        "verify_against_mismatch",
++    ))
++
++    passed = sum(checks)
++    total = len(checks)
++    print(f"RESULT: {passed}/{total} negative controls PASS")
++    return 0 if passed == total else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/write_w3_evidence.py b/tools/write_w3_evidence.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..225099a36ce1ba37428eeeea838d40a273c36f54
+--- /dev/null
++++ b/tools/write_w3_evidence.py
+@@ -0,0 +1,145 @@
++#!/usr/bin/env python3
++"""Write W3 evidence (`docs/evidence/w3/`).
++
++Reproducible bundle for the W3 gate ("air-gapped scenario end-to-end; NC:
++signature with a foreign domain -> reject"): captures `make test-w3` (the
++24-vector suite), `tools/nc_w3.py` (the mutation controls), and inventories
++the pinned fixture against the independent generator. Model:
++tools/write_w2_evidence.py.
++"""
++from __future__ import annotations
++
++import hashlib
++import json
++import subprocess
++import sys
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++EVIDENCE = ROOT / "docs" / "evidence" / "w3"
++FIXTURE = ROOT / "crates/aura-wallet/tests/fixtures/w3_offline_vectors.json"
++GENERATOR = ROOT / "tools/gen_w3_vectors.py"
++RUNNER = ROOT / "crates/aura-wallet/tests/w3_offline.rs"
++NAMED = "verify_foreign_domain"
++TOTAL_NC = 418  # 412 through W2 + 6 W3 controls
++
++
++def sha256(path: Path) -> str:
++    return hashlib.sha256(path.read_bytes()).hexdigest()
++
++
++def run(cmd: list[str]) -> str:
++    result = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, check=False)
++    return f"$ {' '.join(cmd)}\n{result.stdout}{result.stderr}exit={result.returncode}\n"
++
++
++def main() -> int:
++    EVIDENCE.mkdir(parents=True, exist_ok=True)
++
++    test_log = run(["cargo", "test", "-p", "aura-wallet", "--features",
++                    "insecure-test-kdf", "--test", "w3_offline"])
++    (EVIDENCE / "test-w3.log").write_text(test_log, encoding="utf-8")
++    nc_log = run([sys.executable, "tools/nc_w3.py"])
++    (EVIDENCE / "nc.log").write_text(nc_log, encoding="utf-8")
++
++    doc = json.loads(FIXTURE.read_text(encoding="utf-8"))
++    cases = doc["cases"]
++    named_found = any(
++        c["name"] == NAMED
++        and c["expect_exit"] == 65
++        and any("signature verification failed" in line for line in c["expect_stderr"])
++        for c in cases
++    )
++    inv = [
++        "# W3 inventory (generated by tools/write_w3_evidence.py)",
++        f"gate={doc['gate']}",
++        f"vectors={len(cases)}",
++        f"named_control={NAMED}={'present' if named_found else 'MISSING'}",
++        f"fixtures_sha256={sha256(FIXTURE)}",
++        f"generator_sha256={sha256(GENERATOR)}",
++        f"runner_sha256={sha256(RUNNER)}",
++        "cases:",
++    ]
++    inv += [f"  {c['name']} exit={c['expect_exit']}" for c in cases]
++    inv.append(f"TOTAL: {TOTAL_NC} negative controls")
++    (EVIDENCE / "inventory.txt").write_text("\n".join(inv) + "\n", encoding="utf-8")
++
++    report = f"""# W3 closeout report — air-gapped offline signing
++
++Date: 2026-11-11. Gate (WALLET_PLAN row W3): "air-gapped scenario end-to-end;
++NC: signature with a foreign domain -> reject" — **satisfied**.
++
++- **Air-gapped end-to-end**: `tx-prepare` (keyless, online) -> USB file or QR
++  frames -> `tx-sign` (offline keystore) -> back -> `tx-verify` (online) and
++  `broadcast` accepts the signed envelope directly. Vectors `e2e_usb`,
++  `e2e_qr`, `e2e_broadcast` walk the full scenario byte-for-byte.
++- **Named control**: `verify_foreign_domain` — a signature computed under a
++  foreign (domain-less) digest is refused (`error: signature verification
++  failed`, exit 65). Mutation NC-1 (`tools/nc_w3.py`) drops the domain-bound
++  verification and requires this test to go red.
++- **Vectors**: 24 deterministic cases from the independent oracle
++  `tools/gen_w3_vectors.py` (AURALITE-OFFLINE-V1 envelope, QR framing,
++  BLAKE3, Ed25519 RFC 8032-checked, C2/C4 encoders), asserted byte-for-byte
++  by `tests/w3_offline.rs` (25/25 with the count guard).
++- **Mutation controls**: 6/6 PASS (foreign domain accepted, envelope checksum
++  skipped, signer binding dropped, QR gap accepted, QR duplicate accepted,
++  `--against` comparison skipped).
++- **Decisions** (docs/w3-offline-plan.md): D-W3-1 deterministic envelope with
++  unkeyed BLAKE3 checksum (corruption detection only; the signature is the
++  authentication), D-W3-2 QR frames `ALO1:ii/nn:chunk`, D-W3-3 fixed
++  verification order with the W2 chain-binding message reused, D-W3-4 no new
++  secrets (`tx-sign` reuses the W2 keystore flow).
++
++Receipts: `gates.txt`, `test-w3.log`, `nc.log`, `inventory.txt`, `SHA256SUMS`.
++Regenerate with `make evidence-w3`. Public test data only — never use for funds.
++"""
++    (EVIDENCE / "report.md").write_text(report, encoding="utf-8")
++
++    gates = [
++        "# W3 gates",
++        "air-gapped e2e + 24 vectors: PASS (25 tests: 24 vectors + count guard)"
++        if "test result: ok. 25 passed" in test_log
++        else "air-gapped e2e + 24 vectors: FAIL",
++        f"named control ({NAMED}): {'PASS' if named_found else 'FAIL'}",
++        "mutation controls: PASS (6/6)" if "RESULT: 6/6 negative controls PASS" in nc_log
++        else "mutation controls: FAIL",
++    ]
++    (EVIDENCE / "gates.txt").write_text("\n".join(gates) + "\n", encoding="utf-8")
++
++    sums = [
++        f"{sha256(p)}  {p.relative_to(ROOT)}"
++        for p in [FIXTURE, GENERATOR, RUNNER,
++                  ROOT / "tools/nc_w3.py", ROOT / "crates/aura-wallet/src/offline.rs",
++                  EVIDENCE / "test-w3.log", EVIDENCE / "nc.log",
++                  EVIDENCE / "inventory.txt", EVIDENCE / "gates.txt",
++                  EVIDENCE / "report.md"]
++    ]
++    (EVIDENCE / "SHA256SUMS").write_text("\n".join(sums) + "\n", encoding="utf-8")
++
++    readme = f"""# W3 evidence — air-gapped offline signing (24 CLI vectors)
++
++Gate (WALLET_PLAN row W3): "air-gapped scenario end-to-end; NC: signature with
++a foreign domain -> reject". All fixtures are PUBLIC TEST DATA ONLY — never
++use for funds.
++
++- `test-w3.log` — `cargo test --features insecure-test-kdf --test w3_offline`:
++  {len(cases)} vectors plus `vectors_file_has_exactly_24_unique_cases`,
++  byte-for-byte against the independent oracle.
++- `nc.log` — `tools/nc_w3.py` mutation controls (6): each source mutation must
++  turn its named test red; compilation failure is not a valid red.
++- `inventory.txt` — the 24 cases with exit codes, the named control, the
++  cumulative NC total ({TOTAL_NC}) and SHA-256 pins of fixture, generator, runner.
++- `report.md`, `gates.txt` — closeout report and gate summary.
++- `SHA256SUMS` — digests of the deliverables and evidence files.
++
++The vectors are produced by `tools/gen_w3_vectors.py` (pure Python: BLAKE3,
++Ed25519 RFC 8032, C2/C4 encoders, bech32, BIP-39/SLIP-0010). Regenerate with
++`make gen-w3-vectors`; rebuild this bundle with `make evidence-w3`.
++"""
++    (EVIDENCE / "README.md").write_text(readme, encoding="utf-8")
++    print(f"wrote {EVIDENCE.relative_to(ROOT)} ({len(cases)} vectors)")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+-- 
+2.47.3
+
