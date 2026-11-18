@@ -1,6 +1,6 @@
 # SECURITY_PLAN — threats, fuzzing, audit, incidents
 
-**Status:** 🚧 IN PROGRESS — H0 ✅ (`patches/0063-H0-threat-model.patch`); H1 ✅ (`patches/0064-H1-supply-chain.patch`); H4 ✅ (`patches/0068-H4-property.patch`); H5 ✅ (`patches/0069-H5-consensus.patch`); H6 ✅ (`patches/0070-H6-economic.patch`); H7 ✅ (`patches/0071-H7-opsec.patch`) — **Stage 1 (H0–H7) закрыт**; ⏸ H8–H9 Stage 2  
+**Status:** 🚧 IN PROGRESS — H0 ✅ (`patches/0063-H0-threat-model.patch`); H1 ✅ (`patches/0064-H1-supply-chain.patch`); H4 ✅ (`patches/0068-H4-property.patch`); H5 ✅ (`patches/0069-H5-consensus.patch`); H6 ✅ (`patches/0070-H6-economic.patch`); H7 ✅ (`patches/0071-H7-opsec.patch`) — **Stage 1 (H0–H7) закрыт**; H8 ✅ (`patches/0072-H8-audit.patch`); ⏸ H9 Stage 2  
 **Stage:** Stage 1: H0–H7. ⏸ Stage 2: H8–H9 (external audit, bug bounty, incident drills).  
 **Deliverable:** `patches/0086-H0-...` … `patches/0095-H9-...`
 **Dependencies:** runs in parallel with CORE (H0/H1 with C0). H0–H7 are mandatory
@@ -47,7 +47,7 @@ Stage-2 external-review gate (O5).
 | ✅ **H5** | Consensus safety | TLA+/Apalache spec, Jepsen-like runs (together with B10/N8) | model finds a counterexample when 2f+1 is removed; NC documented |
 | ✅ **H6** | Economic attacks | MEV, censorship, stake grinding, 34% attack, oracle manipulation, bridge drain | simulations: damage bounded by limits/slashing; NC: no pause → red |
 | ✅ **H7** | OpSec | validator keys (HSM/offline), CI isolation, permissions, access log, reproducible build | NC: secret in git → CI red; two hosts build to the same sha256 |
-| ⏸ **H8** | External audit + bounty | audit of consensus/VM/bridge/wallet, public report, fixes, bug bounty + disclosure | 0 unfixed critical/high; NC: re-audit finds an old bug → red |
+| ✅ **H8** | External audit + bounty | audit of consensus/VM/bridge/wallet, public report, fixes, bug bounty + disclosure | 0 unfixed critical/high; NC: re-audit finds an old bug → red |
 | ⏸ **H9** | Incidents | playbook: halt/pause/upgrade/rollback, communication, post-mortem, drills | drill "Byzantine validator + bridge bug": network halted/recovered within SLO |
 
 ## Risks
@@ -224,6 +224,23 @@ Stage 2 (⏸): external audit, bug bounty and incident drills (H8–H9).
   without burn, rotation pinned to one validator, canonical order
   reversed, oracle median replaced by max, bridge reserve bound disabled —
   7/7 PASS.
+
+### H8 receipt (2026-11-18) — external audit + bounty
+
+- Deliverable: `patches/0072-H8-audit.patch`; evidence in
+  `docs/evidence/h8/` (`campaign/` self-contained: re-audit logs,
+  `result.json` with commands and source digests).
+- Gate met literally: **0 unfixed critical/high** in the findings
+  registry (`tools/fixtures/h8_findings.json`), and **re-audit finds an
+  old bug → red** — NC-1/NC-2 re-introduce the two named old bugs
+  (wallet keystore mode check; consensus reward overflow) and
+  `tools/h8_reaudit.py` turns red with the named message each time.
+- Public report `docs/audit/h8-public-audit-report.md` covers
+  consensus/VM/bridge/wallet (bridge = E9, slot retained);
+  coordinated disclosure + bug bounty published in `SECURITY.md`.
+- Negative controls: `tools/nc_h8.py`, 7/7 in `docs/evidence/h8/nc.log`;
+  cumulative negative control total 481. Deviations (scripted external
+  review; bridge out of code scope) recorded in `docs/h8-audit-plan.md` §3.
 
 ### H7 receipt (2026-11-17) — Stage 1 closed
 

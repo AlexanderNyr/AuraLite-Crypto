@@ -266,6 +266,8 @@ test: deps-check
 	@$(PYTHON) tools/test_historical_drift.py
 	@echo "== opsec checks (H7) =="
 	@$(PYTHON) tools/check_opsec.py
+	@echo "== re-audit (H8) =="
+	@$(PYTHON) tools/h8_reaudit.py
 	@echo "== close-out audit =="
 	@$(PYTHON) tools/audit_closeout.py
 	@echo "ALL GATES GREEN"
@@ -1347,6 +1349,16 @@ nc-h7:
 
 evidence-h7:
 	@$(PYTHON) tools/write_h7_evidence.py
+
+.PHONY: reaudit-h8 nc-h8 evidence-h8
+reaudit-h8:
+	@$(PYTHON) tools/h8_reaudit.py
+
+nc-h8:
+	@$(PYTHON) tools/nc_h8.py
+
+evidence-h8:
+	@$(PYTHON) tools/write_h8_evidence.py
 
 # Optional independent interop check; install the pinned test-only Python
 # dependencies in tools/w1-reference-requirements.txt first.

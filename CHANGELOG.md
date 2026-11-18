@@ -3,6 +3,19 @@
 All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
 never rewritten: corrections are made with a new entry or an explicit note.
 
+## [H8 — External audit + bounty phase closed: 0 unfixed critical/high, re-audit oracle, 7 mutation controls] 2026-11-18
+
+### Added
+- `docs/audit/h8-public-audit-report.md` (public audit of
+  consensus/VM/bridge/wallet: findings table, methodology),
+  `SECURITY.md` (coordinated disclosure policy + bug bounty with a
+  normative severity table), `tools/fixtures/h8_known_bugs.json` and
+  `tools/fixtures/h8_findings.json` (pinned registries),
+  `tools/h8_reaudit.py` (deterministic re-audit oracle, fail-closed,
+  wired into `make test`), `tools/nc_h8.py` (7 mutation controls; the
+  phase gate literally — re-introduced old bugs turn the gate red),
+  `tools/write_h8_evidence.py`, `docs/h8-audit-plan.md`.
+
 ## [H7 — OpSec / reproducible builds phase closed: two-host sha256 gate, secret-in-git gate, 7 mutation controls] 2026-11-17
 
 ### Added
