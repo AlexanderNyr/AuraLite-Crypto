@@ -1,6 +1,6 @@
 # SECURITY_PLAN — threats, fuzzing, audit, incidents
 
-**Status:** 🚧 IN PROGRESS — H0 ✅ (`patches/0063-H0-threat-model.patch`); H1 ✅ (`patches/0064-H1-supply-chain.patch`); H4 ✅ (`patches/0068-H4-property.patch`); H5 ✅ (`patches/0069-H5-consensus.patch`); H6 ✅ (`patches/0070-H6-economic.patch`); H7 ✅ (`patches/0071-H7-opsec.patch`) — **Stage 1 (H0–H7) закрыт**; H8 ✅ (`patches/0072-H8-audit.patch`); ⏸ H9 Stage 2  
+**Status:** 🚧 IN PROGRESS — H0 ✅ (`patches/0063-H0-threat-model.patch`); H1 ✅ (`patches/0064-H1-supply-chain.patch`); H4 ✅ (`patches/0068-H4-property.patch`); H5 ✅ (`patches/0069-H5-consensus.patch`); H6 ✅ (`patches/0070-H6-economic.patch`); H7 ✅ (`patches/0071-H7-opsec.patch`) — **Stage 1 (H0–H7) закрыт**; H8 ✅ (`patches/0072-H8-audit.patch`); H9 ✅ (`patches/0073-H9-incident.patch`) — **SECURITY_PLAN (H0–H9) закрыт**  
 **Stage:** Stage 1: H0–H7. ⏸ Stage 2: H8–H9 (external audit, bug bounty, incident drills).  
 **Deliverable:** `patches/0086-H0-...` … `patches/0095-H9-...`
 **Dependencies:** runs in parallel with CORE (H0/H1 with C0). H0–H7 are mandatory
@@ -48,7 +48,7 @@ Stage-2 external-review gate (O5).
 | ✅ **H6** | Economic attacks | MEV, censorship, stake grinding, 34% attack, oracle manipulation, bridge drain | simulations: damage bounded by limits/slashing; NC: no pause → red |
 | ✅ **H7** | OpSec | validator keys (HSM/offline), CI isolation, permissions, access log, reproducible build | NC: secret in git → CI red; two hosts build to the same sha256 |
 | ✅ **H8** | External audit + bounty | audit of consensus/VM/bridge/wallet, public report, fixes, bug bounty + disclosure | 0 unfixed critical/high; NC: re-audit finds an old bug → red |
-| ⏸ **H9** | Incidents | playbook: halt/pause/upgrade/rollback, communication, post-mortem, drills | drill "Byzantine validator + bridge bug": network halted/recovered within SLO |
+| ✅ **H9** | Incidents | playbook: halt/pause/upgrade/rollback, communication, post-mortem, drills | drill "Byzantine validator + bridge bug": network halted/recovered within SLO |
 
 ## Risks
 
@@ -224,6 +224,24 @@ Stage 2 (⏸): external audit, bug bounty and incident drills (H8–H9).
   without burn, rotation pinned to one validator, canonical order
   reversed, oracle median replaced by max, bridge reserve bound disabled —
   7/7 PASS.
+
+### H9 receipt (2026-11-18) — incident drills, SECURITY_PLAN closed
+
+- Deliverable: `patches/0073-H9-incident.patch`; evidence in
+  `docs/evidence/h9/` (`campaign/` self-contained: drill logs,
+  `result.json` with commands and source digests).
+- Gate met literally: drill **"Byzantine validator + bridge bug"**
+  halts the network at t+5 min (SLO ≤ 15) and recovers it at t+180 min
+  (SLO ≤ 240); NC-1 (halt removed) and NC-2 (recover removed) turn the
+  runner red with the named message each time.
+- Playbook `docs/incident/PLAYBOOK.md` covers halt/pause/upgrade/
+  rollback + communication + post-mortem with normative SLOs; three
+  drills tied to H0 scenarios (D1 → H0-S10/S11, D2 → H0-S02/S13,
+  D3 → H0-S15/S18).
+- Negative controls: `tools/nc_h9.py`, 7/7 in `docs/evidence/h9/nc.log`;
+  cumulative negative control total 488. Deviations (scheduled-timeline
+  drill without a live testnet; bridge half = E9) recorded in
+  `docs/h9-incident-plan.md` §3.
 
 ### H8 receipt (2026-11-18) — external audit + bounty
 

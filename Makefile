@@ -268,6 +268,8 @@ test: deps-check
 	@$(PYTHON) tools/check_opsec.py
 	@echo "== re-audit (H8) =="
 	@$(PYTHON) tools/h8_reaudit.py
+	@echo "== incident drills (H9) =="
+	@$(PYTHON) tools/h9_incident_drill.py
 	@echo "== close-out audit =="
 	@$(PYTHON) tools/audit_closeout.py
 	@echo "ALL GATES GREEN"
@@ -1359,6 +1361,16 @@ nc-h8:
 
 evidence-h8:
 	@$(PYTHON) tools/write_h8_evidence.py
+
+.PHONY: drill-h9 nc-h9 evidence-h9
+drill-h9:
+	@$(PYTHON) tools/h9_incident_drill.py
+
+nc-h9:
+	@$(PYTHON) tools/nc_h9.py
+
+evidence-h9:
+	@$(PYTHON) tools/write_h9_evidence.py
 
 # Optional independent interop check; install the pinned test-only Python
 # dependencies in tools/w1-reference-requirements.txt first.

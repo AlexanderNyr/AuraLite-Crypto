@@ -3,6 +3,19 @@
 All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
 never rewritten: corrections are made with a new entry or an explicit note.
 
+## [H9 — Incident drills phase closed: named drill halted/recovered within SLO, playbook + 7 mutation controls] 2026-11-18
+
+### Added
+- `docs/incident/PLAYBOOK.md` (halt/pause/upgrade/rollback, detection,
+  recovery, communication, post-mortem template; SLOs halt ≤ 15 min,
+  recover ≤ 240 min, post-mortem ≤ 480 min), `tools/fixtures/h9_drills.json`
+  (three deterministic drill timelines tied to H0 scenarios),
+  `tools/h9_incident_drill.py` (deterministic drill runner: playbook
+  coverage, incident state-machine order, SLO bounds; the named gate
+  literally — drill "Byzantine validator + bridge bug" halted/recovered
+  within SLO; wired into `make test`), `tools/nc_h9.py` (7 mutation
+  controls), `tools/write_h9_evidence.py`, `docs/h9-incident-plan.md`.
+
 ## [H8 — External audit + bounty phase closed: 0 unfixed critical/high, re-audit oracle, 7 mutation controls] 2026-11-18
 
 ### Added
