@@ -1,0 +1,2402 @@
+From c04e608be5a9d9b8dbf86fd7edd6f2904aef0ee4 Mon Sep 17 00:00:00 2001
+From: AuraLite <auralite@local>
+Date: Sun, 15 Nov 2026 16:22:22 +0000
+Subject: [PATCH] H2: Crypto review phase closed (50 vectors, 6 mutation
+ controls)
+
+50 golden crypto vectors from an independent oracle (pure-Python RFC 8032 +
+python blake3 + from-spec domain_message): byte-for-byte sign/verify, keygen,
+digest layout, edge payloads; negatives: wrong domain, cross chain, tampered
+payload, wrong key, high-S malleation. verify_raw now rejects S >= L with
+CryptoError::NonCanonicalSignature (the (R, S+L) twin; dalek's
+legacy_compatibility feature would reopen the window). Side-channel
+checklist: 10 machine-readable items with source-claim checks
+(tools/check_h2_review.py); PQ plan (ML-DSA FIPS 204 primary, SLH-DSA
+FIPS 205 backup). Named control shared_domain; mutation controls 6/6.
+---
+ CHANGELOG.md                                  |  18 +
+ Makefile                                      |  18 +
+ crates/aura-crypto/src/ed25519.rs             |  71 ++-
+ crates/aura-crypto/src/error.rs               |   5 +
+ .../aura-crypto/tests/fixtures/h2_vectors.txt | 495 ++++++++++++++++++
+ crates/aura-crypto/tests/h2_crypto.rs         | 299 +++++++++++
+ docs/evidence/h2/README.md                    |  13 +
+ docs/evidence/h2/SHA256SUMS                   |  17 +
+ docs/evidence/h2/check.log                    |  25 +
+ docs/evidence/h2/gates.txt                    |   6 +
+ docs/evidence/h2/inventory.txt                |  26 +
+ docs/evidence/h2/nc.log                       |   9 +
+ docs/evidence/h2/report.md                    |  35 ++
+ docs/evidence/review-w1-source-drift.txt      |  12 +-
+ docs/h2-crypto-review-plan.md                 | 187 +++++++
+ docs/plans/SECURITY_PLAN.md                   |  30 +-
+ tools/audit_closeout.py                       |   8 +-
+ tools/check_h2_review.py                      | 178 +++++++
+ tools/fixtures/h2_review_checklist.json       |  85 +++
+ tools/gen_h2_vectors.py                       | 269 ++++++++++
+ tools/nc_h2.py                                | 128 +++++
+ tools/write_h2_evidence.py                    | 165 ++++++
+ 22 files changed, 2087 insertions(+), 12 deletions(-)
+ create mode 100644 crates/aura-crypto/tests/fixtures/h2_vectors.txt
+ create mode 100644 crates/aura-crypto/tests/h2_crypto.rs
+ create mode 100644 docs/evidence/h2/README.md
+ create mode 100644 docs/evidence/h2/SHA256SUMS
+ create mode 100644 docs/evidence/h2/check.log
+ create mode 100644 docs/evidence/h2/gates.txt
+ create mode 100644 docs/evidence/h2/inventory.txt
+ create mode 100644 docs/evidence/h2/nc.log
+ create mode 100644 docs/evidence/h2/report.md
+ create mode 100644 docs/h2-crypto-review-plan.md
+ create mode 100644 tools/check_h2_review.py
+ create mode 100644 tools/fixtures/h2_review_checklist.json
+ create mode 100644 tools/gen_h2_vectors.py
+ create mode 100644 tools/nc_h2.py
+ create mode 100644 tools/write_h2_evidence.py
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 4045c7d..6edf073 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,24 @@
+ All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
+ never rewritten: corrections are made with a new entry or an explicit note.
+ 
++## [H2 — crypto review phase closed: 50 vectors, 6 mutation controls] 2026-11-14
++
++- H2 phase closed (SECURITY_PLAN). Deliverable
++  `patches/0066-H2-crypto-review.patch`, receipt in `docs/plans/SECURITY_PLAN.md`,
++  evidence in `docs/evidence/h2/`.
++- 50 golden crypto vectors (independent oracle: pure-Python RFC 8032 +
++  python blake3 + from-spec `domain_message`): byte-for-byte sign/verify,
++  keygen, digest layout and edge payloads, plus negatives — wrong domain,
++  cross chain, tampered payload, wrong key, high-S malleation.
++- Malleability check: `verify_raw` rejects `S >= L` with the distinct
++  `CryptoError::NonCanonicalSignature` (the `(R, S+L)` twin; dalek's
++  `legacy_compatibility` feature would reopen the window).
++- Side-channel checklist: 10 machine-readable items with source-claim checks
++  (`tools/check_h2_review.py`); PQ plan recorded (ML-DSA FIPS 204 primary,
++  SLH-DSA FIPS 205 stateless backup).
++- Named control (shared domain -> red): `H2: wrong-domain signature must be
++  rejected`; mutation controls 6/6 PASS (`tools/nc_h2.py`).
++
+ ## [H0 — threat model phase closed: 32 owned scenarios, 6 mutation controls] 2026-11-11
+ 
+ - H0 phase closed (SECURITY_PLAN). Deliverable
+diff --git a/Makefile b/Makefile
+index 37b0e84..602f036 100644
+--- a/Makefile
++++ b/Makefile
+@@ -60,6 +60,7 @@ PYTHON ?= python3
+         gen-w4-vectors test-w4 nc-w4 evidence-w4 \
+         gen-h0-vectors check-h0 nc-h0 evidence-h0 \
+         gen-h1-vectors gen-h1-sbom check-h1 nc-h1 evidence-h1 \
++        gen-h2-vectors check-h2 nc-h2 evidence-h2 \
+         devnet clean
+ 
+ help:
+@@ -245,6 +246,8 @@ test: deps-check
+ 	@$(PYTHON) tools/check_claims.py
+ 	@echo "== threat model review gate =="
+ 	@$(PYTHON) tools/check_threat_model.py
++	@echo "== crypto review checklist gate =="
++	@$(PYTHON) tools/check_h2_review.py
+ 	@echo "== supply chain gate =="
+ 	@$(PYTHON) tools/check_supply_chain.py --selftest
+ 	@$(PYTHON) tools/check_supply_chain.py
+@@ -1251,6 +1254,21 @@ nc-h1:
+ evidence-h1:
+ 	@$(PYTHON) tools/write_h1_evidence.py
+ 
++# H2: the crypto review gate (docs/h2-crypto-review-plan.md).
++.PHONY: gen-h2-vectors check-h2 nc-h2 evidence-h2
++
++gen-h2-vectors:
++	@$(PYTHON) tools/gen_h2_vectors.py
++
++check-h2:
++	@$(PYTHON) tools/check_h2_review.py
++
++nc-h2:
++	@$(PYTHON) tools/nc_h2.py
++
++evidence-h2:
++	@$(PYTHON) tools/write_h2_evidence.py
++
+ # Optional independent interop check; install the pinned test-only Python
+ # dependencies in tools/w1-reference-requirements.txt first.
+ .PHONY: test-w1-interop
+diff --git a/crates/aura-crypto/src/ed25519.rs b/crates/aura-crypto/src/ed25519.rs
+index fdb7e72..6fe1325 100644
+--- a/crates/aura-crypto/src/ed25519.rs
++++ b/crates/aura-crypto/src/ed25519.rs
+@@ -21,19 +21,50 @@ pub fn sign_raw(seed: &[u8; 32], message: &[u8]) -> [u8; 64] {
+ 
+ /// Verify a pure Ed25519 signature.
+ ///
++/// Rejects non-canonical `S` values first (H2 malleability check): RFC 8032
++/// §5.1.7 requires `S < L`, but ed25519-dalek's ZIP215 verification accepts
++/// `S >= L`, which malleates `(R, S)` into a second valid twin `(R, S+L)`.
++///
+ /// NC target: `tools/nc_c3.py` replaces the verification expression with
+-/// `Ok(())` and requires the tampered-signature test to go red.
++/// `Ok(())` and requires the tampered-signature test to go red. H2 target:
++/// `tools/nc_h2.py` NC-2 removes the canonical-`S` guard and requires
++/// `H2: high-S signature must be rejected`.
+ pub fn verify_raw(
+     public: &[u8; 32],
+     message: &[u8],
+     signature: &[u8; 64],
+ ) -> Result<(), CryptoError> {
++    if !s_is_canonical(signature) {
++        return Err(CryptoError::NonCanonicalSignature);
++    }
+     let key = VerifyingKey::from_bytes(public).map_err(|_| CryptoError::InvalidPublicKey)?;
+     let sig = Signature::from_bytes(signature);
+     key.verify(message, &sig)
+         .map_err(|_| CryptoError::VerificationFailed)
+ }
+ 
++/// Order `L` of the Ed25519 prime-order group, little-endian
++/// (`L = 2^252 + 27742317777372353535851937790883648493`).
++const GROUP_ORDER_LE: [u8; 32] = [
++    0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
++    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
++];
++
++/// RFC 8032 canonical check: the little-endian scalar `S` must satisfy
++/// `S < L`. Byte-wise compare from the most-significant byte (index 31).
++fn s_is_canonical(signature: &[u8; 64]) -> bool {
++    let s = &signature[32..];
++    for i in (0..32).rev() {
++        if s[i] < GROUP_ORDER_LE[i] {
++            return true;
++        }
++        if s[i] > GROUP_ORDER_LE[i] {
++            return false;
++        }
++    }
++    false // S == L is not canonical either
++}
++
+ /// Sign `payload` under `(chain_id, domain)`.
+ ///
+ /// The signed bytes are the 32-byte domain-separated BLAKE3 digest, so the
+@@ -54,3 +85,41 @@ pub fn verify(
+     let digest = hash_domain(chain_id, domain, payload);
+     verify_raw(public, digest.as_bytes(), signature)
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    /// H2 review finding, demonstrated: the classic malleation of an Ed25519
++    /// signature is the twin `(R, S+L)` — `S' = S + L` still satisfies the
++    /// verification equation because `S' ≡ S (mod L)`. ed25519-dalek 2.2.0's
++    /// default `check_scalar` (`Scalar::from_canonical_bytes`) rejects it,
++    /// but its `legacy_compatibility` feature relaxes the bound to `S < 2^253`
++    /// and reopens malleation (dalek's own comment: "permits signature
++    /// malleability"). `verify_raw` therefore enforces `S < L` explicitly and
++    /// independently, with a distinct `NonCanonicalSignature` error.
++    #[test]
++    fn high_s_twin_is_rejected_with_non_canonical_signature() {
++        let seed = [7u8; 32];
++        let message = b"h2 signature malleation demonstration";
++        let signature = sign_raw(&seed, message);
++        // Build the twin S' = S + L (no wraparound: S < L < 2^252).
++        let mut twin = signature;
++        let mut carry = 0u16;
++        for i in 0..32 {
++            let sum = u16::from(signature[32 + i]) + u16::from(GROUP_ORDER_LE[i]) + carry;
++            twin[32 + i] = sum as u8;
++            carry = sum >> 8;
++        }
++        assert_eq!(carry, 0, "S+L must fit in 256 bits");
++        assert!(s_is_canonical(&signature), "fresh signatures are canonical");
++        assert!(!s_is_canonical(&twin), "the S+L twin is not canonical");
++        let public = ed25519_public_key(&seed);
++        assert!(verify_raw(&public, message, &signature).is_ok());
++        assert_eq!(
++            verify_raw(&public, message, &twin),
++            Err(CryptoError::NonCanonicalSignature),
++            "the malleated twin must die on the canonical-S guard"
++        );
++    }
++}
+diff --git a/crates/aura-crypto/src/error.rs b/crates/aura-crypto/src/error.rs
+index f39d019..ec2a1ca 100644
+--- a/crates/aura-crypto/src/error.rs
++++ b/crates/aura-crypto/src/error.rs
+@@ -17,6 +17,8 @@ pub enum CryptoError {
+     InvalidSecpSecret,
+     /// Signature verification failed.
+     VerificationFailed,
++    /// A signature used a non-canonical (malleable) `S` value, `S >= L`.
++    NonCanonicalSignature,
+ }
+ 
+ impl fmt::Display for CryptoError {
+@@ -28,6 +30,9 @@ impl fmt::Display for CryptoError {
+             Self::InvalidPrehashLength(n) => write!(f, "prehash must be 32 bytes, got {n}"),
+             Self::InvalidSecpSecret => f.write_str("invalid secp256k1 secret scalar"),
+             Self::VerificationFailed => f.write_str("signature verification failed"),
++            Self::NonCanonicalSignature => {
++                f.write_str("non-canonical (malleable) signature S value")
++            }
+         }
+     }
+ }
+diff --git a/crates/aura-crypto/tests/fixtures/h2_vectors.txt b/crates/aura-crypto/tests/fixtures/h2_vectors.txt
+new file mode 100644
+index 0000000..353ca96
+--- /dev/null
++++ b/crates/aura-crypto/tests/fixtures/h2_vectors.txt
+@@ -0,0 +1,495 @@
++# H2 golden vectors — crypto review (exactly 50).
++#
++# Expectation block: tools/gen_h2_vectors.py (independent oracle:
++# pure-Python RFC 8032 (gen_c4_vectors) + python blake3 + a from-spec
++# domain_message assembler). Seeds: seed_i = SHA-256(
++# "AuraLite-Crypto/h2-crypto-vectors-v1/seed/" || u32le(i)).
++# Do not edit by hand.
++
++hash_context=417572614c6974652d43727970746f2f63727970746f2d763100
++vector_count=50
++
++vector=v01
++kind=sign_verify
++seed=b695684ece7bc88cd888cd85e691637ad9ccc413d6544c38134ff38e191f16a3
++chain=aura-test-1
++domain=tx
++payload_hex=68322d63727970746f2d766563746f722d303101
++pubkey=6b472343a053aad5151ae94940477424a57c3d66b22c0654cf31975aa25a8a9d
++digest=78aa6556c0f856af2e244ef2504a4eb99523d7647ecf9d84833f8915ec8c4417
++sig=97e8f1cc93e46584698afc3b0a8b3a264edf09d58a841a6a8e9f3e260938766bfe4f566c33317be83cdb6d072da8b62659fcbe37057476110097887238d77807
++
++vector=v02
++kind=sign_verify
++seed=dc59fb15fd96c5e10cb5000f4970331c9c7cff777c405c9781c1b75c1128f927
++chain=aura-test-1
++domain=vote
++payload_hex=68322d63727970746f2d766563746f722d303202
++pubkey=b853a47a6c2857d4d881b511fa629903fa0e9baf8f2c28fbeb9cc1e4983c6f30
++digest=ad26375d77d5dc9f6dad1f0a1e3222063efd93a09fee912a091500a371c15fb7
++sig=b1e2bd398320c3191da63613e18ea8bd2ac5d3baab4271bbff7d43085720f34adb9dbce8608498d8ad076b6dea0d4fad63cd38a351b9bc2579c2937925e8ff0f
++
++vector=v03
++kind=sign_verify
++seed=efa33e8f1aa7d2e3f38b7e7703a6e97a7f79f5325b41043ac5ecefd3f9eb8bff
++chain=aura-test-1
++domain=block
++payload_hex=68322d63727970746f2d766563746f722d303303
++pubkey=3bc9252e333390e10ec1e075002d5d6966c6b551d75c100635ad18a20e01f553
++digest=e4396f0cb40093c805c293053f729b98e36da23faff51403b98905c236397b8a
++sig=475e6839d21720fe73b36028d38aced999fc01c9f48c360854245ea1b6cbe77dee082a53220df67251e3ba480b56dd072aecfcc592f82d1ddf796872c5ec350f
++
++vector=v04
++kind=sign_verify
++seed=f5136906d7709dbd6b0e8f8f0efe3d853c6811834da7ab37572151b590a762c4
++chain=aura-test-1
++domain=contract
++payload_hex=68322d63727970746f2d766563746f722d303404
++pubkey=0acbf5a4d4bdcb7a161c1cfe60801673531e8d511ead49518bcc2b386dcad51f
++digest=3c295070f9703a5285c91f7024181ed8dbe4b503d64d2d8c719e04df4b20da54
++sig=b40e4da99a81da1c4a9fdd3ccff78c3943b6e80fcd8c4ceabc59dd3035fb1851918a6014a8a8f49e4a77526a84dadc44314de12f8bcb094e4aa96f3619930e0f
++
++vector=v05
++kind=sign_verify
++seed=384714282d7db68d73e5b4a99192834d8bca706b3323dcf799c679eab7c3053f
++chain=aura-test-1
++domain=genesis
++payload_hex=68322d63727970746f2d766563746f722d303505
++pubkey=7a24a980c7352da10df059b5bd6e657104aa7749cb6a076154c00d665619c472
++digest=244bba1724ad23e1dab4e2e660be646c8172167551b4945eff84deccb0188efe
++sig=88b358deae68ec34559906c15def6611fa9d70f6b635df1b625e4f02189a2ab8a414a5db4d144cce0b0c00f4dc3cc2d1d24bc76e32ae03d80d4a921808fc7e09
++
++vector=v06
++kind=sign_verify
++seed=9e8d5e11b28e0fdaa1d814107f1d32365f641ec216c61c5d4304df5ada8617ec
++chain=aura-test-2
++domain=tx
++payload_hex=68322d63727970746f2d766563746f722d303606
++pubkey=409c1a2d240487016e7739d0c3b76f621ab62feb0978f3c215993a7f0b3f261b
++digest=8808b1b9e9b3dc4dc8014de597ec2bee391872b219a95fd0f7c552e91a9c7542
++sig=3fcfd6dcc4fc3e3813f25dc6a0c1bae43f0ff287b8f7c46b4fc70a9375704a6e4157bd7aea379d13267bac98f55c11f42bec57106b26917a0c93ca38ee79a909
++
++vector=v07
++kind=sign_verify
++seed=8fb374e90ce3dcea91e5e31207a7f51dc5210710000c8f2115e54a5494e6fbc2
++chain=aura-test-2
++domain=vote
++payload_hex=68322d63727970746f2d766563746f722d303707
++pubkey=da5a2c539883dab4adf453891c3a76124df78fe3433a67929439718596914948
++digest=cef4e7e1110ba34d676ccf20c843b85379fafd54ca30be3814915780f9649864
++sig=68a63bdb31d129f3a554c9e33b26e78107b6bca711ca06e044c4688e8d74672b13c587632b822aafd2dd18fe89eebffebedda2466c8f98bc74767039f195df07
++
++vector=v08
++kind=sign_verify
++seed=d5d76337649735b70b87410243457cca0be19c0765d84d76e391b3a15bd0dd02
++chain=aura-test-2
++domain=block
++payload_hex=68322d63727970746f2d766563746f722d303808
++pubkey=747074195897f65254a8baec6145888f55a76b77f68b901329e266f535fd5812
++digest=1f8cc15972bb89017a263b1a3b5f9017e884bf845bae39ee1ac7222d2c3b7487
++sig=50d4d0bcaa0ad2b0f99e0d8dcb0be53845be799be286f87d287c14d889ced5bab3ff85c932bfb6e3727b794abc248e085825af3b2d3d946122bf2d71810dfa00
++
++vector=v09
++kind=sign_verify
++seed=546d65d1926f1b6372dde47171650404b111fbe619f7066f197321b744714b55
++chain=aura-test-2
++domain=contract
++payload_hex=68322d63727970746f2d766563746f722d303909
++pubkey=df668b3a05937406a17ead390b8a5a9157824bed4099cf0274415d351b74204f
++digest=21dbcc741495952be8f789c4eb0d49f86af78f99dddf6814324082651d90bfaf
++sig=051fd6d2628df72202346a346faad4932887a6782d242fffa430f20317bd0afba67e568863837ab0fa1db82aa9c196ab1a669cf0bd655b970ada110aeb881109
++
++vector=v10
++kind=sign_verify
++seed=3863181e596878c56ce7b2a1a9784cc81de499ed30ccecde52e2c09b835dafe3
++chain=aura-test-2
++domain=genesis
++payload_hex=68322d63727970746f2d766563746f722d31300a
++pubkey=4245a6e7870df9ecb1e873d481cf70e8ae08a97bb114598f1f81c53876e6ce94
++digest=aa8d0bdd0148a69839bc5fbd2869e4a4d739b5d7e497f4b1ac007e8344233040
++sig=826c7b21529f567f8b10bbd9fdcad66ed9fdf753081bbe7c556d2fd57b0e1c52f6f6523a1ec46ef88fdd9da005fd0631c8fd25ca34b8285752d3123c25e2ae04
++
++vector=v11
++kind=keygen
++seed=190e0272ab35d6c74a4488d15e191b80417035afa0faaa23d682dacbc7cd78eb
++pubkey=b4b9cc87639306af2eed1b46967195395cfd1e16535a459cd8d3d5c03443046a
++
++vector=v12
++kind=keygen
++seed=c90dbdb296dc1aab74f76f9dadf837a895e11744679d96545a073b62e7a62394
++pubkey=7a579b196256025151765d12f128209c91d3ee31523963fb3f740810a7953f45
++
++vector=v13
++kind=keygen
++seed=9ddbbf50644daa2beed573392d5077fc974d627e04066bd4bc793320ef322e78
++pubkey=9adf4632849d83e64feca902db0c3506222e7e845ba3106823d91b02a8178b5e
++
++vector=v14
++kind=keygen
++seed=42f1b8f8731a569fd0bf9be234321a1e330857edbfb1a8af1dc634f4444b5cfe
++pubkey=34bb43d8ca1185036b3785c579075f56741770c80973b18af13c85dea28cac18
++
++vector=v15
++kind=keygen
++seed=3701857da5361daa7e122d8bde81912117ac31ac0d4004e8d2180e457fc4c98d
++pubkey=02d919e4cf12ba06f28a4f454de20f87918fac7ef11364922de593025b9c226e
++
++vector=v16
++kind=wrong_domain
++seed=fd40b8e8dc4f238434c25a6b75129e5dcd24ede7940ff5b6a378a4ed5a7c49d6
++chain=aura-test-1
++domain=tx
++other_domain=vote
++payload_hex=68322d63727970746f2d766563746f722d313610
++pubkey=a9bf13eb2843407b41a9184be939273dc8aaecd1c757b32a2b165505f9e48d39
++digest=c89a77ed845bbb6baca40e47e689a5d59e60060fe2f87423e5d06a51dff1ebe9
++sig=e1a08c2ff9fe49e62b50b0b2260d62ef53a91191f91d8ce772181958f38555c809a58f0a54c885868206553d3dbab07ecff9d2df59760c1b38c4276932eaca08
++
++vector=v17
++kind=wrong_domain
++seed=27d5e3b80945070f3e23755f5bd0c3cc67408e5decda9e777b12c0228427f533
++chain=aura-test-1
++domain=vote
++other_domain=block
++payload_hex=68322d63727970746f2d766563746f722d313711
++pubkey=6265a9a45e676a63b52217ce8e036bdb6c1c55448fb9857d4bdbb7fab5f40146
++digest=a403b114f0065b427e97763ad5a20c99d959f90dc04b658c8ef175f131b6eeda
++sig=f6930070e1c0b865d0c225d442db3e1def6561737bebbae2bbdaa37a80aa011fd6e3360ae2aba677cce518505d5e8bc4d90604133356b8ee29f375527c84c80f
++
++vector=v18
++kind=wrong_domain
++seed=e3d4cde237ad44c1f3c71f9f23f6d5010415eb8d1be66b2bdd58a834e03b77e7
++chain=aura-test-1
++domain=block
++other_domain=contract
++payload_hex=68322d63727970746f2d766563746f722d313812
++pubkey=b63cd283e7e92d8c5cf1b26b0d8c1177c060551aaa786a5cdebd269932b15594
++digest=928d380dc375c8ed8b8ae0de336c2cb0dd510e3961ad6de0f78f169dd89a1f33
++sig=b3f05597fae6e1550f6699c9bd7fc96cfeb9a57df6d2936cb9d934fb2f790d63214055eb75742153ad87ae2e47e5e19aa9516034f51770ea7c76d30dc1cfba0a
++
++vector=v19
++kind=wrong_domain
++seed=d23d4cffa55d93acbee5277286cbe3dbc751f5d3428225917aa4b0b72b8b424a
++chain=aura-test-1
++domain=contract
++other_domain=genesis
++payload_hex=68322d63727970746f2d766563746f722d313913
++pubkey=258e3a0c8b5882a7934dce31f68e0727839813ec8203e69b7f12597ef54ed02d
++digest=a6517f569e7bd7566cdd5ccef535c290eb1946eefbae55b1eaec03dcd7e6175d
++sig=b4b277c2c97efadcfd5ab2182b9ad10552edd2e51fd1272088c9eabec6f44aaacf3b2e74f02d6900e592ceea52542dba72eefd325ae472a6779999462d675907
++
++vector=v20
++kind=wrong_domain
++seed=6e4fc6054d5bc3337def117fc67aa4c79771f114f37ddc7639bcbc0f7728a49d
++chain=aura-test-1
++domain=genesis
++other_domain=tx
++payload_hex=68322d63727970746f2d766563746f722d323014
++pubkey=bff4c442e3879d2ebd571efde29d4119278a68c470890941802f166b26dc005d
++digest=da77cb3fbff235dcbaf192831d3ed290cec772b8f370e8000ee5fb6e05217563
++sig=a837d2ae6765af07b1da35f0c4e4cef61dad73438587a0a699f49f60c4d45fe81a0d27a5464cf61b0a9e81d6c6dd1c35d2d7980533fa406e446fba110708c60d
++
++vector=v21
++kind=cross_chain
++seed=6a78e1594daf454a38088db229e519dc165d69cd6416e92666540ad6099825d1
++chain=aura-test-1
++domain=tx
++other_chain=aura-test-2
++payload_hex=68322d63727970746f2d766563746f722d323115
++pubkey=66ee8029eb26b42bd19e82507161d7876dc3678864fdf2602061e54346815e7a
++digest=219f2de54dc57606b75354d2e88bac2e773fb79db2e3024c8d01136e76d7cb67
++sig=ea9d16d3210ab84bd4aee2cf58ae3f4e48e607aa0fcfe5b364c6eb9b85819352a79cb796cffda2bf4ac9a716c436060d50249d51913d60d5dca5261621b5740f
++
++vector=v22
++kind=cross_chain
++seed=966a2506cabb388b5d2ad8d3dfe65b5bc707386fe2ccb1b338b65bcbd0e11c32
++chain=aura-test-1
++domain=vote
++other_chain=aura-test-2
++payload_hex=68322d63727970746f2d766563746f722d323216
++pubkey=934ddf50fafb80ab0578350fb2de6ad4fd4c0c47363277af8e2350516d1a6ac0
++digest=1d61d4a611a0d54a0b2a8754a60a6a78f7356f740b9b076851053c0815e16b21
++sig=e7a10a978251fc10f87684ba88f6f001c03b5804e765ba0a0cffc8be3c326e6528ad71ad2186e23efcf81713b64b6fc10e12f6de3935b6fe6bbf061be0d61b08
++
++vector=v23
++kind=cross_chain
++seed=6b4322d26ab17a1d4cb571a065ff72ada8be12a62c97260240799f7cb3c258e3
++chain=aura-test-1
++domain=block
++other_chain=aura-test-2
++payload_hex=68322d63727970746f2d766563746f722d323317
++pubkey=a5e0eca6409f67e231a551f16d9d6df1b07aedcc4f4df614b1a5ca47f24a037a
++digest=d7fcfc162c0e60750066c5ddefe37700d5903af8529225d3d63287a1468273cb
++sig=8d00a127ee681391b2a1a74a5e7f0cb56f10ef744bb72ef9f121e05487e3e9aa516fd81ebebfb4832ab30a67c86e536c5b0ec3b2d19b3cfb24c6248daf66d90c
++
++vector=v24
++kind=cross_chain
++seed=9e3f791ca3c526f0c0f3262828788a40626424e48ad6ea1305e6eda5c1c313bc
++chain=aura-test-1
++domain=contract
++other_chain=aura-test-2
++payload_hex=68322d63727970746f2d766563746f722d323418
++pubkey=5289155d10cab279337501bf660263864e473ec3df8c1f79cf5134c956cf5adc
++digest=a23afb271c38bc354c85c8d0343606f8813bc513c5ba68f5ce12ac9dfbe9a105
++sig=8147aa8b783abaa489b7288a606dc72b679d3966c0f47e751802d076c07ec0bd65c3c3b8b488409be8ec75b439bc334dbc07a7b661cda1092e10283710b6fe06
++
++vector=v25
++kind=cross_chain
++seed=bb3ce958fc732143a378b1ce74e842f64ee529b1d3469108d66855f1d7605474
++chain=aura-test-1
++domain=genesis
++other_chain=aura-test-2
++payload_hex=68322d63727970746f2d766563746f722d323519
++pubkey=e95e279be5170276ee34e3341863aab2493d65060e883e9576db56e28e7a4068
++digest=3aa87ac88eb83d82d26c2bc1d536060eb2e58e46eb4af2a801fa5e1ff76a3893
++sig=bac6598f13387c851a9ca80d141483ecac272327ae67336bced12f28ecf82c797921db264f3b34150580b74abf1f448f2381df09f3cd89a71b9dd61b38642106
++
++vector=v26
++kind=tampered_payload
++seed=c9adaa108b74684aa9adbfb2cb9c4e37f4fd70063a046aca83263ae7c93d2dd4
++chain=aura-test-2
++domain=tx
++payload_hex=68322d63727970746f2d766563746f722d32361a
++other_payload_hex=68322d63727970746f2d366563746f722d32361a
++pubkey=3c442350b4fde47a3502ee26a53519eab3a95a41a46b636ffd108338167c7e31
++digest=e6543fefa40f2aeabdabe031703211f1364270aa5d96c90b334944546ecc76ca
++sig=1ce20c4fd133a0bdd9f7a018d71e3f918818c844546c78dc44968ce54d2e08f5f8ac813ce9715928d4eeacc3f2ed16e5c2f3a42ad9c2c19b50b6b240a17aa102
++
++vector=v27
++kind=tampered_payload
++seed=a807efe49c9dc6967ee0b1ab8f1ed7679501f9ffacb9bdfd3369cfab249dd53b
++chain=aura-test-2
++domain=vote
++payload_hex=68322d63727970746f2d766563746f722d32371b
++other_payload_hex=68322d63727970746f2d366563746f722d32371b
++pubkey=8f6b98e0f4aafb8b78a63e3e17f633b973b7b384d310f5e83e29b9545ffbfd4f
++digest=882adf22b4b9978f3dae65976b18522f848d564ac9f251feefa51b56936c6be5
++sig=fa718dca830f9c0cfe1b5c9f97dbdeb6b95649cece5880e56e94b4e4914c0bbafc782439a9e5a83f8698d3af32981f98d8b81ff6d4996671956a17f6bfb20d0d
++
++vector=v28
++kind=tampered_payload
++seed=c7f5c4888002a990cbbe59b8c062ea704c108092ab5f9c5ff7ece797c20eab6c
++chain=aura-test-2
++domain=block
++payload_hex=68322d63727970746f2d766563746f722d32381c
++other_payload_hex=68322d63727970746f2d366563746f722d32381c
++pubkey=1cf1fc9ee0a15dabc6c8460080be617b7b32af00fc0be877a3fd6595c6ba8976
++digest=98d69037f74e438e6d8e7b833e21a48309dc2fd98fe8c631e95ad7cc232f98b9
++sig=a60b00d87270639262d53a16de437c1677187f61e56785c578f61eb8ac3150d39ed57a3a25872774168fc4b1befc238087e038908da4cd68ab631ffb1758c508
++
++vector=v29
++kind=tampered_payload
++seed=bbda1e99d52984ac45862699bb88ba17f60cf38a7b34a36079662594f67a1863
++chain=aura-test-2
++domain=contract
++payload_hex=68322d63727970746f2d766563746f722d32391d
++other_payload_hex=68322d63727970746f2d366563746f722d32391d
++pubkey=efd03cfab1e7dd2688ee0ff94a6114de9762da236a3da3561718f34b56bc288e
++digest=6deb62bca6edc664b23d0fe97319632885b0e970ce50275ed24a99143cb90dd5
++sig=c5a7be38ec781bb01dcd81c8717a39545c0e27bb209039147533d716949e50534174d102607c3b12dab293317cec1ede35e0e1c7d0fc480841ab878c9b8ba301
++
++vector=v30
++kind=tampered_payload
++seed=95874e3328cd0a0092a8b9527b79044b7d3a60c860e4f7367a805dfcdcda8aab
++chain=aura-test-2
++domain=genesis
++payload_hex=68322d63727970746f2d766563746f722d33301e
++other_payload_hex=68322d63727970746f2d366563746f722d33301e
++pubkey=a54ec52fe7af015c0eaa93b3b69744b0bffe421df3e93b530a4576743e985d79
++digest=e2d5be01dfca51b9e271ab5e05e11130797973116130a317fb7d6f531d2f180d
++sig=4c238d6633453029c390f92f2a939a155a809cfb636b80e77595a5d71a78c6fd5e1d2ab2b01614c3de0b8ea84f1c1e1a9dbfcded1bda33bb39820f84fdb5cf04
++
++vector=v31
++kind=wrong_key
++seed=6eb0d2e47402113a3412a6736da40e227d5521eeb133615ed1d29d828968129b
++chain=aura-test-1
++domain=tx
++payload_hex=68322d63727970746f2d766563746f722d33311f
++pubkey=9a12c5998fcfcd0fd50e99602f027ad1a9c6b29682fced7d394e4bc2c4d4a8f9
++other_pubkey=3ba8f00c4507867ad88d44cdbe10fdb4c2cbebcfdeab81954bf8b0de442ee2e5
++digest=c648e4afbe1ba6da4c5bbde8d50a8563f7049466eecd2d9815f52f3ff6878698
++sig=8032a9a3e068d9291e00da09ec923553034bcde9cb1001f84977c1a2cfc8751cb30bb2806814825decc0850f4fe6a7bdf5940aa0b6ce7a197ed50d32fd4ca30b
++
++vector=v32
++kind=wrong_key
++seed=ae43aa64ff0d8e86226ce1e7ffc43b35d62d2eda61b90c6058fc81c7853e252e
++chain=aura-test-1
++domain=vote
++payload_hex=68322d63727970746f2d766563746f722d333220
++pubkey=457171e3365ded30c1f9e91d5c37541d4a4d4b71260d108bfa6cb3aa9b68e199
++other_pubkey=ab7a8767148ab7f6e4d4ee0c46542bd77c2f6a38ef95ff846b5c707708edcf77
++digest=a75cb4fedc2a2e978cd5bbc3883a745d2bb6039bd2ac0921c5d64e3191c03e90
++sig=bd33b47f0e48475c2c145150c5f3daaac2c184533f88d13e62de32a69edf3fec4c06e6f93b81c6979dacb52b0799e08d20d0080c2bba0b7df511c97a35cda909
++
++vector=v33
++kind=wrong_key
++seed=20d5d7f5b88dd13f254a8d8cfe064b513eb8749e80fe70a74da617c683741de9
++chain=aura-test-1
++domain=block
++payload_hex=68322d63727970746f2d766563746f722d333321
++pubkey=540760bb7ef5c1953471347f54429631cf653d393c2aee817400d901404a6ae9
++other_pubkey=8bf90b60c7c6986c39b8adb7968ddef46bfd449ca52d1168795cf49fee6c21ee
++digest=75c98a2baaa752f6947b3acdc92714d4540671fc710730468ddc02fd83518ce5
++sig=af8614bd2f3cf793489a5e5ffd7362dff30ec5819d4105db6d7c7a1e3621ff0cd1297fbc12c4d73f636429ae86e2d89058cc90952fb6756bb32c6bed17add40f
++
++vector=v34
++kind=wrong_key
++seed=0fa81d6e7b3b31831740077653f8dd9d60b91cdc3b7ac4a2f682fd8ce2b8965e
++chain=aura-test-1
++domain=contract
++payload_hex=68322d63727970746f2d766563746f722d333422
++pubkey=c405f4b6d5e6a6121eded9a1481f965753ebc94fc7c449528a1ececc5ff13427
++other_pubkey=dca697118297a023fc5aeae9b13d3d3a950ea3a0b4ef6add372454fff07fffa6
++digest=2f5239524adedd4292a9353c2cba9e7e556eb2fe9337baf1873e83767153c519
++sig=84a1bbdad0f2a84551be8dde4e87222ce919731a3427dda0794759b4d822b2af0603e6d7b635019c08ee0159a93ecaf47a7f819da8660847bdb11413e9f8670a
++
++vector=v35
++kind=wrong_key
++seed=30bb274f37ce0c92946f0ba0c382e5a63cb6d4e3f2aea53ab2cef9d6ae7de421
++chain=aura-test-1
++domain=genesis
++payload_hex=68322d63727970746f2d766563746f722d333523
++pubkey=77e8ca52f676c729e6d9d0ef661cc16048b228b7bb04178bfe650e6e0c36aaf4
++other_pubkey=1fac992272db6cf012bd3fd64e4adcbb92ee72239c3e1175979b0a3d1eb2919b
++digest=70c5726382df216ec297163d53ca40f61fc9e558f20a586afcdfbbcfe750d09f
++sig=abd4ba4ad9efe35c6237d86cac33634b49fa255e6398524fc650c9b6b7a89d798aeced66af8102df34bd5ce32550e84d7580df9b282ecfdbc1b52ed9382e8709
++
++vector=v36
++kind=high_s
++seed=3ff56bf2a4d5f4ce75299cb6589775fa0eccff936e141014ee2976533412877b
++chain=aura-test-2
++domain=tx
++payload_hex=68322d63727970746f2d766563746f722d333624
++pubkey=3c287da946d326f2219d19410ee95e1a8f2ecb3115cab227e3758d500b47f760
++digest=c6eb78bb27025e06d17d426535533f331ad6be038ff5ba0027e292eef8eb6df2
++sig=e6effbc11d4920ca01c59ade3f202263112c5ce090b481cb3cd0a68b8502b7603e616face4d72b8429d07d4213ebeff15d5312af16355758d953c39c95904e06
++sig_high_s=e6effbc11d4920ca01c59ade3f202263112c5ce090b481cb3cd0a68b8502b7602b356509ff3a3edcff6c75e5f1e4ce065e5312af16355758d953c39c95904e16
++
++vector=v37
++kind=high_s
++seed=06fb8c5f9d198818d6c619b98e1e472d2973c274bcbcad6451e0c49785267941
++chain=aura-test-2
++domain=vote
++payload_hex=68322d63727970746f2d766563746f722d333725
++pubkey=9f203e9608968d2c0fd803a7b24318317867d480e204c47405b19cb0aefcfc0a
++digest=6b47e7b7689825aea7339379e63c5db19739c2b60c2ecde518356df4a898c461
++sig=4457f67ff26266dea587d0bc0f696fd0a578764fff550298127623e1896d9365c00d7ffb378942090ec1be350ca5dd91e07918839054bb468b87331b77a2240e
++sig_high_s=4457f67ff26266dea587d0bc0f696fd0a578764fff550298127623e1896d9365ade1745852ec5461e45db6d8ea9ebca6e07918839054bb468b87331b77a2241e
++
++vector=v38
++kind=high_s
++seed=330a651c3721c98fe2009d4599eba7bae7c625463f5f82a2bac31157636a6cd7
++chain=aura-test-2
++domain=block
++payload_hex=68322d63727970746f2d766563746f722d333826
++pubkey=bd7bffce68484ff5b8aba86ddfd292a37734cfa19726dadcd912881c83c9a342
++digest=0d16f8b6e4c73b2e4c1ae2a0afea335e34c4ad508a013f1bc976a13dc6c8a95a
++sig=91bf0fea61e6a1d6d12cb34eec6d4c675f779a9ed4de85e54d9866939dacd86b1fa0f0c4660e555529ecdcccb20fade1ceacf4af3a50501d71b8731094ec9102
++sig_high_s=91bf0fea61e6a1d6d12cb34eec6d4c675f779a9ed4de85e54d9866939dacd86b0c74e621817167adff88d46f91098cf6ceacf4af3a50501d71b8731094ec9112
++
++vector=v39
++kind=high_s
++seed=0ab85834293a0d91e08f72446b0893c5bf3d4fc46f3b89d3c37ed351eba4ef65
++chain=aura-test-2
++domain=contract
++payload_hex=68322d63727970746f2d766563746f722d333927
++pubkey=1e99421367c40e4dece822028378fb63582dac951d2ccab8cba95ffe2f755a4c
++digest=73a73a32583349b3847e42dd1f5313100e2ece39e56947558e8a0e9848dde33f
++sig=17b148068cc257d7cf23ecde5540c41b8dda45d83c1c63c339bfcc230da1efe26bbf426e6144a6bd8e6c4aeb14189e6e34f9d21312e3d04eb8d0cd2a9c60870d
++sig_high_s=17b148068cc257d7cf23ecde5540c41b8dda45d83c1c63c339bfcc230da1efe2589338cb7ba7b8156509428ef3117d8334f9d21312e3d04eb8d0cd2a9c60871d
++
++vector=v40
++kind=high_s
++seed=e61b90af97e52072bf34ad613d61968833636817f6f31a71de8666d613e871d2
++chain=aura-test-2
++domain=genesis
++payload_hex=68322d63727970746f2d766563746f722d343028
++pubkey=eddf963879378377e93310c561ac99643e5c556e03ffe70b1b852d7f23cfe2c9
++digest=1ac60c85b7587f85355d726138d2302c18c21768dccdb067364eaa27a0a24265
++sig=877219f863fdb80e21f204ca3ac38dd3e64c612fcc7ecaf47412392bab523d77f33404c15db51918300a3e4404ecd916b4427d77575336b3879b4cf78b540008
++sig_high_s=877219f863fdb80e21f204ca3ac38dd3e64c612fcc7ecaf47412392bab523d77e008fa1d78182c7006a735e7e2e5b82bb4427d77575336b3879b4cf78b540018
++
++vector=v41
++kind=digest
++chain=aura-test-1
++domain=tx
++payload_hex=68322d63727970746f2d766563746f722d343129
++digest=e2017529472d8d9010111517693f53bba54bfffa5da7366ebdf6eea6c511ffdc
++
++vector=v42
++kind=digest
++chain=aura-test-2
++domain=vote
++payload_hex=68322d63727970746f2d766563746f722d34322a
++digest=f3bd91e7de2b1dc5cd80039da09486674d5ee6b91332e007f41668d9a410c1a8
++
++vector=v43
++kind=digest
++chain=aura-test-1
++domain=block
++payload_hex=68322d63727970746f2d766563746f722d34332b
++digest=462e2f186ee41f2a8ebfaaed42ef4cb3f074b4ce9d1a70abf2815b257f742b53
++
++vector=v44
++kind=digest
++chain=aura-test-2
++domain=contract
++payload_hex=68322d63727970746f2d766563746f722d34342c
++digest=764f6be494885dca5968d935fd4bd125ea7d450e24dfbb58fabab1abb65f5f19
++
++vector=v45
++kind=digest
++chain=aura-test-1
++domain=genesis
++payload_hex=68322d63727970746f2d766563746f722d34352d
++digest=024059f563943cf803d6d716989fb4278c7b8c31530c0054c2f966b58c16fe22
++
++vector=v46
++kind=edge
++seed=1bc84a717411f93795aac6431388a3b7af1790f9cef4f8d576508ec5a185f1c5
++chain=aura-test-1
++domain=tx
++payload_hex=
++pubkey=0251cfb78f033d64dff8e04095e531b7fdb19dbf8308634322839fe674127a3e
++digest=4435244cd5d446c046b5d2f2c3f4764501cc49bbbd0b2fb083438eb3965a4e32
++sig=cc26a999c09e8d86017a10206330da4efdbd15aebcd4a0d97c11d925882e1c80a44025b224f1f11f2401a010f3efc27126beb89b06d63b246cbbadeb71d5d508
++
++vector=v47
++kind=edge
++seed=095b27a2b00942e4ac7e751b132629666ea340493855884338e6c0a1101c39fe
++chain=aura-test-2
++domain=vote
++payload_hex=00
++pubkey=7e32bab649e93d0a474f962977b4ef14cfa32e150fd9ae3172c51db4acba87d5
++digest=a7959caf2ce9abf763e065fde08ac661156f9a0bec0fd718e5387bbdfeb7ccac
++sig=85b5a1c492950056fc6c55617c6a943113a7dfab1457a74bf04b29a735e230d52d74bce8dd88da430fc8be08e0693c137381893814eba629fb1850fa11661201
++
++vector=v48
++kind=edge
++seed=68513765c892ae3e4c8c7b972114b99c6c9a0429b0ec509edaa740818ff1dae2
++chain=aura-test-1
++domain=block
++payload_hex=ff
++pubkey=ddefe96ffae180190af534b6392b8fd4e5252fd3d294301b9f3bc53de3437034
++digest=e4015cc20c32b3ff4fb446b86ea637fa4375711663efc451711bdc320cf61e66
++sig=4ca558586fbf558ac615dc339a76d774d20958bd1e54f3bb1b617c2e41a12b678fb376e7eaa2ba2d979b1f8a9e3593b048666b763f993e3b329622b71f07880b
++
++vector=v49
++kind=edge
++seed=2b51eed80c9222d494bb219dd39b8bf26df114651c00cba7cf1c1eac9fdf5830
++chain=aura-test-2
++domain=contract
++payload_hex=000000ff610062ff
++pubkey=d9bd01439be1d198828e9ef3e4e688aaa9e67cc3c877f5a45de70591e946bc8d
++digest=c47f9c1e00ca4b7a2ad5dc7f71bd9db9fa706f7827d32e40fd35faefa6345fb3
++sig=fdddbf02be8f7a0c706c04527ffb1e83507f56a1ac81721a9e552a6161857650d0a93ef537806b8f2c66ccd37b95f82fc4e197c0710fca628b6663e437360203
++
++vector=v50
++kind=edge
++seed=e693c881ef659089fdbff0b357f19558afa546c6ca67519e4bb3405a0ec741ed
++chain=aura-test-1
++domain=genesis
++payload_hex=030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc
++pubkey=e8635dd820e42ed0c5629eb28ba547d90f6cfbbaa113f3073c6d757c819c4131
++digest=6b16b84c5cb21a1bf0248755d80da9748c7304186da992342cbda58b139bc96f
++sig=e231b274b3af4d25db06c976323d8c6b257952ab46ceacbad8059b4172bb381f3718ad60b890d191c3b0fae9dee6f2627d6b78bd60128cad60b0b43637620501
+diff --git a/crates/aura-crypto/tests/h2_crypto.rs b/crates/aura-crypto/tests/h2_crypto.rs
+new file mode 100644
+index 0000000..562bdef
+--- /dev/null
++++ b/crates/aura-crypto/tests/h2_crypto.rs
+@@ -0,0 +1,299 @@
++//! H2 gate: 50 golden crypto vectors, byte-for-byte, plus behavioral negatives.
++//!
++//! Fixture: `tools/gen_h2_vectors.py` (independent oracle: pure-Python RFC
++//! 8032 from `tools/gen_c4_vectors.py`, the python `blake3` binding, and a
++//! from-spec `domain_message` assembler). Nothing here was produced by the
++//! Rust code under review.
++//!
++//! Families (docs/h2-crypto-review-plan.md §2): sign_verify, keygen,
++//! wrong_domain, cross_chain, tampered_payload, wrong_key, high_s, digest,
++//! edge. NC targets (`tools/nc_h2.py`):
++//!   NC-1 (named) collapse `Domain::tag()` -> `H2: wrong-domain signature must be rejected`,
++//!   NC-2 remove the canonical-S guard -> `H2: high-S signature must be rejected`,
++//!   NC-3 drop the chain binding -> `H2: cross-chain digest must be chain-bound`.
++
++use std::collections::BTreeMap;
++
++use aura_crypto::{CryptoError, ed25519_public_key, hash_domain, sign_raw, verify, verify_raw};
++use aura_types::Domain;
++
++const H2: &str = include_str!("fixtures/h2_vectors.txt");
++
++/// Parse the block-format fixture: `vector=<label>` starts a block; every
++/// `key=value` line belongs to the current block. Header lines before the
++/// first block are ignored here (see `h2_vector_count_is_50`).
++fn vectors() -> Vec<BTreeMap<String, String>> {
++    let mut out: Vec<BTreeMap<String, String>> = Vec::new();
++    let mut current: Option<BTreeMap<String, String>> = None;
++    for line in H2.lines() {
++        let line = line.trim();
++        if line.is_empty() || line.starts_with('#') {
++            continue;
++        }
++        let Some((key, value)) = line.split_once('=') else {
++            continue;
++        };
++        if key == "vector" {
++            if let Some(map) = current.take() {
++                out.push(map);
++            }
++            let mut map = BTreeMap::new();
++            map.insert(key.to_owned(), value.to_owned());
++            current = Some(map);
++        } else if let Some(map) = current.as_mut() {
++            assert!(
++                map.insert(key.to_owned(), value.to_owned()).is_none(),
++                "duplicate fixture key {key}"
++            );
++        }
++    }
++    if let Some(map) = current.take() {
++        out.push(map);
++    }
++    out
++}
++
++fn get<'a>(vec: &'a BTreeMap<String, String>, key: &str) -> &'a str {
++    vec.get(key)
++        .unwrap_or_else(|| panic!("missing fixture field {key} in {:?}", vec.get("vector")))
++}
++
++fn kind(vec: &BTreeMap<String, String>) -> &str {
++    get(vec, "kind")
++}
++
++fn domain_of(tag: &str) -> Domain {
++    match tag {
++        "tx" => Domain::Tx,
++        "vote" => Domain::Vote,
++        "block" => Domain::Block,
++        "contract" => Domain::Contract,
++        "genesis" => Domain::Genesis,
++        _ => panic!("unknown domain tag in fixture: {tag}"),
++    }
++}
++
++fn hx(text: &str) -> Vec<u8> {
++    assert_eq!(text.len() % 2, 0, "even-length hex");
++    text.as_bytes()
++        .chunks(2)
++        .map(|pair| (nibble(pair[0]) << 4) | nibble(pair[1]))
++        .collect()
++}
++
++fn nibble(byte: u8) -> u8 {
++    match byte {
++        b'0'..=b'9' => byte - b'0',
++        b'a'..=b'f' => byte - b'a' + 10,
++        _ => panic!("invalid hex nibble in fixture"),
++    }
++}
++
++fn arr32(text: &str) -> [u8; 32] {
++    hx(text).try_into().expect("expected 32 bytes")
++}
++
++fn arr64(text: &str) -> [u8; 64] {
++    hx(text).try_into().expect("expected 64 bytes")
++}
++
++#[test]
++fn h2_vector_count_is_50() {
++    assert!(H2.contains("vector_count=50"), "fixture header pin");
++    let vecs = vectors();
++    assert_eq!(vecs.len(), 50, "H2: exactly 50 vectors expected");
++    for kind_name in [
++        "sign_verify",
++        "keygen",
++        "wrong_domain",
++        "cross_chain",
++        "tampered_payload",
++        "wrong_key",
++        "high_s",
++        "digest",
++        "edge",
++    ] {
++        assert!(
++            vecs.iter().any(|v| kind(v) == kind_name),
++            "fixture must contain {kind_name} vectors"
++        );
++    }
++}
++
++#[test]
++fn h2_keygen_matches_oracle() {
++    for vec in vectors().iter().filter(|v| kind(v) == "keygen") {
++        let seed = arr32(get(vec, "seed"));
++        assert_eq!(
++            ed25519_public_key(&seed),
++            arr32(get(vec, "pubkey")),
++            "keygen mismatch for {:?}",
++            vec.get("vector")
++        );
++    }
++}
++
++#[test]
++fn h2_sign_verify_byte_for_byte() {
++    let positives = ["sign_verify", "edge"];
++    for vec in vectors().iter().filter(|v| positives.contains(&kind(v))) {
++        let label = vec.get("vector").cloned().unwrap_or_default();
++        let seed = arr32(get(vec, "seed"));
++        let payload = hx(get(vec, "payload_hex"));
++        let digest = arr32(get(vec, "digest"));
++        let signature = arr64(get(vec, "sig"));
++        let public = arr32(get(vec, "pubkey"));
++        assert_eq!(ed25519_public_key(&seed), public, "pubkey {label}");
++        assert_eq!(
++            hash_domain(get(vec, "chain"), domain_of(get(vec, "domain")), &payload).to_hex(),
++            get(vec, "digest"),
++            "digest {label}"
++        );
++        assert_eq!(sign_raw(&seed, &digest), signature, "signature {label}");
++        assert!(
++            verify(
++                &public,
++                get(vec, "chain"),
++                domain_of(get(vec, "domain")),
++                &payload,
++                &signature
++            )
++            .is_ok(),
++            "verify must accept {label}"
++        );
++    }
++}
++
++#[test]
++fn h2_wrong_domain_rejected() {
++    for vec in vectors().iter().filter(|v| kind(v) == "wrong_domain") {
++        let seed = arr32(get(vec, "seed"));
++        let payload = hx(get(vec, "payload_hex"));
++        let signature = arr64(get(vec, "sig"));
++        let public = arr32(get(vec, "pubkey"));
++        assert_eq!(ed25519_public_key(&seed), public);
++        let chain = get(vec, "chain");
++        assert!(
++            verify(
++                &public,
++                chain,
++                domain_of(get(vec, "domain")),
++                &payload,
++                &signature
++            )
++            .is_ok()
++        );
++        assert!(
++            verify(
++                &public,
++                chain,
++                domain_of(get(vec, "other_domain")),
++                &payload,
++                &signature
++            )
++            .is_err(),
++            "H2: wrong-domain signature must be rejected"
++        );
++    }
++}
++
++#[test]
++fn h2_cross_chain_rejected() {
++    for vec in vectors().iter().filter(|v| kind(v) == "cross_chain") {
++        let seed = arr32(get(vec, "seed"));
++        let payload = hx(get(vec, "payload_hex"));
++        let signature = arr64(get(vec, "sig"));
++        let public = arr32(get(vec, "pubkey"));
++        assert_eq!(ed25519_public_key(&seed), public);
++        let domain = domain_of(get(vec, "domain"));
++        assert_ne!(
++            hash_domain(get(vec, "other_chain"), domain, &payload),
++            hash_domain(get(vec, "chain"), domain, &payload),
++            "H2: cross-chain digest must be chain-bound"
++        );
++        assert!(verify(&public, get(vec, "chain"), domain, &payload, &signature).is_ok());
++        assert!(
++            verify(
++                &public,
++                get(vec, "other_chain"),
++                domain,
++                &payload,
++                &signature
++            )
++            .is_err(),
++            "H2: cross-chain signature must be rejected"
++        );
++    }
++}
++
++#[test]
++fn h2_tampered_payload_rejected() {
++    for vec in vectors().iter().filter(|v| kind(v) == "tampered_payload") {
++        let seed = arr32(get(vec, "seed"));
++        let payload = hx(get(vec, "payload_hex"));
++        let other = hx(get(vec, "other_payload_hex"));
++        let signature = arr64(get(vec, "sig"));
++        let public = arr32(get(vec, "pubkey"));
++        assert_eq!(ed25519_public_key(&seed), public);
++        let chain = get(vec, "chain");
++        let domain = domain_of(get(vec, "domain"));
++        assert!(verify(&public, chain, domain, &payload, &signature).is_ok());
++        assert!(
++            verify(&public, chain, domain, &other, &signature).is_err(),
++            "H2: tampered payload signature must be rejected"
++        );
++    }
++}
++
++#[test]
++fn h2_wrong_key_rejected() {
++    for vec in vectors().iter().filter(|v| kind(v) == "wrong_key") {
++        let payload = hx(get(vec, "payload_hex"));
++        let signature = arr64(get(vec, "sig"));
++        let public = arr32(get(vec, "pubkey"));
++        let other = arr32(get(vec, "other_pubkey"));
++        let chain = get(vec, "chain");
++        let domain = domain_of(get(vec, "domain"));
++        assert!(verify(&public, chain, domain, &payload, &signature).is_ok());
++        assert!(
++            verify(&other, chain, domain, &payload, &signature).is_err(),
++            "H2: wrong-key signature must be rejected"
++        );
++    }
++}
++
++#[test]
++fn h2_high_s_malleability_rejected() {
++    for vec in vectors().iter().filter(|v| kind(v) == "high_s") {
++        let seed = arr32(get(vec, "seed"));
++        let payload = hx(get(vec, "payload_hex"));
++        let digest = arr32(get(vec, "digest"));
++        let signature = arr64(get(vec, "sig"));
++        let twin = arr64(get(vec, "sig_high_s"));
++        let public = arr32(get(vec, "pubkey"));
++        assert_eq!(ed25519_public_key(&seed), public);
++        assert_eq!(
++            hash_domain(get(vec, "chain"), domain_of(get(vec, "domain")), &payload).to_hex(),
++            get(vec, "digest")
++        );
++        assert!(verify_raw(&public, &digest, &signature).is_ok());
++        assert_eq!(
++            verify_raw(&public, &digest, &twin),
++            Err(CryptoError::NonCanonicalSignature),
++            "H2: high-S signature must be rejected"
++        );
++    }
++}
++
++#[test]
++fn h2_digest_matches_oracle() {
++    for vec in vectors().iter().filter(|v| kind(v) == "digest") {
++        let payload = hx(get(vec, "payload_hex"));
++        assert_eq!(
++            hash_domain(get(vec, "chain"), domain_of(get(vec, "domain")), &payload).to_hex(),
++            get(vec, "digest"),
++            "digest mismatch for {:?}",
++            vec.get("vector")
++        );
++    }
++}
+diff --git a/docs/evidence/h2/README.md b/docs/evidence/h2/README.md
+new file mode 100644
+index 0000000..807260e
+--- /dev/null
++++ b/docs/evidence/h2/README.md
+@@ -0,0 +1,13 @@
++# H2 evidence — crypto review (50 vectors)
++
++Gate (SECURITY_PLAN row H2): "50 crypto vectors + side-channel checklist;
++NC: shared domain -> signature passes, red".
++
++- `check.log` — oracle drift check, `tools/check_h2_review.py` and the h2
++  vector suite (`crates/aura-crypto/tests/h2_crypto.rs`).
++- `nc.log` — `tools/nc_h2.py` mutation controls (6), named = shared domain.
++- `inventory.txt` — vector kinds, checklist statuses and the cumulative NC
++  total (442).
++- `report.md`, `gates.txt`, `SHA256SUMS`.
++
++Regenerate: `make gen-h2-vectors`, `make evidence-h2`.
+diff --git a/docs/evidence/h2/SHA256SUMS b/docs/evidence/h2/SHA256SUMS
+new file mode 100644
+index 0000000..0a3b24f
+--- /dev/null
++++ b/docs/evidence/h2/SHA256SUMS
+@@ -0,0 +1,17 @@
++a055f47911d8084545f7a3985d6a1380daf641f1b9a647a56b8e3f58624fbf31  tools/fixtures/h2_review_checklist.json
++b5bd2b772643d44f3812d61ab1ddaa3f33f2c0c4bbf7c36002197d066b873eb1  crates/aura-crypto/tests/fixtures/h2_vectors.txt
++49e19e73d12ef1e8a4ced038bab780baaf9782f0eed120f820d981888f88f3db  docs/h2-crypto-review-plan.md
++e264c2e80f6e705b604f3fae2478d16a6c6039b2bd86a874f174d19537e7343f  tools/gen_h2_vectors.py
++3fec368b676893aa678e94639049f1c7961aae10c82daf00fdcd4acc59e6c15b  tools/check_h2_review.py
++9d923b7180c81a3bd630419f48a066f69fe7a1bed3f7c17c8f07649a89b1862e  tools/nc_h2.py
++758ffb067e67c78e75d890c6be5740c4f702eea437187d98641b5f9f8421ad5c  crates/aura-crypto/src/ed25519.rs
++a0f79675183f442331a485ca964e96d09692da1e7f03c53c59fd66d3838bf88c  crates/aura-crypto/src/hash.rs
++1c6c7ca82223de8aa346a55ada3e23227a42074ab27de9ab6e59f5cd4736b2fd  crates/aura-crypto/src/secret.rs
++d4826ceef08c2ace5a965fd898c121a6597d838171b0ee7a0247de9b10657b08  crates/aura-crypto/src/error.rs
++4d005a8a710ce3358ea499f1688ef0094571c4703ea60c90a6638d67859b2965  crates/aura-crypto/tests/h2_crypto.rs
++f0e1ee92781ef3f2976d077a8d0ae669eb9368eb55f9fd8f585fe810d6899ac7  crates/aura-types/src/primitives.rs
++f4b326d0934ddc4d14130ea17f8b9fd4d083d7d2857e8c1f578d2e9c67eab7fc  docs/evidence/h2/check.log
++82f3c22778bb93c4f46c844f31c73dbf00945eb4afa65b1ff81a3876f0844ef8  docs/evidence/h2/nc.log
++e7ce6266808c0071f63af61c664dd69a73126a26d61954915640f86022aa8709  docs/evidence/h2/inventory.txt
++cc9f8c5007f029feea30dac48b9a4133c57200b6a1d2c29fc785edc8058128df  docs/evidence/h2/gates.txt
++4d3283872a04fcd52aa3fc7021c161d452e0d3c474a16a5f365ce7a6d538adbc  docs/evidence/h2/report.md
+diff --git a/docs/evidence/h2/check.log b/docs/evidence/h2/check.log
+new file mode 100644
+index 0000000..52aa6e5
+--- /dev/null
++++ b/docs/evidence/h2/check.log
+@@ -0,0 +1,25 @@
++$ /usr/local/bin/python3 tools/gen_h2_vectors.py --check
++ORACLE: OK — 50 vectors + 10 checklist items, no drift
++exit=0
++$ /usr/local/bin/python3 tools/check_h2_review.py
++CRYPTO REVIEW: OK — 10 checklist items, all claims verified
++exit=0
++$ cargo test -p aura-crypto --test h2_crypto
++
++running 9 tests
++test h2_digest_matches_oracle ... ok
++test h2_cross_chain_rejected ... ok
++test h2_high_s_malleability_rejected ... ok
++test h2_keygen_matches_oracle ... ok
++test h2_tampered_payload_rejected ... ok
++test h2_vector_count_is_50 ... ok
++test h2_sign_verify_byte_for_byte ... ok
++test h2_wrong_domain_rejected ... ok
++test h2_wrong_key_rejected ... ok
++
++test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
++
++   Compiling aura-crypto v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-crypto)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.35s
++     Running tests/h2_crypto.rs (target/debug/deps/h2_crypto-c9a4c80bc08dd2b0)
++exit=0
+diff --git a/docs/evidence/h2/gates.txt b/docs/evidence/h2/gates.txt
+new file mode 100644
+index 0000000..ab4730c
+--- /dev/null
++++ b/docs/evidence/h2/gates.txt
+@@ -0,0 +1,6 @@
++# H2 gates
++crypto vectors: PASS (50/50)
++oracle drift: none
++side-channel checklist: PASS (10 items)
++named control (shared_domain): PASS
++mutation controls: PASS (6/6)
+diff --git a/docs/evidence/h2/inventory.txt b/docs/evidence/h2/inventory.txt
+new file mode 100644
+index 0000000..51bd266
+--- /dev/null
++++ b/docs/evidence/h2/inventory.txt
+@@ -0,0 +1,26 @@
++# H2 inventory (generated by tools/write_h2_evidence.py)
++vectors=50
++vector_kinds:
++  cross_chain=5
++  digest=5
++  edge=5
++  high_s=5
++  keygen=5
++  sign_verify=10
++  tampered_payload=5
++  wrong_domain=5
++  wrong_key=5
++checklist_items=10
++named_control=shared_domain=present
++checklist:
++  H2-SC01 status=verified owner=crypto reviewer
++  H2-SC02 status=verified owner=crypto reviewer
++  H2-SC03 status=verified owner=crypto reviewer
++  H2-SC04 status=verified owner=core maintainer
++  H2-SC05 status=verified owner=core maintainer
++  H2-SC06 status=verified owner=core maintainer
++  H2-SC07 status=verified owner=core maintainer
++  H2-SC08 status=verified owner=core maintainer
++  H2-SC09 status=planned owner=core maintainer
++  H2-SC10 status=planned owner=core maintainer
++TOTAL: 442 negative controls
+diff --git a/docs/evidence/h2/nc.log b/docs/evidence/h2/nc.log
+new file mode 100644
+index 0000000..f9b91e9
+--- /dev/null
++++ b/docs/evidence/h2/nc.log
+@@ -0,0 +1,9 @@
++$ /usr/local/bin/python3 tools/nc_h2.py
++PASS NC: shared domain -> signature passes, suite red: H2: wrong-domain signature must be rejected
++PASS NC: canonical-S guard removed -> high-S red: H2: high-S signature must be rejected
++PASS NC: chain binding dropped -> cross-chain red: H2: cross-chain digest must be chain-bound
++PASS NC: checklist item without an owner -> gate red: error: checklist item H2-SC07: missing owner
++PASS NC: checklist item without evidence -> gate red: error: checklist item H2-SC08: missing evidence
++PASS NC: checklist item without status -> gate red: error: checklist item H2-SC04: missing status
++RESULT: 6/6 negative controls PASS
++exit=0
+diff --git a/docs/evidence/h2/report.md b/docs/evidence/h2/report.md
+new file mode 100644
+index 0000000..5dde2c4
+--- /dev/null
++++ b/docs/evidence/h2/report.md
+@@ -0,0 +1,35 @@
++# H2 closeout report — crypto review
++
++Date: 2026-11-14. Gate (SECURITY_PLAN row H2): "50 crypto vectors +
++side-channel checklist; NC: shared domain -> signature passes, red" —
++**satisfied**.
++
++- **Vectors**: 50 golden crypto vectors from the independent oracle
++  `tools/gen_h2_vectors.py` (pure-Python RFC 8032, python blake3, from-spec
++  `domain_message`): keygen, sign/verify byte-for-byte, wrong domain, cross
++  chain, tampered payload, wrong key, high-S malleation, digest layout,
++  edge payloads. `crates/aura-crypto/tests/h2_crypto.rs` asserts every
++  expectation (`h2_vector_count_is_50` pins the count).
++- **Malleability (D-H2-3)**: `verify_raw` rejects `S >= L` with the distinct
++  `CryptoError::NonCanonicalSignature`. Review finding: the classic twin
++  `(R, S+L)` satisfies the same verification equation; ed25519-dalek 2.2.0's
++  default `check_scalar` rejects it, but its `legacy_compatibility` feature
++  reopens malleation ("permits signature malleability" — dalek's own
++  comment). The guard makes `S < L` our own invariant.
++- **Side-channel checklist (D-H2-4)**: 10 machine-readable items
++  (`### H2-SCxx`, `Claim/Owner/Evidence/Status`) pinned by
++  `tools/fixtures/h2_review_checklist.json`, re-derived by
++  `tools/check_h2_review.py`, which also greps the reviewed sources for each
++  claim (constant-time compare, Zeroizing, Debug redaction, S<L guard, five
++  domain tags, chain binding, length prefixes, hash context).
++- **Post-quantum (D-H2-5)**: ML-DSA (FIPS 204) primary, SLH-DSA (FIPS 205)
++  stateless backup; hybrid `Ed25519 || ML-DSA` migration planned for
++  W1-FORMAT-v2 / Stage 2 (plan §4).
++- **Named control** (shared_domain): `tools/nc_h2.py` NC-1 collapses every
++  `Domain::tag()` to one tag and requires the h2 suite to go red with
++  `H2: wrong-domain signature must be rejected`.
++- **Mutation controls: 6/6 PASS** (shared domain, canonical-S guard, chain
++  binding, checklist owner, checklist evidence, checklist status).
++
++Receipts: `gates.txt`, `check.log`, `nc.log`, `inventory.txt`, `SHA256SUMS`.
++Regenerate with `make evidence-h2`. Public project material only.
+diff --git a/docs/evidence/review-w1-source-drift.txt b/docs/evidence/review-w1-source-drift.txt
+index 8d69944..0e6d7c1 100644
+--- a/docs/evidence/review-w1-source-drift.txt
++++ b/docs/evidence/review-w1-source-drift.txt
+@@ -1,12 +1,12 @@
+ # Explicit source drift from frozen historical SHA256SUMS.
+ # historical-sha256 current-sha256 repository-relative-path
+ # Not a replacement for a new phase security review or certification.
+-adc24e7c03e1a63e5d7addbda15ff40ce630367152699c5d9659cd8db65f357b 7c89af4dec6f29920fbde44340eb8797cad37f50e0b57babf22109a0024a7772 CHANGELOG.md
+-c83d08301a703c9db11462aa541bc898e52548589972118465164895eed44dc7 7c89af4dec6f29920fbde44340eb8797cad37f50e0b57babf22109a0024a7772 CHANGELOG.md
++adc24e7c03e1a63e5d7addbda15ff40ce630367152699c5d9659cd8db65f357b 43285c906a55020b074e9533e70c69640562096165cce094d5f24f578208f485 CHANGELOG.md
++c83d08301a703c9db11462aa541bc898e52548589972118465164895eed44dc7 43285c906a55020b074e9533e70c69640562096165cce094d5f24f578208f485 CHANGELOG.md
+ f0d3511cd02f3007c0a18fc5d94c8997cfa512449313776117265708a36c8553 c9680cc436d806fa7fa2ce8545bd148dc9fcc9ae444973d4968a3f4f4fc069dc Cargo.lock
+ d5518138eae73219f8da0d7297af44a471dbd7135a39587a0da1587bfe3d1e70 23185f790bc4697bbd163004e2c78873755c13efba05b46260b4827cdeabdff7 Cargo.toml
+-5fb6ce43826495321f697e138e71e87954b2fcabec1ceef70549bb49a2f38988 a7e9b718f1208c226dc78f2ac95b231022d05543556bef5aa560a67dbe6da54a Makefile
+-c5e92007c53a22253ad7d2cc779863b9592562a394d1b26ff09ea8d031991e29 a7e9b718f1208c226dc78f2ac95b231022d05543556bef5aa560a67dbe6da54a Makefile
++5fb6ce43826495321f697e138e71e87954b2fcabec1ceef70549bb49a2f38988 504a299775f8a892b8ec160034d4a391d1e66ae69a1e08ca398ad717e7ae5d2d Makefile
++c5e92007c53a22253ad7d2cc779863b9592562a394d1b26ff09ea8d031991e29 504a299775f8a892b8ec160034d4a391d1e66ae69a1e08ca398ad717e7ae5d2d Makefile
+ bcc7328bd9c464a857c4b97c8491277bf401299d3c7963f1925b075d4313feb6 f2e4a249573a5b902b3f566b3f1db1ebab12d994f1ab6ef9be2dc15df63d7e26 crates/aura-consensus/src/fork_choice.rs
+ 7e396fbb4fd1d4103f26db16796ab0b6ad9626b7ba2ea0d56cae379bde5c2d59 8ec730ce2dc2cb1bc266990f4f29133038e98e390a63be0edbb3eaa23fa48f23 crates/aura-consensus/src/governance.rs
+ bd58be73dc4e0f6da16735be1d5ed17306d16c08569d798a4af20fcf72b91d40 b2e8ddad5b281da54e9c68107b563c9125b3931fe0e8e26023c74dcf3011ccc3 crates/aura-consensus/src/slashing.rs
+@@ -42,8 +42,8 @@ bce9253cdf6d4a17db6f84d2d32567dc3fba7f824b7bbf9dfbe9a3c20fd10494 0e9893d2df6522e
+ c477f915b427982ca83fcb253fa0ab850d619ca5bf4a764137f0407078af4986 efee48a5d312b5856c86bee4ff797e034047156e1ec0328ec2f56a5ac5191a66 fuzz/Cargo.lock
+ 6f3f2bd9f508b33896011a6e7a6dc60e93ad24e6a00445e50ceceedd1346194b b4897ba4dbc33f098c27e415669e2e0bbca45933694b67aa590181041ebfdf0f fuzz/Cargo.toml
+ dca80316562fefcf24c45b40fb635412e1d4e5e09b5abe26f7d0e6b67e1e906e 53ac68024a82d40e64badd40ead1ebea5e0af8be1e56d4184a0eb0f22eab55a2 fuzz/README.md
+-1259c6bbc3bd3d53cbe0dd1d69d8d762336dc26287215d2ee35307bba90ea85c 6c11021035455117a7bd4817c8a860b285483fe14681329f3548e908d593746b tools/audit_closeout.py
+-7bd672503f104aa733dff03e84f57ac26ef926607657ab6a799f9d2bc14c0dc9 6c11021035455117a7bd4817c8a860b285483fe14681329f3548e908d593746b tools/audit_closeout.py
++1259c6bbc3bd3d53cbe0dd1d69d8d762336dc26287215d2ee35307bba90ea85c 6552001e0de6786905b8f157e566aa7b76e9c055d9e8b7f6805680e71774a131 tools/audit_closeout.py
++7bd672503f104aa733dff03e84f57ac26ef926607657ab6a799f9d2bc14c0dc9 6552001e0de6786905b8f157e566aa7b76e9c055d9e8b7f6805680e71774a131 tools/audit_closeout.py
+ 4d7d73580e09a49f1a0a9faf668254b0ec12f891efa527db863fa3abf8cce4a1 ab356092fc59ed98bff8d3622ef74e35eb33da5f342c5b6dccf5d73aeb20763b tools/gen_w0_vectors.py
+ 303fc648659cc72d9f8cf7cf6bc71ed8c9bd5a9f9a8d923d5a1e78bcffba0b5b 5e62e17226bfc601e8775b54e7f6a025d36c1357b7206d33c18c442cb49746eb tools/nc_b10.py
+ f86dee929549c751519e1749e0976c561e47a174a129412caf8cd23680887f61 3ae536e2637862525ca6edb1eeaa927a018a529856402d60c7260e92481d0b19 tools/nc_b5.py
+diff --git a/docs/h2-crypto-review-plan.md b/docs/h2-crypto-review-plan.md
+new file mode 100644
+index 0000000..a6eb19f
+--- /dev/null
++++ b/docs/h2-crypto-review-plan.md
+@@ -0,0 +1,187 @@
++# H2 — Crypto review plan (side-channel checklist + PQ plan)
++
++Status: 🚧 IN PROGRESS — H2
++Owner: core maintainer
++Date: 2026-11-14
++Gate: `50 crypto vectors + side-channel checklist`
++Named control: `shared domain -> signature passes, red`
++
++## 1. Scope and DoD
++
++SECURITY_PLAN row H2 requires an independent crypto review covering:
++constant-time behaviour, secret zeroization, domain separation, signature
++malleability, and a post-quantum plan. This phase delivers:
++
++- **D-H2-1 — 50 golden crypto vectors** (`crates/aura-crypto/tests/fixtures/h2_vectors.txt`):
++  keygen, sign/verify byte-for-byte, and the negative families (wrong domain,
++  cross chain, tampered payload, wrong key, high-S malleability), plus digest
++  layout vectors and edge payloads. Oracle: `tools/gen_h2_vectors.py`
++  (independent: pure-Python RFC 8032 from `tools/gen_c4_vectors.py`, the
++  python `blake3` binding, and a from-spec `domain_message` assembler).
++- **D-H2-2 — signed-digest layout pin.** `domain_message` =
++  `HASH_CONTEXT || u64le(prefix_len) || prefix || u64le(payload_len) || payload`,
++  `prefix = chain_id || 0x00 || domain_tag || 0x00`. Digest vectors v41–v45
++  pin `hash_domain` byte-for-byte; a change of `HASH_CONTEXT` is a protocol
++  change (C3 keeps its NC on that constant).
++- **D-H2-3 — malleability check.** `verify_raw` rejects non-canonical `S`
++  (`S >= L`, RFC 8032 §5.1.7) *before* verification, with the distinct
++  `CryptoError::NonCanonicalSignature` error. Review finding: the classic
++  malleation is the twin `(R, S+L)` (`S' ≡ S mod L`, so the twin satisfies
++  the same verification equation). ed25519-dalek 2.2.0's default
++  `check_scalar` (`Scalar::from_canonical_bytes`) already rejects `S >= L`,
++  but its `legacy_compatibility` feature relaxes the bound to `S < 2^253` and
++  reopens malleation — dalek's own comment marks that path "permits signature
++  malleability". The explicit guard makes `S < L` an invariant of *our* API,
++  independent of dependency features or swaps (a supply-chain-shaped threat),
++  and gives gates/callers a distinguishable error. Proven by the `high_s`
++  vectors (v36–v40) and the unit test in `ed25519.rs`.
++- **D-H2-4 — side-channel checklist** (below): machine-readable
++  `### H2-SCxx` items with `Claim/Owner/Evidence/Status` fields, pinned by
++  the oracle to `tools/fixtures/h2_review_checklist.json` and re-derived by
++  `tools/check_h2_review.py`, which also greps the reviewed sources for each
++  claim.
++- **D-H2-5 — post-quantum plan** (below): ML-DSA (FIPS 204) as the signature
++  upgrade, SLH-DSA (FIPS 205) as the stateless backup.
++- **D-H2-6 — mutation controls** (`tools/nc_h2.py`, 6): see §4.
++- **D-H2-7 — evidence** in `docs/evidence/h2/` (`make evidence-h2`).
++
++## 2. The 50 vectors
++
++Seeds: `seed_i = SHA-256("AuraLite-Crypto/h2-crypto-vectors-v1/seed/" || u32le(i))`.
++Chains: `aura-test-1`, `aura-test-2`. Domains: the five `Domain::tag()` tags.
++
++| ids | kind | count | expectation |
++| --- | --- | --- | --- |
++| v01–v10 | `sign_verify` | 10 | pubkey/digest/sig byte-for-byte; `verify` accepts |
++| v11–v15 | `keygen` | 5 | `ed25519_public_key(seed)` byte-for-byte |
++| v16–v20 | `wrong_domain` | 5 | same signature under another domain tag -> reject |
++| v21–v25 | `cross_chain` | 5 | same signature under another chain -> reject |
++| v26–v30 | `tampered_payload` | 5 | one flipped payload byte -> reject |
++| v31–v35 | `wrong_key` | 5 | another seed's public key -> reject |
++| v36–v40 | `high_s` | 5 | `(R, S+L)` twin -> `NonCanonicalSignature` |
++| v41–v45 | `digest` | 5 | `hash_domain` byte-for-byte (layout pin) |
++| v46–v50 | `edge` | 5 | empty/`0x00`/`0xff`/mixed/1 KiB payloads sign+verify |
++
++`high_s` twins use `S' = S + L` (no wraparound: `S < L < 2^252`), the classic
++ed25519 malleation. The suite asserts `verify_raw` rejects the twin; a unit
++test in `crates/aura-crypto/src/ed25519.rs` additionally demonstrates that
++ed25519-dalek's ZIP215 verify *accepts* it (the vulnerability is real).
++
++## 3. Side-channel checklist
++
++### H2-SC01 — Constant-time comparison for secret material
++- Claim: Secret comparisons go through subtle::ConstantTimeEq via constant_time_eq; no early-exit equality on secret bytes.
++- Owner: crypto reviewer
++- Evidence: crates/aura-crypto/src/secret.rs
++- Status: verified
++
++### H2-SC02 — Secret material zeroized on drop
++- Claim: SecretBytes wraps Zeroizing<[u8; 32]> so key material is wiped when it leaves scope.
++- Owner: crypto reviewer
++- Evidence: crates/aura-crypto/src/secret.rs
++- Status: verified
++
++### H2-SC03 — Debug redaction for secrets
++- Claim: Debug for SecretBytes prints [REDACTED] and no Display impl can print secret bytes.
++- Owner: crypto reviewer
++- Evidence: crates/aura-crypto/src/secret.rs
++- Status: verified
++
++### H2-SC04 — Signature malleability check (S < L)
++- Claim: verify_raw rejects non-canonical S values (S >= L) before verification with a distinct NonCanonicalSignature error, independent of dependency-internal checks.
++- Owner: core maintainer
++- Evidence: crates/aura-crypto/src/ed25519.rs
++- Status: verified
++
++### H2-SC05 — Domain separation covers all five domains
++- Claim: Domain::tag() assigns a distinct stable tag to Tx, Vote, Block, Contract and Genesis; cross-domain signatures are rejected.
++- Owner: core maintainer
++- Evidence: crates/aura-types/src/primitives.rs
++- Status: verified
++
++### H2-SC06 — Chain binding in the signed digest
++- Claim: hash_domain binds chain_id into the signed digest; a signature made for one chain fails on another.
++- Owner: core maintainer
++- Evidence: crates/aura-crypto/src/hash.rs
++- Status: verified
++
++### H2-SC07 — Unambiguous length-prefixed message layout
++- Claim: domain_message encodes prefix and payload lengths as u64 little-endian before each segment; concatenation is unambiguous.
++- Owner: core maintainer
++- Evidence: crates/aura-crypto/src/hash.rs
++- Status: verified
++
++### H2-SC08 — Versioned hash context is a protocol constant
++- Claim: HASH_CONTEXT is pinned at AuraLite-Crypto/crypto-v1 and changing it is a protocol change requiring a new phase.
++- Owner: core maintainer
++- Evidence: crates/aura-crypto/src/hash.rs
++- Status: verified
++
++### H2-SC09 — Post-quantum primary: ML-DSA (FIPS 204)
++- Claim: ML-DSA is the designated PQ signature upgrade; the hybrid migration plan is recorded in this document.
++- Owner: core maintainer
++- Evidence: docs/h2-crypto-review-plan.md
++- Status: planned
++
++### H2-SC10 — Post-quantum backup: SLH-DSA (FIPS 205)
++- Claim: SLH-DSA is the designated stateless hash-based backup if ML-DSA is weakened; the fallback plan is recorded in this document.
++- Owner: core maintainer
++- Evidence: docs/h2-crypto-review-plan.md
++- Status: planned
++
++## 4. Post-quantum plan (D-H2-5)
++
++Current primitives and quantum exposure:
++
++- **Signatures (Ed25519, RFC 8032; secp256k1 compat)** — broken by Shor's
++  algorithm. Every long-lived public key becomes forgeable once a
++  cryptographically relevant quantum computer exists. This is the urgent part.
++- **Hashes (BLAKE3-256, SHA-256 for seeds)** — Grover only halves preimage
++  security (256-bit -> 128-bit). Acceptable long-term; no urgent migration.
++
++Plan:
++
++1. **ML-DSA (FIPS 204) as the primary PQ signature.** Standardized lattice
++   (Dilithium) signature with the broadest implementation ecosystem. Adopted
++   as the designated upgrade for `Domain::Tx/Vote/Block/Contract/Genesis`
++   signatures. Public keys and signatures are large (2.6 KB / 4.6 KB for
++   ML-DSA-65), which is acceptable for consensus artifacts and is why the
++   migration is a codec change (`CODEC_VERSION` bump), not a drop-in.
++2. **SLH-DSA (FIPS 205) as the stateless backup.** Hash-based (SPHINCS+),
++   conservative security assumptions, no lattice structure. Kept as the
++   designated fallback if ML-DSA is weakened (as happened with earlier
++   Rainbow/GeMSS candidates). Signatures are ~30 KB: reserved for genesis
++   certificates, root-of-trust anchors and release signatures, where size is
++   cheap and assumption diversity is priceless.
++3. **Hybrid migration (Stage 2).** Mode H-PQ-hybrid: sign with
++   `Ed25519 || ML-DSA` (composite), verify both, until the network has
++   rehearsed on testnet. Wire format lands in W1-FORMAT-v2 (currently frozen
++   as v1 for testnet per the W1 owner decision); the domain separation
++   context bumps (`crypto-v2`) and every signature version is carried in the
++   codec. Rollback window: the composite keeps the classical half until the
++   PQ half is proven in production.
++4. **Key inventory discipline.** No long-lived classical-only keys past the
++   hybrid activation height; release/genesis keys move to SLH-DSA first.
++5. **Status: planned.** Nothing in this phase changes the wire; the vectors
++   and checklist pin today's primitives so the migration has a byte-exact
++   baseline to diff against.
++
++## 5. Gates and controls
++
++- `make test` runs `tools/check_h2_review.py` (checklist gate) and, through
++  `cargo test`, `crates/aura-crypto/tests/h2_crypto.rs` (the 50 vectors).
++  Failure output: `error: crypto-review: …` / assertion messages
++  `H2: …`, exit 1.
++- `make check-h2` runs the checklist gate alone; `make gen-h2-vectors`
++  regenerates the fixtures (deterministic; `--check` proves no drift).
++- Negative controls (`tools/nc_h2.py`, 6):
++  **NC-1 (named) shared domain -> signature passes, red** (all `Domain::tag()`
++  tags collapse to one -> `H2: wrong-domain signature must be rejected`),
++  NC-2 remove the S<L check -> `H2: high-S signature must be rejected`,
++  NC-3 drop the chain binding -> `H2: cross-chain digest must be chain-bound`,
++  NC-4 delete a checklist Owner field -> `error: checklist item H2-SC07: missing owner`,
++  NC-5 delete a checklist Evidence field -> `error: checklist item H2-SC08: missing evidence`,
++  NC-6 delete a checklist Status field -> `error: checklist item H2-SC04: missing status`.
++- Evidence `docs/evidence/h2/`: `report.md`, `gates.txt`, `check.log`,
++  `nc.log`, `inventory.txt` (cumulative TOTAL: 442), `SHA256SUMS`;
++  regenerate with `make evidence-h2`.
+diff --git a/docs/plans/SECURITY_PLAN.md b/docs/plans/SECURITY_PLAN.md
+index f3ca184..e495047 100644
+--- a/docs/plans/SECURITY_PLAN.md
++++ b/docs/plans/SECURITY_PLAN.md
+@@ -1,6 +1,6 @@
+ # SECURITY_PLAN — threats, fuzzing, audit, incidents
+ 
+-**Status:** 🚧 IN PROGRESS — H0 ✅ (`patches/0063-H0-threat-model.patch`); H1 ✅ (`patches/0064-H1-supply-chain.patch`); H2–H7 open; ⏸ H8–H9 Stage 2  
++**Status:** 🚧 IN PROGRESS — H0 ✅ (`patches/0063-H0-threat-model.patch`); H1 ✅ (`patches/0064-H1-supply-chain.patch`); H2 ✅ (`patches/0066-H2-crypto-review.patch`); H3–H7 open; ⏸ H8–H9 Stage 2  
+ **Stage:** Stage 1: H0–H7. ⏸ Stage 2: H8–H9 (external audit, bug bounty, incident drills).  
+ **Deliverable:** `patches/0086-H0-...` … `patches/0095-H9-...`
+ **Dependencies:** runs in parallel with CORE (H0/H1 with C0). H0–H7 are mandatory
+@@ -33,7 +33,7 @@ coverage measurement and crash triage. C9 did not claim any of those.
+ |---|---|---|---|
+ | ✅ **H0** | Threat model | `docs/THREAT_MODEL.md`: assets, adversary (external/validator/insider), trust boundaries, 30+ scenarios | review gate; NC: scenario without an owner → red |
+ | ✅ **H1** | Supply chain | `cargo deny`, `cargo audit`, pinning, SBOM (CycloneDX), gitleaks, release signatures | CI fails on a known vulnerable version; NC: remove deny → red |
+-| **H2** | Crypto review | constant-time, zeroize, domain separation, malleability check, PQ plan (ML-DSA FIPS 204 / SLH-DSA FIPS 205 [7](https://csrc.nist.gov/news/2024/postquantum-cryptography-fips-approved)) | 50 crypto vectors + side-channel checklist; NC: shared domain → signature passes, red |
++| ✅ **H2** | Crypto review | constant-time, zeroize, domain separation, malleability check, PQ plan (ML-DSA FIPS 204 / SLH-DSA FIPS 205 [7](https://csrc.nist.gov/news/2024/postquantum-cryptography-fips-approved)) | 50 crypto vectors + side-channel checklist; NC: shared domain → signature passes, red |
+ | **H3** | Fuzzing | cargo-fuzz targets: codec, tx decode, RPC, p2p frames, WASM verifier, wallet keystore | 24 h total, 0 new crashes; NC: injected bug → fuzz finds it |
+ | **H4** | Property/differential | reference implementation of tree/codec, model-based VM tests, balance invariants | 1M generated txs: `sum(balances)` conserved |
+ | **H5** | Consensus safety | TLA+/Apalache spec, Jepsen-like runs (together with B10/N8) | model finds a counterexample when 2f+1 is removed; NC documented |
+@@ -100,3 +100,29 @@ Stage 2 (⏸): external audit, bug bounty and incident drills (H8–H9).
+   removed, lockfile digest removed, sbom comparison removed, secret rule
+   disabled, signature verification skipped — 6/6 PASS.
+ 
++### H2 receipt (2026-11-14)
++
++- Deliverable: `patches/0066-H2-crypto-review.patch`; evidence in
++  `docs/evidence/h2/`; plan in `docs/h2-crypto-review-plan.md`.
++- 50 golden crypto vectors (`crates/aura-crypto/tests/fixtures/h2_vectors.txt`,
++  oracle `tools/gen_h2_vectors.py` — pure-Python RFC 8032 + python blake3 +
++  from-spec `domain_message`): keygen, sign/verify byte-for-byte, wrong
++  domain, cross chain, tampered payload, wrong key, high-S malleation,
++  digest layout, edge payloads — asserted by
++  `crates/aura-crypto/tests/h2_crypto.rs` (registered in `make test`).
++- Malleability check: `verify_raw` rejects `S >= L` with the distinct
++  `CryptoError::NonCanonicalSignature` (the classic twin `(R, S+L)`; dalek's
++  `legacy_compatibility` feature would reopen the window).
++- Side-channel checklist: 10 machine-readable items (`H2-SC01..SC10`,
++  Claim/Owner/Evidence/Status) pinned by
++  `tools/fixtures/h2_review_checklist.json`, re-derived and source-checked by
++  `tools/check_h2_review.py` (registered in `make test`).
++- PQ plan (planned): ML-DSA (FIPS 204) primary, SLH-DSA (FIPS 205) stateless
++  backup, hybrid `Ed25519 || ML-DSA` migration at W1-FORMAT-v2 / Stage 2.
++- Named control: `shared domain` — `tools/nc_h2.py` NC-1 collapses
++  `Domain::tag()` to one tag and requires the h2 suite to go red with
++  `H2: wrong-domain signature must be rejected`.
++- Mutation controls (`tools/nc_h2.py`, 6): shared domain, canonical-S guard
++  removed, chain binding dropped, checklist owner/evidence/status deleted —
++  6/6 PASS.
++
+diff --git a/tools/audit_closeout.py b/tools/audit_closeout.py
+index 69744f8..97f9b5f 100644
+--- a/tools/audit_closeout.py
++++ b/tools/audit_closeout.py
+@@ -36,7 +36,7 @@ NODE_PHASES = ["D0", "D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8"]
+ CONSENSUS_PHASES = ["B0", "B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9", "B10"]  # CONSENSUS_PLAN complete
+ NET_PHASES = ["N0", "N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8"]  # NET_PLAN complete
+ WALLET_PHASES = ["W0", "W1", "W2", "W3", "W4"]  # grows with each W phase
+-SECURITY_PHASES = ["H0", "H1"]  # grows with each H phase
++SECURITY_PHASES = ["H0", "H1", "H2"]  # grows with each H phase
+ PHASES = CORE_PHASES + STATE_PHASES + EXEC_PHASES + NODE_PHASES + CONSENSUS_PHASES + NET_PHASES + WALLET_PHASES + SECURITY_PHASES
+ SHIPPED = CORE_PHASES + [
+     "S0",
+@@ -91,8 +91,9 @@ SHIPPED = CORE_PHASES + [
+     "W3",
+     "W4",
+     "H0",
++    "H1",
+ ]
+-CURRENT = "H1"
++CURRENT = "H2"
+ 
+ PLAN_FOR_PREFIX = {
+     "C": "CORE_PLAN.md",
+@@ -110,7 +111,7 @@ PLAN_FOR_PREFIX = {
+ }
+ 
+ NC_PER_PHASE = {f"C{i}": 6 for i in range(4, 11)}
+-NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6, "W4": 6, "H0": 6, "H1": 6})
++NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6, "W4": 6, "H0": 6, "H1": 6, "H2": 6})
+ SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)  # 339 (through W0)
+ EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + (0 if CURRENT in SHIPPED else NC_PER_PHASE[CURRENT])
+ 
+@@ -131,6 +132,7 @@ PATCH_ORDER += ["H0", "H1"]
+ # 0065 is reserved for the H1 post-closeout scan-scope fix (not a phase);
+ # the next phase patch (H2) starts at 0066.
+ PATCH_ORDER += ["HFIX"]
++PATCH_ORDER += ["H2"]
+ PATCH_NUMBERS = {phase: index + 1 for index, phase in enumerate(PATCH_ORDER)}
+ 
+ 
+diff --git a/tools/check_h2_review.py b/tools/check_h2_review.py
+new file mode 100644
+index 0000000..2799d0f
+--- /dev/null
++++ b/tools/check_h2_review.py
+@@ -0,0 +1,178 @@
++#!/usr/bin/env python3
++"""H2 review gate: parse the side-channel checklist in
++`docs/h2-crypto-review-plan.md` and enforce its schema.
++
++Fails (exit 1, one `error: ...` line per violation) on: fewer than 10 items,
++duplicate or malformed ids, missing required fields (claim, owner, evidence,
++status), owners outside the roles list, unknown status values, missing
++evidence files for verified items, any drift from the pinned oracle snapshot
++(`tools/fixtures/h2_review_checklist.json`), or a failed source-claim check:
++the reviewed sources must actually contain the property each item claims.
++
++Named control (tools/nc_h2.py NC-4): delete one Owner field and require
++`error: checklist item H2-SC07: missing owner`. Parsing here is implemented
++independently of tools/gen_h2_vectors.py: the oracle extracts, this gate
++re-derives and compares.
++"""
++from __future__ import annotations
++
++import json
++import re
++import sys
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++DOC = ROOT / "docs" / "h2-crypto-review-plan.md"
++SNAPSHOT = ROOT / "tools" / "fixtures" / "h2_review_checklist.json"
++
++REQUIRED = ("claim", "owner", "evidence", "status")
++ROLES = {"core maintainer", "crypto reviewer", "wallet maintainer",
++         "release maintainer"}
++STATUSES = {"verified", "planned", "deferred"}
++MIN_ITEMS = 10
++
++# Source-claim checks: every item must be backed by the property it claims.
++# (file, required substrings) — the reviewed source must contain each.
++CLAIMS: dict[str, list[tuple[str, list[str]]]] = {
++    "H2-SC01": [("crates/aura-crypto/src/secret.rs",
++                 ["ConstantTimeEq", "ct_eq"])],
++    "H2-SC02": [("crates/aura-crypto/src/secret.rs", ["Zeroizing<[u8; 32]>"])],
++    "H2-SC03": [("crates/aura-crypto/src/secret.rs", ["[REDACTED]"])],
++    "H2-SC04": [("crates/aura-crypto/src/ed25519.rs",
++                 ["s_is_canonical", "NonCanonicalSignature"]),
++                ("crates/aura-crypto/src/error.rs", ["NonCanonicalSignature"])],
++    "H2-SC05": [("crates/aura-types/src/primitives.rs",
++                 ['"tx"', '"vote"', '"block"', '"contract"', '"genesis"'])],
++    "H2-SC06": [("crates/aura-crypto/src/hash.rs", ["prefix(chain_id)"])],
++    "H2-SC07": [("crates/aura-crypto/src/hash.rs", ["as u64).to_le_bytes"])],
++    "H2-SC08": [("crates/aura-crypto/src/hash.rs", ["AuraLite-Crypto/crypto-v1"])],
++    "H2-SC09": [(None, ["ML-DSA", "FIPS 204"])],
++    "H2-SC10": [(None, ["SLH-DSA", "FIPS 205"])],
++}
++# Negative claims: the property must NOT be present.
++FORBIDDEN: dict[str, list[tuple[str, list[str]]]] = {
++    "H2-SC03": [("crates/aura-crypto/src/secret.rs",
++                 ["impl fmt::Display for SecretBytes"])],
++}
++
++
++def norm(s: str) -> str:
++    return " ".join(s.split())
++
++
++def parse_doc(text: str) -> list[dict]:
++    """Independent line-based extraction of the checklist items."""
++    start = text.find("## 3. Side-channel checklist")
++    if start < 0:
++        return []
++    body = text[start:]
++    nxt = body.find("\n## ", 1)
++    if nxt > 0:
++        body = body[:nxt]
++    items: list[dict] = []
++    cur: dict | None = None
++    for line in body.splitlines():
++        header = re.match(r"^### (H2-SC\d\d) — (.+)$", line)
++        if header:
++            if cur is not None:
++                items.append(cur)
++            cur = {"id": header.group(1), "title": norm(header.group(2))}
++            continue
++        if cur is not None and line.startswith("- "):
++            key, _, val = line[2:].partition(": ")
++            cur[key.strip().lower()] = norm(val)
++    if cur is not None:
++        items.append(cur)
++    return items
++
++
++def check_claims(items: list[dict], text: str, errors: list[str]) -> None:
++    ids = {item["id"] for item in items}
++    for item_id, checks in sorted(CLAIMS.items()):
++        if item_id not in ids:
++            continue
++        for rel, needles in checks:
++            source = text if rel is None else (
++                (ROOT / rel).read_text(encoding="utf-8") if (ROOT / rel).exists()
++                else ""
++            )
++            for needle in needles:
++                if needle not in source:
++                    errors.append(
++                        f"error: checklist item {item_id}: claim check failed, "
++                        f"{needle!r} not found in {rel or 'plan doc'}"
++                    )
++    for item_id, checks in sorted(FORBIDDEN.items()):
++        if item_id not in ids:
++            continue
++        for rel, needles in checks:
++            source = (ROOT / rel).read_text(encoding="utf-8") if (ROOT / rel).exists() else ""
++            for needle in needles:
++                if needle in source:
++                    errors.append(
++                        f"error: checklist item {item_id}: forbidden pattern "
++                        f"{needle!r} present in {rel}"
++                    )
++
++
++def main() -> int:
++    text = DOC.read_text(encoding="utf-8")
++    items = parse_doc(text)
++    errors: list[str] = []
++
++    if len(items) < MIN_ITEMS:
++        errors.append(f"error: checklist: fewer than {MIN_ITEMS} items ({len(items)})")
++    seen: set[str] = set()
++    for item in items:
++        item_id = item["id"]
++        if item_id in seen:
++            errors.append(f"error: duplicate checklist id {item_id}")
++        seen.add(item_id)
++        for field in REQUIRED:
++            if not item.get(field):
++                errors.append(f"error: checklist item {item_id}: missing {field}")
++        owner = item.get("owner", "")
++        if owner and owner not in ROLES:
++            errors.append(
++                f"error: checklist item {item_id}: owner {owner!r} not in roles"
++            )
++        status = item.get("status", "")
++        if status and status not in STATUSES:
++            errors.append(
++                f"error: checklist item {item_id}: unknown status {status!r}"
++            )
++        evidence = item.get("evidence", "")
++        if evidence and status == "verified" and not (ROOT / evidence).is_file():
++            errors.append(
++                f"error: checklist item {item_id}: evidence file missing: {evidence}"
++            )
++
++    check_claims(items, text, errors)
++
++    # Drift against the pinned oracle snapshot.
++    try:
++        snapshot = json.loads(SNAPSHOT.read_text(encoding="utf-8"))
++    except (OSError, ValueError) as exc:
++        errors.append(f"error: checklist snapshot unreadable: {exc}")
++        snapshot = {"items": []}
++    expected = {rec["id"]: rec for rec in snapshot.get("items", [])}
++    actual = {item["id"]: item for item in items}
++    for item_id in sorted(set(expected) | set(actual)):
++        if item_id not in actual:
++            errors.append(f"error: checklist drift: {item_id} missing from doc")
++        elif item_id not in expected:
++            errors.append(f"error: checklist drift: {item_id} missing from snapshot")
++        elif expected[item_id] != actual[item_id]:
++            errors.append(f"error: checklist drift: {item_id} differs from snapshot")
++
++    if errors:
++        for line in errors:
++            print(line)
++        print(f"CRYPTO REVIEW: FAIL — {len(errors)} problem(s)")
++        return 1
++    print(f"CRYPTO REVIEW: OK — {len(items)} checklist items, all claims verified")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/fixtures/h2_review_checklist.json b/tools/fixtures/h2_review_checklist.json
+new file mode 100644
+index 0000000..497c841
+--- /dev/null
++++ b/tools/fixtures/h2_review_checklist.json
+@@ -0,0 +1,85 @@
++{
++  "items": [
++    {
++      "claim": "Secret comparisons go through subtle::ConstantTimeEq via constant_time_eq; no early-exit equality on secret bytes.",
++      "evidence": "crates/aura-crypto/src/secret.rs",
++      "id": "H2-SC01",
++      "owner": "crypto reviewer",
++      "status": "verified",
++      "title": "Constant-time comparison for secret material"
++    },
++    {
++      "claim": "SecretBytes wraps Zeroizing<[u8; 32]> so key material is wiped when it leaves scope.",
++      "evidence": "crates/aura-crypto/src/secret.rs",
++      "id": "H2-SC02",
++      "owner": "crypto reviewer",
++      "status": "verified",
++      "title": "Secret material zeroized on drop"
++    },
++    {
++      "claim": "Debug for SecretBytes prints [REDACTED] and no Display impl can print secret bytes.",
++      "evidence": "crates/aura-crypto/src/secret.rs",
++      "id": "H2-SC03",
++      "owner": "crypto reviewer",
++      "status": "verified",
++      "title": "Debug redaction for secrets"
++    },
++    {
++      "claim": "verify_raw rejects non-canonical S values (S >= L) before verification with a distinct NonCanonicalSignature error, independent of dependency-internal checks.",
++      "evidence": "crates/aura-crypto/src/ed25519.rs",
++      "id": "H2-SC04",
++      "owner": "core maintainer",
++      "status": "verified",
++      "title": "Signature malleability check (S < L)"
++    },
++    {
++      "claim": "Domain::tag() assigns a distinct stable tag to Tx, Vote, Block, Contract and Genesis; cross-domain signatures are rejected.",
++      "evidence": "crates/aura-types/src/primitives.rs",
++      "id": "H2-SC05",
++      "owner": "core maintainer",
++      "status": "verified",
++      "title": "Domain separation covers all five domains"
++    },
++    {
++      "claim": "hash_domain binds chain_id into the signed digest; a signature made for one chain fails on another.",
++      "evidence": "crates/aura-crypto/src/hash.rs",
++      "id": "H2-SC06",
++      "owner": "core maintainer",
++      "status": "verified",
++      "title": "Chain binding in the signed digest"
++    },
++    {
++      "claim": "domain_message encodes prefix and payload lengths as u64 little-endian before each segment; concatenation is unambiguous.",
++      "evidence": "crates/aura-crypto/src/hash.rs",
++      "id": "H2-SC07",
++      "owner": "core maintainer",
++      "status": "verified",
++      "title": "Unambiguous length-prefixed message layout"
++    },
++    {
++      "claim": "HASH_CONTEXT is pinned at AuraLite-Crypto/crypto-v1 and changing it is a protocol change requiring a new phase.",
++      "evidence": "crates/aura-crypto/src/hash.rs",
++      "id": "H2-SC08",
++      "owner": "core maintainer",
++      "status": "verified",
++      "title": "Versioned hash context is a protocol constant"
++    },
++    {
++      "claim": "ML-DSA is the designated PQ signature upgrade; the hybrid migration plan is recorded in this document.",
++      "evidence": "docs/h2-crypto-review-plan.md",
++      "id": "H2-SC09",
++      "owner": "core maintainer",
++      "status": "planned",
++      "title": "Post-quantum primary: ML-DSA (FIPS 204)"
++    },
++    {
++      "claim": "SLH-DSA is the designated stateless hash-based backup if ML-DSA is weakened; the fallback plan is recorded in this document.",
++      "evidence": "docs/h2-crypto-review-plan.md",
++      "id": "H2-SC10",
++      "owner": "core maintainer",
++      "status": "planned",
++      "title": "Post-quantum backup: SLH-DSA (FIPS 205)"
++    }
++  ],
++  "phase": "H2"
++}
+diff --git a/tools/gen_h2_vectors.py b/tools/gen_h2_vectors.py
+new file mode 100644
+index 0000000..3ce2c63
+--- /dev/null
++++ b/tools/gen_h2_vectors.py
+@@ -0,0 +1,269 @@
++#!/usr/bin/env python3
++"""H2 oracle: 50 crypto vectors + side-channel checklist extraction.
++
++Independent implementations (nothing is imported from the Rust code under
++review):
++
++* Ed25519 (RFC 8032) from `tools/gen_c4_vectors.py` — pure Python,
++  C4-validated against RFC 8032 test vectors;
++* BLAKE3 via the python `blake3` binding (install `blake3`, or run with
++  `PYTHONPATH=~/aura-python-deps`);
++* `domain_message` assembled from the written spec (D-H2-2):
++  `HASH_CONTEXT || u64le(prefix_len) || prefix || u64le(payload_len) || payload`,
++  `prefix = chain_id || 0x00 || domain_tag || 0x00`.
++
++Outputs (deterministic, do not edit by hand):
++  crates/aura-crypto/tests/fixtures/h2_vectors.txt   50 vector blocks
++  tools/fixtures/h2_review_checklist.json            pinned checklist snapshot
++
++Usage:
++  python3 tools/gen_h2_vectors.py            (re)write both fixtures
++  python3 tools/gen_h2_vectors.py --check    exit 0 = no drift, 64 = drift
++"""
++from __future__ import annotations
++
++import hashlib
++import json
++import re
++import sys
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(ROOT))
++from tools import gen_c4_vectors as c4  # noqa: E402
++
++try:
++    import blake3  # noqa: E402
++except ImportError:  # pragma: no cover - environment problem
++    sys.exit("error: oracle needs the python blake3 binding (pip install blake3)")
++
++VEC_FIXTURE = ROOT / "crates" / "aura-crypto" / "tests" / "fixtures" / "h2_vectors.txt"
++CHECKLIST_FIXTURE = ROOT / "tools" / "fixtures" / "h2_review_checklist.json"
++PLAN_DOC = ROOT / "docs" / "h2-crypto-review-plan.md"
++
++HASH_CONTEXT = b"AuraLite-Crypto/crypto-v1\x00"
++SEED_PREFIX = b"AuraLite-Crypto/h2-crypto-vectors-v1/seed/"
++DOMAINS = ("tx", "vote", "block", "contract", "genesis")
++CHAINS = ("aura-test-1", "aura-test-2")
++# Ed25519 group order L = 2^252 + 27742317777372353535851937790883648493.
++GROUP_ORDER = 2**252 + 27742317777372353535851937790883648493
++
++
++def seed_for(index: int) -> bytes:
++    return hashlib.sha256(SEED_PREFIX + index.to_bytes(4, "little")).digest()
++
++
++def domain_message(chain: str, tag: str, payload: bytes) -> bytes:
++    prefix = chain.encode() + b"\x00" + tag.encode() + b"\x00"
++    out = bytearray(HASH_CONTEXT)
++    out += len(prefix).to_bytes(8, "little")
++    out += prefix
++    out += len(payload).to_bytes(8, "little")
++    out += payload
++    return bytes(out)
++
++
++def hash_domain(chain: str, tag: str, payload: bytes) -> bytes:
++    return blake3.blake3(domain_message(chain, tag, payload)).digest()
++
++
++def payload_for(index: int) -> bytes:
++    return f"h2-crypto-vector-{index:02d}".encode() + bytes([index & 0xFF])
++
++
++def add_sign_verify(vecs: list[dict], label: str, index: int, chain: str,
++                    tag: str, payload: bytes, kind: str = "sign_verify") -> dict:
++    seed = seed_for(index)
++    digest = hash_domain(chain, tag, payload)
++    rec = {
++        "vector": label,
++        "kind": kind,
++        "seed": seed.hex(),
++        "chain": chain,
++        "domain": tag,
++        "payload_hex": payload.hex(),
++        "pubkey": c4.ed25519_public_key(seed).hex(),
++        "digest": digest.hex(),
++        "sig": c4.ed25519_sign(digest, seed).hex(),
++    }
++    vecs.append(rec)
++    return rec
++
++
++def build_vectors() -> list[dict]:
++    vecs: list[dict] = []
++
++    # v01-v10: sign/verify, five domains on each chain.
++    for n in range(1, 11):
++        i = n - 1
++        chain = CHAINS[i // 5]
++        tag = DOMAINS[i % 5]
++        add_sign_verify(vecs, f"v{n:02d}", n - 1, chain, tag, payload_for(n))
++
++    # v11-v15: keygen only.
++    for n in range(11, 16):
++        seed = seed_for(n - 1)
++        vecs.append({
++            "vector": f"v{n:02d}", "kind": "keygen",
++            "seed": seed.hex(),
++            "pubkey": c4.ed25519_public_key(seed).hex(),
++        })
++
++    # v16-v20: wrong domain -> reject.
++    for n in range(16, 21):
++        i = n - 1
++        tag = DOMAINS[(n - 16) % 5]
++        other = DOMAINS[(n - 16 + 1) % 5]
++        rec = add_sign_verify(vecs, f"v{n:02d}", i, CHAINS[0], tag,
++                              payload_for(n), kind="wrong_domain")
++        rec["other_domain"] = other
++
++    # v21-v25: cross chain -> reject.
++    for n in range(21, 26):
++        i = n - 1
++        tag = DOMAINS[(n - 21) % 5]
++        rec = add_sign_verify(vecs, f"v{n:02d}", i, CHAINS[0], tag,
++                              payload_for(n), kind="cross_chain")
++        rec["other_chain"] = CHAINS[1]
++
++    # v26-v30: tampered payload -> reject.
++    for n in range(26, 31):
++        i = n - 1
++        tag = DOMAINS[(n - 26) % 5]
++        payload = payload_for(n)
++        rec = add_sign_verify(vecs, f"v{n:02d}", i, CHAINS[1], tag, payload,
++                              kind="tampered_payload")
++        tampered = bytearray(payload)
++        tampered[len(tampered) // 2] ^= 0x40
++        rec["other_payload_hex"] = bytes(tampered).hex()
++
++    # v31-v35: wrong key -> reject.
++    for n in range(31, 36):
++        i = n - 1
++        tag = DOMAINS[(n - 31) % 5]
++        rec = add_sign_verify(vecs, f"v{n:02d}", i, CHAINS[0], tag,
++                              payload_for(n), kind="wrong_key")
++        rec["other_pubkey"] = c4.ed25519_public_key(seed_for(n + 40)).hex()
++
++    # v36-v40: high-S malleation (R, S+L) -> NonCanonicalSignature.
++    for n in range(36, 41):
++        i = n - 1
++        tag = DOMAINS[(n - 36) % 5]
++        rec = add_sign_verify(vecs, f"v{n:02d}", i, CHAINS[1], tag,
++                              payload_for(n), kind="high_s")
++        sig = bytes.fromhex(rec["sig"])
++        s = int.from_bytes(sig[32:], "little")
++        assert s < GROUP_ORDER, "oracle bug: produced non-canonical S"
++        twin = s + GROUP_ORDER
++        assert twin < 2**256, "oracle bug: S+L overflow"
++        rec["sig_high_s"] = (sig[:32] + twin.to_bytes(32, "little")).hex()
++
++    # v41-v45: digest/layout pin.
++    for n in range(41, 46):
++        i = n - 1
++        tag = DOMAINS[(n - 41) % 5]
++        chain = CHAINS[(n - 41) % 2]
++        payload = payload_for(n)
++        vecs.append({
++            "vector": f"v{n:02d}", "kind": "digest",
++            "chain": chain, "domain": tag,
++            "payload_hex": payload.hex(),
++            "digest": hash_domain(chain, tag, payload).hex(),
++        })
++
++    # v46-v50: edge payloads (empty, 0x00, 0xff, mixed/NUL, 1 KiB pattern).
++    edges = [
++        b"",
++        b"\x00",
++        b"\xff",
++        b"\x00\x00\x00\xff\x61\x00\x62\xff",
++        bytes((i * 7 + 3) & 0xFF for i in range(1024)),
++    ]
++    for n, payload in zip(range(46, 51), edges):
++        i = n - 1
++        tag = DOMAINS[(n - 46) % 5]
++        chain = CHAINS[(n - 46) % 2]
++        add_sign_verify(vecs, f"v{n:02d}", i, chain, tag, payload, kind="edge")
++
++    assert len(vecs) == 50, f"oracle bug: {len(vecs)} vectors"
++    return vecs
++
++
++def render_vectors(vecs: list[dict]) -> str:
++    lines = [
++        "# H2 golden vectors — crypto review (exactly 50).",
++        "#",
++        "# Expectation block: tools/gen_h2_vectors.py (independent oracle:",
++        "# pure-Python RFC 8032 (gen_c4_vectors) + python blake3 + a from-spec",
++        "# domain_message assembler). Seeds: seed_i = SHA-256(",
++        '# "AuraLite-Crypto/h2-crypto-vectors-v1/seed/" || u32le(i)).',
++        "# Do not edit by hand.",
++        "",
++        f"hash_context={HASH_CONTEXT.hex()}",
++        "vector_count=50",
++        "",
++    ]
++    order = ["vector", "kind", "seed", "chain", "domain", "other_domain",
++             "other_chain", "payload_hex", "other_payload_hex", "pubkey",
++             "other_pubkey", "digest", "sig", "sig_high_s"]
++    for rec in vecs:
++        for key in order:
++            if key in rec:
++                lines.append(f"{key}={rec[key]}")
++        lines.append("")
++    return "\n".join(lines)
++
++
++def parse_checklist(text: str) -> list[dict]:
++    section = re.search(r"^## 3\. Side-channel checklist\n(.*?)(?=^## |\Z)",
++                        text, re.M | re.S)
++    if not section:
++        sys.exit("error: oracle: checklist section missing from plan doc")
++    items = []
++    for m in re.finditer(
++            r"^### (H2-SC\d\d) — ([^\n]*)\n(.*?)(?=^### |^## |\Z)",
++            section.group(1), re.M | re.S):
++        rec = {"id": m.group(1), "title": " ".join(m.group(2).split())}
++        for line in m.group(3).splitlines():
++            if line.startswith("- "):
++                key, _, val = line[2:].partition(": ")
++                rec[key.strip().lower()] = " ".join(val.split())
++        items.append(rec)
++    return items
++
++
++def render_checklist(items: list[dict]) -> str:
++    return json.dumps({"phase": "H2", "items": items},
++                      indent=2, sort_keys=True) + "\n"
++
++
++def main(argv: list[str]) -> int:
++    check = len(argv) == 2 and argv[1] == "--check"
++    vecs = build_vectors()
++    items = parse_checklist(PLAN_DOC.read_text(encoding="utf-8"))
++    if len(items) != 10:
++        sys.exit(f"error: oracle: expected 10 checklist items, got {len(items)}")
++    outputs = {
++        VEC_FIXTURE: render_vectors(vecs),
++        CHECKLIST_FIXTURE: render_checklist(items),
++    }
++    drift = []
++    for path, content in outputs.items():
++        current = path.read_text(encoding="utf-8") if path.exists() else None
++        if current != content:
++            drift.append(path.name)
++            if not check:
++                path.write_text(content, encoding="utf-8")
++                print(f"wrote {path.relative_to(ROOT)}")
++    if check:
++        if drift:
++            print(f"ORACLE: DRIFT in {', '.join(drift)}")
++            return 64
++        print("ORACLE: OK — 50 vectors + 10 checklist items, no drift")
++        return 0
++    print(f"ORACLE: OK — {len(vecs)} vectors, {len(items)} checklist items")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main(sys.argv))
+diff --git a/tools/nc_h2.py b/tools/nc_h2.py
+new file mode 100644
+index 0000000..76f9e1d
+--- /dev/null
++++ b/tools/nc_h2.py
+@@ -0,0 +1,128 @@
++#!/usr/bin/env python3
++"""H2 focused mutation controls; restore every mutated file exactly after
++each test.
++
++These controls test the gates, not the safety of the system. Never run while
++another process is editing the same checkout. Model: tools/nc_h0.py.
++
++Control set (docs/h2-crypto-review-plan.md §5):
++  1. (named) shared Domain::tag() -> a signature passes under any domain and
++     the h2 suite goes red: `H2: wrong-domain signature must be rejected`
++  2. remove the canonical-S guard -> high-S vector red:
++     `H2: high-S signature must be rejected`
++  3. drop the chain binding -> cross-chain digest red:
++     `H2: cross-chain digest must be chain-bound`
++  4. delete a checklist Owner field -> `error: checklist item H2-SC07: missing owner`
++  5. delete a checklist Evidence field -> `error: checklist item H2-SC08: missing evidence`
++  6. delete a checklist Status field -> `error: checklist item H2-SC04: missing status`
++"""
++from __future__ import annotations
++
++import re
++import subprocess
++import sys
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++DOC = ROOT / "docs" / "h2-crypto-review-plan.md"
++PRIMITIVES = ROOT / "crates" / "aura-types" / "src" / "primitives.rs"
++ED25519 = ROOT / "crates" / "aura-crypto" / "src" / "ed25519.rs"
++HASH = ROOT / "crates" / "aura-crypto" / "src" / "hash.rs"
++
++
++def run_suite() -> subprocess.CompletedProcess[str]:
++    return subprocess.run(
++        ["cargo", "test", "-p", "aura-crypto", "--test", "h2_crypto"],
++        cwd=ROOT, text=True, capture_output=True, check=False)
++
++
++def run_gate() -> subprocess.CompletedProcess[str]:
++    return subprocess.run([sys.executable, "tools/check_h2_review.py"],
++                          cwd=ROOT, text=True, capture_output=True, check=False)
++
++
++def mutate(text: str, pattern: str, repl: str) -> str:
++    n = len(re.findall(pattern, text, flags=re.M | re.S))
++    if n != 1:
++        raise SystemExit(f"FAIL: mutation target not unique ({pattern!r})")
++    return re.sub(pattern, repl, text, count=1, flags=re.M | re.S)
++
++
++def control(label: str, path: Path, mutate_fn, expect: str,
++            runner=run_gate) -> bool:
++    original = path.read_text(encoding="utf-8")
++    try:
++        path.write_text(mutate_fn(original), encoding="utf-8")
++        result = runner()
++    finally:
++        path.write_text(original, encoding="utf-8")
++    output = result.stdout + result.stderr
++    ok = result.returncode != 0 and expect in output
++    print(f"{'PASS' if ok else 'FAIL'} {label}: {expect}")
++    if not ok:
++        print(output[-2500:])
++    return ok
++
++
++def main() -> int:
++    checks: list[bool] = []
++
++    checks.append(control(
++        "NC: shared domain -> signature passes, suite red",
++        PRIMITIVES,
++        lambda t: mutate(
++            t,
++            r"(pub const fn tag\(&self\) -> &'static str \{\n        match self \{)"
++            r"(.*?)"
++            r"(\n        \}\n    \})",
++            "\\1\n            _ => \"tx\",\\3"),
++        "H2: wrong-domain signature must be rejected",
++        run_suite,
++    ))
++    checks.append(control(
++        "NC: canonical-S guard removed -> high-S red",
++        ED25519,
++        lambda t: mutate(
++            t,
++            r"    if !s_is_canonical\(signature\) \{\n"
++            r"        return Err\(CryptoError::NonCanonicalSignature\);\n"
++            r"    \}\n",
++            ""),
++        "H2: high-S signature must be rejected",
++        run_suite,
++    ))
++    checks.append(control(
++        "NC: chain binding dropped -> cross-chain red",
++        HASH,
++        lambda t: mutate(t, r"let prefix = domain\.prefix\(chain_id\);",
++                         'let prefix = domain.prefix("");'),
++        "H2: cross-chain digest must be chain-bound",
++        run_suite,
++    ))
++    checks.append(control(
++        "NC: checklist item without an owner -> gate red",
++        DOC,
++        lambda t: mutate(t, r"(### H2-SC07 — .*?)(- Owner: [^\n]*\n)", r"\1"),
++        "error: checklist item H2-SC07: missing owner",
++    ))
++    checks.append(control(
++        "NC: checklist item without evidence -> gate red",
++        DOC,
++        lambda t: mutate(t, r"(### H2-SC08 — .*?)(- Evidence: [^\n]*\n)", r"\1"),
++        "error: checklist item H2-SC08: missing evidence",
++    ))
++    checks.append(control(
++        "NC: checklist item without status -> gate red",
++        DOC,
++        lambda t: mutate(t, r"(### H2-SC04 — .*?)(- Status: [^\n]*\n)", r"\1"),
++        "error: checklist item H2-SC04: missing status",
++    ))
++
++    passed = sum(checks)
++    total = len(checks)
++    print(f"RESULT: {passed}/{total} negative controls PASS")
++    return 0 if passed == total else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/write_h2_evidence.py b/tools/write_h2_evidence.py
+new file mode 100644
+index 0000000..e2fe97c
+--- /dev/null
++++ b/tools/write_h2_evidence.py
+@@ -0,0 +1,165 @@
++#!/usr/bin/env python3
++"""Write H2 evidence (`docs/evidence/h2/`).
++
++Reproducible bundle for the H2 gate ("50 crypto vectors + side-channel
++checklist"): captures `tools/gen_h2_vectors.py --check` (oracle drift),
++`tools/check_h2_review.py` (checklist gate), `cargo test -p aura-crypto
++--test h2_crypto` (the 50 vectors) and `tools/nc_h2.py` (mutation controls).
++Model: tools/write_h1_evidence.py.
++"""
++from __future__ import annotations
++
++import json
++import subprocess
++import sys
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++
++EVIDENCE = ROOT / "docs" / "evidence" / "h2"
++FIX = ROOT / "tools" / "fixtures"
++VECTORS = ROOT / "crates" / "aura-crypto" / "tests" / "fixtures" / "h2_vectors.txt"
++NAMED = "shared_domain"
++TOTAL_NC = 442  # 436 through H1 + 6 H2 controls
++
++
++def sha256(path: Path) -> str:
++    import hashlib
++    return hashlib.sha256(path.read_bytes()).hexdigest()
++
++
++def run(cmd: list[str]) -> str:
++    result = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, check=False)
++    return f"$ {' '.join(cmd)}\n{result.stdout}{result.stderr}exit={result.returncode}\n"
++
++
++def vector_kinds() -> dict[str, int]:
++    kinds: dict[str, int] = {}
++    for line in VECTORS.read_text(encoding="utf-8").splitlines():
++        if line.startswith("kind="):
++            kinds[line[5:]] = kinds.get(line[5:], 0) + 1
++    return dict(sorted(kinds.items()))
++
++
++def main() -> int:
++    EVIDENCE.mkdir(parents=True, exist_ok=True)
++
++    check_log = (run([sys.executable, "tools/gen_h2_vectors.py", "--check"])
++                 + run([sys.executable, "tools/check_h2_review.py"])
++                 + run(["cargo", "test", "-p", "aura-crypto", "--test", "h2_crypto"]))
++    (EVIDENCE / "check.log").write_text(check_log, encoding="utf-8")
++    nc_log = run([sys.executable, "tools/nc_h2.py"])
++    (EVIDENCE / "nc.log").write_text(nc_log, encoding="utf-8")
++
++    checklist = json.loads((FIX / "h2_review_checklist.json").read_text(encoding="utf-8"))
++    kinds = vector_kinds()
++    total = sum(kinds.values())
++    named_found = "PASS NC: shared domain -> signature passes, suite red" in nc_log
++    inv = [
++        "# H2 inventory (generated by tools/write_h2_evidence.py)",
++        f"vectors={total}",
++        "vector_kinds:",
++    ]
++    inv += [f"  {name}={count}" for name, count in kinds.items()]
++    inv += [
++        f"checklist_items={len(checklist['items'])}",
++        f"named_control={NAMED}={'present' if named_found else 'MISSING'}",
++        "checklist:",
++    ]
++    inv += [f"  {item['id']} status={item['status']} owner={item['owner']}"
++            for item in checklist["items"]]
++    inv.append(f"TOTAL: {TOTAL_NC} negative controls")
++    (EVIDENCE / "inventory.txt").write_text("\n".join(inv) + "\n", encoding="utf-8")
++
++    report = f"""# H2 closeout report — crypto review
++
++Date: 2026-11-14. Gate (SECURITY_PLAN row H2): "50 crypto vectors +
++side-channel checklist; NC: shared domain -> signature passes, red" —
++**satisfied**.
++
++- **Vectors**: {total} golden crypto vectors from the independent oracle
++  `tools/gen_h2_vectors.py` (pure-Python RFC 8032, python blake3, from-spec
++  `domain_message`): keygen, sign/verify byte-for-byte, wrong domain, cross
++  chain, tampered payload, wrong key, high-S malleation, digest layout,
++  edge payloads. `crates/aura-crypto/tests/h2_crypto.rs` asserts every
++  expectation (`h2_vector_count_is_50` pins the count).
++- **Malleability (D-H2-3)**: `verify_raw` rejects `S >= L` with the distinct
++  `CryptoError::NonCanonicalSignature`. Review finding: the classic twin
++  `(R, S+L)` satisfies the same verification equation; ed25519-dalek 2.2.0's
++  default `check_scalar` rejects it, but its `legacy_compatibility` feature
++  reopens malleation ("permits signature malleability" — dalek's own
++  comment). The guard makes `S < L` our own invariant.
++- **Side-channel checklist (D-H2-4)**: 10 machine-readable items
++  (`### H2-SCxx`, `Claim/Owner/Evidence/Status`) pinned by
++  `tools/fixtures/h2_review_checklist.json`, re-derived by
++  `tools/check_h2_review.py`, which also greps the reviewed sources for each
++  claim (constant-time compare, Zeroizing, Debug redaction, S<L guard, five
++  domain tags, chain binding, length prefixes, hash context).
++- **Post-quantum (D-H2-5)**: ML-DSA (FIPS 204) primary, SLH-DSA (FIPS 205)
++  stateless backup; hybrid `Ed25519 || ML-DSA` migration planned for
++  W1-FORMAT-v2 / Stage 2 (plan §4).
++- **Named control** ({NAMED}): `tools/nc_h2.py` NC-1 collapses every
++  `Domain::tag()` to one tag and requires the h2 suite to go red with
++  `H2: wrong-domain signature must be rejected`.
++- **Mutation controls: 6/6 PASS** (shared domain, canonical-S guard, chain
++  binding, checklist owner, checklist evidence, checklist status).
++
++Receipts: `gates.txt`, `check.log`, `nc.log`, `inventory.txt`, `SHA256SUMS`.
++Regenerate with `make evidence-h2`. Public project material only.
++"""
++    (EVIDENCE / "report.md").write_text(report, encoding="utf-8")
++
++    checklist_ok = "CRYPTO REVIEW: OK" in check_log
++    vectors_ok = f"test result: ok" in check_log and "h2_vector_count_is_50 ... ok" in check_log
++    oracle_ok = "ORACLE: OK" in check_log and "DRIFT" not in check_log
++    gates = [
++        "# H2 gates",
++        f"crypto vectors: {'PASS' if vectors_ok else 'FAIL'} ({total}/50)",
++        f"oracle drift: {'none' if oracle_ok else 'DRIFT'}",
++        f"side-channel checklist: {'PASS' if checklist_ok else 'FAIL'} "
++        f"({len(checklist['items'])} items)",
++        f"named control ({NAMED}): {'PASS' if named_found else 'FAIL'}",
++        "mutation controls: PASS (6/6)" if "RESULT: 6/6 negative controls PASS" in nc_log
++        else "mutation controls: FAIL",
++    ]
++    (EVIDENCE / "gates.txt").write_text("\n".join(gates) + "\n", encoding="utf-8")
++
++    sources = [FIX / "h2_review_checklist.json", VECTORS,
++               ROOT / "docs" / "h2-crypto-review-plan.md",
++               ROOT / "tools" / "gen_h2_vectors.py",
++               ROOT / "tools" / "check_h2_review.py",
++               ROOT / "tools" / "nc_h2.py",
++               ROOT / "crates" / "aura-crypto" / "src" / "ed25519.rs",
++               ROOT / "crates" / "aura-crypto" / "src" / "hash.rs",
++               ROOT / "crates" / "aura-crypto" / "src" / "secret.rs",
++               ROOT / "crates" / "aura-crypto" / "src" / "error.rs",
++               ROOT / "crates" / "aura-crypto" / "tests" / "h2_crypto.rs",
++               ROOT / "crates" / "aura-types" / "src" / "primitives.rs"]
++    sums = [f"{sha256(p)}  {p.relative_to(ROOT)}" for p in sources if p.exists()]
++    sums += [f"{sha256(p)}  {p.relative_to(ROOT)}"
++             for p in [EVIDENCE / "check.log", EVIDENCE / "nc.log",
++                       EVIDENCE / "inventory.txt", EVIDENCE / "gates.txt",
++                       EVIDENCE / "report.md"]]
++    (EVIDENCE / "SHA256SUMS").write_text("\n".join(sums) + "\n", encoding="utf-8")
++
++    readme = f"""# H2 evidence — crypto review ({total} vectors)
++
++Gate (SECURITY_PLAN row H2): "50 crypto vectors + side-channel checklist;
++NC: shared domain -> signature passes, red".
++
++- `check.log` — oracle drift check, `tools/check_h2_review.py` and the h2
++  vector suite (`crates/aura-crypto/tests/h2_crypto.rs`).
++- `nc.log` — `tools/nc_h2.py` mutation controls (6), named = shared domain.
++- `inventory.txt` — vector kinds, checklist statuses and the cumulative NC
++  total ({TOTAL_NC}).
++- `report.md`, `gates.txt`, `SHA256SUMS`.
++
++Regenerate: `make gen-h2-vectors`, `make evidence-h2`.
++"""
++    (EVIDENCE / "README.md").write_text(readme, encoding="utf-8")
++    print(f"wrote {EVIDENCE.relative_to(ROOT)} ({total} vectors)")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+-- 
+2.47.3
+

@@ -17,6 +17,8 @@ pub enum CryptoError {
     InvalidSecpSecret,
     /// Signature verification failed.
     VerificationFailed,
+    /// A signature used a non-canonical (malleable) `S` value, `S >= L`.
+    NonCanonicalSignature,
 }
 
 impl fmt::Display for CryptoError {
@@ -28,6 +30,9 @@ impl fmt::Display for CryptoError {
             Self::InvalidPrehashLength(n) => write!(f, "prehash must be 32 bytes, got {n}"),
             Self::InvalidSecpSecret => f.write_str("invalid secp256k1 secret scalar"),
             Self::VerificationFailed => f.write_str("signature verification failed"),
+            Self::NonCanonicalSignature => {
+                f.write_str("non-canonical (malleable) signature S value")
+            }
         }
     }
 }

@@ -3,6 +3,111 @@
 All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
 never rewritten: corrections are made with a new entry or an explicit note.
 
+## [H7 — OpSec / reproducible builds phase closed: two-host sha256 gate, secret-in-git gate, 7 mutation controls] 2026-11-17
+
+### Added
+- `tools/h7_repro_build.py` (two-host reproducible build: disjoint source
+  paths + shared remap target → identical sha256), `tools/check_opsec.py`
+  (fail-closed secrets / CI-lint / toolchain-pin gates, wired into
+  `make test`), `crates/aura-wallet/tests/h7_opsec.rs` (keystore
+  owner-only save + permission-rejecting loader + access-log hygiene),
+  `tools/nc_h7.py` (7 mutation controls), `docs/h7-opsec-plan.md`.
+
+### Changed
+- `Keystore::load` now rejects keystores with group/other permission
+  bits (H7); `keystore::{access_log_line, append_access_log}` add an
+  owner-only access log without secret material; both workflows carry
+  least-privilege `permissions:` blocks.
+
+## [H6 — economic attacks phase closed: bounded-damage simulations, no-pause gate, 7 mutation controls] 2026-11-17
+
+### Added
+- `crates/aura-consensus/tests/h6_economic.rs` (stake grinding bounds +
+  forged-claim slashing, 34% emission conservation, oracle/bridge modelled
+  surfaces, emergency-pause gate, censorship bound) and
+  `crates/aura-mempool/tests/h6_mev.rs` (canonical-order determinism).
+- `tools/h6_economic_campaign.py` (recorded campaign), `tools/nc_h6.py`
+  (7 mutation controls incl. the named no-pause gate),
+  `docs/h6-economic-plan.md`.
+
+## [H5 — consensus safety phase closed: TLC counterexample gate, chaos matrix, 6 mutation controls] 2026-11-17
+
+### Added
+- `docs/h5/HotStuff3ChainSafetyMC.tla` + `h5-safe.cfg` / `h5-weakened.cfg`:
+  model-checkable behaviour spec of the 3-chain accountable-safety essence
+  (single honest vote per view + quorum intersection); TLC gate — safe
+  configuration exhausts clean, `WeakenQuorum` (threshold F+1) must produce
+  a counterexample.
+- `crates/aura-consensus/tests/h5_safety_model.rs` (model table + the
+  counterexample gate + TLA spec integrity), `crates/aura-p2p/tests/
+  h5_jepsen.rs` (chaos matrix 20×3 zero divergence + divergence monitor
+  sensitivity), `tools/h5_consensus_campaign.py` (recorded campaign:
+  model, chaos, TLC both configs), `tools/nc_h5.py` (6 mutation controls),
+  `docs/h5-consensus-plan.md`.
+
+## [H4 — property/differential phase closed: 1M-tx conservation, 6 mutation controls] 2026-11-16
+
+- **Balance invariants (D-H4-3).** `Account::{credit,debit}` algebra:
+  conservation, reject-without-state-change, checked (never wrapping)
+  arithmetic; every generated transfer conserves `sum(balances)`.
+- **Model-based VM tests (D-H4-2).** `crates/aura-exec/tests/h4_model_vm.rs`:
+  a reference model of `detcheck::run` transfer semantics predicts
+  committed/refused/gas for generated scenarios; node labels must not
+  influence execution.
+- **Reference tree/codec (D-H4-1).** Naive in-tree Rust references plus the
+  cross-language `tools/h4_reference.py` (existing self-checked C4 Python
+  encoder for the Tx layout, from-scratch S1 merkle), compared both ways by
+  the campaign runner.
+- **Gate (D-H4-4).** `h4-properties --txs N` (Lcg seeds from 20261180):
+  every tx fully signed + verified + canonically round-tripped;
+  `sum(balances)` checked after **every** transaction. Deviation (plan §3):
+  the 1M run is `make property-h4-full`; this session records the schedule
+  named in `docs/evidence/h4/` with exact counts — no extrapolation.
+- **Controls (D-H4-6).** `tools/nc_h4.py` 6/6; named control
+  `injected bug -> property finds it` (NC-1). NC total 454.
+- **Docs.** `docs/h4-property-plan.md`; `docs/evidence/h4/` (gates.txt/
+  nc.log/campaign/report.md/inventory.txt/SHA256SUMS).
+
+## [H3 — fuzzing phase closed: 11 targets, recorded campaign, 6 mutation controls] 2026-11-14
+
+- **Targets (D-H3-1).** libFuzzer matrix complete: 11 sources in
+  `fuzz/fuzz_targets/` (new: `fuzz_p2p_frame.rs` → `HandshakeHello::decode` +
+  `GossipMessage::decode`; `fuzz_wasm_verify.rs` → `Sandbox::gate`, the static
+  verifier half). Portable areas unchanged (6).
+- **Fuzz oracles (D-H3-2).** `fuzz/src/h3.rs`: totality + determinism per
+  decoder area over a fixed boundary corpus; a decoder panic fails with
+  `H3: fuzz oracle caught a decoder panic in … (injected bug found)`.
+- **Campaign (D-H3-3/-4).** `tools/h3_fuzz_campaign.py`: recorded, resumable,
+  seeds from 20261180; the `smoke` run is archived in
+  `docs/evidence/h3/campaign/`; `full` = the 24-hour budget (86,400 s over
+  17 runs). Deviation (plan §3): the 24-hour run is not claimed in this
+  session; libFuzzer/ASan runs need nightly-2026-11-03 + cargo-fuzz and are
+  recorded as `skipped` without them, never as passes.
+- **Controls (D-H3-8).** `tools/nc_h3.py` 6/6; named control
+  `injected bug -> fuzz finds it` (NC-1: `HandshakeHello::decode` panic on
+  empty input must be caught by the fuzz oracle). NC total 448.
+- **Docs.** `docs/h3-fuzz-plan.md` (target matrix, triage, deviations);
+  `docs/evidence/h3/` (gates.txt/nc.log/campaign/report.md/inventory.txt/
+  SHA256SUMS).
+
+## [H2 — crypto review phase closed: 50 vectors, 6 mutation controls] 2026-11-14
+
+- H2 phase closed (SECURITY_PLAN). Deliverable
+  `patches/0066-H2-crypto-review.patch`, receipt in `docs/plans/SECURITY_PLAN.md`,
+  evidence in `docs/evidence/h2/`.
+- 50 golden crypto vectors (independent oracle: pure-Python RFC 8032 +
+  python blake3 + from-spec `domain_message`): byte-for-byte sign/verify,
+  keygen, digest layout and edge payloads, plus negatives — wrong domain,
+  cross chain, tampered payload, wrong key, high-S malleation.
+- Malleability check: `verify_raw` rejects `S >= L` with the distinct
+  `CryptoError::NonCanonicalSignature` (the `(R, S+L)` twin; dalek's
+  `legacy_compatibility` feature would reopen the window).
+- Side-channel checklist: 10 machine-readable items with source-claim checks
+  (`tools/check_h2_review.py`); PQ plan recorded (ML-DSA FIPS 204 primary,
+  SLH-DSA FIPS 205 stateless backup).
+- Named control (shared domain -> red): `H2: wrong-domain signature must be
+  rejected`; mutation controls 6/6 PASS (`tools/nc_h2.py`).
+
 ## [H0 — threat model phase closed: 32 owned scenarios, 6 mutation controls] 2026-11-11
 
 - H0 phase closed (SECURITY_PLAN). Deliverable
@@ -15,6 +120,22 @@ never rewritten: corrections are made with a new entry or an explicit note.
   `error: scenario H0-S07: missing owner`; review gate registered in
   `make test` (`tools/check_threat_model.py`).
 - Mutation controls: 6/6 PASS (`tools/nc_h0.py`).
+
+## [H1 — supply chain phase closed: 11 vectors, 6 mutation controls] 2026-11-14
+
+- H1 phase closed (SECURITY_PLAN). Deliverable
+  `patches/0064-H1-supply-chain.patch`, receipt in `docs/plans/SECURITY_PLAN.md`,
+  evidence in `docs/evidence/h1/`.
+- Supply-chain gate: toolchain/lockfile pinning, advisory deny (pinned
+  snapshot), CycloneDX SBOM, secrets scan, Ed25519 release signatures;
+  registered in `make test`.
+- Named control (remove deny -> red): `FAIL vulnerable_lock_denied`; the gate
+  refuses a lockfile that resolves a denied crate version.
+- Mutation controls: 6/6 PASS (`tools/nc_h1.py`).
+- Post-closeout deviation (2026-11-14): the secret scanner now skips the
+  immutable `patches/` review archive (its diffs embed demo-fixture lines);
+  red/green guard `tools/test_patch_scope_guard.py` wired into `make test`.
+  Recorded in `docs/h1-supply-chain-plan.md`.
 
 ## [W4 — multisig phase closed: 3-of-5 gate, 22 vectors, 6 mutation controls] 2026-11-11
 

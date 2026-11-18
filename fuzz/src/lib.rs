@@ -1,5 +1,11 @@
 //! Shared checks for isolated W1 fuzz targets. Not part of the application.
 
+/// H3 fuzz oracles (docs/h3-fuzz-plan.md §1, D-H3-2): totality +
+/// determinism checks per decoder area over a fixed boundary corpus.
+/// `tools/nc_h3.py` injects decoder bugs and requires these oracles to go
+/// red with `H3: fuzz oracle caught a decoder panic`.
+pub mod h3;
+
 #[cfg(feature = "insecure-wallet-fuzz")]
 pub mod keystore_decrypt {
     use aura_wallet::keystore::{Keystore, KeystoreError};

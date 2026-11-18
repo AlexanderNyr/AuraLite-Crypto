@@ -59,6 +59,8 @@ PYTHON ?= python3
         gen-w3-vectors test-w3 nc-w3 evidence-w3 \
         gen-w4-vectors test-w4 nc-w4 evidence-w4 \
         gen-h0-vectors check-h0 nc-h0 evidence-h0 \
+        gen-h1-vectors gen-h1-sbom check-h1 nc-h1 evidence-h1 \
+        gen-h2-vectors check-h2 nc-h2 evidence-h2 \
         devnet clean
 
 help:
@@ -244,6 +246,13 @@ test: deps-check
 	@$(PYTHON) tools/check_claims.py
 	@echo "== threat model review gate =="
 	@$(PYTHON) tools/check_threat_model.py
+	@echo "== crypto review checklist gate =="
+	@$(PYTHON) tools/check_h2_review.py
+	@echo "== supply chain gate =="
+	@$(PYTHON) tools/check_supply_chain.py --selftest
+	@$(PYTHON) tools/check_supply_chain.py
+	@echo "== patch archive scope guard =="
+	@$(PYTHON) tools/test_patch_scope_guard.py
 	@echo "== dependency gate =="
 	@$(PYTHON) tools/check_deps.py
 	@echo "== local scrypt fork provenance =="
@@ -255,6 +264,8 @@ test: deps-check
 	@$(PYTHON) tools/check_rig.py
 	@echo "== historical checksum policy tests =="
 	@$(PYTHON) tools/test_historical_drift.py
+	@echo "== opsec checks (H7) =="
+	@$(PYTHON) tools/check_opsec.py
 	@echo "== close-out audit =="
 	@$(PYTHON) tools/audit_closeout.py
 	@echo "ALL GATES GREEN"
@@ -1225,6 +1236,117 @@ nc-h0:
 
 evidence-h0:
 	@$(PYTHON) tools/write_h0_evidence.py
+
+# H1: the supply-chain gate (tools/check_supply_chain.py).
+.PHONY: gen-h1-vectors gen-h1-sbom check-h1 nc-h1 evidence-h1
+
+gen-h1-vectors:
+	@$(PYTHON) tools/gen_h1_vectors.py
+
+gen-h1-sbom:
+	@$(PYTHON) tools/gen_h1_sbom.py
+
+check-h1:
+	@$(PYTHON) tools/check_supply_chain.py --selftest
+	@$(PYTHON) tools/check_supply_chain.py
+
+nc-h1:
+	@$(PYTHON) tools/nc_h1.py
+
+evidence-h1:
+	@$(PYTHON) tools/write_h1_evidence.py
+
+# H2: the crypto review gate (docs/h2-crypto-review-plan.md).
+.PHONY: gen-h2-vectors check-h2 nc-h2 evidence-h2
+
+gen-h2-vectors:
+	@$(PYTHON) tools/gen_h2_vectors.py
+
+check-h2:
+	@$(PYTHON) tools/check_h2_review.py
+
+nc-h2:
+	@$(PYTHON) tools/nc_h2.py
+
+evidence-h2:
+	@$(PYTHON) tools/write_h2_evidence.py
+
+# H3: recorded fuzz campaigns (docs/h3-fuzz-plan.md §3) and controls.
+fuzz-h3:
+	@$(PYTHON) tools/h3_fuzz_campaign.py --schedule smoke
+
+fuzz-h3-full:
+	@$(PYTHON) tools/h3_fuzz_campaign.py --schedule full
+
+nc-h3:
+	@$(PYTHON) tools/nc_h3.py
+
+evidence-h3:
+	@$(PYTHON) tools/write_h3_evidence.py
+
+# H4: property suites run inside `make test` (cargo test --workspace); these
+# targets are the recorded 1M-tx campaign and the phase controls.
+property-h4:
+	@$(CARGO) test --locked -p aura-testkit --test h4_properties
+	@$(CARGO) test --locked -p aura-state --test h4_tree
+	@$(CARGO) test --locked -p aura-exec --test h4_model_vm
+
+property-h4-full:
+	@$(PYTHON) tools/h4_property_campaign.py --schedule full
+
+nc-h4:
+	@$(PYTHON) tools/nc_h4.py
+
+evidence-h4:
+	@$(PYTHON) tools/write_h4_evidence.py
+
+# H5: consensus safety (docs/h5-consensus-plan.md). The model-table and
+# chaos-matrix tests run inside `make test` (cargo test --workspace); the
+# full campaign records them together with the TLC runs (safe / weakened).
+model-h5:
+	@$(CARGO) test --locked -p aura-consensus --test h5_safety_model
+	@$(CARGO) test --locked -p aura-p2p --test h5_jepsen
+
+model-h5-full:
+	@$(PYTHON) tools/h5_consensus_campaign.py --schedule full
+
+nc-h5:
+	@$(PYTHON) tools/nc_h5.py
+
+evidence-h5:
+	@$(PYTHON) tools/write_h5_evidence.py
+
+# H6: economic-attack simulations (docs/h6-economic-plan.md). The sims run
+# inside `make test` (cargo test --workspace); these targets record the
+# campaign and the phase controls.
+econ-h6:
+	@$(CARGO) test --locked -p aura-consensus --test h6_economic
+	@$(CARGO) test --locked -p aura-mempool --test h6_mev
+
+econ-h6-full:
+	@$(PYTHON) tools/h6_economic_campaign.py --schedule full
+
+nc-h6:
+	@$(PYTHON) tools/nc_h6.py
+
+evidence-h6:
+	@$(PYTHON) tools/write_h6_evidence.py
+
+# H7: OpSec / reproducible builds (docs/h7-opsec-plan.md). The OpSec
+# checks are wired into `make test`; these targets record the campaign and
+# the phase controls.
+opsec-h7:
+	@$(PYTHON) tools/check_opsec.py
+	@$(CARGO) test --locked -p aura-wallet --features insecure-test-kdf --test h7_opsec
+
+repro-h7:
+	@$(PYTHON) tools/h7_repro_build.py
+
+nc-h7:
+	@$(PYTHON) tools/nc_h7.py
+
+evidence-h7:
+	@$(PYTHON) tools/write_h7_evidence.py
 
 # Optional independent interop check; install the pinned test-only Python
 # dependencies in tools/w1-reference-requirements.txt first.

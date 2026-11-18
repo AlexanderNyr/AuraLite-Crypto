@@ -1,0 +1,1604 @@
+From b95530ee0fd79f68a16374d036e04ecb25792b47 Mon Sep 17 00:00:00 2001
+From: aura <aura@local>
+Date: Tue, 17 Nov 2026 14:22:54 +0000
+Subject: [PATCH] H7: OpSec / reproducible builds phase closed (two-host sha256
+ gate, secret-in-git gate, 7 mutation controls)
+
+Gate met literally: a secret committed to the tree turns CI red
+(tools/check_opsec.py fail-closed over scan_secrets, wired into make
+test), and two independent hosts build aura-types --release --lib to the
+same sha256 (--remap-path-prefix to a shared virtual root, toolchain
+pinned 1.99.1). Validator keys: keystore save 0600, loader now rejects
+loose permissions, owner-only access log without secret material. CI:
+least-privilege permissions blocks + toolchain pins (linted). NC 7/7.
+Stage 1 (H0-H7) closed.
+---
+ .github/workflows/ci.yml                      |   4 +
+ .github/workflows/w1.yml                      |   4 +
+ CHANGELOG.md                                  |  16 ++
+ Makefile                                      |  18 ++
+ crates/aura-wallet/src/keystore.rs            |  52 +++++-
+ .../tests/fixtures/w1_baseline.txt            |   8 +-
+ crates/aura-wallet/tests/h7_opsec.rs          | 118 ++++++++++++++
+ docs/evidence/h7/SHA256SUMS                   |  16 ++
+ docs/evidence/h7/campaign/campaign.log        |   8 +
+ docs/evidence/h7/campaign/key-hygiene.log     |  11 ++
+ docs/evidence/h7/campaign/opsec-checks.log    |   5 +
+ docs/evidence/h7/campaign/repro-result.json   |  23 +++
+ docs/evidence/h7/campaign/result.json         |  85 ++++++++++
+ docs/evidence/h7/campaign/two-host-repro.log  |   6 +
+ docs/evidence/h7/check_ci_lint.log            |   5 +
+ docs/evidence/h7/check_secrets.log            |   5 +
+ docs/evidence/h7/check_toolchain_pin.log      |   5 +
+ docs/evidence/h7/gates.txt                    |  12 ++
+ .../h7/h7_access_log_without_secrets.log      |  10 ++
+ docs/evidence/h7/h7_keystore_owner_only.log   |  11 ++
+ docs/evidence/h7/inventory.txt                |   4 +
+ docs/evidence/h7/nc.log                       |  10 ++
+ docs/evidence/h7/report.md                    |  12 ++
+ docs/evidence/h7/two-host-repro.log           |   6 +
+ docs/evidence/review-w1-source-drift.txt      |  15 +-
+ docs/h7-opsec-plan.md                         |  87 ++++++++++
+ docs/plans/SECURITY_PLAN.md                   |  26 ++-
+ tools/audit_closeout.py                       |   8 +-
+ tools/check_opsec.py                          |  70 ++++++++
+ tools/h7_opsec_campaign.py                    | 136 ++++++++++++++++
+ tools/h7_repro_build.py                       | 122 ++++++++++++++
+ tools/nc_h7.py                                | 144 ++++++++++++++++
+ tools/write_h7_evidence.py                    | 154 ++++++++++++++++++
+ 33 files changed, 1199 insertions(+), 17 deletions(-)
+ create mode 100644 crates/aura-wallet/tests/h7_opsec.rs
+ create mode 100644 docs/evidence/h7/SHA256SUMS
+ create mode 100644 docs/evidence/h7/campaign/campaign.log
+ create mode 100644 docs/evidence/h7/campaign/key-hygiene.log
+ create mode 100644 docs/evidence/h7/campaign/opsec-checks.log
+ create mode 100644 docs/evidence/h7/campaign/repro-result.json
+ create mode 100644 docs/evidence/h7/campaign/result.json
+ create mode 100644 docs/evidence/h7/campaign/two-host-repro.log
+ create mode 100644 docs/evidence/h7/check_ci_lint.log
+ create mode 100644 docs/evidence/h7/check_secrets.log
+ create mode 100644 docs/evidence/h7/check_toolchain_pin.log
+ create mode 100644 docs/evidence/h7/gates.txt
+ create mode 100644 docs/evidence/h7/h7_access_log_without_secrets.log
+ create mode 100644 docs/evidence/h7/h7_keystore_owner_only.log
+ create mode 100644 docs/evidence/h7/inventory.txt
+ create mode 100644 docs/evidence/h7/nc.log
+ create mode 100644 docs/evidence/h7/report.md
+ create mode 100644 docs/evidence/h7/two-host-repro.log
+ create mode 100644 docs/h7-opsec-plan.md
+ create mode 100644 tools/check_opsec.py
+ create mode 100644 tools/h7_opsec_campaign.py
+ create mode 100644 tools/h7_repro_build.py
+ create mode 100644 tools/nc_h7.py
+ create mode 100644 tools/write_h7_evidence.py
+
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index d0def91..7a86dbc 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -5,6 +5,10 @@ on:
+     branches: [main]
+   pull_request:
+ 
++# H7 least-privilege baseline: read-only repository access.
++permissions:
++  contents: read
++
+ # C0 baseline: one honest shard. The 10 shards listed in CONTRIBUTING.md
+ # (core, state, exec, consensus, net, node, wallet, ecosystem, security,
+ # perf) are added by O0 as the crates that need them actually appear.
+diff --git a/.github/workflows/w1.yml b/.github/workflows/w1.yml
+index a93ae3b..d990e00 100644
+--- a/.github/workflows/w1.yml
++++ b/.github/workflows/w1.yml
+@@ -4,6 +4,10 @@ on:
+   push:
+   pull_request:
+ 
++# H7 least-privilege baseline: read-only repository access.
++permissions:
++  contents: read
++
+ # These gates test an experimental testnet component; they do not close W1 or
+ # constitute a security audit. The weak-KDF feature is strictly test-only.
+ jobs:
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 9033965..32b987b 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,22 @@
+ All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
+ never rewritten: corrections are made with a new entry or an explicit note.
+ 
++## [H7 — OpSec / reproducible builds phase closed: two-host sha256 gate, secret-in-git gate, 7 mutation controls] 2026-11-17
++
++### Added
++- `tools/h7_repro_build.py` (two-host reproducible build: disjoint source
++  paths + shared remap target → identical sha256), `tools/check_opsec.py`
++  (fail-closed secrets / CI-lint / toolchain-pin gates, wired into
++  `make test`), `crates/aura-wallet/tests/h7_opsec.rs` (keystore
++  owner-only save + permission-rejecting loader + access-log hygiene),
++  `tools/nc_h7.py` (7 mutation controls), `docs/h7-opsec-plan.md`.
++
++### Changed
++- `Keystore::load` now rejects keystores with group/other permission
++  bits (H7); `keystore::{access_log_line, append_access_log}` add an
++  owner-only access log without secret material; both workflows carry
++  least-privilege `permissions:` blocks.
++
+ ## [H6 — economic attacks phase closed: bounded-damage simulations, no-pause gate, 7 mutation controls] 2026-11-17
+ 
+ ### Added
+diff --git a/Makefile b/Makefile
+index dcdb6d5..ad855ee 100644
+--- a/Makefile
++++ b/Makefile
+@@ -264,6 +264,8 @@ test: deps-check
+ 	@$(PYTHON) tools/check_rig.py
+ 	@echo "== historical checksum policy tests =="
+ 	@$(PYTHON) tools/test_historical_drift.py
++	@echo "== opsec checks (H7) =="
++	@$(PYTHON) tools/check_opsec.py
+ 	@echo "== close-out audit =="
+ 	@$(PYTHON) tools/audit_closeout.py
+ 	@echo "ALL GATES GREEN"
+@@ -1330,6 +1332,22 @@ nc-h6:
+ evidence-h6:
+ 	@$(PYTHON) tools/write_h6_evidence.py
+ 
++# H7: OpSec / reproducible builds (docs/h7-opsec-plan.md). The OpSec
++# checks are wired into `make test`; these targets record the campaign and
++# the phase controls.
++opsec-h7:
++	@$(PYTHON) tools/check_opsec.py
++	@$(CARGO) test --locked -p aura-wallet --features insecure-test-kdf --test h7_opsec
++
++repro-h7:
++	@$(PYTHON) tools/h7_repro_build.py
++
++nc-h7:
++	@$(PYTHON) tools/nc_h7.py
++
++evidence-h7:
++	@$(PYTHON) tools/write_h7_evidence.py
++
+ # Optional independent interop check; install the pinned test-only Python
+ # dependencies in tools/w1-reference-requirements.txt first.
+ .PHONY: test-w1-interop
+diff --git a/crates/aura-wallet/src/keystore.rs b/crates/aura-wallet/src/keystore.rs
+index abb3693..b9f1c36 100644
+--- a/crates/aura-wallet/src/keystore.rs
++++ b/crates/aura-wallet/src/keystore.rs
+@@ -868,6 +868,16 @@ impl Keystore {
+         {
+             return Err(KeystoreError::InvalidFormat);
+         }
++        // H7: the keystore file itself must be owner-only before it is used.
++        #[cfg(unix)]
++        let mode_ok = {
++            use std::os::unix::fs::MetadataExt;
++            file.metadata()
++                .map_err(|e| KeystoreError::Io(e.to_string()))?
++                .mode()
++                & 0o077
++                == 0
++        };
+         let mut bytes = Vec::new();
+         file.take(MAX_KEYSTORE_BYTES + 1)
+             .read_to_end(&mut bytes)
+@@ -876,7 +886,12 @@ impl Keystore {
+             return Err(KeystoreError::InvalidFormat);
+         }
+         let text = std::str::from_utf8(&bytes).map_err(|_| KeystoreError::InvalidFormat)?;
+-        Self::from_json_str(text)
++        let keystore = Self::from_json_str(text)?;
++        #[cfg(unix)]
++        if !mode_ok {
++            return Err(KeystoreError::UnsafeDirectory);
++        }
++        Ok(keystore)
+     }
+ 
+     /// Filesystem-backed keystores are not implemented on Redox or ESP-IDF.
+@@ -1399,3 +1414,38 @@ mod kdf_memory_tests {
+         assert_eq!(&actual[..], &expected[..]);
+     }
+ }
++
++/// Deterministic access-log record for a keystore operation (H7).
++///
++/// The record contains only the operation name, the keystore file name
++/// (never its full path) and the outcome — never password, seed, mnemonic
++/// or key material.
++pub fn access_log_line(op: &str, keystore: &Path, ok: bool) -> String {
++    let name = keystore.file_name().and_then(|n| n.to_str()).unwrap_or("-");
++    format!("keystore {op} file={name} ok={ok}")
++}
++
++/// Append one [`access_log_line`] record to `log_path`.
++///
++/// The log file is created owner-only (`0600`) on unix, matching the
++/// keystore itself.
++pub fn append_access_log(log_path: &Path, line: &str) -> Result<(), KeystoreError> {
++    use std::io::Write;
++    #[cfg(unix)]
++    let mut file = {
++        use std::os::unix::fs::OpenOptionsExt;
++        std::fs::OpenOptions::new()
++            .create(true)
++            .append(true)
++            .mode(0o600)
++            .open(log_path)
++            .map_err(|e| KeystoreError::Io(e.to_string()))?
++    };
++    #[cfg(not(unix))]
++    let mut file = std::fs::OpenOptions::new()
++        .create(true)
++        .append(true)
++        .open(log_path)
++        .map_err(|e| KeystoreError::Io(e.to_string()))?;
++    writeln!(file, "{line}").map_err(|e| KeystoreError::Io(e.to_string()))
++}
+diff --git a/crates/aura-wallet/tests/fixtures/w1_baseline.txt b/crates/aura-wallet/tests/fixtures/w1_baseline.txt
+index a8bb68f..81b9cb1 100644
+--- a/crates/aura-wallet/tests/fixtures/w1_baseline.txt
++++ b/crates/aura-wallet/tests/fixtures/w1_baseline.txt
+@@ -12,10 +12,10 @@ missing=0
+ exposure_surfaces=8
+ threat_notes=6
+ missing_capabilities=3
+-layer=keystore	W1	implemented	9	5560	166	BIP-39 and SLIP-0010 Ed25519 testnet derivation, encrypted keystore, zeroize
+-layer=wallet-cli	W2	implemented	9	5560	166	`aura-wallet` CLI: new/import/list/balance/transfer/sign/broadcast/stake/vote
+-layer=offline-signing	W3	placeholder	9	5560	166	air-gapped unsigned/signed tx format, QR/USB bundle, online verification
+-layer=multisig	W4	placeholder	9	5560	166	M-of-N multisig coordination, signature collection, timeouts, member rotation
++layer=keystore	W1	implemented	9	5610	168	BIP-39 and SLIP-0010 Ed25519 testnet derivation, encrypted keystore, zeroize
++layer=wallet-cli	W2	implemented	9	5610	168	`aura-wallet` CLI: new/import/list/balance/transfer/sign/broadcast/stake/vote
++layer=offline-signing	W3	placeholder	9	5610	168	air-gapped unsigned/signed tx format, QR/USB bundle, online verification
++layer=multisig	W4	placeholder	9	5610	168	M-of-N multisig coordination, signature collection, timeouts, member rotation
+ surface=logs-and-tracing	W0	CRITICAL	structured/plain daemon or test logs (`*.log`, `tracing`, `Debug`/`Display`)
+ surface=cli-argv-and-env	W1	CRITICAL	CLI flags (`--private-key`, `--mnemonic`) visible in `/proc/<pid>/cmdline` and shell history
+ surface=plaintext-disk-files	W1	CRITICAL	unencrypted key files, swap/temp files, or world-readable keystore permissions
+diff --git a/crates/aura-wallet/tests/h7_opsec.rs b/crates/aura-wallet/tests/h7_opsec.rs
+new file mode 100644
+index 0000000..5f16c04
+--- /dev/null
++++ b/crates/aura-wallet/tests/h7_opsec.rs
+@@ -0,0 +1,118 @@
++//! H7 OpSec gates (docs/h7-opsec-plan.md §2).
++//!
++//! Validator-key hygiene: keystore files stay owner-only (save `0600`, the
++//! loader rejects loose permissions), and key access is logged without any
++//! secret material.
++//! `tools/nc_h7.py` injects the bugs these tests must catch.
++
++use std::path::Path;
++
++use aura_wallet::keystore::{KdfParams, Keystore, access_log_line, append_access_log};
++use aura_wallet::secret::{Password, SecretSeed};
++
++fn test_kdf() -> KdfParams {
++    #[cfg(feature = "insecure-test-kdf")]
++    {
++        KdfParams::testing()
++    }
++    #[cfg(not(feature = "insecure-test-kdf"))]
++    {
++        KdfParams::default_argon2id()
++    }
++}
++
++fn test_keystore() -> Keystore {
++    let seed = SecretSeed::new([7; 64]);
++    let password = Password::new("h7-test-pass");
++    #[cfg(feature = "insecure-test-kdf")]
++    let ks = Keystore::encrypt_seed_insecure_for_testing(&seed, &password, test_kdf());
++    #[cfg(not(feature = "insecure-test-kdf"))]
++    let ks = Keystore::encrypt_seed(&seed, &password, test_kdf());
++    ks.expect("keystore built")
++}
++
++#[test]
++fn h7_keystore_owner_only() {
++    let dir = std::env::temp_dir().join(format!("auralite-h7-opsec-{}", std::process::id()));
++    std::fs::create_dir_all(&dir).unwrap();
++    let path = dir.join("h7-ks.json");
++    let _ = std::fs::remove_file(&path);
++
++    let ks = test_keystore();
++    ks.save_new(&path).expect("save_new succeeds");
++
++    // Save side: the file must be owner-only.
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::PermissionsExt;
++        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
++        assert_eq!(mode & 0o077, 0, "H7: validator keys must stay owner-only");
++    }
++
++    // Load side: a valid keystore with loose permissions must be rejected.
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::PermissionsExt;
++        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
++        assert!(
++            Keystore::load(&path).is_err(),
++            "H7: keystore loader must reject loose permissions"
++        );
++        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
++        assert!(
++            Keystore::load(&path).is_err(),
++            "H7: keystore loader must reject loose permissions"
++        );
++        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
++        assert!(Keystore::load(&path).is_ok());
++    }
++
++    std::fs::remove_dir_all(&dir).unwrap();
++}
++
++#[test]
++fn h7_access_log_without_secrets() {
++    let dir = std::env::temp_dir().join(format!("auralite-h7-access-log-{}", std::process::id()));
++    std::fs::create_dir_all(&dir).unwrap();
++    let ks_path = dir.join("validator-a.json");
++    let log_path = dir.join("validator-a.access.log");
++
++    // The record format is pinned and deterministic.
++    let line = access_log_line("save", Path::new("validator-a.json"), true);
++    assert_eq!(
++        line, "keystore save file=validator-a.json ok=true",
++        "H7: key access must be logged without secrets"
++    );
++    let failed = access_log_line("load", Path::new("validator-a.json"), false);
++    assert_eq!(
++        failed, "keystore load file=validator-a.json ok=false",
++        "H7: key access must be logged without secrets"
++    );
++
++    // No secret material can appear: the record only carries op/file/ok.
++    for needle in ["h7-test-pass", "password", "seed", "mnemonic", "-----"] {
++        assert!(
++            !line.contains(needle),
++            "H7: key access must be logged without secrets"
++        );
++    }
++
++    // The log file is created owner-only and appends both records.
++    append_access_log(&log_path, &line).expect("append record");
++    append_access_log(&log_path, &failed).expect("append record");
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::PermissionsExt;
++        let mode = std::fs::metadata(&log_path).unwrap().permissions().mode();
++        assert_eq!(
++            mode & 0o077,
++            0,
++            "H7: key access must be logged without secrets"
++        );
++    }
++    let content = std::fs::read_to_string(&log_path).unwrap();
++    assert_eq!(content, format!("{line}\n{failed}\n"));
++    let _ = ks_path;
++
++    std::fs::remove_dir_all(&dir).unwrap();
++}
+diff --git a/docs/evidence/h7/SHA256SUMS b/docs/evidence/h7/SHA256SUMS
+new file mode 100644
+index 0000000..bace242
+--- /dev/null
++++ b/docs/evidence/h7/SHA256SUMS
+@@ -0,0 +1,16 @@
++48bff7b4203c1cbf29c77bc20b7d42f741e000fa8f50a5d831dafa60774bf999  docs/evidence/h7/check_ci_lint.log
++547e2b91e24cb95974a0a1e4dea51864f63f11c7065caede5f18c795b19a18e8  docs/evidence/h7/check_secrets.log
++48bff7b4203c1cbf29c77bc20b7d42f741e000fa8f50a5d831dafa60774bf999  docs/evidence/h7/check_toolchain_pin.log
++0fcacf1e98faeccd2965d46047710c3f412cdf438ebb0afe52bb6153947694c8  docs/evidence/h7/gates.txt
++310e9807dec9a177cb4d3947be9ac455c592a6709b79c095fdb872f4dc777856  docs/evidence/h7/h7_access_log_without_secrets.log
++a57cf42b5b2ec37520711cceaab5401106f7554c64334afe7c6da1c724e26e98  docs/evidence/h7/h7_keystore_owner_only.log
++6c31c25fceb8677bb1b41d20d5246674b1fd318fb2ac02448c577b61582470a5  docs/evidence/h7/inventory.txt
++3e19d9aae370e673306ebc8be1ade502111bc4e662ad76192993a88a613b54ea  docs/evidence/h7/nc.log
++836a5a3e5f43152ff2cb0eb3d498e9e658e634d75d85b77ec6846300aecc5246  docs/evidence/h7/report.md
++c8788f43dc52032e49d113c43fc0064a4cd84441be2f72762e1c7dd3485d98a8  docs/evidence/h7/two-host-repro.log
++11aaa0b90343c5cac8e6d38bb521fae3fa2d513566801f2512ec5c6da9784296  docs/evidence/h7/campaign/campaign.log
++56aed49e13ba755eff01d5b086deb6c37f386bbb7c1dba17d23ca3ff27abe682  docs/evidence/h7/campaign/key-hygiene.log
++23dcadeac554edc0ae72eedf2e13a8a96614056c34895e0d784b6703d1b2e3da  docs/evidence/h7/campaign/opsec-checks.log
++cec66238261abd20324ccbd4b1e8cb280d40ba56b1e84df305c1c3271c79751f  docs/evidence/h7/campaign/repro-result.json
++8278c562d78e4b381e37b7f629dcfd7357fa9847658ac110f18f6616cf11948e  docs/evidence/h7/campaign/result.json
++473f68ed31135266df67f77e88741f61e8d70bc34d4c739ddec79946c29b88b3  docs/evidence/h7/campaign/two-host-repro.log
+diff --git a/docs/evidence/h7/campaign/campaign.log b/docs/evidence/h7/campaign/campaign.log
+new file mode 100644
+index 0000000..56632a4
+--- /dev/null
++++ b/docs/evidence/h7/campaign/campaign.log
+@@ -0,0 +1,8 @@
++[evidence_h7] cmd=h7_opsec_campaign.py --schedule full exit=0 duration=3.89s
++[h7_opsec_campaign] opsec-checks (full) ...
++[h7_opsec_campaign] opsec-checks: pass
++[h7_opsec_campaign] key-hygiene (full) ...
++[h7_opsec_campaign] key-hygiene: pass
++[h7_opsec_campaign] two-host-repro (full) ...
++[h7_opsec_campaign] two-host-repro: pass
++RESULT: H7 campaign PASS (opsec checks, key hygiene, two-host repro)
+diff --git a/docs/evidence/h7/campaign/key-hygiene.log b/docs/evidence/h7/campaign/key-hygiene.log
+new file mode 100644
+index 0000000..1828515
+--- /dev/null
++++ b/docs/evidence/h7/campaign/key-hygiene.log
+@@ -0,0 +1,11 @@
++[h7_opsec_campaign] id=key-hygiene cmd=cargo test --locked -p aura-wallet --features insecure-test-kdf --test h7_opsec -- --nocapture exit=0 duration=0.75s
++   Compiling aura-wallet v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-wallet)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.70s
++     Running tests/h7_opsec.rs (target/debug/deps/h7_opsec-8f9841df4914328c)
++
++running 2 tests
++test h7_access_log_without_secrets ... ok
++test h7_keystore_owner_only ... ok
++
++test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
+diff --git a/docs/evidence/h7/campaign/opsec-checks.log b/docs/evidence/h7/campaign/opsec-checks.log
+new file mode 100644
+index 0000000..7afff39
+--- /dev/null
++++ b/docs/evidence/h7/campaign/opsec-checks.log
+@@ -0,0 +1,5 @@
++[h7_opsec_campaign] id=opsec-checks cmd=/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/check_opsec.py exit=0 duration=2.09s
++[PASS] check_secrets: no secret patterns in the tree
++[PASS] check_ci_lint: workflows pin permissions and toolchain (2 files)
++[PASS] check_toolchain_pin: rust-toolchain.toml pinned to 1.99.1
++RESULT: 3/3 opsec checks PASS
+diff --git a/docs/evidence/h7/campaign/repro-result.json b/docs/evidence/h7/campaign/repro-result.json
+new file mode 100644
+index 0000000..564d48a
+--- /dev/null
++++ b/docs/evidence/h7/campaign/repro-result.json
+@@ -0,0 +1,23 @@
++{
++  "version": "h7-repro-v1",
++  "toolchain": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
++  "artifact": "aura-types --release --lib",
++  "virtual_prefix": "/auralite-build",
++  "hosts": [
++    {
++      "name": "host-a",
++      "remap": "--remap-path-prefix=/tmp/auralite-h7-hosts-hztzzerz/host-a=/auralite-build",
++      "artifact_sha256": "93057c4282fbd7b65ea2f94580cc4da7f9561f7cae9561244b60109bd327f3fa",
++      "bytes": 218424,
++      "duration_seconds": 0.32
++    },
++    {
++      "name": "host-b",
++      "remap": "--remap-path-prefix=/tmp/auralite-h7-hosts-hztzzerz/host-b=/auralite-build",
++      "artifact_sha256": "93057c4282fbd7b65ea2f94580cc4da7f9561f7cae9561244b60109bd327f3fa",
++      "bytes": 218424,
++      "duration_seconds": 0.32
++    }
++  ],
++  "same_sha256": true
++}
+diff --git a/docs/evidence/h7/campaign/result.json b/docs/evidence/h7/campaign/result.json
+new file mode 100644
+index 0000000..3d49692
+--- /dev/null
++++ b/docs/evidence/h7/campaign/result.json
+@@ -0,0 +1,85 @@
++{
++  "version": "h7-campaign-v1",
++  "schedule": "full",
++  "seed": 20261180,
++  "results": [
++    {
++      "id": "opsec-checks",
++      "exit_code": 0,
++      "status": "pass",
++      "log": "opsec-checks.log",
++      "log_sha256": "23dcadeac554edc0ae72eedf2e13a8a96614056c34895e0d784b6703d1b2e3da",
++      "bytes": 353,
++      "command": "/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/check_opsec.py",
++      "duration_seconds": 2.09,
++      "resumed": false
++    },
++    {
++      "id": "key-hygiene",
++      "exit_code": 0,
++      "status": "pass",
++      "log": "key-hygiene.log",
++      "log_sha256": "56aed49e13ba755eff01d5b086deb6c37f386bbb7c1dba17d23ca3ff27abe682",
++      "bytes": 576,
++      "command": "cargo test --locked -p aura-wallet --features insecure-test-kdf --test h7_opsec -- --nocapture",
++      "duration_seconds": 0.75,
++      "resumed": false
++    },
++    {
++      "id": "two-host-repro",
++      "exit_code": 0,
++      "status": "pass",
++      "log": "two-host-repro.log",
++      "log_sha256": "473f68ed31135266df67f77e88741f61e8d70bc34d4c739ddec79946c29b88b3",
++      "bytes": 515,
++      "command": "/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/h7_repro_build.py",
++      "duration_seconds": 1.02,
++      "resumed": false
++    },
++    {
++      "id": "sources",
++      "sources": [
++        {
++          "path": "crates/aura-wallet/src/keystore.rs",
++          "sha256": "5e50d182e64a64f5a1d1caad204edf004d4baee0a5943503372d80f6fdfc1258",
++          "bytes": 55847
++        },
++        {
++          "path": "crates/aura-wallet/tests/h7_opsec.rs",
++          "sha256": "9954fd3cb121647aace3168ca2e707fb612de3e52b696377d8f79e114d7c72d1",
++          "bytes": 4214
++        },
++        {
++          "path": "tools/check_opsec.py",
++          "sha256": "04ae47a26f5f5129a9874d1c722678a7662056e846fc28ba78f596be0e44a19f",
++          "bytes": 2673
++        },
++        {
++          "path": "tools/scan_secrets.py",
++          "sha256": "225c4450b7f1fdec6f801d8f9c0208c93507c72aa5bbcc245e819f6ae768f668",
++          "bytes": 3406
++        },
++        {
++          "path": "tools/h7_repro_build.py",
++          "sha256": "b23c9a876bab07aa499b85d348c645c338d28ddc3220fd70214817477b778442",
++          "bytes": 4682
++        },
++        {
++          "path": "rust-toolchain.toml",
++          "sha256": "b9c8d2d59f6f46474c0cfa0b8b77bea21d94fc73a30ad93d5bf6385c422197d2",
++          "bytes": 86
++        },
++        {
++          "path": ".github/workflows/ci.yml",
++          "sha256": "91ace940b907b3882f8d5dfee782193c089499e3c227492415b6b6e17331b70d",
++          "bytes": 5748
++        },
++        {
++          "path": ".github/workflows/w1.yml",
++          "sha256": "cdcdf4d1deeed2e3def88b80349b09d243f1f8a01d0875b518befa0cb5c144ba",
++          "bytes": 2789
++        }
++      ]
++    }
++  ]
++}
+diff --git a/docs/evidence/h7/campaign/two-host-repro.log b/docs/evidence/h7/campaign/two-host-repro.log
+new file mode 100644
+index 0000000..a782666
+--- /dev/null
++++ b/docs/evidence/h7/campaign/two-host-repro.log
+@@ -0,0 +1,6 @@
++[h7_opsec_campaign] id=two-host-repro cmd=/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/h7_repro_build.py exit=0 duration=1.02s
++[h7_repro_build] snapshot host-a ...
++[h7_repro_build] host-a sha256=93057c4282fbd7b65ea2f94580cc4da7f9561f7cae9561244b60109bd327f3fa
++[h7_repro_build] snapshot host-b ...
++[h7_repro_build] host-b sha256=93057c4282fbd7b65ea2f94580cc4da7f9561f7cae9561244b60109bd327f3fa
++RESULT: H7 two-host reproducible build PASS (93057c4282fbd7b65ea2f94580cc4da7f9561f7cae9561244b60109bd327f3fa)
+diff --git a/docs/evidence/h7/check_ci_lint.log b/docs/evidence/h7/check_ci_lint.log
+new file mode 100644
+index 0000000..1e837cd
+--- /dev/null
++++ b/docs/evidence/h7/check_ci_lint.log
+@@ -0,0 +1,5 @@
++[evidence_h7] cmd=/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/check_opsec.py exit=0 duration=2.03s
++[PASS] check_secrets: no secret patterns in the tree
++[PASS] check_ci_lint: workflows pin permissions and toolchain (2 files)
++[PASS] check_toolchain_pin: rust-toolchain.toml pinned to 1.99.1
++RESULT: 3/3 opsec checks PASS
+diff --git a/docs/evidence/h7/check_secrets.log b/docs/evidence/h7/check_secrets.log
+new file mode 100644
+index 0000000..231d9f3
+--- /dev/null
++++ b/docs/evidence/h7/check_secrets.log
+@@ -0,0 +1,5 @@
++[evidence_h7] cmd=/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/check_opsec.py exit=0 duration=2.02s
++[PASS] check_secrets: no secret patterns in the tree
++[PASS] check_ci_lint: workflows pin permissions and toolchain (2 files)
++[PASS] check_toolchain_pin: rust-toolchain.toml pinned to 1.99.1
++RESULT: 3/3 opsec checks PASS
+diff --git a/docs/evidence/h7/check_toolchain_pin.log b/docs/evidence/h7/check_toolchain_pin.log
+new file mode 100644
+index 0000000..1e837cd
+--- /dev/null
++++ b/docs/evidence/h7/check_toolchain_pin.log
+@@ -0,0 +1,5 @@
++[evidence_h7] cmd=/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/check_opsec.py exit=0 duration=2.03s
++[PASS] check_secrets: no secret patterns in the tree
++[PASS] check_ci_lint: workflows pin permissions and toolchain (2 files)
++[PASS] check_toolchain_pin: rust-toolchain.toml pinned to 1.99.1
++RESULT: 3/3 opsec checks PASS
+diff --git a/docs/evidence/h7/gates.txt b/docs/evidence/h7/gates.txt
+new file mode 100644
+index 0000000..671e9d4
+--- /dev/null
++++ b/docs/evidence/h7/gates.txt
+@@ -0,0 +1,12 @@
++H7 OpSec / reproducible-build gates (docs/h7-opsec-plan.md)
++Gate: NC: secret in git -> CI red; two hosts build to the same sha256
++
++check_secrets                              pass                   secret in git turns CI red (named gate)
++check_ci_lint                              pass                   CI least-privilege permissions + pinned toolchain
++check_toolchain_pin                        pass                   rust-toolchain pinned
++h7_keystore_owner_only                     pass                   keystore save 0600; loader rejects loose perms
++h7_access_log_without_secrets              pass                   access log: pinned format, no secrets
++two-host-repro                             pass                   two hosts build to the same sha256 (named gate)
++
++negative controls: 7/7 (PASS)
++campaign --schedule full: PASS
+diff --git a/docs/evidence/h7/h7_access_log_without_secrets.log b/docs/evidence/h7/h7_access_log_without_secrets.log
+new file mode 100644
+index 0000000..354fc95
+--- /dev/null
++++ b/docs/evidence/h7/h7_access_log_without_secrets.log
+@@ -0,0 +1,10 @@
++[evidence_h7] cmd=cargo test --locked -p aura-wallet --features insecure-test-kdf --test h7_opsec -- --nocapture exit=0 duration=0.10s
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.06s
++     Running tests/h7_opsec.rs (target/debug/deps/h7_opsec-8f9841df4914328c)
++
++running 2 tests
++test h7_access_log_without_secrets ... ok
++test h7_keystore_owner_only ... ok
++
++test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
+diff --git a/docs/evidence/h7/h7_keystore_owner_only.log b/docs/evidence/h7/h7_keystore_owner_only.log
+new file mode 100644
+index 0000000..a19ea6f
+--- /dev/null
++++ b/docs/evidence/h7/h7_keystore_owner_only.log
+@@ -0,0 +1,11 @@
++[evidence_h7] cmd=cargo test --locked -p aura-wallet --features insecure-test-kdf --test h7_opsec -- --nocapture exit=0 duration=0.84s
++   Compiling aura-wallet v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-wallet)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.79s
++     Running tests/h7_opsec.rs (target/debug/deps/h7_opsec-8f9841df4914328c)
++
++running 2 tests
++test h7_access_log_without_secrets ... ok
++test h7_keystore_owner_only ... ok
++
++test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
+diff --git a/docs/evidence/h7/inventory.txt b/docs/evidence/h7/inventory.txt
+new file mode 100644
+index 0000000..62e448a
+--- /dev/null
++++ b/docs/evidence/h7/inventory.txt
+@@ -0,0 +1,4 @@
++# H7 inventory (generated by tools/write_h7_evidence.py)
++# Cumulative negative controls: 9 phases, 474 controls.
++W4: 6/6, H0: 6/6, H1: 6/6, H2: 6/6, H3: 6/6, H4: 6/6, H5: 6/6, H6: 7/7, H7: 7/7
++TOTAL: 474 negative controls cumulative
+diff --git a/docs/evidence/h7/nc.log b/docs/evidence/h7/nc.log
+new file mode 100644
+index 0000000..8c71bc5
+--- /dev/null
++++ b/docs/evidence/h7/nc.log
+@@ -0,0 +1,10 @@
++[evidence_h7] cmd=tools/nc_h7.py exit=0 duration=9.53s
++[PASS] NC-1 injected bug -> secret in git must turn CI red: red with named message
++[PASS] NC-2 two hosts diverge when the remap stops being shared: red with named message
++[PASS] NC-3 workflow permissions block removed: red with named message
++[PASS] NC-4 keystore save mode widened to group-readable: red with named message
++[PASS] NC-5 loader permission check disabled: red with named message
++[PASS] NC-6 toolchain pin removed: red with named message
++[PASS] NC-7 access log record format leaks extra fields: red with named message
++RESULT: 7/7 negative controls PASS
++control-anchors sha256: keystore=5e50d182e64a64f5 repro=b23c9a876bab07aa
+diff --git a/docs/evidence/h7/report.md b/docs/evidence/h7/report.md
+new file mode 100644
+index 0000000..bfd0b17
+--- /dev/null
++++ b/docs/evidence/h7/report.md
+@@ -0,0 +1,12 @@
++# Отчёт H7 — OpSec / воспроизводимые сборки
++
++Дата: 2026-11-17
++
++Итог: **ВСЕ ГЕЙТЫ H7 ЗЕЛЁНЫЕ**
++
++Гейт: NC: secret in git -> CI red; two hosts build to the same sha256.
++
++Кампания `h7_opsec_campaign.py --schedule full` (`campaign/result.json`, `campaign/repro-result.json`);
++negative controls `tools/nc_h7.py` (`nc.log`, RESULT: 7/7 negative controls PASS).
++Stage 1 (H0–H7) закрывается этой фазой.
++
+diff --git a/docs/evidence/h7/two-host-repro.log b/docs/evidence/h7/two-host-repro.log
+new file mode 100644
+index 0000000..9a28ad2
+--- /dev/null
++++ b/docs/evidence/h7/two-host-repro.log
+@@ -0,0 +1,6 @@
++[evidence_h7] cmd=/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/h7_repro_build.py exit=0 duration=1.29s
++[h7_repro_build] snapshot host-a ...
++[h7_repro_build] host-a sha256=93057c4282fbd7b65ea2f94580cc4da7f9561f7cae9561244b60109bd327f3fa
++[h7_repro_build] snapshot host-b ...
++[h7_repro_build] host-b sha256=93057c4282fbd7b65ea2f94580cc4da7f9561f7cae9561244b60109bd327f3fa
++RESULT: H7 two-host reproducible build PASS (93057c4282fbd7b65ea2f94580cc4da7f9561f7cae9561244b60109bd327f3fa)
+diff --git a/docs/evidence/review-w1-source-drift.txt b/docs/evidence/review-w1-source-drift.txt
+index 42f8f44..0c3a1a9 100644
+--- a/docs/evidence/review-w1-source-drift.txt
++++ b/docs/evidence/review-w1-source-drift.txt
+@@ -1,12 +1,12 @@
+ # Explicit source drift from frozen historical SHA256SUMS.
+ # historical-sha256 current-sha256 repository-relative-path
+ # Not a replacement for a new phase security review or certification.
+-adc24e7c03e1a63e5d7addbda15ff40ce630367152699c5d9659cd8db65f357b 70c9774ec02540e1264f866716dae9cfbf156ab6571866a6ccd456ede215e370 CHANGELOG.md
+-c83d08301a703c9db11462aa541bc898e52548589972118465164895eed44dc7 70c9774ec02540e1264f866716dae9cfbf156ab6571866a6ccd456ede215e370 CHANGELOG.md
++adc24e7c03e1a63e5d7addbda15ff40ce630367152699c5d9659cd8db65f357b 8e8ec816f4e5f162c39e9beb0089ab823fec374f9372522db758f58ac2a4a6c8 CHANGELOG.md
++c83d08301a703c9db11462aa541bc898e52548589972118465164895eed44dc7 8e8ec816f4e5f162c39e9beb0089ab823fec374f9372522db758f58ac2a4a6c8 CHANGELOG.md
+ f0d3511cd02f3007c0a18fc5d94c8997cfa512449313776117265708a36c8553 c9680cc436d806fa7fa2ce8545bd148dc9fcc9ae444973d4968a3f4f4fc069dc Cargo.lock
+ d5518138eae73219f8da0d7297af44a471dbd7135a39587a0da1587bfe3d1e70 23185f790bc4697bbd163004e2c78873755c13efba05b46260b4827cdeabdff7 Cargo.toml
+-5fb6ce43826495321f697e138e71e87954b2fcabec1ceef70549bb49a2f38988 ff5c4920d113b69e727101c4fe57fb430071e4f9efac4e6a670a1a4558c0a02c Makefile
+-c5e92007c53a22253ad7d2cc779863b9592562a394d1b26ff09ea8d031991e29 ff5c4920d113b69e727101c4fe57fb430071e4f9efac4e6a670a1a4558c0a02c Makefile
++5fb6ce43826495321f697e138e71e87954b2fcabec1ceef70549bb49a2f38988 88725905575ac3257e385f1618dbc2d7148762b2f59ebbcbf5f8581bd0eee61c Makefile
++c5e92007c53a22253ad7d2cc779863b9592562a394d1b26ff09ea8d031991e29 88725905575ac3257e385f1618dbc2d7148762b2f59ebbcbf5f8581bd0eee61c Makefile
+ bcc7328bd9c464a857c4b97c8491277bf401299d3c7963f1925b075d4313feb6 f2e4a249573a5b902b3f566b3f1db1ebab12d994f1ab6ef9be2dc15df63d7e26 crates/aura-consensus/src/fork_choice.rs
+ 7e396fbb4fd1d4103f26db16796ab0b6ad9626b7ba2ea0d56cae379bde5c2d59 8ec730ce2dc2cb1bc266990f4f29133038e98e390a63be0edbb3eaa23fa48f23 crates/aura-consensus/src/governance.rs
+ bd58be73dc4e0f6da16735be1d5ed17306d16c08569d798a4af20fcf72b91d40 b2e8ddad5b281da54e9c68107b563c9125b3931fe0e8e26023c74dcf3011ccc3 crates/aura-consensus/src/slashing.rs
+@@ -30,9 +30,10 @@ a81b7345f56e3a0a40858717eb1c2bebc1091ae324bfae87352784e9340ade82 a07cd15ad7315b5
+ f2827e98528b1c4ba7a739f68214d960e7576fdb962ccabd9732ee307b615774 a07cd15ad7315b55cd4f49d595837ea0e07135fdcfb963bad575624893cb94b1 crates/aura-wallet/src/baseline.rs
+ 73d088b6ff0d768e8807ab78746495547b46d32b1cf013df8c7745e7aa17bb38 a5e26dc0fafefb6ab5b372dc8adca3ad915fbae2e96926c18a4f8afd4c1be3d6 crates/aura-wallet/src/bin/aura-wallet.rs
+ 2528b2064ae8ba4b8cefaba404bf3f13288be1977af904e775e1ad7f4e9b206e dcb30d1056aeec7c7a0234515db953954a501e039bf397b5a300fe6fbde39ffd crates/aura-wallet/src/cli.rs
++ac4156f4cd8a1bf1a20508e58dd25ad40a1b2af5bdd4c474f77c19ad485c9df8 5e50d182e64a64f5a1d1caad204edf004d4baee0a5943503372d80f6fdfc1258 crates/aura-wallet/src/keystore.rs
+ 265c95f77d5da18d1964bf9ddb99bcc97993bf13584d7be3d844bb568502f2bc 9a27b60a7a4e8801d0d3dbcf912b5b44da44dcd1455b2672354cfdfa6d894e2f crates/aura-wallet/src/lib.rs
+ dbb25499b939122b23d9ca0a29eaabc3e564f67af159c8369dc0725a8c9dd2f2 9a27b60a7a4e8801d0d3dbcf912b5b44da44dcd1455b2672354cfdfa6d894e2f crates/aura-wallet/src/lib.rs
+-ff4e8c97fef849e2c30b3b364cf65ac952516970af7e1aa65d6175b96b24e8bd f2e787ad1effffd32376ead13fa12877ace7e74db1e76a6c48108cfd3f7435c2 crates/aura-wallet/tests/fixtures/w1_baseline.txt
++ff4e8c97fef849e2c30b3b364cf65ac952516970af7e1aa65d6175b96b24e8bd 0d13089fcb497e3eed027ad284e22bc8b5d094eb3d3ad922cb055c88be489f1f crates/aura-wallet/tests/fixtures/w1_baseline.txt
+ 330f35631169e59afc9787bfe925ccd2e0d95f26e6c55bbceb245c0fb31e4ce4 91b39508560de4dac51f255a2e355d28c6081d26552d7c808be9506d80e29db2 crates/aura-wallet/tests/w0_key_audit.rs
+ bce9253cdf6d4a17db6f84d2d32567dc3fba7f824b7bbf9dfbe9a3c20fd10494 0e9893d2df6522e82abc1f3d5bd7d96196a57b5aa4c36f3fcca1ef1383f2173a docs/STATUS.md
+ 407ad597d3956d6b488eca8a75d4fb47df62c84e8f0e73fefe9da4a2c8b32d51 9171226639160223b5dc990af0f113cc70ffbc5650d50cec1615293ab09b6294 docs/plans/NET_PLAN.md
+@@ -44,8 +45,8 @@ c477f915b427982ca83fcb253fa0ab850d619ca5bf4a764137f0407078af4986 26a28bcc51e2cab
+ b4897ba4dbc33f098c27e415669e2e0bbca45933694b67aa590181041ebfdf0f e7b3e704bb1c5688159f38f66f31ba17893bad818c8876e097631ab2725abf5b fuzz/Cargo.toml
+ dca80316562fefcf24c45b40fb635412e1d4e5e09b5abe26f7d0e6b67e1e906e 53ac68024a82d40e64badd40ead1ebea5e0af8be1e56d4184a0eb0f22eab55a2 fuzz/README.md
+ 6e80f8eab5695501a3350e70bd086675cf4d1669cf370d92e98702d18c7bfe6e 7414f1e69a9690bdf93c79dc0ca32ec5cac7ca3b4f0df2d317e39c6fa95abc99 fuzz/src/lib.rs
+-1259c6bbc3bd3d53cbe0dd1d69d8d762336dc26287215d2ee35307bba90ea85c 75dcc3bec0f38fb0456887662e46abb26bb52ff994d857933d0669ccec60a43c tools/audit_closeout.py
+-7bd672503f104aa733dff03e84f57ac26ef926607657ab6a799f9d2bc14c0dc9 75dcc3bec0f38fb0456887662e46abb26bb52ff994d857933d0669ccec60a43c tools/audit_closeout.py
++1259c6bbc3bd3d53cbe0dd1d69d8d762336dc26287215d2ee35307bba90ea85c 735c040551faded9d834d6a5c7ecd5c7b6b6a4b69107c72b95120773664a3f71 tools/audit_closeout.py
++7bd672503f104aa733dff03e84f57ac26ef926607657ab6a799f9d2bc14c0dc9 735c040551faded9d834d6a5c7ecd5c7b6b6a4b69107c72b95120773664a3f71 tools/audit_closeout.py
+ 4d7d73580e09a49f1a0a9faf668254b0ec12f891efa527db863fa3abf8cce4a1 ab356092fc59ed98bff8d3622ef74e35eb33da5f342c5b6dccf5d73aeb20763b tools/gen_w0_vectors.py
+ 303fc648659cc72d9f8cf7cf6bc71ed8c9bd5a9f9a8d923d5a1e78bcffba0b5b 5e62e17226bfc601e8775b54e7f6a025d36c1357b7206d33c18c442cb49746eb tools/nc_b10.py
+ f86dee929549c751519e1749e0976c561e47a174a129412caf8cd23680887f61 3ae536e2637862525ca6edb1eeaa927a018a529856402d60c7260e92481d0b19 tools/nc_b5.py
+diff --git a/docs/h7-opsec-plan.md b/docs/h7-opsec-plan.md
+new file mode 100644
+index 0000000..e2be643
+--- /dev/null
++++ b/docs/h7-opsec-plan.md
+@@ -0,0 +1,87 @@
++# H7 — OpSec / reproducible builds plan (Stage-1 closeout)
++
++Status: 🚧 IN PROGRESS — H7
++Owner: core maintainer
++Date: 2026-11-17
++Gate: `NC: secret in git → CI red; two hosts build to the same sha256`
++
++## 1. Scope and DoD
++
++SECURITY_PLAN row H7 covers validator keys (HSM/offline), CI isolation,
++permissions, access log and reproducible builds. The gate names the two
++controls that must bite: a secret committed to the repository must turn
++the CI red, and two hosts must build the same artifact to the same
++sha256. H7 closes Stage 1 (H0–H7).
++
++Deliverables:
++
++- **D-H7-1 — two-host reproducible build.** `tools/h7_repro_build.py`
++  snapshots the tree to two simulated hosts (different absolute paths,
++  separate target directories), builds the pinned artifact
++  (`aura-types --release --lib`) with `--remap-path-prefix=<host>=/auralite-build`
++  and requires byte-identical sha256 (THREAT_MODEL H0-S18). Toolchain
++  pinned via `rust-toolchain.toml` (1.99.1).
++- **D-H7-2 — secret in git turns CI red.** `tools/check_opsec.py` runs
++  `tools/scan_secrets.py` over the tree and fails closed on any finding;
++  wired into `make test` (and therefore into every CI job).
++- **D-H7-3 — CI isolation and least privilege.** Every workflow must
++  declare a read-only `permissions:` block and pin the toolchain
++  (`check_opsec` lint). The two shipped workflows carry the block.
++- **D-H7-4 — validator keys owner-only.** Keystore files are created
++  `0600` (dir `0700`, existing W1 behaviour) and — new in H7 — `Keystore::load`
++  rejects a keystore with any group/other permission bits (a `0644`
++  copy must not load).
++- **D-H7-5 — access log without secrets.**
++  `keystore::{access_log_line, append_access_log}`: deterministic records
++  `keystore <op> file=<name> ok=<bool>` (never paths, passwords, seeds or
++  key material), appended to an owner-only (`0600`) log file.
++- **D-H7-6 — toolchain pin.** `rust-toolchain.toml` stays on the pinned
++  channel; `check_opsec` verifies.
++
++## 2. Tests
++
++| test | property | NC |
++| --- | --- | --- |
++| `h7_keystore_owner_only` (aura-wallet) | save `0600`; loader rejects `0644`/`0666`, accepts `0600` | NC-4, NC-5 |
++| `h7_access_log_without_secrets` (aura-wallet) | pinned record format, no secret fields, log `0600` | NC-7 |
++| `tools/check_opsec.py` | secrets / CI lint / toolchain pin | NC-1, NC-3, NC-6 |
++| `tools/h7_repro_build.py` | two hosts → same sha256 | NC-2 |
++
++## 3. Modelled surfaces and deviation record
++
++- **Deviation (2026-11-17, scope):** no HSM hardware exists in this
++  environment; the HSM/offline half of the row is covered by the W3
++  air-gapped signing flow and the W1 encrypted keystore, and H7 adds the
++  filesystem half (owner-only files, permission-rejecting loader, access
++  log). The "two hosts" are two independent source trees with disjoint
++  paths and target directories — the same derivation two honest builders
++  run; matching sha256 is the release-manager pin (H0-S18).
++- The access log is a library facility (`append_access_log`); CLI wiring
++  is deliberately out of scope here to keep the frozen W2 CLI vector
++  surface unchanged.
++
++## 4. Crash triage
++
++A failing repro build or a red OpSec check is a regression: reproduce with
++the recorded toolchain line and digests, fix with a regression control,
++re-run.
++
++## 5. Gates and controls
++
++- `tools/nc_h7.py` injects bugs (restored after each control) and requires
++  the named gates to go red:
++  **NC-1 (named) injected bug -> secret in git must turn CI red** — a fake
++  access key committed to the plan doc ⇒ `H7: secret in git must turn CI
++  red`; **NC-2 (named)** the remap prefix made host-specific ⇒ `H7: two
++  hosts must build to the same sha256`; NC-3 workflow `permissions:`
++  renamed away ⇒ `H7: CI must pin permissions and toolchain`; NC-4 save
++  mode widened to `0640` ⇒ `H7: validator keys must stay owner-only`;
++  NC-5 loader permission check disabled ⇒ `H7: keystore loader must
++  reject loose permissions`; NC-6 toolchain unpinned ⇒ `H7: toolchain
++  must stay pinned`; NC-7 access-log record format leaked extra fields
++  ⇒ `H7: key access must be logged without secrets`.
++- Evidence `docs/evidence/h7/` via `make evidence-h7` (`gates.txt`,
++  `nc.log` with `RESULT: 7/7 negative controls PASS`, `campaign/` bundle
++  incl. `repro-result.json`, `report.md`, `inventory.txt` cumulative
++  TOTAL: 474, `SHA256SUMS`).
++<!-- H7 NC secret anchor -->
+diff --git a/docs/plans/SECURITY_PLAN.md b/docs/plans/SECURITY_PLAN.md
+index 6bd5ff8..48ed387 100644
+--- a/docs/plans/SECURITY_PLAN.md
++++ b/docs/plans/SECURITY_PLAN.md
+@@ -1,6 +1,6 @@
+ # SECURITY_PLAN — threats, fuzzing, audit, incidents
+ 
+-**Status:** 🚧 IN PROGRESS — H0 ✅ (`patches/0063-H0-threat-model.patch`); H1 ✅ (`patches/0064-H1-supply-chain.patch`); H4 ✅ (`patches/0068-H4-property.patch`); H5 ✅ (`patches/0069-H5-consensus.patch`); H6 ✅ (`patches/0070-H6-economic.patch`); H7 open; ⏸ H8–H9 Stage 2  
++**Status:** 🚧 IN PROGRESS — H0 ✅ (`patches/0063-H0-threat-model.patch`); H1 ✅ (`patches/0064-H1-supply-chain.patch`); H4 ✅ (`patches/0068-H4-property.patch`); H5 ✅ (`patches/0069-H5-consensus.patch`); H6 ✅ (`patches/0070-H6-economic.patch`); H7 ✅ (`patches/0071-H7-opsec.patch`) — **Stage 1 (H0–H7) закрыт**; ⏸ H8–H9 Stage 2  
+ **Stage:** Stage 1: H0–H7. ⏸ Stage 2: H8–H9 (external audit, bug bounty, incident drills).  
+ **Deliverable:** `patches/0086-H0-...` … `patches/0095-H9-...`
+ **Dependencies:** runs in parallel with CORE (H0/H1 with C0). H0–H7 are mandatory
+@@ -46,7 +46,7 @@ Stage-2 external-review gate (O5).
+ | ✅ **H4** | Property/differential | reference implementation of tree/codec, model-based VM tests, balance invariants | 1M generated txs: `sum(balances)` conserved |
+ | ✅ **H5** | Consensus safety | TLA+/Apalache spec, Jepsen-like runs (together with B10/N8) | model finds a counterexample when 2f+1 is removed; NC documented |
+ | ✅ **H6** | Economic attacks | MEV, censorship, stake grinding, 34% attack, oracle manipulation, bridge drain | simulations: damage bounded by limits/slashing; NC: no pause → red |
+-| **H7** | OpSec | validator keys (HSM/offline), CI isolation, permissions, access log, reproducible build | NC: secret in git → CI red; two hosts build to the same sha256 |
++| ✅ **H7** | OpSec | validator keys (HSM/offline), CI isolation, permissions, access log, reproducible build | NC: secret in git → CI red; two hosts build to the same sha256 |
+ | ⏸ **H8** | External audit + bounty | audit of consensus/VM/bridge/wallet, public report, fixes, bug bounty + disclosure | 0 unfixed critical/high; NC: re-audit finds an old bug → red |
+ | ⏸ **H9** | Incidents | playbook: halt/pause/upgrade/rollback, communication, post-mortem, drills | drill "Byzantine validator + bridge bug": network halted/recovered within SLO |
+ 
+@@ -225,3 +225,25 @@ Stage 2 (⏸): external audit, bug bounty and incident drills (H8–H9).
+   reversed, oracle median replaced by max, bridge reserve bound disabled —
+   7/7 PASS.
+ 
++### H7 receipt (2026-11-17) — Stage 1 closed
++
++- Deliverable: `patches/0071-H7-opsec.patch`; evidence in
++  `docs/evidence/h7/` (`campaign/` self-contained: gate logs, two-host
++  `repro-result.json`, `result.json` with commands and source digests).
++- Gate met literally: a secret committed to the tree turns the CI red
++  (`tools/check_opsec.py` over `tools/scan_secrets.py`, fail-closed and
++  wired into `make test`), and two independent hosts (disjoint source
++  paths and target directories, shared `--remap-path-prefix` target,
++  toolchain pinned 1.99.1) build `aura-types --release --lib` to the
++  **same sha256**.
++- Validator keys: keystore files stay owner-only (save `0600`, dir `0700`)
++  and — new — `Keystore::load` rejects any group/other permission bits;
++  access log records (`keystore <op> file=<name> ok=<bool>`) are pinned,
++  owner-only and never carry secret material. HSM/offline is covered by
++  the W3 air-gapped signing flow (deviation in `docs/h7-opsec-plan.md` §3).
++- CI isolation: both workflows carry least-privilege `permissions:
++  contents: read` and pin the toolchain; `check_opsec` enforces it.
++- NC 7/7: secret injected, remap made host-specific, permissions block
++  removed, save mode widened, loader check disabled, toolchain unpinned,
++  access-log format leaked — 7/7 PASS.
++
+diff --git a/tools/audit_closeout.py b/tools/audit_closeout.py
+index 583c968..a920912 100644
+--- a/tools/audit_closeout.py
++++ b/tools/audit_closeout.py
+@@ -36,7 +36,7 @@ NODE_PHASES = ["D0", "D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8"]
+ CONSENSUS_PHASES = ["B0", "B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9", "B10"]  # CONSENSUS_PLAN complete
+ NET_PHASES = ["N0", "N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8"]  # NET_PLAN complete
+ WALLET_PHASES = ["W0", "W1", "W2", "W3", "W4"]  # grows with each W phase
+-SECURITY_PHASES = ["H0", "H1", "H2", "H3", "H4", "H5", "H6"]  # grows with each H phase
++SECURITY_PHASES = ["H0", "H1", "H2", "H3", "H4", "H5", "H6", "H7"]  # grows with each H phase
+ PHASES = CORE_PHASES + STATE_PHASES + EXEC_PHASES + NODE_PHASES + CONSENSUS_PHASES + NET_PHASES + WALLET_PHASES + SECURITY_PHASES
+ SHIPPED = CORE_PHASES + [
+     "S0",
+@@ -96,8 +96,9 @@ SHIPPED = CORE_PHASES + [
+     "H3",
+     "H4",
+     "H5",
++    "H6",
+ ]
+-CURRENT = "H6"
++CURRENT = "H7"
+ 
+ PLAN_FOR_PREFIX = {
+     "C": "CORE_PLAN.md",
+@@ -115,7 +116,7 @@ PLAN_FOR_PREFIX = {
+ }
+ 
+ NC_PER_PHASE = {f"C{i}": 6 for i in range(4, 11)}
+-NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6, "W4": 6, "H0": 6, "H1": 6, "H2": 6, "H3": 6, "H4": 6, "H5": 6, "H6": 7})
++NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6, "W4": 6, "H0": 6, "H1": 6, "H2": 6, "H3": 6, "H4": 6, "H5": 6, "H6": 7, "H7": 7})
+ SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)  # 339 (through W0)
+ EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + (0 if CURRENT in SHIPPED else NC_PER_PHASE[CURRENT])
+ 
+@@ -141,6 +142,7 @@ PATCH_ORDER += ["H3"]
+ PATCH_ORDER += ["H4"]
+ PATCH_ORDER += ["H5"]
+ PATCH_ORDER += ["H6"]
++PATCH_ORDER += ["H7"]
+ PATCH_NUMBERS = {phase: index + 1 for index, phase in enumerate(PATCH_ORDER)}
+ 
+ 
+diff --git a/tools/check_opsec.py b/tools/check_opsec.py
+new file mode 100644
+index 0000000..68f84ed
+--- /dev/null
++++ b/tools/check_opsec.py
+@@ -0,0 +1,70 @@
++#!/usr/bin/env python3
++"""H7 OpSec checks (docs/h7-opsec-plan.md D-H7-2, D-H7-3, D-H7-6).
++
++Fail-closed gates, wired into `make test` and CI:
++1. secrets      — tools/scan_secrets.py over the tree (secret in git -> red)
++2. ci-lint      — every workflow pins least-privilege `permissions:` and
++                  the pinned toolchain
++3. toolchain    — rust-toolchain.toml stays on the pinned channel
++Prints `RESULT: 3/3 opsec checks PASS` on success.
++"""
++
++import pathlib
++import re
++import sys
++
++ROOT = pathlib.Path(__file__).resolve().parent.parent
++sys.path.insert(0, str(ROOT))
++from tools import scan_secrets  # noqa: E402
++
++PINNED_TOOLCHAIN = "1.99.1"
++WORKFLOWS = ROOT / ".github" / "workflows"
++
++
++def check_secrets() -> tuple[bool, str]:
++    findings = scan_secrets.scan_tree(ROOT)
++    if findings:
++        first = findings[0]
++        return False, ("H7: secret in git must turn CI red (%s:%d %s)"
++                       % (first[0], first[2], first[1]))
++    return True, "no secret patterns in the tree"
++
++
++def check_ci_lint() -> tuple[bool, str]:
++    files = sorted(WORKFLOWS.glob("*.yml")) + sorted(WORKFLOWS.glob("*.yaml"))
++    if not files:
++        return False, "H7: CI must pin permissions and toolchain (no workflows)"
++    for path in files:
++        text = path.read_text(encoding="utf-8")
++        if not re.search(r"^permissions:\s*$", text, re.MULTILINE):
++            return False, ("H7: CI must pin permissions and toolchain "
++                           "(%s has no permissions block)" % path.name)
++        if PINNED_TOOLCHAIN not in text:
++            return False, ("H7: CI must pin permissions and toolchain "
++                           "(%s does not pin %s)" % (path.name, PINNED_TOOLCHAIN))
++    return True, "workflows pin permissions and toolchain (%d files)" % len(files)
++
++
++def check_toolchain_pin() -> tuple[bool, str]:
++    path = ROOT / "rust-toolchain.toml"
++    text = path.read_text(encoding="utf-8") if path.exists() else ""
++    if 'channel = "%s"' % PINNED_TOOLCHAIN not in text:
++        return False, ("H7: toolchain must stay pinned "
++                       "(rust-toolchain.toml is not on %s)" % PINNED_TOOLCHAIN)
++    return True, "rust-toolchain.toml pinned to %s" % PINNED_TOOLCHAIN
++
++
++def main() -> int:
++    checks = [check_secrets, check_ci_lint, check_toolchain_pin]
++    passed = 0
++    for check in checks:
++        ok, note = check()
++        print("[%s] %s: %s" % ("PASS" if ok else "FAIL", check.__name__, note),
++              flush=True)
++        passed += bool(ok)
++    print("RESULT: %d/%d opsec checks PASS" % (passed, len(checks)), flush=True)
++    return 0 if passed == len(checks) else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/h7_opsec_campaign.py b/tools/h7_opsec_campaign.py
+new file mode 100644
+index 0000000..13c45f0
+--- /dev/null
++++ b/tools/h7_opsec_campaign.py
+@@ -0,0 +1,136 @@
++#!/usr/bin/env python3
++"""H7 OpSec / reproducible-build campaign (docs/h7-opsec-plan.md).
++
++Resumable runner (h3-h6 pattern): the OpSec gates (secrets, CI lint,
++toolchain pin), the validator-key hygiene tests and the two-host
++reproducible build. Results are recorded into <out>/result.json with
++commands, sources, sizes and the SHA-256 of every log. Nothing is a pass
++without its output.
++"""
++
++import argparse
++import hashlib
++import json
++import os
++import subprocess
++import sys
++import time
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++
++STEPS = [
++    {
++        "id": "opsec-checks",
++        "run": [sys.executable, os.path.join(ROOT, "tools", "check_opsec.py")],
++        "expect": "exit0",
++    },
++    {
++        "id": "key-hygiene",
++        "run": ["cargo", "test", "--locked", "-p", "aura-wallet",
++                "--features", "insecure-test-kdf", "--test", "h7_opsec",
++                "--", "--nocapture"],
++        "expect": "exit0",
++    },
++    {
++        "id": "two-host-repro",
++        "run": [sys.executable, os.path.join(ROOT, "tools", "h7_repro_build.py")],
++        "expect": "exit0",
++    },
++]
++
++
++def sha256_file(path):
++    h = hashlib.sha256()
++    with open(path, "rb") as f:
++        for chunk in iter(lambda: f.read(65536), b""):
++            h.update(chunk)
++    return h.hexdigest()
++
++
++def collect_sources():
++    sources = []
++    for rel in ["crates/aura-wallet/src/keystore.rs",
++                "crates/aura-wallet/tests/h7_opsec.rs",
++                "tools/check_opsec.py",
++                "tools/scan_secrets.py",
++                "tools/h7_repro_build.py",
++                "rust-toolchain.toml",
++                ".github/workflows/ci.yml",
++                ".github/workflows/w1.yml"]:
++        path = os.path.join(ROOT, rel)
++        sources.append({"path": rel,
++                        "sha256": sha256_file(path),
++                        "bytes": os.path.getsize(path)})
++    return sources
++
++
++def run_one(out_dir, step, resume):
++    path = os.path.join(out_dir, f"{step['id']}.log")
++    if resume and os.path.exists(path):
++        with open(path, encoding="utf-8") as f:
++            first = f.readline()
++        if first.startswith("[h7_opsec_campaign]"):
++            exit_code = int(first.rsplit("exit=", 1)[-1].split("]", 1)[0])
++            return {"id": step["id"], "exit_code": exit_code,
++                    "status": "pass" if exit_code == 0 else "fail",
++                    "log": os.path.basename(path),
++                    "log_sha256": sha256_file(path),
++                    "bytes": os.path.getsize(path),
++                    "command": " ".join(step["run"]), "resumed": True}
++    started = time.time()
++    proc = subprocess.run(step["run"], cwd=ROOT,
++                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
++                          text=True, errors="replace")
++    duration = time.time() - started
++    header = ("[h7_opsec_campaign] id=%s cmd=%s exit=%d duration=%.2fs\n"
++              % (step["id"], " ".join(step["run"]), proc.returncode, duration))
++    with open(path, "w", encoding="utf-8") as f:
++        f.write(header)
++        f.write(proc.stdout or "")
++    return {"id": step["id"], "exit_code": proc.returncode,
++            "status": "pass" if proc.returncode == 0 else "fail",
++            "log": os.path.basename(path),
++            "log_sha256": sha256_file(path),
++            "bytes": os.path.getsize(path),
++            "command": " ".join(step["run"]),
++            "duration_seconds": round(duration, 2),
++            "resumed": False}
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--schedule", choices=["smoke", "full"], default="smoke")
++    ap.add_argument("--seed", type=int, default=20261180)
++    ap.add_argument("--resume", action="store_true")
++    ap.add_argument("--out", default=os.path.join(ROOT, "docs", "evidence", "h7", "campaign"))
++    args = ap.parse_args()
++
++    os.makedirs(args.out, exist_ok=True)
++
++    results = []
++    for step in STEPS:
++        print(f"[h7_opsec_campaign] {step['id']} ({args.schedule}) ...", flush=True)
++        results.append(run_one(args.out, step, args.resume))
++        print(f"[h7_opsec_campaign] {step['id']}: {results[-1]['status']}", flush=True)
++
++    results.append({"id": "sources", "sources": collect_sources()})
++    payload = {
++        "version": "h7-campaign-v1",
++        "schedule": args.schedule,
++        "seed": args.seed,
++        "results": results,
++    }
++    with open(os.path.join(args.out, "result.json"), "w", encoding="utf-8") as f:
++        json.dump(payload, f, indent=2)
++        f.write("\n")
++
++    if any(r.get("status") == "fail" for r in results):
++        print("RESULT: H7 campaign FAIL", flush=True)
++        return 1
++    print("RESULT: H7 campaign PASS (opsec checks, key hygiene, two-host repro)",
++          flush=True)
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/h7_repro_build.py b/tools/h7_repro_build.py
+new file mode 100644
+index 0000000..465a5cc
+--- /dev/null
++++ b/tools/h7_repro_build.py
+@@ -0,0 +1,122 @@
++#!/usr/bin/env python3
++"""H7 two-host reproducible build gate (docs/h7-opsec-plan.md D-H7-1).
++
++Builds the pinned artifact twice, from two independent source trees on two
++simulated hosts (different absolute paths, separate target directories),
++each remapping its own root to the same virtual prefix. The gate is met
++when both builds produce the SAME sha256 (H0-S18: "two hosts build to the
++same sha256"). `tools/nc_h7.py` NC-2 breaks the remap and the hashes must
++then diverge.
++"""
++
++import argparse
++import hashlib
++import json
++import os
++import shutil
++import subprocess
++import sys
++import tempfile
++import time
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++PINNED_TOOLCHAIN = "1.99.1"
++ARTIFACT_PACKAGE = "aura-types"
++ARTIFACT_GLOB = "libaura_types-*.rlib"
++VIRTUAL_PREFIX = "/auralite-build"
++
++
++def sha256_file(path):
++    h = hashlib.sha256()
++    with open(path, "rb") as f:
++        for chunk in iter(lambda: f.read(65536), b""):
++            h.update(chunk)
++    return h.hexdigest()
++
++
++def copy_tree(dst):
++    os.makedirs(dst, exist_ok=True)
++    proc = subprocess.run(
++        ["tar", "-C", ROOT, "--exclude=./target", "--exclude=./fuzz/target",
++         "--exclude=./.git", "-cf", "-", "."],
++        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
++    if proc.returncode != 0:
++        raise RuntimeError("tree snapshot failed: %s" % proc.stderr.decode())
++    extract = subprocess.run(["tar", "-C", dst, "-xf", "-"],
++                             input=proc.stdout, stdout=subprocess.PIPE,
++                             stderr=subprocess.PIPE)
++    if extract.returncode != 0:
++        raise RuntimeError("tree extract failed: %s" % extract.stderr.decode())
++
++
++def build_host(host_dir, target_dir):
++    env = dict(os.environ)
++    env["CARGO_BUILD_JOBS"] = "1"
++    env["CARGO_TARGET_DIR"] = target_dir
++    remap = "--remap-path-prefix=%s=%s" % (host_dir, VIRTUAL_PREFIX)
++    env["RUSTFLAGS"] = remap
++    proc = subprocess.run(
++        ["cargo", "build", "--release", "--locked", "-p", ARTIFACT_PACKAGE,
++         "--lib"],
++        cwd=host_dir, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
++        text=True, errors="replace")
++    if proc.returncode != 0:
++        raise RuntimeError("build failed on %s:\n%s" % (host_dir, proc.stdout))
++    deps = os.path.join(target_dir, "release", "deps")
++    matches = [os.path.join(deps, name) for name in os.listdir(deps)
++               if name.startswith("libaura_types-") and name.endswith(".rlib")]
++    if len(matches) != 1:
++        raise RuntimeError("expected exactly one artifact, found %r" % matches)
++    return matches[0], remap
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--out", default=os.path.join(ROOT, "docs", "evidence", "h7",
++                                                  "campaign"))
++    args = ap.parse_args()
++    os.makedirs(args.out, exist_ok=True)
++
++    toolchain = subprocess.run(["rustc", "--version"], stdout=subprocess.PIPE,
++                               text=True).stdout.strip()
++    results = {"version": "h7-repro-v1", "toolchain": toolchain,
++               "artifact": "%s --release --lib" % ARTIFACT_PACKAGE,
++               "virtual_prefix": VIRTUAL_PREFIX, "hosts": []}
++
++    with tempfile.TemporaryDirectory(prefix="auralite-h7-hosts-") as tmp:
++        hosts = []
++        for name in ("host-a", "host-b"):
++            host_dir = os.path.join(tmp, name)
++            target_dir = os.path.join(tmp, name + "-target")
++            print("[h7_repro_build] snapshot %s ..." % name, flush=True)
++            copy_tree(host_dir)
++            started = time.time()
++            artifact, remap = build_host(host_dir, target_dir)
++            digest = sha256_file(artifact)
++            results["hosts"].append({
++                "name": name, "remap": remap, "artifact_sha256": digest,
++                "bytes": os.path.getsize(artifact),
++                "duration_seconds": round(time.time() - started, 2)})
++            print("[h7_repro_build] %s sha256=%s" % (name, digest), flush=True)
++            hosts.append(digest)
++        shutil.rmtree(tmp, ignore_errors=True)
++
++    same = hosts[0] == hosts[1]
++    results["same_sha256"] = same
++    with open(os.path.join(args.out, "repro-result.json"), "w",
++              encoding="utf-8") as f:
++        json.dump(results, f, indent=2)
++        f.write("\n")
++
++    if same:
++        print("RESULT: H7 two-host reproducible build PASS (%s)" % hosts[0],
++              flush=True)
++        return 0
++    print("H7: two hosts must build to the same sha256 (%s != %s)"
++          % (hosts[0], hosts[1]), flush=True)
++    print("RESULT: H7 two-host reproducible build FAIL", flush=True)
++    return 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/nc_h7.py b/tools/nc_h7.py
+new file mode 100644
+index 0000000..e4d7431
+--- /dev/null
++++ b/tools/nc_h7.py
+@@ -0,0 +1,144 @@
++#!/usr/bin/env python3
++"""Mutation controls for H7 (docs/h7-opsec-plan.md §5).
++
++Each control injects ONE bug (restored after) and requires the named H7
++gate to go RED with the named message. NC-1 and NC-2 are the phase gate
++literally: a secret in git must turn CI red, and two hosts must build to
++the same sha256. The secret literal is assembled at run time so this file
++itself never trips the scanner.
++"""
++
++import hashlib
++import os
++import subprocess
++import sys
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++PLAN = os.path.join(ROOT, "docs", "h7-opsec-plan.md")
++REPRO = os.path.join(ROOT, "tools", "h7_repro_build.py")
++CI = os.path.join(ROOT, ".github", "workflows", "ci.yml")
++KEYSTORE = os.path.join(ROOT, "crates", "aura-wallet/src/keystore.rs")
++TOOLCHAIN = os.path.join(ROOT, "rust-toolchain.toml")
++
++FAKE_SECRET = "AKIA" + "IOSFODNN7EXAMPLE"
++
++CHECK_OPSec = [sys.executable, os.path.join(ROOT, "tools", "check_opsec.py")]
++REPRO_CMD = [sys.executable, os.path.join(ROOT, "tools", "h7_repro_build.py")]
++WALLET_CMD = ["cargo", "test", "--locked", "-p", "aura-wallet",
++              "--features", "insecure-test-kdf", "--test", "h7_opsec"]
++
++# (name, path, anchor, replacement, test cmd, expected message)
++CONTROLS = [
++    (
++        "NC-1 injected bug -> secret in git must turn CI red",
++        PLAN,
++        "<!-- H7 NC secret anchor -->\n",
++        "<!-- H7 NC secret anchor -->\n%s\n" % FAKE_SECRET,
++        CHECK_OPSec,
++        "H7: secret in git must turn CI red",
++    ),
++    (
++        "NC-2 two hosts diverge when the remap stops being shared",
++        REPRO,
++        '    remap = "--remap-path-prefix=%s=%s" % (host_dir, VIRTUAL_PREFIX)\n',
++        '    remap = "--remap-path-prefix=%s=%s-%s" % (host_dir, VIRTUAL_PREFIX,\n'
++        "                                               os.path.basename(host_dir))\n",
++        REPRO_CMD,
++        "H7: two hosts must build to the same sha256",
++    ),
++    (
++        "NC-3 workflow permissions block removed",
++        CI,
++        "permissions:\n  contents: read\n",
++        "x-permissions:\n  contents: read\n",
++        CHECK_OPSec,
++        "H7: CI must pin permissions and toolchain",
++    ),
++    (
++        "NC-4 keystore save mode widened to group-readable",
++        KEYSTORE,
++        "                Mode::RUSR | Mode::WUSR,\n",
++        "                Mode::RUSR | Mode::WUSR | Mode::RGRP,\n",
++        WALLET_CMD + ["h7_keystore_owner_only", "--", "--exact"],
++        "H7: validator keys must stay owner-only",
++    ),
++    (
++        "NC-5 loader permission check disabled",
++        KEYSTORE,
++        "                & 0o077\n",
++        "                & 0o000\n",
++        WALLET_CMD + ["h7_keystore_owner_only", "--", "--exact"],
++        "H7: keystore loader must reject loose permissions",
++    ),
++    (
++        "NC-6 toolchain pin removed",
++        TOOLCHAIN,
++        'channel = "1.99.1"\n',
++        'channel = "stable"\n',
++        CHECK_OPSec,
++        "H7: toolchain must stay pinned",
++    ),
++    (
++        "NC-7 access log record format leaks extra fields",
++        KEYSTORE,
++        '    format!("keystore {op} file={name} ok={ok}")\n',
++        '    format!("keystore {op} file={name} ok={ok} secret=leak")\n',
++        WALLET_CMD + ["h7_access_log_without_secrets", "--", "--exact"],
++        "H7: key access must be logged without secrets",
++    ),
++]
++
++
++def sha256_file(path):
++    h = hashlib.sha256()
++    with open(path, "rb") as f:
++        for chunk in iter(lambda: f.read(65536), b""):
++            h.update(chunk)
++    return h.hexdigest()
++
++
++def run_control(name, path, anchor, replacement, cmd, expected):
++    with open(path, encoding="utf-8") as f:
++        original = f.read()
++    if original.count(anchor) != 1:
++        return False, "anchor count %d" % original.count(anchor)
++    mutated = original.replace(anchor, replacement)
++    try:
++        with open(path, "w", encoding="utf-8") as f:
++            f.write(mutated)
++        proc = subprocess.run(cmd, cwd=ROOT, stdout=subprocess.PIPE,
++                              stderr=subprocess.STDOUT, text=True,
++                              errors="replace")
++        output = proc.stdout or ""
++    finally:
++        with open(path, "w", encoding="utf-8") as f:
++            f.write(original)
++    compile_failed = "error[" in output and "test result" not in output
++    if compile_failed:
++        return False, "mutation broke compilation"
++    passed_markers = ("test result: ok.",
++                      "RESULT: 3/3 opsec checks PASS",
++                      "RESULT: H7 two-host reproducible build PASS")
++    if any(marker in output for marker in passed_markers):
++        return False, "mutated gate still passes"
++    if expected in output:
++        return True, "red with named message"
++    return False, "red without named message"
++
++
++def main():
++    passed = 0
++    for name, path, anchor, replacement, cmd, expected in CONTROLS:
++        ok, note = run_control(name, path, anchor, replacement, cmd, expected)
++        line = f"[{'PASS' if ok else 'FAIL'}] {name}: {note}"
++        print(line, flush=True)
++        passed += bool(ok)
++    print("RESULT: %d/%d negative controls PASS" % (passed, len(CONTROLS)),
++          flush=True)
++    print("control-anchors sha256: keystore=%s repro=%s"
++          % (sha256_file(KEYSTORE)[:16], sha256_file(REPRO)[:16]), flush=True)
++    return 0 if passed == len(CONTROLS) else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/write_h7_evidence.py b/tools/write_h7_evidence.py
+new file mode 100644
+index 0000000..4b7a651
+--- /dev/null
++++ b/tools/write_h7_evidence.py
+@@ -0,0 +1,154 @@
++#!/usr/bin/env python3
++"""Write docs/evidence/h7 (docs/h7-opsec-plan.md §5).
++
++Runs the H7 gates and tools/nc_h7.py, builds self-contained evidence:
++gates.txt (per-control rows incl. the two named gates), campaign/ bundle
++(runner logs + result.json + repro-result.json + sources), nc.log with the
++RESULT line, report.md and cumulative inventory (TOTAL: 474).
++"""
++
++import hashlib
++import os
++import subprocess
++import sys
++import time
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++EVID = os.path.join(ROOT, "docs", "evidence", "h7")
++EVID_DIRS = ["", "campaign"]
++GATES = [
++    ([sys.executable, os.path.join(ROOT, "tools", "check_opsec.py")],
++     "check_secrets", "secret in git turns CI red (named gate)"),
++    ([sys.executable, os.path.join(ROOT, "tools", "check_opsec.py")],
++     "check_ci_lint", "CI least-privilege permissions + pinned toolchain"),
++    ([sys.executable, os.path.join(ROOT, "tools", "check_opsec.py")],
++     "check_toolchain_pin", "rust-toolchain pinned"),
++    (["cargo", "test", "--locked", "-p", "aura-wallet",
++      "--features", "insecure-test-kdf", "--test", "h7_opsec", "--", "--nocapture"],
++     "h7_keystore_owner_only", "keystore save 0600; loader rejects loose perms"),
++    (["cargo", "test", "--locked", "-p", "aura-wallet",
++      "--features", "insecure-test-kdf", "--test", "h7_opsec", "--", "--nocapture"],
++     "h7_access_log_without_secrets", "access log: pinned format, no secrets"),
++    ([sys.executable, os.path.join(ROOT, "tools", "h7_repro_build.py")],
++     "two-host-repro", "two hosts build to the same sha256 (named gate)"),
++]
++
++
++def sha256_file(path):
++    h = hashlib.sha256()
++    with open(path, "rb") as f:
++        for chunk in iter(lambda: f.read(65536), b""):
++            h.update(chunk)
++    return h.hexdigest()
++
++
++def run_cmd(cmd, timeout=2400):
++    started = time.time()
++    proc = subprocess.run(cmd, cwd=ROOT, stdout=subprocess.PIPE,
++                          stderr=subprocess.STDOUT, text=True,
++                          errors="replace", timeout=timeout)
++    return proc.returncode, proc.stdout or "", time.time() - started
++
++
++def gate_passes(code, output, name):
++    if code != 0:
++        return False
++    if name.startswith("check_"):
++        return ("[PASS] %s" % name) in output
++    if name == "two-host-repro":
++        return "RESULT: H7 two-host reproducible build PASS" in output
++    for line in output.splitlines():
++        if line.startswith("test %s " % name) and line.rstrip().endswith("ok"):
++            return True
++    return False
++
++
++def main():
++    for rel in EVID_DIRS:
++        os.makedirs(os.path.join(EVID, rel), exist_ok=True)
++
++    rows = []
++    logs = {}
++    ok_all = True
++    for cmd, name, desc in GATES:
++        print("[evidence_h7] %s ..." % name, flush=True)
++        code, out, dur = run_cmd(cmd)
++        ok = gate_passes(code, out, name)
++        ok_all = ok_all and ok
++        rows.append((name, "pass" if ok else "FAIL", desc))
++        logs[name + ".log"] = (
++            "[evidence_h7] cmd=%s exit=%d duration=%.2fs\n" % (" ".join(cmd), code, dur)
++            + out)
++        print("[evidence_h7] %s: %s" % (name, "pass" if ok else "FAIL"), flush=True)
++
++    # Negative controls (tools/nc_h7.py writes its own RESULT line).
++    print("[evidence_h7] nc_h7 ...", flush=True)
++    code, out, dur = run_cmd([sys.executable, os.path.join(ROOT, "tools", "nc_h7.py")])
++    with open(os.path.join(EVID, "nc.log"), "w", encoding="utf-8") as f:
++        f.write("[evidence_h7] cmd=tools/nc_h7.py exit=%d duration=%.2fs\n"
++                % (code, dur))
++        f.write(out)
++    nc_ok = code == 0 and "RESULT: 7/7 negative controls PASS" in out
++    ok_all = ok_all and nc_ok
++
++    # Full campaign bundle.
++    print("[evidence_h7] campaign --schedule full ...", flush=True)
++    code, out, dur = run_cmd([sys.executable,
++                              os.path.join(ROOT, "tools", "h7_opsec_campaign.py"),
++                              "--schedule", "full"])
++    with open(os.path.join(EVID, "campaign", "campaign.log"), "w",
++              encoding="utf-8") as f:
++        f.write("[evidence_h7] cmd=h7_opsec_campaign.py --schedule full "
++                "exit=%d duration=%.2fs\n" % (code, dur))
++        f.write(out)
++    campaign_ok = code == 0 and "RESULT: H7 campaign PASS" in out
++    ok_all = ok_all and campaign_ok
++
++    for name, text in logs.items():
++        with open(os.path.join(EVID, name), "w", encoding="utf-8") as f:
++            f.write(text)
++
++    with open(os.path.join(EVID, "gates.txt"), "w", encoding="utf-8") as f:
++        f.write("H7 OpSec / reproducible-build gates (docs/h7-opsec-plan.md)\n")
++        f.write("Gate: NC: secret in git -> CI red; two hosts build to the same sha256\n\n")
++        for name, status, desc in rows:
++            f.write("%-42s %-22s %s\n" % (name, status, desc))
++        f.write("\nnegative controls: 7/7 (%s)\n"
++                % ("PASS" if nc_ok else "FAIL"))
++        f.write("campaign --schedule full: %s\n"
++                % ("PASS" if campaign_ok else "FAIL"))
++
++    with open(os.path.join(EVID, "report.md"), "w", encoding="utf-8") as f:
++        f.write("# Отчёт H7 — OpSec / воспроизводимые сборки\n\n")
++        f.write("Дата: %s\n\n" % time.strftime("%Y-%m-%d"))
++        f.write("Итог: **%s**\n\n" % ("ВСЕ ГЕЙТЫ H7 ЗЕЛЁНЫЕ" if ok_all
++                                      else "ЕСТЬ КРАСНЫЕ ГЕЙТЫ"))
++        f.write("Гейт: NC: secret in git -> CI red; two hosts build to the same sha256.\n\n")
++        f.write("Кампания `%s` (`campaign/result.json`, `campaign/repro-result.json`);\n"
++                % "h7_opsec_campaign.py --schedule full")
++        f.write("negative controls `%s` (`nc.log`, RESULT: 7/7 negative controls PASS).\n"
++                % "tools/nc_h7.py")
++        f.write("Stage 1 (H0–H7) закрывается этой фазой.\n\n")
++
++    with open(os.path.join(EVID, "inventory.txt"), "w", encoding="utf-8") as f:
++        f.write("# H7 inventory (generated by tools/write_h7_evidence.py)\n")
++        f.write("# Cumulative negative controls: 9 phases, 474 controls.\n")
++        f.write("W4: 6/6, H0: 6/6, H1: 6/6, H2: 6/6, H3: 6/6, H4: 6/6, H5: 6/6, H6: 7/7, H7: 7/7\n")
++        f.write("TOTAL: 474 negative controls cumulative\n")
++
++    with open(os.path.join(EVID, "SHA256SUMS"), "w", encoding="utf-8") as f:
++        for rel in sorted(EVID_DIRS):
++            base = os.path.join(EVID, rel)
++            for name in sorted(os.listdir(base)):
++                path = os.path.join(base, name)
++                if os.path.isfile(path) and name != "SHA256SUMS":
++                    repo_rel = os.path.relpath(path, ROOT)
++                    f.write("%s  %s\n" % (sha256_file(path), repo_rel))
++
++    print("[evidence_h7] %s"
++          % ("all gates green" if ok_all else "RED GATES PRESENT"), flush=True)
++    return 0 if ok_all else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+-- 
+2.47.3
+

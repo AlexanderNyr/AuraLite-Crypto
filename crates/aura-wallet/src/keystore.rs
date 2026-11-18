@@ -868,6 +868,16 @@ impl Keystore {
         {
             return Err(KeystoreError::InvalidFormat);
         }
+        // H7: the keystore file itself must be owner-only before it is used.
+        #[cfg(unix)]
+        let mode_ok = {
+            use std::os::unix::fs::MetadataExt;
+            file.metadata()
+                .map_err(|e| KeystoreError::Io(e.to_string()))?
+                .mode()
+                & 0o077
+                == 0
+        };
         let mut bytes = Vec::new();
         file.take(MAX_KEYSTORE_BYTES + 1)
             .read_to_end(&mut bytes)
@@ -876,7 +886,12 @@ impl Keystore {
             return Err(KeystoreError::InvalidFormat);
         }
         let text = std::str::from_utf8(&bytes).map_err(|_| KeystoreError::InvalidFormat)?;
-        Self::from_json_str(text)
+        let keystore = Self::from_json_str(text)?;
+        #[cfg(unix)]
+        if !mode_ok {
+            return Err(KeystoreError::UnsafeDirectory);
+        }
+        Ok(keystore)
     }
 
     /// Filesystem-backed keystores are not implemented on Redox or ESP-IDF.
@@ -1398,4 +1413,39 @@ mod kdf_memory_tests {
         .unwrap();
         assert_eq!(&actual[..], &expected[..]);
     }
+}
+
+/// Deterministic access-log record for a keystore operation (H7).
+///
+/// The record contains only the operation name, the keystore file name
+/// (never its full path) and the outcome — never password, seed, mnemonic
+/// or key material.
+pub fn access_log_line(op: &str, keystore: &Path, ok: bool) -> String {
+    let name = keystore.file_name().and_then(|n| n.to_str()).unwrap_or("-");
+    format!("keystore {op} file={name} ok={ok}")
+}
+
+/// Append one [`access_log_line`] record to `log_path`.
+///
+/// The log file is created owner-only (`0600`) on unix, matching the
+/// keystore itself.
+pub fn append_access_log(log_path: &Path, line: &str) -> Result<(), KeystoreError> {
+    use std::io::Write;
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(log_path)
+            .map_err(|e| KeystoreError::Io(e.to_string()))?
+    };
+    #[cfg(not(unix))]
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .map_err(|e| KeystoreError::Io(e.to_string()))?;
+    writeln!(file, "{line}").map_err(|e| KeystoreError::Io(e.to_string()))
 }

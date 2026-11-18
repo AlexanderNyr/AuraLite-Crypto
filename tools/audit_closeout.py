@@ -36,7 +36,7 @@ NODE_PHASES = ["D0", "D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8"]            
 CONSENSUS_PHASES = ["B0", "B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9", "B10"]  # CONSENSUS_PLAN complete
 NET_PHASES = ["N0", "N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8"]  # NET_PLAN complete
 WALLET_PHASES = ["W0", "W1", "W2", "W3", "W4"]  # grows with each W phase
-SECURITY_PHASES = ["H0"]  # grows with each H phase
+SECURITY_PHASES = ["H0", "H1", "H2", "H3", "H4", "H5", "H6", "H7"]  # grows with each H phase
 PHASES = CORE_PHASES + STATE_PHASES + EXEC_PHASES + NODE_PHASES + CONSENSUS_PHASES + NET_PHASES + WALLET_PHASES + SECURITY_PHASES
 SHIPPED = CORE_PHASES + [
     "S0",
@@ -90,8 +90,15 @@ SHIPPED = CORE_PHASES + [
     "W2",
     "W3",
     "W4",
+    "H0",
+    "H1",
+    "H2",
+    "H3",
+    "H4",
+    "H5",
+    "H6",
 ]
-CURRENT = "H0"
+CURRENT = "H7"
 
 PLAN_FOR_PREFIX = {
     "C": "CORE_PLAN.md",
@@ -109,7 +116,7 @@ PLAN_FOR_PREFIX = {
 }
 
 NC_PER_PHASE = {f"C{i}": 6 for i in range(4, 11)}
-NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6, "W4": 6, "H0": 6})
+NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6, "W4": 6, "H0": 6, "H1": 6, "H2": 6, "H3": 6, "H4": 6, "H5": 6, "H6": 7, "H7": 7})
 SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)  # 339 (through W0)
 EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + (0 if CURRENT in SHIPPED else NC_PER_PHASE[CURRENT])
 
@@ -126,7 +133,16 @@ PATCH_ORDER = CORE_PHASES + STATE_PHASES + EXEC_PHASES + ["D0", "D1"]
 PATCH_ORDER += ["B0", "B1", "B2", "B3"] + [f"D{i}" for i in range(2, 7)]
 PATCH_ORDER += ["N0", "N1", "N2"] + ["B4", "B5"] + ["D7", "D8"]
 PATCH_ORDER += [f"N{i}" for i in range(3, 9)] + [f"B{i}" for i in range(6, 11)] + ["W0", "W1", "W2", "W3", "W4"]
-PATCH_ORDER += ["H0"]
+PATCH_ORDER += ["H0", "H1"]
+# 0065 is reserved for the H1 post-closeout scan-scope fix (not a phase);
+# the next phase patch (H2) starts at 0066.
+PATCH_ORDER += ["HFIX"]
+PATCH_ORDER += ["H2"]
+PATCH_ORDER += ["H3"]
+PATCH_ORDER += ["H4"]
+PATCH_ORDER += ["H5"]
+PATCH_ORDER += ["H6"]
+PATCH_ORDER += ["H7"]
 PATCH_NUMBERS = {phase: index + 1 for index, phase in enumerate(PATCH_ORDER)}
 
 
