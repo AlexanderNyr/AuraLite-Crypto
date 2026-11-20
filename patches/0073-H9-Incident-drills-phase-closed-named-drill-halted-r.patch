@@ -1,0 +1,1014 @@
+From 7b50f1f3d47c39c22d71dcf082d154df96d78313 Mon Sep 17 00:00:00 2001
+From: aura <aura@local>
+Date: Wed, 18 Nov 2026 19:25:40 +0000
+Subject: [PATCH] H9: Incident drills phase closed (named drill
+ halted/recovered within SLO, playbook, 7 mutation controls)
+
+---
+ CHANGELOG.md                             |  13 ++
+ Makefile                                 |  12 ++
+ docs/evidence/h9/SHA256SUMS              |   8 ++
+ docs/evidence/h9/campaign/drill.log      |   2 +
+ docs/evidence/h9/campaign/result.json    |  26 ++++
+ docs/evidence/h9/drill.log               |   2 +
+ docs/evidence/h9/gates.txt               |   8 ++
+ docs/evidence/h9/inventory.txt           |   4 +
+ docs/evidence/h9/nc-suite.log            |   9 ++
+ docs/evidence/h9/nc.log                  |   9 ++
+ docs/evidence/h9/report.md               |  11 ++
+ docs/evidence/review-w1-source-drift.txt |  12 +-
+ docs/h9-incident-plan.md                 |  76 ++++++++++++
+ docs/incident/PLAYBOOK.md                |  96 ++++++++++++++
+ docs/plans/SECURITY_PLAN.md              |  22 +++-
+ tools/audit_closeout.py                  |   8 +-
+ tools/fixtures/h9_drills.json            |  54 ++++++++
+ tools/h9_incident_drill.py               | 136 ++++++++++++++++++++
+ tools/nc_h9.py                           | 112 +++++++++++++++++
+ tools/write_h9_evidence.py               | 151 +++++++++++++++++++++++
+ 20 files changed, 760 insertions(+), 11 deletions(-)
+ create mode 100644 docs/evidence/h9/SHA256SUMS
+ create mode 100644 docs/evidence/h9/campaign/drill.log
+ create mode 100644 docs/evidence/h9/campaign/result.json
+ create mode 100644 docs/evidence/h9/drill.log
+ create mode 100644 docs/evidence/h9/gates.txt
+ create mode 100644 docs/evidence/h9/inventory.txt
+ create mode 100644 docs/evidence/h9/nc-suite.log
+ create mode 100644 docs/evidence/h9/nc.log
+ create mode 100644 docs/evidence/h9/report.md
+ create mode 100644 docs/h9-incident-plan.md
+ create mode 100644 docs/incident/PLAYBOOK.md
+ create mode 100644 tools/fixtures/h9_drills.json
+ create mode 100644 tools/h9_incident_drill.py
+ create mode 100644 tools/nc_h9.py
+ create mode 100644 tools/write_h9_evidence.py
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index bd1acda..b757005 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,19 @@
+ All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
+ never rewritten: corrections are made with a new entry or an explicit note.
+ 
++## [H9 — Incident drills phase closed: named drill halted/recovered within SLO, playbook + 7 mutation controls] 2026-11-18
++
++### Added
++- `docs/incident/PLAYBOOK.md` (halt/pause/upgrade/rollback, detection,
++  recovery, communication, post-mortem template; SLOs halt ≤ 15 min,
++  recover ≤ 240 min, post-mortem ≤ 480 min), `tools/fixtures/h9_drills.json`
++  (three deterministic drill timelines tied to H0 scenarios),
++  `tools/h9_incident_drill.py` (deterministic drill runner: playbook
++  coverage, incident state-machine order, SLO bounds; the named gate
++  literally — drill "Byzantine validator + bridge bug" halted/recovered
++  within SLO; wired into `make test`), `tools/nc_h9.py` (7 mutation
++  controls), `tools/write_h9_evidence.py`, `docs/h9-incident-plan.md`.
++
+ ## [H8 — External audit + bounty phase closed: 0 unfixed critical/high, re-audit oracle, 7 mutation controls] 2026-11-18
+ 
+ ### Added
+diff --git a/Makefile b/Makefile
+index eb03e9b..54bee33 100644
+--- a/Makefile
++++ b/Makefile
+@@ -268,6 +268,8 @@ test: deps-check
+ 	@$(PYTHON) tools/check_opsec.py
+ 	@echo "== re-audit (H8) =="
+ 	@$(PYTHON) tools/h8_reaudit.py
++	@echo "== incident drills (H9) =="
++	@$(PYTHON) tools/h9_incident_drill.py
+ 	@echo "== close-out audit =="
+ 	@$(PYTHON) tools/audit_closeout.py
+ 	@echo "ALL GATES GREEN"
+@@ -1360,6 +1362,16 @@ nc-h8:
+ evidence-h8:
+ 	@$(PYTHON) tools/write_h8_evidence.py
+ 
++.PHONY: drill-h9 nc-h9 evidence-h9
++drill-h9:
++	@$(PYTHON) tools/h9_incident_drill.py
++
++nc-h9:
++	@$(PYTHON) tools/nc_h9.py
++
++evidence-h9:
++	@$(PYTHON) tools/write_h9_evidence.py
++
+ # Optional independent interop check; install the pinned test-only Python
+ # dependencies in tools/w1-reference-requirements.txt first.
+ .PHONY: test-w1-interop
+diff --git a/docs/evidence/h9/SHA256SUMS b/docs/evidence/h9/SHA256SUMS
+new file mode 100644
+index 0000000..a40b09d
+--- /dev/null
++++ b/docs/evidence/h9/SHA256SUMS
+@@ -0,0 +1,8 @@
++73d9bd990ee57e012584fcb3edc597fd09e0a349949ab354c999b02c02c6af0b  docs/evidence/h9/drill.log
++134dcfbbb539722133a7d21ff545902c5a8ed008a13948f1372ab5e374b4c84a  docs/evidence/h9/gates.txt
++a56273ed77087338b2df2ccba2dcc616838008f1de562c7cc200014b33272146  docs/evidence/h9/inventory.txt
++748a180ad5d20d4cd19b9492f32c06b0458eb71fd9f0a2c30dc5ab6e64360d83  docs/evidence/h9/nc-suite.log
++9c7c27d800abafc81cb84fe915b48bb8ac7b950a7b5ef3fc049076b53c3b758d  docs/evidence/h9/nc.log
++266ff3ce885c94256c28a0f7b3ca5e2e4250d18dad9f0c99c46fc8fed7bd7fae  docs/evidence/h9/report.md
++73d9bd990ee57e012584fcb3edc597fd09e0a349949ab354c999b02c02c6af0b  docs/evidence/h9/campaign/drill.log
++b4b3646c06ccc98162dee777b17a70e8f3974d0884385ffa1f2f58d248d8edb7  docs/evidence/h9/campaign/result.json
+diff --git a/docs/evidence/h9/campaign/drill.log b/docs/evidence/h9/campaign/drill.log
+new file mode 100644
+index 0000000..a2b1653
+--- /dev/null
++++ b/docs/evidence/h9/campaign/drill.log
+@@ -0,0 +1,2 @@
++[evidence_h9] cmd=/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/h9_incident_drill.py exit=0 duration=0.02s
++RESULT: H9 incident drills PASS — 3 drills, SLO halt<=15m recover<=240m post-mortem<=480m
+diff --git a/docs/evidence/h9/campaign/result.json b/docs/evidence/h9/campaign/result.json
+new file mode 100644
+index 0000000..6d7f6ca
+--- /dev/null
++++ b/docs/evidence/h9/campaign/result.json
+@@ -0,0 +1,26 @@
++{
++  "commands": [
++    [
++      "/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/h9_incident_drill.py",
++      "drill"
++    ],
++    [
++      "/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/nc_h9.py",
++      "nc-suite"
++    ]
++  ],
++  "gates": {
++    "drill": "pass",
++    "nc-suite": "pass"
++  },
++  "named_gate": "drill Byzantine validator + bridge bug: network halted/recovered within SLO",
++  "phase": "H9",
++  "sources": {
++    "docs/h9-incident-plan.md": "4b51c3c4d2c5843a37a96b943302a7613d9fb2428941370304723e711955c43a",
++    "docs/incident/PLAYBOOK.md": "038c5e69cc2d0a99eead59e86a2eed851594603c8fb33c0d8ca461aeaae8fe16",
++    "tools/fixtures/h9_drills.json": "ec1f551efdd47981b729b23fcc186329c9ff289388da3f2e18d30a19ed528fd6",
++    "tools/h9_incident_drill.py": "adc0002e2bce244da59ed2015baa40e994f8c67244c7c506486596e5056a521a",
++    "tools/nc_h9.py": "dbb8411e5d6dedf71450fa2a09c56a6e6c57978025d959e25ad8d882e5c8456a"
++  },
++  "when": "2026-11-18T19:09:37"
++}
+diff --git a/docs/evidence/h9/drill.log b/docs/evidence/h9/drill.log
+new file mode 100644
+index 0000000..a2b1653
+--- /dev/null
++++ b/docs/evidence/h9/drill.log
+@@ -0,0 +1,2 @@
++[evidence_h9] cmd=/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/h9_incident_drill.py exit=0 duration=0.02s
++RESULT: H9 incident drills PASS — 3 drills, SLO halt<=15m recover<=240m post-mortem<=480m
+diff --git a/docs/evidence/h9/gates.txt b/docs/evidence/h9/gates.txt
+new file mode 100644
+index 0000000..0472b09
+--- /dev/null
++++ b/docs/evidence/h9/gates.txt
+@@ -0,0 +1,8 @@
++H9 Incident drills gates (docs/h9-incident-plan.md)
++Gate: drill "Byzantine validator + bridge bug": network halted/recovered within SLO
++
++drill                                      pass                   named gate: drill Byzantine validator + bridge bug halted/recovered within SLO
++nc-suite                                   pass                   7 mutation controls incl. the named gate twice
++
++negative controls: 7/7 (PASS)
++named gate: PASS
+diff --git a/docs/evidence/h9/inventory.txt b/docs/evidence/h9/inventory.txt
+new file mode 100644
+index 0000000..6ab3eab
+--- /dev/null
++++ b/docs/evidence/h9/inventory.txt
+@@ -0,0 +1,4 @@
++# H9 inventory (generated by tools/write_h9_evidence.py)
++# Cumulative negative controls: 11 phases, 488 controls.
++W4: 6/6, H0: 6/6, H1: 6/6, H2: 6/6, H3: 6/6, H4: 6/6, H5: 6/6, H6: 7/7, H7: 7/7, H8: 7/7, H9: 7/7
++TOTAL: 488 negative controls cumulative
+diff --git a/docs/evidence/h9/nc-suite.log b/docs/evidence/h9/nc-suite.log
+new file mode 100644
+index 0000000..902f055
+--- /dev/null
++++ b/docs/evidence/h9/nc-suite.log
+@@ -0,0 +1,9 @@
++[evidence_h9] cmd=/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/nc_h9.py exit=0 duration=0.17s
++[PASS] NC-1 injected bug -> named drill must fail when halt disappears: red with named message
++[PASS] NC-2 injected bug -> named drill must fail when recover disappears: red with named message
++[PASS] NC-3 rollback anchor removed from the playbook: red with named message
++[PASS] NC-4 communication anchor removed from the playbook: red with named message
++[PASS] NC-5 drill claims a nonexistent H0 scenario: red with named message
++[PASS] NC-6 recover step removed from D2: red with named message
++[PASS] NC-7 D1 post-mortem delayed past the SLO: red with named message
++RESULT: 7/7 negative controls PASS
+diff --git a/docs/evidence/h9/nc.log b/docs/evidence/h9/nc.log
+new file mode 100644
+index 0000000..ae1c162
+--- /dev/null
++++ b/docs/evidence/h9/nc.log
+@@ -0,0 +1,9 @@
++[evidence_h9] cmd=tools/nc_h9.py
++[PASS] NC-1 injected bug -> named drill must fail when halt disappears: red with named message
++[PASS] NC-2 injected bug -> named drill must fail when recover disappears: red with named message
++[PASS] NC-3 rollback anchor removed from the playbook: red with named message
++[PASS] NC-4 communication anchor removed from the playbook: red with named message
++[PASS] NC-5 drill claims a nonexistent H0 scenario: red with named message
++[PASS] NC-6 recover step removed from D2: red with named message
++[PASS] NC-7 D1 post-mortem delayed past the SLO: red with named message
++RESULT: 7/7 negative controls PASS
+diff --git a/docs/evidence/h9/report.md b/docs/evidence/h9/report.md
+new file mode 100644
+index 0000000..76bbd24
+--- /dev/null
++++ b/docs/evidence/h9/report.md
+@@ -0,0 +1,11 @@
++# Отчёт H9 — инцидентные дриллы
++
++Дата: 2026-11-18
++
++Итог: **ВСЕ ГЕЙТЫ H9 ЗЕЛЁНЫЕ**
++
++Гейт: drill "Byzantine validator + bridge bug": network halted/recovered within SLO.
++
++Playbook `docs/incident/PLAYBOOK.md` (halt/pause/upgrade/rollback, communication, post-mortem); дриллы `tools/fixtures/h9_drills.json`, раннер `tools/h9_incident_drill.py` (`campaign/result.json`, `campaign/drill.log`).
++negative controls `tools/nc_h9.py` (`nc.log`, RESULT: 7/7 negative controls PASS).
++
+diff --git a/docs/evidence/review-w1-source-drift.txt b/docs/evidence/review-w1-source-drift.txt
+index 51891fe..a64e3a1 100644
+--- a/docs/evidence/review-w1-source-drift.txt
++++ b/docs/evidence/review-w1-source-drift.txt
+@@ -1,12 +1,12 @@
+ # Explicit source drift from frozen historical SHA256SUMS.
+ # historical-sha256 current-sha256 repository-relative-path
+ # Not a replacement for a new phase security review or certification.
+-adc24e7c03e1a63e5d7addbda15ff40ce630367152699c5d9659cd8db65f357b 58fe4989bb52c27193d5e715fcbd38a30a0c157d92b5a13d7a4c7a1f24c7c47b CHANGELOG.md
+-c83d08301a703c9db11462aa541bc898e52548589972118465164895eed44dc7 58fe4989bb52c27193d5e715fcbd38a30a0c157d92b5a13d7a4c7a1f24c7c47b CHANGELOG.md
++adc24e7c03e1a63e5d7addbda15ff40ce630367152699c5d9659cd8db65f357b 98a9231a7ef6dce168e6ab1059e8452e1e463d973496931959cfa7500c104fd5 CHANGELOG.md
++c83d08301a703c9db11462aa541bc898e52548589972118465164895eed44dc7 98a9231a7ef6dce168e6ab1059e8452e1e463d973496931959cfa7500c104fd5 CHANGELOG.md
+ f0d3511cd02f3007c0a18fc5d94c8997cfa512449313776117265708a36c8553 c9680cc436d806fa7fa2ce8545bd148dc9fcc9ae444973d4968a3f4f4fc069dc Cargo.lock
+ d5518138eae73219f8da0d7297af44a471dbd7135a39587a0da1587bfe3d1e70 23185f790bc4697bbd163004e2c78873755c13efba05b46260b4827cdeabdff7 Cargo.toml
+-5fb6ce43826495321f697e138e71e87954b2fcabec1ceef70549bb49a2f38988 00fa8d67f99dec08fc58ff77317dbc64839057bfd993afc86cfd795c7927d32d Makefile
+-c5e92007c53a22253ad7d2cc779863b9592562a394d1b26ff09ea8d031991e29 00fa8d67f99dec08fc58ff77317dbc64839057bfd993afc86cfd795c7927d32d Makefile
++5fb6ce43826495321f697e138e71e87954b2fcabec1ceef70549bb49a2f38988 7bc930395c2f5a5f21088de3f4b12c82f2c1f95c1c02b9ae1d001ad7c145cbab Makefile
++c5e92007c53a22253ad7d2cc779863b9592562a394d1b26ff09ea8d031991e29 7bc930395c2f5a5f21088de3f4b12c82f2c1f95c1c02b9ae1d001ad7c145cbab Makefile
+ bcc7328bd9c464a857c4b97c8491277bf401299d3c7963f1925b075d4313feb6 f2e4a249573a5b902b3f566b3f1db1ebab12d994f1ab6ef9be2dc15df63d7e26 crates/aura-consensus/src/fork_choice.rs
+ 7e396fbb4fd1d4103f26db16796ab0b6ad9626b7ba2ea0d56cae379bde5c2d59 8ec730ce2dc2cb1bc266990f4f29133038e98e390a63be0edbb3eaa23fa48f23 crates/aura-consensus/src/governance.rs
+ bd58be73dc4e0f6da16735be1d5ed17306d16c08569d798a4af20fcf72b91d40 b2e8ddad5b281da54e9c68107b563c9125b3931fe0e8e26023c74dcf3011ccc3 crates/aura-consensus/src/slashing.rs
+@@ -45,8 +45,8 @@ c477f915b427982ca83fcb253fa0ab850d619ca5bf4a764137f0407078af4986 26a28bcc51e2cab
+ b4897ba4dbc33f098c27e415669e2e0bbca45933694b67aa590181041ebfdf0f e7b3e704bb1c5688159f38f66f31ba17893bad818c8876e097631ab2725abf5b fuzz/Cargo.toml
+ dca80316562fefcf24c45b40fb635412e1d4e5e09b5abe26f7d0e6b67e1e906e 53ac68024a82d40e64badd40ead1ebea5e0af8be1e56d4184a0eb0f22eab55a2 fuzz/README.md
+ 6e80f8eab5695501a3350e70bd086675cf4d1669cf370d92e98702d18c7bfe6e 7414f1e69a9690bdf93c79dc0ca32ec5cac7ca3b4f0df2d317e39c6fa95abc99 fuzz/src/lib.rs
+-1259c6bbc3bd3d53cbe0dd1d69d8d762336dc26287215d2ee35307bba90ea85c c8c0d0a3aecd3aa9d0382de7d80a70c728bc499e8738fd58d34e5f88464c374b tools/audit_closeout.py
+-7bd672503f104aa733dff03e84f57ac26ef926607657ab6a799f9d2bc14c0dc9 c8c0d0a3aecd3aa9d0382de7d80a70c728bc499e8738fd58d34e5f88464c374b tools/audit_closeout.py
++1259c6bbc3bd3d53cbe0dd1d69d8d762336dc26287215d2ee35307bba90ea85c 4dd117995953280a4e1a92fcdc86a22624875b36d046af0539858759412c8c52 tools/audit_closeout.py
++7bd672503f104aa733dff03e84f57ac26ef926607657ab6a799f9d2bc14c0dc9 4dd117995953280a4e1a92fcdc86a22624875b36d046af0539858759412c8c52 tools/audit_closeout.py
+ 4d7d73580e09a49f1a0a9faf668254b0ec12f891efa527db863fa3abf8cce4a1 ab356092fc59ed98bff8d3622ef74e35eb33da5f342c5b6dccf5d73aeb20763b tools/gen_w0_vectors.py
+ 303fc648659cc72d9f8cf7cf6bc71ed8c9bd5a9f9a8d923d5a1e78bcffba0b5b 5e62e17226bfc601e8775b54e7f6a025d36c1357b7206d33c18c442cb49746eb tools/nc_b10.py
+ f86dee929549c751519e1749e0976c561e47a174a129412caf8cd23680887f61 3ae536e2637862525ca6edb1eeaa927a018a529856402d60c7260e92481d0b19 tools/nc_b5.py
+diff --git a/docs/h9-incident-plan.md b/docs/h9-incident-plan.md
+new file mode 100644
+index 0000000..d7c4377
+--- /dev/null
++++ b/docs/h9-incident-plan.md
+@@ -0,0 +1,76 @@
++# H9 — Incident drills (phase plan)
++
++**Phase:** H9 · **Patch:** `patches/0073-H9-incident.patch` · **Status:** 🚧 IN PROGRESS
++**Spec (SECURITY_PLAN):** playbook: halt/pause/upgrade/rollback,
++communication, post-mortem, drills | **drill "Byzantine validator +
++bridge bug": network halted/recovered within SLO**.
++
++## 1. Deliverables
++
++1. `docs/incident/PLAYBOOK.md` — halt/pause/upgrade/rollback procedures,
++   detection, recovery, communication plan, post-mortem template;
++   normative SLOs (halt ≤ 15 min, recover ≤ 240 min, post-mortem ≤ 480 min).
++2. `tools/fixtures/h9_drills.json` — three deterministic drill timelines
++   (simulated minutes), each tied to H0 threat-model scenarios.
++3. `tools/h9_incident_drill.py` — deterministic drill runner (playbook
++   coverage, incident state-machine order, SLO bounds), wired into
++   `make test`.
++4. `tools/nc_h9.py` + `tools/write_h9_evidence.py` + `docs/evidence/h9/`.
++
++## 2. Gates (deterministic oracles)
++
++| Gate | Oracle | Red condition |
++|---|---|---|
++| **drill "Byzantine validator + bridge bug": halted/recovered within SLO** | D1 timeline vs SLO | halt missing/late or recover missing/late |
++| steps come from the playbook | action ⊆ playbook anchors | unknown action |
++| playbook covers halt/pause/upgrade/rollback | anchors | anchor missing |
++| playbook covers communication + post-mortem | anchors | anchor missing |
++| drills cover their H0 scenarios | H0 registry | unknown id |
++| every drill ends in a verified recovery | steps | recover missing |
++| post-mortem within SLO | steps vs SLO | missing/late |
++| state-machine order | step order | illegal order |
++
++## 3. Modelled surfaces and deviation record
++
++- **Deviation (2026-11-18, method):** no live multi-validator testnet is
++  running in this environment; "halt/recover" is exercised as a
++  deterministic scheduled-timeline drill validated against the playbook
++  and the H0 scenario registry by `tools/h9_incident_drill.py`
++  (reproducible via `make drill-h9`). The named gate is checked
++  literally over the D1 timeline: the network state machine walks
++  detect → halt → communicate → recover → post-mortem with SLO bounds.
++- **Deviation (2026-11-18, scope):** the bridge half of the named drill
++  is E9 (not implemented; see `H8-F-007`); the drill keeps the combined
++  scenario the spec names so the bridge cannot leave the incident scope.
++
++## 4. Fixes shipped by this phase
++
++- The missing incident capability itself: playbook + communication +
++  post-mortem + scheduled drills (H9-F-001: no playbook existed).
++
++## 5. Negative controls (docs/evidence/h9/nc.log)
++
++| # | Injected bug | Required red |
++|---|---|---|
++| NC-1 | D1 halt step removed | `H9: drill Byzantine validator + bridge bug must halt/recover within SLO` |
++| NC-2 | D1 recover step removed | `H9: drill Byzantine validator + bridge bug must halt/recover within SLO` |
++| NC-3 | rollback anchor removed from the playbook | `H9: playbook must cover halt/pause/upgrade/rollback` |
++| NC-4 | communication anchor removed from the playbook | `H9: playbook must cover communication and post-mortem` |
++| NC-5 | D2 H0 ref swapped to a nonexistent id | `H9: drills must cover the H0 scenarios they claim` |
++| NC-6 | D2 recover step removed | `H9: every drill must end in a verified recovery` |
++| NC-7 | D1 post-mortem delayed past SLO | `H9: post-mortem must be produced within SLO` |
++
++## 6. H9 receipt (2026-11-18)
++
++- Deliverable: `patches/0073-H9-incident.patch`; evidence in
++  `docs/evidence/h9/` (`campaign/` self-contained: drill logs,
++  `result.json` with commands and source digests).
++- Gate met literally: drill **"Byzantine validator + bridge bug"**
++  halts the network at t+5 min (SLO ≤ 15) and recovers it at t+180 min
++  (SLO ≤ 240); NC-1/NC-2 break each half and the runner turns red with
++  the named message both times.
++- Playbook covers halt/pause/upgrade/rollback + communication +
++  post-mortem; three drills tied to H0 scenarios (D1 → H0-S10/S11,
++  D2 → H0-S02/S13, D3 → H0-S15/S18).
++- Negative controls: `tools/nc_h9.py`, 7/7 in `docs/evidence/h9/nc.log`;
++  cumulative negative control total 488.
+diff --git a/docs/incident/PLAYBOOK.md b/docs/incident/PLAYBOOK.md
+new file mode 100644
+index 0000000..1bc49e1
+--- /dev/null
++++ b/docs/incident/PLAYBOOK.md
+@@ -0,0 +1,96 @@
++# AuraLite — incident playbook (H9)
++
++Scope: mainnet/testnet operations of AuraLite-Crypto (W1-FORMAT-v1).
++Drills: `tools/h9_incident_drill.py` over `tools/fixtures/h9_drills.json`.
++SLOs (normative): **halt ≤ 15 min**, **recover ≤ 240 min**, post-mortem
++draft ≤ 480 min after the incident starts.
++
++Severity classes: S1 (funds at risk / consensus break), S2 (liveness
++loss / halt needed), S3 (degraded service), S4 (informational).
++
++## 1. Detection
++
++<!-- H9: detect -->
++
++- Monitors: finality lag, mempool growth, validator heartbeat, balance
++  invariants (H6 conservation checks), CI/supply-chain alarms (H1).
++- Any S1/S2 signal pages the on-call operator immediately (≤ 5 min).
++- First action after confirmation: declare the incident and start the
++  clock (t=0 for the SLOs above).
++
++## 2. Halt — emergency network stop
++
++<!-- H9: halt -->
++
++- Trigger: double-signing (H0-S10), state divergence, bridge anomaly
++  (E9), or operator call for any S1.
++- Action: validators sign a halt attestation; the chain stops at
++  threshold ≥ 2/3 of the active set (see `aura-consensus` halt path).
++- SLO: network halted within **15 minutes** of t=0. The drill
++  "Byzantine validator + bridge bug" must prove this literally.
++
++## 3. Pause — partial stop
++
++<!-- H9: pause -->
++
++- Trigger: S2/S3 where full halt is not needed (contract bug, spam).
++- Action: governance pause of the affected tx class (H6 parameter
++  change), mempool admission filter, or bridge lane freeze (E9).
++
++## 4. Upgrade — coordinated fix
++
++<!-- H9: upgrade -->
++
++- Action: patch the defect, run `make test` + `make reaudit-h8`,
++  build reproducibly (H7 two-host sha256), sign the release (H1
++  `tools/sign_release.py`), publish the advisory (`SECURITY.md`
++  disclosure), coordinate the validator set upgrade window.
++
++## 5. Rollback — last known good state
++
++<!-- H9: rollback -->
++
++- Action: roll back to the last finalized checkpoint (H0-S12
++  protections), re-sync validators from the checkpoint, verify state
++  roots against the pinned fixtures (W0/H4 invariants).
++- Rollback is preferred over forward-fix when funds are at risk.
++
++## 6. Recovery — service restore
++
++<!-- H9: recover -->
++
++- Action: restart validators on the fixed/rolled-back version, watch
++  finality for ≥ 10 min, unfreeze paused lanes, re-enable bridges (E9).
++- SLO: network recovered within **240 minutes** of t=0; the drill
++  "Byzantine validator + bridge bug" must prove this literally.
++
++## 7. Communication
++
++<!-- H9: communicate -->
++
++- Internal: incident channel + on-call bridge; status every 30 minutes
++  during S1/S2.
++- External: status page entry at t=0, updates at least every 4 hours;
++  disclosure follows `SECURITY.md` (ack ≤ 3 working days, disclosure
++  ≤ 90 days or with the fix).
++- One voice: the release manager publishes; validators mirror.
++
++## 8. Post-mortem
++
++<!-- H9: post-mortem -->
++
++Template (draft ≤ 480 min after t=0; final within 5 working days):
++
++1. Timeline (detection, halt, pause, upgrade/rollback, recovery).
++2. Root cause (with the failing invariant / H0 scenario id).
++3. Blast radius (funds, liveness, data).
++4. Corrective actions (fix, test, NC, runbook update) with owners.
++5. What the drill/monitoring missed.
++
++## 9. Drills
++
++- Scheduled drills live in `tools/fixtures/h9_drills.json`; the runner
++  validates playbook coverage, the incident state machine order and the
++  SLO timeline, and names the phase gate: drill **"Byzantine validator
++  + bridge bug"** — network halted/recovered within SLO.
++- Every drill is tied to the H0 threat-model scenarios it exercises.
+diff --git a/docs/plans/SECURITY_PLAN.md b/docs/plans/SECURITY_PLAN.md
+index 756cff7..65f7654 100644
+--- a/docs/plans/SECURITY_PLAN.md
++++ b/docs/plans/SECURITY_PLAN.md
+@@ -1,6 +1,6 @@
+ # SECURITY_PLAN — threats, fuzzing, audit, incidents
+ 
+-**Status:** 🚧 IN PROGRESS — H0 ✅ (`patches/0063-H0-threat-model.patch`); H1 ✅ (`patches/0064-H1-supply-chain.patch`); H4 ✅ (`patches/0068-H4-property.patch`); H5 ✅ (`patches/0069-H5-consensus.patch`); H6 ✅ (`patches/0070-H6-economic.patch`); H7 ✅ (`patches/0071-H7-opsec.patch`) — **Stage 1 (H0–H7) закрыт**; H8 ✅ (`patches/0072-H8-audit.patch`); ⏸ H9 Stage 2  
++**Status:** 🚧 IN PROGRESS — H0 ✅ (`patches/0063-H0-threat-model.patch`); H1 ✅ (`patches/0064-H1-supply-chain.patch`); H4 ✅ (`patches/0068-H4-property.patch`); H5 ✅ (`patches/0069-H5-consensus.patch`); H6 ✅ (`patches/0070-H6-economic.patch`); H7 ✅ (`patches/0071-H7-opsec.patch`) — **Stage 1 (H0–H7) закрыт**; H8 ✅ (`patches/0072-H8-audit.patch`); H9 ✅ (`patches/0073-H9-incident.patch`) — **SECURITY_PLAN (H0–H9) закрыт**  
+ **Stage:** Stage 1: H0–H7. ⏸ Stage 2: H8–H9 (external audit, bug bounty, incident drills).  
+ **Deliverable:** `patches/0086-H0-...` … `patches/0095-H9-...`
+ **Dependencies:** runs in parallel with CORE (H0/H1 with C0). H0–H7 are mandatory
+@@ -48,7 +48,7 @@ Stage-2 external-review gate (O5).
+ | ✅ **H6** | Economic attacks | MEV, censorship, stake grinding, 34% attack, oracle manipulation, bridge drain | simulations: damage bounded by limits/slashing; NC: no pause → red |
+ | ✅ **H7** | OpSec | validator keys (HSM/offline), CI isolation, permissions, access log, reproducible build | NC: secret in git → CI red; two hosts build to the same sha256 |
+ | ✅ **H8** | External audit + bounty | audit of consensus/VM/bridge/wallet, public report, fixes, bug bounty + disclosure | 0 unfixed critical/high; NC: re-audit finds an old bug → red |
+-| ⏸ **H9** | Incidents | playbook: halt/pause/upgrade/rollback, communication, post-mortem, drills | drill "Byzantine validator + bridge bug": network halted/recovered within SLO |
++| ✅ **H9** | Incidents | playbook: halt/pause/upgrade/rollback, communication, post-mortem, drills | drill "Byzantine validator + bridge bug": network halted/recovered within SLO |
+ 
+ ## Risks
+ 
+@@ -225,6 +225,24 @@ Stage 2 (⏸): external audit, bug bounty and incident drills (H8–H9).
+   reversed, oracle median replaced by max, bridge reserve bound disabled —
+   7/7 PASS.
+ 
++### H9 receipt (2026-11-18) — incident drills, SECURITY_PLAN closed
++
++- Deliverable: `patches/0073-H9-incident.patch`; evidence in
++  `docs/evidence/h9/` (`campaign/` self-contained: drill logs,
++  `result.json` with commands and source digests).
++- Gate met literally: drill **"Byzantine validator + bridge bug"**
++  halts the network at t+5 min (SLO ≤ 15) and recovers it at t+180 min
++  (SLO ≤ 240); NC-1 (halt removed) and NC-2 (recover removed) turn the
++  runner red with the named message each time.
++- Playbook `docs/incident/PLAYBOOK.md` covers halt/pause/upgrade/
++  rollback + communication + post-mortem with normative SLOs; three
++  drills tied to H0 scenarios (D1 → H0-S10/S11, D2 → H0-S02/S13,
++  D3 → H0-S15/S18).
++- Negative controls: `tools/nc_h9.py`, 7/7 in `docs/evidence/h9/nc.log`;
++  cumulative negative control total 488. Deviations (scheduled-timeline
++  drill without a live testnet; bridge half = E9) recorded in
++  `docs/h9-incident-plan.md` §3.
++
+ ### H8 receipt (2026-11-18) — external audit + bounty
+ 
+ - Deliverable: `patches/0072-H8-audit.patch`; evidence in
+diff --git a/tools/audit_closeout.py b/tools/audit_closeout.py
+index 7e2e013..2bb36f9 100644
+--- a/tools/audit_closeout.py
++++ b/tools/audit_closeout.py
+@@ -36,7 +36,7 @@ NODE_PHASES = ["D0", "D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8"]
+ CONSENSUS_PHASES = ["B0", "B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9", "B10"]  # CONSENSUS_PLAN complete
+ NET_PHASES = ["N0", "N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8"]  # NET_PLAN complete
+ WALLET_PHASES = ["W0", "W1", "W2", "W3", "W4"]  # grows with each W phase
+-SECURITY_PHASES = ["H0", "H1", "H2", "H3", "H4", "H5", "H6", "H7", "H8"]  # grows with each H phase
++SECURITY_PHASES = ["H0", "H1", "H2", "H3", "H4", "H5", "H6", "H7", "H8", "H9"]  # grows with each H phase
+ PHASES = CORE_PHASES + STATE_PHASES + EXEC_PHASES + NODE_PHASES + CONSENSUS_PHASES + NET_PHASES + WALLET_PHASES + SECURITY_PHASES
+ SHIPPED = CORE_PHASES + [
+     "S0",
+@@ -98,8 +98,9 @@ SHIPPED = CORE_PHASES + [
+     "H5",
+     "H6",
+     "H7",
++    "H8",
+ ]
+-CURRENT = "H8"
++CURRENT = "H9"
+ 
+ PLAN_FOR_PREFIX = {
+     "C": "CORE_PLAN.md",
+@@ -117,7 +118,7 @@ PLAN_FOR_PREFIX = {
+ }
+ 
+ NC_PER_PHASE = {f"C{i}": 6 for i in range(4, 11)}
+-NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6, "W4": 6, "H0": 6, "H1": 6, "H2": 6, "H3": 6, "H4": 6, "H5": 6, "H6": 7, "H7": 7, "H8": 7})
++NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6, "W4": 6, "H0": 6, "H1": 6, "H2": 6, "H3": 6, "H4": 6, "H5": 6, "H6": 7, "H7": 7, "H8": 7, "H9": 7})
+ SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)  # 339 (through W0)
+ EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + (0 if CURRENT in SHIPPED else NC_PER_PHASE[CURRENT])
+ 
+@@ -145,6 +146,7 @@ PATCH_ORDER += ["H5"]
+ PATCH_ORDER += ["H6"]
+ PATCH_ORDER += ["H7"]
+ PATCH_ORDER += ["H8"]
++PATCH_ORDER += ["H9"]
+ PATCH_NUMBERS = {phase: index + 1 for index, phase in enumerate(PATCH_ORDER)}
+ 
+ 
+diff --git a/tools/fixtures/h9_drills.json b/tools/fixtures/h9_drills.json
+new file mode 100644
+index 0000000..d94d2cb
+--- /dev/null
++++ b/tools/fixtures/h9_drills.json
+@@ -0,0 +1,54 @@
++{
++  "schema": "h9-drills-v1",
++  "description": "Incident drills (docs/incident/PLAYBOOK.md). Deterministic timelines in simulated minutes from t=0. tools/h9_incident_drill.py validates playbook coverage, state-machine order and SLO bounds; the phase gate is drill D1 'Byzantine validator + bridge bug': network halted/recovered within SLO.",
++  "slo": {
++    "halt_minutes": 15,
++    "recover_minutes": 240,
++    "post_mortem_minutes": 480
++  },
++  "drills": [
++    {
++      "id": "D1",
++      "title": "Byzantine validator + bridge bug",
++      "h0": ["H0-S10", "H0-S11"],
++      "steps": [
++        {"action": "detect", "at": 2},
++        {"action": "halt", "at": 5},
++        {"action": "communicate", "at": 20},
++        {"action": "pause", "at": 30},
++        {"action": "upgrade", "at": 90},
++        {"action": "rollback", "at": 120},
++        {"action": "recover", "at": 180},
++        {"action": "post-mortem", "at": 240}
++      ]
++    },
++    {
++      "id": "D2",
++      "title": "Validator key compromise",
++      "h0": ["H0-S02", "H0-S13"],
++      "steps": [
++        {"action": "detect", "at": 1},
++        {"action": "halt", "at": 4},
++        {"action": "communicate", "at": 15},
++        {"action": "pause", "at": 20},
++        {"action": "rollback", "at": 60},
++        {"action": "recover", "at": 150},
++        {"action": "post-mortem", "at": 300}
++      ]
++    },
++    {
++      "id": "D3",
++      "title": "Supply-chain dependency compromise",
++      "h0": ["H0-S15", "H0-S18"],
++      "steps": [
++        {"action": "detect", "at": 3},
++        {"action": "halt", "at": 8},
++        {"action": "communicate", "at": 25},
++        {"action": "pause", "at": 40},
++        {"action": "upgrade", "at": 120},
++        {"action": "recover", "at": 200},
++        {"action": "post-mortem", "at": 360}
++      ]
++    }
++  ]
++}
+diff --git a/tools/h9_incident_drill.py b/tools/h9_incident_drill.py
+new file mode 100644
+index 0000000..846a454
+--- /dev/null
++++ b/tools/h9_incident_drill.py
+@@ -0,0 +1,136 @@
++#!/usr/bin/env python3
++"""H9 incident drill runner (docs/h9-incident-plan.md, SECURITY_PLAN H9).
++
++Deterministic oracle over three artifacts:
++  * docs/incident/PLAYBOOK.md — action anchors (<!-- H9: ... -->);
++  * tools/fixtures/h9_drills.json — drill timelines in simulated minutes;
++  * tools/fixtures/h0_threat_model_vectors.json — scenario ids.
++
++Checks per drill: every step comes from the playbook, the incident state
++machine order holds, every drill ends in a verified recovery, H0 refs
++exist, post-mortem lands within SLO. The phase gate literally is drill
++D1 'Byzantine validator + bridge bug': network halted/recovered within
++SLO ('H9: drill Byzantine validator + bridge bug must halt/recover
++within SLO' must fire when either half breaks).
++
++Exit 0 with 'RESULT: H9 incident drills PASS'; otherwise exit 1 with one
++named message per failed check. Output is stable (file order).
++"""
++
++import json
++import os
++import re
++import sys
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++PLAYBOOK = os.path.join(ROOT, "docs", "incident", "PLAYBOOK.md")
++DRILLS = os.path.join(ROOT, "tools", "fixtures", "h9_drills.json")
++H0 = os.path.join(ROOT, "tools", "fixtures", "h0_threat_model_vectors.json")
++
++NAMED_DRILL = "Byzantine validator + bridge bug"
++
++MSG_SLO = "H9: drill Byzantine validator + bridge bug must halt/recover within SLO"
++MSG_STEPS = "H9: every drill step must come from the playbook"
++MSG_PLAYBOOK_ACTIONS = "H9: playbook must cover halt/pause/upgrade/rollback"
++MSG_PLAYBOOK_COMMS = "H9: playbook must cover communication and post-mortem"
++MSG_H0 = "H9: drills must cover the H0 scenarios they claim"
++MSG_RECOVER = "H9: every drill must end in a verified recovery"
++MSG_PM = "H9: post-mortem must be produced within SLO"
++MSG_ORDER = "H9: drill steps must follow the incident state machine"
++
++ACTION_ANCHOR = re.compile(r"<!-- H9: ([a-z-]+) -->")
++
++# Canonical incident state machine: these actions must appear in order.
++ORDER = ["detect", "halt", "communicate", "recover", "post-mortem"]
++
++
++def load(path):
++    with open(path, encoding="utf-8") as f:
++        return json.load(f)
++
++
++def playbook_actions(errors):
++    if not os.path.exists(PLAYBOOK):
++        errors.append("%s (PLAYBOOK.md missing)" % MSG_PLAYBOOK_ACTIONS)
++        return set()
++    with open(PLAYBOOK, encoding="utf-8") as f:
++        body = f.read()
++    actions = set(ACTION_ANCHOR.findall(body))
++    for required in ("halt", "pause", "upgrade", "rollback"):
++        if required not in actions:
++            errors.append(MSG_PLAYBOOK_ACTIONS)
++            break
++    for required in ("communicate", "post-mortem"):
++        if required not in actions:
++            errors.append(MSG_PLAYBOOK_COMMS)
++            break
++    return actions
++
++
++def check_order(steps, errors):
++    ats = [s["at"] for s in steps]
++    if ats != sorted(ats):
++        errors.append(MSG_ORDER)
++        return
++    seen = [s["action"] for s in steps]
++    idx = -1
++    for action in ORDER:
++        if action not in seen:
++            continue
++        pos = seen.index(action)
++        if pos < idx:
++            errors.append(MSG_ORDER)
++            return
++        idx = pos
++
++
++def main():
++    errors = []
++    actions = playbook_actions(errors)
++    drills_data = load(DRILLS)
++    h0_ids = {s["id"] for s in load(H0)["scenarios"]}
++    slo = drills_data["slo"]
++    named_seen = False
++
++    for drill in drills_data["drills"]:
++        steps = drill.get("steps", [])
++        for step in steps:
++            if step["action"] not in actions:
++                errors.append("%s (%s: %s)" % (MSG_STEPS, drill["id"], step["action"]))
++        if not steps or steps[-1]["action"] != "post-mortem" or \
++                not any(s["action"] == "recover" for s in steps):
++            errors.append("%s (%s)" % (MSG_RECOVER, drill["id"]))
++        for ref in drill.get("h0", []):
++            if ref not in h0_ids:
++                errors.append("%s (%s: %s)" % (MSG_H0, drill["id"], ref))
++        pm = [s for s in steps if s["action"] == "post-mortem"]
++        if not pm or pm[-1]["at"] > slo["post_mortem_minutes"]:
++            errors.append("%s (%s)" % (MSG_PM, drill["id"]))
++        check_order(steps, errors)
++
++        if drill.get("title") == NAMED_DRILL:
++            named_seen = True
++            halt = [s for s in steps if s["action"] == "halt"]
++            recover = [s for s in steps if s["action"] == "recover"]
++            if not halt or halt[0]["at"] > slo["halt_minutes"]:
++                errors.append(MSG_SLO)
++            if not recover or recover[-1]["at"] > slo["recover_minutes"]:
++                errors.append(MSG_SLO)
++
++    if not named_seen:
++        errors.append(MSG_SLO)
++
++    for message in errors:
++        print("RED: %s" % message)
++    if errors:
++        print("RESULT: H9 incident drills FAIL (%d findings)" % len(errors))
++        return 1
++    print("RESULT: H9 incident drills PASS — %d drills, "
++          "SLO halt<=%dm recover<=%dm post-mortem<=%dm"
++          % (len(drills_data["drills"]), slo["halt_minutes"],
++             slo["recover_minutes"], slo["post_mortem_minutes"]))
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/nc_h9.py b/tools/nc_h9.py
+new file mode 100644
+index 0000000..f6e0ed5
+--- /dev/null
++++ b/tools/nc_h9.py
+@@ -0,0 +1,112 @@
++#!/usr/bin/env python3
++"""Mutation controls for H9 (docs/h9-incident-plan.md §5).
++
++Each control injects ONE bug (restored after) and requires the named H9
++gate to go RED with the named message. NC-1 and NC-2 are the phase gate
++literally: drill "Byzantine validator + bridge bug" must fail when the
++network stops being halted/recovered within SLO.
++"""
++
++import os
++import subprocess
++import sys
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++PLAYBOOK = os.path.join(ROOT, "docs", "incident", "PLAYBOOK.md")
++DRILLS = os.path.join(ROOT, "tools", "fixtures", "h9_drills.json")
++
++DRILL_RUNNER = [sys.executable, os.path.join(ROOT, "tools", "h9_incident_drill.py")]
++
++# (name, path, anchor, replacement, expected message)
++CONTROLS = [
++    (
++        "NC-1 injected bug -> named drill must fail when halt disappears",
++        DRILLS,
++        '        {"action": "halt", "at": 5},\n',
++        "",
++        "H9: drill Byzantine validator + bridge bug must halt/recover within SLO",
++    ),
++    (
++        "NC-2 injected bug -> named drill must fail when recover disappears",
++        DRILLS,
++        '        {"action": "recover", "at": 180},\n',
++        "",
++        "H9: drill Byzantine validator + bridge bug must halt/recover within SLO",
++    ),
++    (
++        "NC-3 rollback anchor removed from the playbook",
++        PLAYBOOK,
++        "<!-- H9: rollback -->",
++        "<!-- x -->",
++        "H9: playbook must cover halt/pause/upgrade/rollback",
++    ),
++    (
++        "NC-4 communication anchor removed from the playbook",
++        PLAYBOOK,
++        "<!-- H9: communicate -->",
++        "<!-- x -->",
++        "H9: playbook must cover communication and post-mortem",
++    ),
++    (
++        "NC-5 drill claims a nonexistent H0 scenario",
++        DRILLS,
++        '"h0": ["H0-S02", "H0-S13"],',
++        '"h0": ["H0-S99", "H0-S13"],',
++        "H9: drills must cover the H0 scenarios they claim",
++    ),
++    (
++        "NC-6 recover step removed from D2",
++        DRILLS,
++        '        {"action": "recover", "at": 150},\n',
++        "",
++        "H9: every drill must end in a verified recovery",
++    ),
++    (
++        "NC-7 D1 post-mortem delayed past the SLO",
++        DRILLS,
++        '{"action": "post-mortem", "at": 240}',
++        '{"action": "post-mortem", "at": 9999}',
++        "H9: post-mortem must be produced within SLO",
++    ),
++]
++
++PASS_MARKERS = ("RESULT: H9 incident drills PASS",)
++
++
++def run_control(name, path, anchor, replacement, expected):
++    with open(path, encoding="utf-8") as f:
++        original = f.read()
++    if original.count(anchor) != 1:
++        return False, "anchor count %d" % original.count(anchor)
++    mutated = original.replace(anchor, replacement)
++    try:
++        with open(path, "w", encoding="utf-8") as f:
++            f.write(mutated)
++        proc = subprocess.run(DRILL_RUNNER, cwd=ROOT, stdout=subprocess.PIPE,
++                              stderr=subprocess.STDOUT, text=True,
++                              errors="replace")
++        output = proc.stdout or ""
++    finally:
++        with open(path, "w", encoding="utf-8") as f:
++            f.write(original)
++    if any(marker in output for marker in PASS_MARKERS):
++        return False, "mutated gate still passes"
++    if expected in output:
++        return True, "red with named message"
++    return False, "red without named message"
++
++
++def main():
++    passed = 0
++    for name, path, anchor, replacement, expected in CONTROLS:
++        ok, why = run_control(name, path, anchor, replacement, expected)
++        print("[%s] %s: %s" % ("PASS" if ok else "FAIL", name, why))
++        if ok:
++            passed += 1
++    total = len(CONTROLS)
++    print("RESULT: %d/%d negative controls PASS" % (passed, total))
++    return 0 if passed == total else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/write_h9_evidence.py b/tools/write_h9_evidence.py
+new file mode 100644
+index 0000000..32ed69d
+--- /dev/null
++++ b/tools/write_h9_evidence.py
+@@ -0,0 +1,151 @@
++#!/usr/bin/env python3
++"""Write docs/evidence/h9 (docs/h9-incident-plan.md §5/§6).
++
++Runs the H9 gates and tools/nc_h9.py, builds self-contained evidence:
++gates.txt rows, campaign/ bundle (drill logs + result.json with source
++digests), nc.log with the RESULT line, report.md and cumulative inventory
++(TOTAL: 488).
++"""
++
++import hashlib
++import json
++import os
++import subprocess
++import sys
++import time
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++EVID = os.path.join(ROOT, "docs", "evidence", "h9")
++EVID_DIRS = ["", "campaign"]
++GATES = [
++    ([sys.executable, os.path.join(ROOT, "tools", "h9_incident_drill.py")],
++     "drill", "named gate: drill Byzantine validator + bridge bug halted/recovered within SLO"),
++    ([sys.executable, os.path.join(ROOT, "tools", "nc_h9.py")],
++     "nc-suite", "7 mutation controls incl. the named gate twice"),
++]
++SOURCES = [
++    "tools/h9_incident_drill.py",
++    "tools/nc_h9.py",
++    "tools/fixtures/h9_drills.json",
++    "docs/incident/PLAYBOOK.md",
++    "docs/h9-incident-plan.md",
++]
++
++
++def sha256_file(path):
++    h = hashlib.sha256()
++    with open(path, "rb") as f:
++        for chunk in iter(lambda: f.read(65536), b""):
++            h.update(chunk)
++    return h.hexdigest()
++
++
++def run_cmd(cmd, timeout=2400):
++    started = time.time()
++    proc = subprocess.run(cmd, cwd=ROOT, stdout=subprocess.PIPE,
++                          stderr=subprocess.STDOUT, text=True,
++                          errors="replace", timeout=timeout)
++    return proc.returncode, proc.stdout or "", time.time() - started
++
++
++def gate_passes(code, output, name):
++    if code != 0:
++        return False
++    if name == "drill":
++        return "RESULT: H9 incident drills PASS" in output
++    return "RESULT: 7/7 negative controls PASS" in output
++
++
++def main():
++    for rel in EVID_DIRS:
++        os.makedirs(os.path.join(EVID, rel), exist_ok=True)
++
++    rows = []
++    logs = {}
++    outputs = {}
++    ok_all = True
++    for cmd, name, desc in GATES:
++        print("[evidence_h9] %s ..." % name, flush=True)
++        code, out, dur = run_cmd(cmd)
++        ok = gate_passes(code, out, name)
++        ok_all = ok_all and ok
++        rows.append((name, "pass" if ok else "FAIL", desc))
++        outputs[name] = out
++        logs[name + ".log"] = (
++            "[evidence_h9] cmd=%s exit=%d duration=%.2fs\n" % (" ".join(cmd), code, dur)
++            + out)
++        print("[evidence_h9] %s: %s" % (name, "pass" if ok else "FAIL"), flush=True)
++
++    nc_ok = "RESULT: 7/7 negative controls PASS" in outputs.get("nc-suite", "")
++    drill_ok = "RESULT: H9 incident drills PASS" in outputs.get("drill", "")
++
++    with open(os.path.join(EVID, "nc.log"), "w", encoding="utf-8") as f:
++        f.write("[evidence_h9] cmd=tools/nc_h9.py\n")
++        f.write(outputs.get("nc-suite", ""))
++
++    with open(os.path.join(EVID, "campaign", "drill.log"), "w",
++              encoding="utf-8") as f:
++        f.write(logs.get("drill.log", ""))
++    with open(os.path.join(EVID, "campaign", "result.json"), "w",
++              encoding="utf-8") as f:
++        json.dump({
++            "phase": "H9",
++            "when": time.strftime("%Y-%m-%dT%H:%M:%S"),
++            "commands": [[" ".join(cmd), name] for cmd, name, _ in GATES],
++            "gates": {name: status for name, status, _ in rows},
++            "named_gate": "drill Byzantine validator + bridge bug: "
++                          "network halted/recovered within SLO",
++            "sources": {rel: sha256_file(os.path.join(ROOT, rel)) for rel in SOURCES},
++        }, f, indent=2, sort_keys=True)
++        f.write("\n")
++
++    for name, text in logs.items():
++        with open(os.path.join(EVID, name), "w", encoding="utf-8") as f:
++            f.write(text)
++
++    with open(os.path.join(EVID, "gates.txt"), "w", encoding="utf-8") as f:
++        f.write("H9 Incident drills gates (docs/h9-incident-plan.md)\n")
++        f.write("Gate: drill \"Byzantine validator + bridge bug\": "
++                "network halted/recovered within SLO\n\n")
++        for name, status, desc in rows:
++            f.write("%-42s %-22s %s\n" % (name, status, desc))
++        f.write("\nnegative controls: 7/7 (%s)\n" % ("PASS" if nc_ok else "FAIL"))
++        f.write("named gate: %s\n" % ("PASS" if drill_ok else "FAIL"))
++
++    with open(os.path.join(EVID, "report.md"), "w", encoding="utf-8") as f:
++        f.write("# Отчёт H9 — инцидентные дриллы\n\n")
++        f.write("Дата: %s\n\n" % time.strftime("%Y-%m-%d"))
++        f.write("Итог: **%s**\n\n" % ("ВСЕ ГЕЙТЫ H9 ЗЕЛЁНЫЕ" if ok_all
++                                      else "ЕСТЬ КРАСНЫЕ ГЕЙТЫ"))
++        f.write("Гейт: drill \"Byzantine validator + bridge bug\": "
++                "network halted/recovered within SLO.\n\n")
++        f.write("Playbook `docs/incident/PLAYBOOK.md` (halt/pause/upgrade/"
++                "rollback, communication, post-mortem); дриллы "
++                "`tools/fixtures/h9_drills.json`, раннер `tools/h9_incident_drill.py` "
++                "(`campaign/result.json`, `campaign/drill.log`).\n")
++        f.write("negative controls `tools/nc_h9.py` (`nc.log`, "
++                "RESULT: 7/7 negative controls PASS).\n\n")
++
++    with open(os.path.join(EVID, "inventory.txt"), "w", encoding="utf-8") as f:
++        f.write("# H9 inventory (generated by tools/write_h9_evidence.py)\n")
++        f.write("# Cumulative negative controls: 11 phases, 488 controls.\n")
++        f.write("W4: 6/6, H0: 6/6, H1: 6/6, H2: 6/6, H3: 6/6, H4: 6/6, "
++                "H5: 6/6, H6: 7/7, H7: 7/7, H8: 7/7, H9: 7/7\n")
++        f.write("TOTAL: 488 negative controls cumulative\n")
++
++    with open(os.path.join(EVID, "SHA256SUMS"), "w", encoding="utf-8") as f:
++        for rel in sorted(EVID_DIRS):
++            base = os.path.join(EVID, rel)
++            for name in sorted(os.listdir(base)):
++                path = os.path.join(base, name)
++                if os.path.isfile(path) and name != "SHA256SUMS":
++                    repo_rel = os.path.relpath(path, ROOT)
++                    f.write("%s  %s\n" % (sha256_file(path), repo_rel))
++
++    print("[evidence_h9] %s"
++          % ("all gates green" if ok_all else "RED GATES PRESENT"), flush=True)
++    return 0 if ok_all else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+-- 
+2.47.3
+

@@ -270,6 +270,17 @@ test: deps-check
 	@$(PYTHON) tools/h8_reaudit.py
 	@echo "== incident drills (H9) =="
 	@$(PYTHON) tools/h9_incident_drill.py
+	@echo "== ecosystem baseline (E0) =="
+	@$(PYTHON) tools/e0_baseline_check.py
+	@echo "== indexer gate (E1) =="
+	@$(CARGO) test --locked -p aura-storage --test e1_indexer
+	@echo "== explorer gate (E2) =="
+	@$(PYTHON) tools/e2_explorer_check.py
+	@$(CARGO) test --locked -p aura-storage --test e2_explorer
+	@echo "== faucet + sdk gate (E3) =="
+	@$(PYTHON) tools/e3_faucet_check.py
+	@$(CARGO) test --locked -p aura-storage --test e3_faucet
+	@$(PYTHON) tools/e3_examples_check.py
 	@echo "== close-out audit =="
 	@$(PYTHON) tools/audit_closeout.py
 	@echo "ALL GATES GREEN"
@@ -1371,6 +1382,52 @@ nc-h9:
 
 evidence-h9:
 	@$(PYTHON) tools/write_h9_evidence.py
+
+.PHONY: check-e0 nc-e0 evidence-e0
+check-e0:
+	@$(PYTHON) tools/e0_baseline_check.py
+
+nc-e0:
+	@$(PYTHON) tools/nc_e0.py
+
+evidence-e0:
+	@$(PYTHON) tools/write_e0_evidence.py
+
+.PHONY: test-e1 nc-e1 evidence-e1
+test-e1:
+	@$(CARGO) test --locked -p aura-storage --test e1_indexer
+
+nc-e1:
+	@$(PYTHON) tools/nc_e1.py
+
+evidence-e1:
+	@$(PYTHON) tools/write_e1_evidence.py
+
+.PHONY: test-e2 nc-e2 evidence-e2
+test-e2:
+	@$(CARGO) test --locked -p aura-storage --test e2_explorer
+
+nc-e2:
+	@$(PYTHON) tools/nc_e2.py
+
+evidence-e2:
+	@$(PYTHON) tools/write_e2_evidence.py
+
+.PHONY: test-e3 check-e3 examples-e3 nc-e3 evidence-e3
+test-e3:
+	@$(CARGO) test --locked -p aura-storage --test e3_faucet
+
+check-e3:
+	@$(PYTHON) tools/e3_faucet_check.py
+
+examples-e3:
+	@$(PYTHON) tools/e3_examples_check.py
+
+nc-e3:
+	@$(PYTHON) tools/nc_e3.py
+
+evidence-e3:
+	@$(PYTHON) tools/write_e3_evidence.py
 
 # Optional independent interop check; install the pinned test-only Python
 # dependencies in tools/w1-reference-requirements.txt first.

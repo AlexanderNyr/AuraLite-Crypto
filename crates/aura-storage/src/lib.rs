@@ -32,7 +32,18 @@
 mod backend;
 mod backup;
 mod error;
+/// E2 chain explorer: read-only views over the E1 indexer plus a
+/// single-page web UI (ECOSYSTEM_PLAN E2).
+pub mod explorer;
+/// E3 rate-limited faucet: 1 payout per address per day, testnet only
+/// (ECOSYSTEM_PLAN E3).
+pub mod faucet;
+/// E1 chain indexer: idempotent ingest + reorg rollback over a local
+/// row store (ECOSYSTEM_PLAN E1; Postgres replaced by deviation).
+pub mod indexer;
 mod prune;
+/// E3 client SDK (Rust) for the explorer and faucet HTTP APIs.
+pub mod sdk;
 mod store;
 mod wal;
 

@@ -3,6 +3,74 @@
 All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
 never rewritten: corrections are made with a new entry or an explicit note.
 
+## [E3 — Faucet+SDK phase closed: 1000 requests 1 payout/address/day, 3/3 SDK examples in CI, 6 mutation controls] 2026-11-19
+
+### Added
+- `crates/aura-storage/src/faucet.rs` (E3 faucet: 1 payout per address
+  per day, testnet only, deterministic policy + stdlib HTTP; ledger
+  payouts per the W1 freeze — deviation in `### E3 receipt`),
+  `crates/aura-storage/src/sdk.rs` (Rust client SDK), `sdk/ts/`
+  (TypeScript SDK + example), `sdk/python/` (Python SDK + example),
+  `docs/sdk/index.md` (docs site), gate
+  `crates/aura-storage/tests/e3_faucet.rs` (1000-request script →
+  750 payouts/250 denials, named messages), independent policy oracle
+  `tools/e3_faucet_check.py` + `tools/fixtures/e3_faucet_script.json`,
+  SDK examples runner `tools/e3_examples_check.py` (rust/ts/python 3/3
+  against a live reference faucet), negative controls `tools/nc_e3.py` ×6
+  (rate limit removed → red, literally), evidence `docs/evidence/e3/`
+  (`TOTAL: 512 negative controls cumulative`), builds `make test-e3` /
+  `make check-e3` / `make examples-e3` / `make nc-e3` /
+  `make evidence-e3` + gates wired into `make test`. Phase receipt +
+  deviations: `docs/plans/ECOSYSTEM_PLAN.md` `### E3 receipt`;
+  deliverable `patches/0077-E3-...patch`.
+
+## [E2 — Explorer phase closed: 10/10 user scenarios green, reproducible contract build, 6 mutation controls] 2026-11-19
+
+### Added
+- `crates/aura-storage/src/explorer.rs` (E2 explorer: blocks/tx/
+  accounts/validators/contracts views over the E1 indexer (D-E1),
+  deterministic ALVM-1 contract builder with verified source, stdlib
+  HTTP web UI + JSON API — no new dependencies, `Cargo.lock` stays
+  pinned at H1), gate `crates/aura-storage/tests/e2_explorer.rs`
+  (10 user scenarios over real HTTP + reproducible build property,
+  named messages), checklist `tools/fixtures/e2_explorer_scenarios.json`
+  (10/10 ready) with oracle `tools/e2_explorer_check.py` (independent
+  Python contract builder cross-checks
+  `tools/fixtures/e2_contracts.json`), report
+  `docs/ecosystem/e2-explorer-report.md`, negative controls
+  `tools/nc_e2.py` ×6 (reproducible build without canonicalization →
+  red, literally), evidence `docs/evidence/e2/` (`TOTAL: 506 negative
+  controls cumulative`), builds `make test-e2` / `make nc-e2` /
+  `make evidence-e2` + gates wired into `make test`. Phase receipt +
+  deviations: `docs/plans/ECOSYSTEM_PLAN.md` `### E2 receipt`;
+  deliverable `patches/0076-E2-...patch`.
+
+## [E1 — Indexer phase closed: 10 000 blocks + reorg, 0 duplicates/losses, 6 mutation controls] 2026-11-18
+
+### Added
+- `crates/aura-storage/src/indexer.rs` (E1 chain indexer: idempotent
+  ingest + reorg rollback over a local row store — the Postgres
+  component is replaced by a recorded deviation, `Cargo.lock` stays
+  pinned at H1), gate `crates/aura-storage/tests/e1_indexer.rs`
+  (10 000 blocks + artificial 205-block reorg → 0 duplicates/losses,
+  named messages), negative controls `tools/nc_e1.py` ×6 (without
+  rollback → red, literally), evidence `docs/evidence/e1/`
+  (`TOTAL: 500 negative controls cumulative`), builds `make test-e1` /
+  `make nc-e1` / `make evidence-e1` + gate wired into `make test`.
+  Phase receipt + deviation: `docs/plans/ECOSYSTEM_PLAN.md` `### E1
+  receipt`; deliverable `patches/0075-E1-indexer.patch`.
+
+## [E0 — Ecosystem baseline phase closed: 10 user scenarios checklist (0/10), 6 mutation controls] 2026-11-18
+
+### Added
+- `docs/ecosystem/e0-baseline-report.md` ("what a user must be able to
+  do": 10 user scenarios US-01..US-10 with surfaces and traceability),
+  `tools/fixtures/e0_user_scenarios.json` (machine-readable checklist),
+  `tools/e0_baseline_check.py` (deterministic oracle: exactly 10 unique
+  scenarios, need/status vocabulary, report coverage, honest readiness
+  counter; wired into `make test`), `tools/nc_e0.py` (6 mutation
+  controls), `tools/write_e0_evidence.py`.
+
 ## [H9 — Incident drills phase closed: named drill halted/recovered within SLO, playbook + 7 mutation controls] 2026-11-18
 
 ### Added
