@@ -1,0 +1,1858 @@
+From 1318a2f08f5f22c08134d09e3a068bf2b7f78525 Mon Sep 17 00:00:00 2001
+From: AlexanderNyr <alexandernyr@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 16:15:04 +0000
+Subject: [PATCH] T5 - slashing and insurance: 7 scenarios, penalty >= damage,
+ fund never negative, mass-slash cap with deferred queue
+
+T5 - Slashing and insurance (ECONOMICS_PLAN). Gate literally: 7 scenarios (single double-sign, repeat offender, correlated mass slash, fund exhaustion, penalty margin floor, mass-slash cap over windows, exhaustion and refill chain) with both invariants - penalty >= damage and the insurance fund never negative - checked at every step of the pinned run (87 steps, 48 incidents). Penalty parameters: T5_PENALTY_BPS 15000 (150% of the measured damage); insurance fund covers victims min(damage, balance), shortfall recorded, replenished by T5_FUND_SHARE_BPS 5000 of every applied penalty; mass-slash protection: T5_MASS_SLASH_CAP_BPS 500 of the registered bonded base (1 000 000 ALCRY) per window, excess penalty deferred - never dropped - and drained over windows (total_applied == total_penalty, pending 0). Golden digest 4cc9ea0319374c3c2c74bc88db6d7747b23f0e21ea637ae2270bc4c5707c9cef pinned in Rust tests and re-derived by the independent Python oracle (tools/t5_slashing_check.py), which cross-runs t5_slashing_example. NC: 7/7 named messages (tools/nc_t5.py; standard 6 + mass-slash cap, H6-H9/T4 precedent). 10 gate tests + 2 metamorphisms. Evidence docs/evidence/t5 (550 NCs cumulative over 22 phases). ALL GATES GREEN.
+---
+ CHANGELOG.md                                  |  37 ++
+ Makefile                                      |  19 +
+ .../examples/t5_slashing_example.rs           |  23 ++
+ crates/aura-storage/src/lib.rs                |   1 +
+ crates/aura-storage/src/slashing.rs           | 385 ++++++++++++++++++
+ crates/aura-storage/tests/t5_slashing.rs      | 298 ++++++++++++++
+ docs/economics/t5-slashing.md                 |  60 +++
+ docs/evidence/review-w1-source-drift.txt      |  14 +-
+ docs/evidence/t5/SHA256SUMS                   |   9 +
+ docs/evidence/t5/baseline.log                 |   2 +
+ docs/evidence/t5/campaign/result.json         |  33 ++
+ docs/evidence/t5/campaign/t5-slashing.log     |  19 +
+ docs/evidence/t5/gates.txt                    |  10 +
+ docs/evidence/t5/inventory.txt                |   4 +
+ docs/evidence/t5/nc-suite.log                 |   9 +
+ docs/evidence/t5/nc.log                       |   9 +
+ docs/evidence/t5/report.md                    |  11 +
+ docs/evidence/t5/t5-slashing.log              |  19 +
+ docs/plans/ECONOMICS_PLAN.md                  |  48 ++-
+ sim/t5-slashing.json                          |  46 +++
+ tools/audit_closeout.py                       |   8 +-
+ tools/nc_t5.py                                | 113 +++++
+ tools/t5_slashing_check.py                    | 215 ++++++++++
+ tools/write_t5_evidence.py                    | 180 ++++++++
+ 24 files changed, 1557 insertions(+), 15 deletions(-)
+ create mode 100644 crates/aura-storage/examples/t5_slashing_example.rs
+ create mode 100644 crates/aura-storage/src/slashing.rs
+ create mode 100644 crates/aura-storage/tests/t5_slashing.rs
+ create mode 100644 docs/economics/t5-slashing.md
+ create mode 100644 docs/evidence/t5/SHA256SUMS
+ create mode 100644 docs/evidence/t5/baseline.log
+ create mode 100644 docs/evidence/t5/campaign/result.json
+ create mode 100644 docs/evidence/t5/campaign/t5-slashing.log
+ create mode 100644 docs/evidence/t5/gates.txt
+ create mode 100644 docs/evidence/t5/inventory.txt
+ create mode 100644 docs/evidence/t5/nc-suite.log
+ create mode 100644 docs/evidence/t5/nc.log
+ create mode 100644 docs/evidence/t5/report.md
+ create mode 100644 docs/evidence/t5/t5-slashing.log
+ create mode 100644 sim/t5-slashing.json
+ create mode 100644 tools/nc_t5.py
+ create mode 100644 tools/t5_slashing_check.py
+ create mode 100644 tools/write_t5_evidence.py
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index c8d7cd5..192ec0d 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,43 @@
+ All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
+ never rewritten: corrections are made with a new entry or an explicit note.
+ 
++## [T5 — Slashing and insurance phase closed: 7 scenarios, penalty ≥ damage, insurance fund never negative, mass-slash cap with a deferred queue] 2026-11-21
++
++### Added
++
++- `crates/aura-storage/src/slashing.rs` — slashing and insurance model:
++  penalty parameters (`T5_PENALTY_BPS = 15_000`: the offender pays 150 %
++  of the measured damage, `penalty >= damage` at every incident);
++  insurance fund (`T5_FUND_SHARE_BPS = 5_000` of every applied penalty
++  replenishes the fund; victims are covered `min(damage, balance)`, the
++  rest is recorded as `shortfall`; the balance is a signed `i128` and
++  must **never go negative**); mass-slash protection
++  (`T5_MASS_SLASH_CAP_BPS = 500` of the registered bonded base
++  `T5_REGISTERED_BONDED` = 1 000 000 `ALCRY` per window; excess penalty
++  is deferred — never dropped — and drains over windows until
++  `total_applied == total_penalty`).
++- `crates/aura-storage/tests/t5_slashing.rs` (10 gate tests: the literal
++  7-scenario gate with both invariants at every step, penalty coverage,
++  fund-never-negative, the mass-slash cap, deferred penalties, exact
++  penalty margin incl. floor edges, exact fund share, pinned digest;
++  metamorphisms — splitting a report, reordering independent reports)
++  and `crates/aura-storage/examples/t5_slashing_example.rs`.
++- `sim/t5-slashing.json` — the pinned scenario (7 scenarios, 87 steps,
++  48 incidents) with golden digest
++  `4cc9ea0319374c3c2c74bc88db6d7747b23f0e21ea637ae2270bc4c5707c9cef`
++  and checkpoints; `docs/economics/t5-slashing.md`.
++- `tools/t5_slashing_check.py` (the phase gate oracle: full model
++  re-implementation, constants, samples, Rust example cross-run),
++  `tools/nc_t5.py` (7 mutation controls: penalty below damage, coverage
++  clamp removed, mass-slash cap raised, deferred penalty dropped, fund
++  income off by one, penalty formula drift, pinned parameter drift),
++  `tools/write_t5_evidence.py` (`docs/evidence/t5/`, cumulative
++  inventory `TOTAL: 550 negative controls over 22 phases`).
++- Wiring: Makefile `slashing gate (T5)` + `test-t5/check-t5/examples-t5/
++  nc-t5/evidence-t5`; `tools/audit_closeout.py` (`CURRENT = "T5"`,
++  `SHIPPED` += T4, `NC_PER_PHASE["T5"] = 7`, `PATCH_ORDER` += T5);
++  `### T5 receipt` in `docs/plans/ECONOMICS_PLAN.md` (Stage 2 opened).
++
+ ## [T4 — Staking phase closed: 1000 delegators, shares sum to exactly one, withdrawal without unbonding red, 21-day unbonding, proportional slashing; Stage 1 (T0–T4) complete] 2026-11-21
+ 
+ ### Added
+diff --git a/Makefile b/Makefile
+index 313850f..255e61a 100644
+--- a/Makefile
++++ b/Makefile
+@@ -296,6 +296,9 @@ test: deps-check
+ 	@echo "== staking gate (T4) =="
+ 	@$(PYTHON) tools/t4_staking_check.py
+ 	@$(CARGO) test --locked -p aura-storage --test t4_staking
++	@echo "== slashing gate (T5) =="
++	@$(PYTHON) tools/t5_slashing_check.py
++	@$(CARGO) test --locked -p aura-storage --test t5_slashing
+ 	@echo "== close-out audit =="
+ 	@$(PYTHON) tools/audit_closeout.py
+ 	@echo "ALL GATES GREEN"
+@@ -1428,6 +1431,22 @@ nc-e2:
+ evidence-e2:
+ 	@$(PYTHON) tools/write_e2_evidence.py
+ 
++.PHONY: test-t5 check-t5 examples-t5 nc-t5 evidence-t5
++test-t5:
++	@$(CARGO) test --locked -p aura-storage --test t5_slashing
++
++check-t5:
++	@$(PYTHON) tools/t5_slashing_check.py
++
++examples-t5:
++	@$(CARGO) run --quiet --locked -p aura-storage --example t5_slashing_example
++
++nc-t5:
++	@$(PYTHON) tools/nc_t5.py
++
++evidence-t5:
++	@$(PYTHON) tools/write_t5_evidence.py
++
+ .PHONY: test-t4 check-t4 examples-t4 nc-t4 evidence-t4
+ test-t4:
+ 	@$(CARGO) test --locked -p aura-storage --test t4_staking
+diff --git a/crates/aura-storage/examples/t5_slashing_example.rs b/crates/aura-storage/examples/t5_slashing_example.rs
+new file mode 100644
+index 0000000..d230b3d
+--- /dev/null
++++ b/crates/aura-storage/examples/t5_slashing_example.rs
+@@ -0,0 +1,23 @@
++//! T5 example: run the pinned slashing and insurance scenario and
++//! print its digest and totals.
++
++use aura_storage::slashing::{run_t5_scenario, scenario_digest};
++
++fn main() {
++    let run = run_t5_scenario();
++    let digest = scenario_digest(&run.steps);
++    println!(
++        "T5-SIM-OK {{\"steps\": {}, \"records\": {}, \"digest\": \"{}\", \
++\"final_balance\": {}, \"pending\": {}, \"total_penalty\": {}, \
++\"total_applied\": {}, \"total_covered\": {}, \"total_shortfall\": {}}}",
++        run.steps.len(),
++        run.records.len(),
++        digest,
++        run.final_balance,
++        run.pending,
++        run.total_penalty,
++        run.total_applied,
++        run.total_covered,
++        run.total_shortfall
++    );
++}
+diff --git a/crates/aura-storage/src/lib.rs b/crates/aura-storage/src/lib.rs
+index 031915a..7c50447 100644
+--- a/crates/aura-storage/src/lib.rs
++++ b/crates/aura-storage/src/lib.rs
+@@ -58,6 +58,7 @@ mod prune;
+ pub mod sdk;
+ /// T4 staking: min stake, delegation with shares, commission, 21-day
+ /// unbonding and a slashing period (ECONOMICS_PLAN T4).
++pub mod slashing;
+ pub mod staking;
+ mod store;
+ mod wal;
+diff --git a/crates/aura-storage/src/slashing.rs b/crates/aura-storage/src/slashing.rs
+new file mode 100644
+index 0000000..85e7ef5
+--- /dev/null
++++ b/crates/aura-storage/src/slashing.rs
+@@ -0,0 +1,385 @@
++//! T5 slashing and insurance: penalty parameters, insurance fund and
++//! mass-slash protection (ECONOMICS_PLAN T5).
++//!
++//! A misbehaving validator causes a measurable **damage** to the network
++//! and its users. The model books each incident as a [`SlashRecord`]:
++//!
++//! * **penalty parameters** — the offender pays
++//!   `damage * `[`T5_PENALTY_BPS`]` / `[`T5_BPS`] (150 %), so the penalty
++//!   always covers the damage;
++//! * **insurance fund** — the victims are made whole from the
++//!   [`InsuranceFund`] up to its available balance
++//!   (`covered = min(damage, balance)`); the uncovered remainder is a
++//!   recorded `shortfall`. The fund is replenished from penalties:
++//!   [`T5_FUND_SHARE_BPS`] (50 %) of every applied penalty flows in.
++//!   The fund balance must **never go negative**;
++//! * **mass-slash protection** — no window may destroy more than
++//!   [`T5_MASS_SLASH_CAP_BPS`] (5 %) of the registered bonded base
++//!   ([`T5_REGISTERED_BONDED`]); excess penalty is **deferred**, not
++//!   dropped, and is collected in later windows
++//!   ([`InsuranceFund::advance`]) until the queue drains.
++//!
++//! The pinned scenario [`run_t5_scenario`] drives the seven gate
++//! scenarios (single double-sign, repeat offender, correlated mass
++//! slash, fund exhaustion, penalty margin floor, mass-slash cap over
++//! windows, exhaustion and refill chain); [`scenario_digest`] is
++//! cross-run against the independent Python oracle
++//! (`tools/t5_slashing_check.py`).
++
++use crate::econ::Amount;
++use crate::issuance::ALCRY;
++
++/// Penalty on top of the caused damage, in basis points (150 %).
++pub const T5_PENALTY_BPS: u64 = 15_000;
++
++/// Share of every applied penalty that replenishes the insurance fund,
++/// in basis points (50 %).
++pub const T5_FUND_SHARE_BPS: u64 = 5_000;
++
++/// Mass-slash protection: maximum share of the registered bonded base
++/// that one window may destroy, in basis points (5 %).
++pub const T5_MASS_SLASH_CAP_BPS: u64 = 500;
++
++/// Basis points denominator.
++pub const T5_BPS: u64 = 10_000;
++
++/// Registered bonded base of the epoch: the mass-slash cap is measured
++/// against it (pinned policy parameter; per-validator stake accounting
++/// is the T4 staking model).
++pub const T5_REGISTERED_BONDED: Amount = 1_000_000 * ALCRY;
++
++/// Initial insurance fund balance.
++pub const T5_FUND_SEED: Amount = 200_000 * ALCRY;
++
++/// Number of gate scenarios in [`run_t5_scenario`].
++pub const T5_SCENARIOS: u32 = 7;
++
++/// Names of the seven gate scenarios (ids 1..=7 in the step log).
++pub const T5_SCENARIO_NAMES: [&str; 7] = [
++    "single double-sign",
++    "repeat offender",
++    "correlated mass slash",
++    "fund exhaustion",
++    "penalty margin floor",
++    "mass-slash cap over windows",
++    "exhaustion and refill chain",
++];
++
++/// Penalty booked for one incident: `damage * T5_PENALTY_BPS / T5_BPS`.
++fn penalty_of(damage: Amount) -> Amount {
++    damage * Amount::from(T5_PENALTY_BPS) / Amount::from(T5_BPS)
++}
++
++/// Insurance income from an applied penalty:
++/// `applied * T5_FUND_SHARE_BPS / T5_BPS`.
++fn income_of(applied: Amount) -> Amount {
++    applied * Amount::from(T5_FUND_SHARE_BPS) / Amount::from(T5_BPS)
++}
++
++/// Mass-slash cap of one window: 5 % of [`T5_REGISTERED_BONDED`].
++fn window_cap() -> Amount {
++    T5_REGISTERED_BONDED * Amount::from(T5_MASS_SLASH_CAP_BPS) / Amount::from(T5_BPS)
++}
++
++/// One booked slashing incident.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct SlashRecord {
++    /// Incident number within the run.
++    pub index: u32,
++    /// Slashing window the incident was booked in.
++    pub window: u32,
++    /// Scenario id of the pinned run (0 for ad-hoc incidents).
++    pub scenario: u32,
++    /// Damage caused to the network and its users.
++    pub damage: Amount,
++    /// Penalty taken from the offender (>= damage).
++    pub penalty: Amount,
++    /// Loss covered from the insurance fund (<= damage).
++    pub covered: Amount,
++    /// Part of the penalty applied within the window cap.
++    pub applied: Amount,
++    /// Insurance income: `T5_FUND_SHARE_BPS` of `applied`.
++    pub income: Amount,
++    /// Uncovered part of the damage: `damage - covered`.
++    pub shortfall: Amount,
++}
++
++/// Insurance fund with a slash ledger and mass-slash protection.
++#[derive(Debug, Clone)]
++pub struct InsuranceFund {
++    balance: i128,
++    window: u32,
++    window_applied: Amount,
++    pending: Amount,
++    total_penalty: Amount,
++    total_applied: Amount,
++    total_covered: Amount,
++    total_shortfall: Amount,
++    records: Vec<SlashRecord>,
++}
++
++impl InsuranceFund {
++    /// New fund seeded with [`T5_FUND_SEED`], window 0 open.
++    pub fn new() -> Self {
++        Self {
++            balance: T5_FUND_SEED as i128,
++            window: 0,
++            window_applied: 0,
++            pending: 0,
++            total_penalty: 0,
++            total_applied: 0,
++            total_covered: 0,
++            total_shortfall: 0,
++            records: Vec::new(),
++        }
++    }
++
++    /// Current fund balance (signed so an overdraw would be visible).
++    pub fn balance(&self) -> i128 {
++        self.balance
++    }
++
++    /// Penalty applied but not yet collected (mass-slash deferral).
++    pub fn pending(&self) -> Amount {
++        self.pending
++    }
++
++    /// Penalties booked so far.
++    pub fn total_penalty(&self) -> Amount {
++        self.total_penalty
++    }
++
++    /// Penalties applied so far (window-capped).
++    pub fn total_applied(&self) -> Amount {
++        self.total_applied
++    }
++
++    /// Damage covered from the fund so far.
++    pub fn total_covered(&self) -> Amount {
++        self.total_covered
++    }
++
++    /// Damage not covered so far.
++    pub fn total_shortfall(&self) -> Amount {
++        self.total_shortfall
++    }
++
++    /// Current window number.
++    pub fn window(&self) -> u32 {
++        self.window
++    }
++
++    /// Penalty applied within the current window.
++    pub fn window_applied(&self) -> Amount {
++        self.window_applied
++    }
++
++    /// The incident ledger.
++    pub fn records(&self) -> &[SlashRecord] {
++        &self.records
++    }
++
++    /// Book one incident: penalty from the offender, mass-slash cap on
++    /// the applied part, insurance income, coverage of the damage.
++    pub fn report(&mut self, damage: Amount, scenario: u32) -> &SlashRecord {
++        let penalty = penalty_of(damage);
++        let room = window_cap().saturating_sub(self.window_applied);
++        let applied = penalty.min(room);
++        self.pending += penalty - applied;
++        self.window_applied += applied;
++        self.total_penalty += penalty;
++        self.total_applied += applied;
++        let income = income_of(applied);
++        self.balance += income as i128;
++        let free = self.balance.max(0) as Amount;
++        let covered = damage.min(free);
++        self.balance -= covered as i128;
++        let shortfall = damage - covered;
++        self.total_covered += covered;
++        self.total_shortfall += shortfall;
++        let index = self.records.len() as u32;
++        self.records.push(SlashRecord {
++            index,
++            window: self.window,
++            scenario,
++            damage,
++            penalty,
++            covered,
++            applied,
++            income,
++            shortfall,
++        });
++        self.records.last().expect("just pushed")
++    }
++
++    /// Close the current window: apply up to one window cap of the
++    /// deferred penalty (mass-slash protection) and open the next one.
++    pub fn advance(&mut self, _scenario: u32) {
++        self.window += 1;
++        self.window_applied = 0;
++        let taken = self.pending.min(window_cap());
++        self.pending -= taken;
++        self.window_applied = taken;
++        self.total_applied += taken;
++        let income = income_of(taken);
++        self.balance += income as i128;
++    }
++}
++
++impl Default for InsuranceFund {
++    fn default() -> Self {
++        Self::new()
++    }
++}
++
++/// One action of the pinned scenario run (digest step).
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct T5Step {
++    /// Step number, starting at 0.
++    pub index: u32,
++    /// 0 = incident booked, 1 = window advanced, 9 = final step.
++    pub kind: u8,
++    /// Scenario id (1..=7).
++    pub scenario: u32,
++    /// Fund balance after the action.
++    pub balance: i128,
++    /// Deferred penalty after the action.
++    pub pending: Amount,
++    /// Cumulative applied penalty after the action.
++    pub total_applied: Amount,
++    /// Cumulative booked penalty after the action.
++    pub total_penalty: Amount,
++    /// Window number after the action.
++    pub window: u32,
++    /// Penalty applied within the window after the action.
++    pub window_applied: Amount,
++}
++
++/// Result of the pinned scenario run.
++#[derive(Debug, Clone)]
++pub struct T5Run {
++    /// Digest steps of the run.
++    pub steps: Vec<T5Step>,
++    /// Incident ledger of the run.
++    pub records: Vec<SlashRecord>,
++    /// Final fund balance.
++    pub final_balance: i128,
++    /// Deferred penalty at the end (0: nothing dropped).
++    pub pending: Amount,
++    /// Cumulative booked penalty.
++    pub total_penalty: Amount,
++    /// Cumulative applied penalty.
++    pub total_applied: Amount,
++    /// Cumulative covered damage.
++    pub total_covered: Amount,
++    /// Cumulative uncovered damage.
++    pub total_shortfall: Amount,
++}
++
++fn push_step(steps: &mut Vec<T5Step>, kind: u8, scenario: u32, fund: &InsuranceFund) {
++    steps.push(T5Step {
++        index: steps.len() as u32,
++        kind,
++        scenario,
++        balance: fund.balance(),
++        pending: fund.pending(),
++        total_applied: fund.total_applied(),
++        total_penalty: fund.total_penalty(),
++        window: fund.window(),
++        window_applied: fund.window_applied(),
++    });
++}
++
++/// The pinned T5 scenario: seven gate scenarios over one insurance fund.
++pub fn run_t5_scenario() -> T5Run {
++    let mut fund = InsuranceFund::new();
++    let mut steps: Vec<T5Step> = Vec::new();
++    // s1: single double-sign.
++    push_step(&mut steps, 0, 1, {
++        fund.report(100 * ALCRY, 1);
++        &fund
++    });
++    // s2: repeat offender.
++    for _ in 0..10 {
++        fund.report(50 * ALCRY, 2);
++        push_step(&mut steps, 0, 2, &fund);
++    }
++    // s3: correlated mass slash, drained over three windows.
++    for _ in 0..20 {
++        fund.report(5_000 * ALCRY, 3);
++        push_step(&mut steps, 0, 3, &fund);
++    }
++    for _ in 0..3 {
++        fund.advance(3);
++        push_step(&mut steps, 1, 3, &fund);
++    }
++    // s4: fund exhaustion pressure.
++    for _ in 0..3 {
++        fund.report(60_000 * ALCRY, 4);
++        push_step(&mut steps, 0, 4, &fund);
++    }
++    for _ in 0..6 {
++        fund.advance(4);
++        push_step(&mut steps, 1, 4, &fund);
++    }
++    // s5: penalty margin floor (odd amounts).
++    fund.report(ALCRY + 1, 5);
++    push_step(&mut steps, 0, 5, &fund);
++    fund.report(999_999_999_999_999_999, 5);
++    push_step(&mut steps, 0, 5, &fund);
++    // s6: mass-slash cap over multiple windows.
++    for _ in 0..8 {
++        fund.report(20_000 * ALCRY, 6);
++        push_step(&mut steps, 0, 6, &fund);
++    }
++    for _ in 0..6 {
++        fund.advance(6);
++        push_step(&mut steps, 1, 6, &fund);
++    }
++    // s7: exhaustion and refill chain.
++    fund.report(500_000 * ALCRY, 7);
++    push_step(&mut steps, 0, 7, &fund);
++    fund.report(250_000 * ALCRY, 7);
++    push_step(&mut steps, 0, 7, &fund);
++    for _ in 0..3 {
++        fund.advance(7);
++        push_step(&mut steps, 1, 7, &fund);
++    }
++    fund.report(1_000 * ALCRY, 7);
++    push_step(&mut steps, 0, 7, &fund);
++    fund.report(2_000 * ALCRY, 7);
++    push_step(&mut steps, 0, 7, &fund);
++    for _ in 0..20 {
++        fund.advance(7);
++        push_step(&mut steps, 1, 7, &fund);
++    }
++    push_step(&mut steps, 9, 7, &fund);
++    T5Run {
++        final_balance: fund.balance(),
++        pending: fund.pending(),
++        total_penalty: fund.total_penalty(),
++        total_applied: fund.total_applied(),
++        total_covered: fund.total_covered(),
++        total_shortfall: fund.total_shortfall(),
++        records: fund.records,
++        steps,
++    }
++}
++
++/// Digest of the scenario step log (sha256, hex).
++pub fn scenario_digest(steps: &[T5Step]) -> String {
++    let mut blob = String::new();
++    for step in steps {
++        blob.push_str(&format!(
++            "{}:{}:{}:{}:{}:{}:{}\n",
++            step.index,
++            step.kind,
++            step.scenario,
++            step.balance,
++            step.pending,
++            step.total_applied,
++            step.total_penalty
++        ));
++    }
++    aura_state::sha256_bytes(blob.as_bytes()).to_hex()
++}
+diff --git a/crates/aura-storage/tests/t5_slashing.rs b/crates/aura-storage/tests/t5_slashing.rs
+new file mode 100644
+index 0000000..dbda6c2
+--- /dev/null
++++ b/crates/aura-storage/tests/t5_slashing.rs
+@@ -0,0 +1,298 @@
++//! T5 gate tests: seven scenarios with the invariants "penalty >=
++//! damage" and "the insurance fund must never go negative", the
++//! mass-slash cap, deferred penalties, pinned digest (ECONOMICS_PLAN
++//! T5: "7 scenarios: penalty >= damage, fund never negative").
++
++use aura_storage::econ::Amount;
++use aura_storage::issuance::ALCRY;
++use aura_storage::slashing::{
++    InsuranceFund, T5_SCENARIO_NAMES, T5_SCENARIOS, run_t5_scenario, scenario_digest,
++};
++
++/// Pinned mass-slash cap: 5 % of the registered bonded base
++/// (1 000 000 ALCRY). Hard-coded on purpose: the tests re-derive the
++/// invariants from the pinned parameters, not from the source consts.
++const PINNED_WINDOW_CAP: Amount = 50_000 * ALCRY;
++
++const GOLDEN_STAKING_DIGEST: &str =
++    "4cc9ea0319374c3c2c74bc88db6d7747b23f0e21ea637ae2270bc4c5707c9cef";
++
++#[test]
++fn t5_seven_scenarios_hold_both_invariants() {
++    assert_eq!(T5_SCENARIOS, 7, "T5: seven scenarios must run");
++    assert_eq!(
++        T5_SCENARIO_NAMES.len() as u32,
++        7,
++        "T5: seven scenarios must run"
++    );
++    let run = run_t5_scenario();
++    for id in 1..=7u32 {
++        assert!(
++            run.steps.iter().any(|s| s.scenario == id),
++            "T5: seven scenarios must run (missing scenario {})",
++            id
++        );
++    }
++    for record in &run.records {
++        assert!(
++            record.penalty >= record.damage,
++            "T5: the penalty must cover the damage"
++        );
++    }
++    for step in &run.steps {
++        assert!(
++            step.balance >= 0,
++            "T5: the insurance fund must never go negative"
++        );
++    }
++}
++
++#[test]
++fn t5_the_penalty_must_cover_the_damage() {
++    let mut fund = InsuranceFund::new();
++    let record = *fund.report(100 * ALCRY, 0);
++    assert_eq!(
++        record.penalty,
++        150 * ALCRY,
++        "T5: the penalty must cover the damage"
++    );
++    assert!(
++        record.penalty >= record.damage,
++        "T5: the penalty must cover the damage"
++    );
++}
++
++#[test]
++fn t5_the_insurance_fund_must_never_go_negative() {
++    let mut fund = InsuranceFund::new();
++    // damage larger than fund + income: the coverage is clamped and the
++    // remainder becomes a shortfall; the balance bottoms at zero.
++    let record = *fund.report(300_000 * ALCRY, 0);
++    assert_eq!(
++        record.covered,
++        225_000 * ALCRY,
++        "T5: the insurance fund must never go negative"
++    );
++    assert_eq!(
++        record.shortfall,
++        75_000 * ALCRY,
++        "T5: the insurance fund must never go negative"
++    );
++    assert!(
++        fund.balance() >= 0,
++        "T5: the insurance fund must never go negative"
++    );
++    assert_eq!(
++        fund.balance(),
++        0,
++        "T5: the insurance fund must never go negative"
++    );
++}
++
++#[test]
++fn t5_the_mass_slash_cap_must_hold_in_every_window() {
++    let run = run_t5_scenario();
++    for step in &run.steps {
++        assert!(
++            step.window_applied <= PINNED_WINDOW_CAP,
++            "T5: the mass-slash cap must hold in every window"
++        );
++    }
++}
++
++#[test]
++fn t5_deferred_penalties_are_not_dropped() {
++    let run = run_t5_scenario();
++    assert_eq!(run.pending, 0, "T5: deferred penalties must not be dropped");
++    assert_eq!(
++        run.total_applied, run.total_penalty,
++        "T5: deferred penalties must not be dropped"
++    );
++}
++
++#[test]
++fn t5_the_penalty_is_exactly_the_damage_times_the_pinned_parameter() {
++    let run = run_t5_scenario();
++    for record in &run.records {
++        assert_eq!(
++            record.penalty,
++            record.damage * 15_000 / 10_000,
++            "T5: the penalty must be exactly damage times the pinned parameter"
++        );
++    }
++    // floor cases of scenario 5
++    let margins: Vec<(Amount, Amount)> = run
++        .records
++        .iter()
++        .filter(|r| r.scenario == 5)
++        .map(|r| (r.damage, r.penalty))
++        .collect();
++    assert_eq!(
++        margins,
++        vec![
++            (1_000_000_000_000_000_001, 1_500_000_000_000_000_001),
++            (999_999_999_999_999_999, 1_499_999_999_999_999_998),
++        ],
++        "T5: the penalty must be exactly damage times the pinned parameter"
++    );
++}
++
++#[test]
++fn t5_the_insurance_income_is_the_fund_share_of_the_applied_penalty() {
++    let run = run_t5_scenario();
++    for record in &run.records {
++        assert_eq!(
++            record.income,
++            record.applied * 5_000 / 10_000,
++            "T5: the insurance income must be exactly the fund share of the applied penalty"
++        );
++    }
++    assert_eq!(
++        run.total_covered + run.total_shortfall,
++        run.records.iter().map(|r| r.damage).sum::<Amount>(),
++        "T5: the insurance income must be exactly the fund share of the applied penalty"
++    );
++}
++
++#[test]
++fn t5_reference_simulation_agrees_with_the_pinned_digest() {
++    let run = run_t5_scenario();
++    assert_eq!(
++        run.steps.len(),
++        87,
++        "T5: the reference simulation must agree with the pinned digest"
++    );
++    assert_eq!(
++        run.records.len(),
++        48,
++        "T5: the reference simulation must agree with the pinned digest"
++    );
++    let digest = scenario_digest(&run.steps);
++    assert_eq!(
++        digest, GOLDEN_STAKING_DIGEST,
++        "T5: the reference simulation must agree with the pinned digest"
++    );
++    let step0 = run.steps[0];
++    assert_eq!(
++        (
++            step0.kind,
++            step0.scenario,
++            step0.balance,
++            step0.pending,
++            step0.total_applied,
++            step0.total_penalty
++        ),
++        (
++            0u8,
++            1u32,
++            199_975_000_000_000_000_000_000i128,
++            0,
++            150_000_000_000_000_000_000,
++            150_000_000_000_000_000_000
++        ),
++        "T5: the reference simulation must agree with the pinned digest"
++    );
++    let step31 = run.steps[31];
++    assert_eq!(
++        (
++            step31.kind,
++            step31.scenario,
++            step31.balance,
++            step31.pending,
++            step31.total_applied,
++            step31.total_penalty
++        ),
++        (
++            1u8,
++            3u32,
++            149_400_000_000_000_000_000_000i128,
++            50_900_000_000_000_000_000_000,
++            100_000_000_000_000_000_000_000,
++            150_900_000_000_000_000_000_000
++        ),
++        "T5: the reference simulation must agree with the pinned digest"
++    );
++    let step43 = run.steps[43];
++    assert_eq!(
++        (step43.kind, step43.scenario, step43.balance, step43.pending),
++        (0u8, 5u32, 129_849_749_999_999_999_999_999i128, 0),
++        "T5: the reference simulation must agree with the pinned digest"
++    );
++    let step60 = run.steps[60];
++    assert_eq!(
++        (step60.kind, step60.scenario, step60.balance, step60.pending),
++        (0u8, 7u32, 0i128, 1_075_000_000_000_000_000_000_000),
++        "T5: the reference simulation must agree with the pinned digest"
++    );
++    let final_step = run.steps[86];
++    assert_eq!(
++        final_step.kind, 9,
++        "T5: the reference simulation must agree with the pinned digest"
++    );
++    assert_eq!(
++        (final_step.balance, final_step.pending),
++        (536_750_000_000_000_000_000_000i128, 0),
++        "T5: the reference simulation must agree with the pinned digest"
++    );
++    assert_eq!(
++        (run.total_applied, run.total_penalty),
++        (
++            1_790_402_999_999_999_999_999_999,
++            1_790_402_999_999_999_999_999_999
++        ),
++        "T5: deferred penalties must not be dropped"
++    );
++    assert_eq!(
++        run.total_covered, 558_451_499_999_999_999_999_998,
++        "T5: the reference simulation must agree with the pinned digest"
++    );
++    assert_eq!(
++        run.total_shortfall, 635_150_500_000_000_000_000_002,
++        "T5: the reference simulation must agree with the pinned digest"
++    );
++}
++
++#[test]
++fn t5_splitting_a_report_preserves_the_totals() {
++    let mut whole = InsuranceFund::new();
++    whole.report(100 * ALCRY, 0);
++    let mut halves = InsuranceFund::new();
++    halves.report(50 * ALCRY, 0);
++    halves.report(50 * ALCRY, 0);
++    assert_eq!(
++        (
++            whole.balance(),
++            whole.total_penalty(),
++            whole.total_covered()
++        ),
++        (
++            halves.balance(),
++            halves.total_penalty(),
++            halves.total_covered()
++        ),
++        "T5: the penalty must be exactly damage times the pinned parameter"
++    );
++}
++
++#[test]
++fn t5_reordering_independent_reports_preserves_the_balance() {
++    let mut forward = InsuranceFund::new();
++    forward.report(100 * ALCRY, 0);
++    forward.report(200 * ALCRY, 0);
++    let mut reverse = InsuranceFund::new();
++    reverse.report(200 * ALCRY, 0);
++    reverse.report(100 * ALCRY, 0);
++    assert_eq!(
++        (
++            forward.balance(),
++            forward.total_penalty(),
++            forward.total_covered()
++        ),
++        (
++            reverse.balance(),
++            reverse.total_penalty(),
++            reverse.total_covered()
++        ),
++        "T5: the insurance fund must never go negative"
++    );
++}
+diff --git a/docs/economics/t5-slashing.md b/docs/economics/t5-slashing.md
+new file mode 100644
+index 0000000..bfce98b
+--- /dev/null
++++ b/docs/economics/t5-slashing.md
+@@ -0,0 +1,60 @@
++# T5 — Slashing and insurance (ECONOMICS_PLAN)
++
++**Статус:** ✅ закрыто (2026-11-21). **Гейт:** 7 scenarios: penalty ≥ damage,
++fund never negative — выполнен буквально.
++
++## Решения
++
++- **Параметры штрафа.** Инцидент (double-sign, простой и т.п.) причиняет
++  измеримый `damage`. Штраф обидчика = `damage × T5_PENALTY_BPS / T5_BPS`
++  = **150 %** — `penalty ≥ damage` выполняется по построению и проверяется
++  на каждом из 48 инцидентов пиненого прогона (включая floor-края
++  `damage = 10^18 ± 1`).
++- **Страховой фонд.** Пострадавшие покрываются из `InsuranceFund`:
++  `covered = min(damage, balance)`; непокрытый остаток — `shortfall`
++  (фиксируется, не теряется). Пополнение: **5000 bps** применённого штрафа
++  (после mass-slash cap) идёт в фонд. Инвариант: **баланс фонда никогда
++  не уходит в минус** (подписанная `i128`, проверка на каждом шаге).
++- **Mass-slash protection.** Ни одно окно не может уничтожить больше
++  **500 bps** зарегистрированного bonded (параметр `T5_REGISTERED_BONDED`
++  = 1 000 000 `ALCRY` → cap = **50 000 `ALCRY`/окно**). Избыток штрафа
++  **откладывается** в очередь (`pending`) — не прощается — и собирается
++  следующими окнами (`advance`), пока очередь не станет пустой
++  (`total_applied == total_penalty`, `pending == 0` в конце прогона).
++
++## Сценарий `sim/t5-slashing.json` (7 сценариев, 87 шагов, 48 инцидентов)
++
++1. единичный double-sign (100 `ALCRY` ущерба);
++2. повторный нарушитель (10 × 50);
++3. коррелированный mass-slash (20 × 5 000) с дренажом по 3 окнам;
++4. давление истощения фонда (3 × 60 000) с дренажом по 6 окнам;
++5. floor-края штрафа (10^18+1 и 10^18−1);
++6. mass-slash cap поверх нескольких окон (8 × 20 000);
++7. цепочка истощения и пополнения (500 000 + 250 000, дренаж, повторное
++   покрытие 1 000/2 000, финальный дренаж).
++
++Золотой дайджест
++`4cc9ea0319374c3c2c74bc88db6d7747b23f0e21ea637ae2270bc4c5707c9cef`
++закреплён в `crates/aura-storage/tests/t5_slashing.rs` и пересчитан
++независимым Python-оракулом `tools/t5_slashing_check.py`, который также
++запускает пример `t5_slashing_example`. Финал: фонд **536 750 `ALCRY`**,
++очередь пуста, `total_applied == total_penalty == 1 790 402 999 999 999
++999 999 999`, покрыто **558 451 499 999 999 999 999 998**, непокрыто
++**635 150 500 000 000 000 000 002**; фонд опускался ровно до 0
++(шаг 60) и восстанавливался — инвариант «never negative» удержится в
++каждой точке.
++
++## Negative controls (`tools/nc_t5.py`, 7/7)
++
++| # | Мутация | Named message |
++|---|---|---|
++| 1 | `T5_PENALTY_BPS` 15 000 → 9 999 | `T5: the penalty must cover the damage` |
++| 2 | clamp покрытия убран (`covered = damage`) | `T5: the insurance fund must never go negative` |
++| 3 | `T5_MASS_SLASH_CAP_BPS` 500 → 5 000 | `T5: the mass-slash cap must hold in every window` |
++| 4 | отложенная часть прощается (`pending = 0`) | `T5: deferred penalties must not be dropped` |
++| 5 | доход фонда +1 | `T5: the insurance income must be exactly the fund share of the applied penalty` |
++| 6 | формула штрафа /10 001 | `T5: the penalty must be exactly damage times the pinned parameter` |
++| 7 | `T5_FUND_SHARE_BPS` 5 000 → 5 001 | `T5: the reference simulation must agree with the pinned digest` |
++
++Эвиденс: `docs/evidence/t5/` (контрольные мутации кумулятивно: **550** за
++22 фазы). Патч фазы: `patches/0083-T5-slashing.patch`.
+diff --git a/docs/evidence/review-w1-source-drift.txt b/docs/evidence/review-w1-source-drift.txt
+index db0e4bc..29a032f 100644
+--- a/docs/evidence/review-w1-source-drift.txt
++++ b/docs/evidence/review-w1-source-drift.txt
+@@ -1,13 +1,13 @@
+ # Source-drift book (W1 review): pinned sources that legitimately changed
+ # after their phase receipt. Format: <historical sha> <current sha> <path>;
+-# one triple per pinned version, sorted. Regenerated at T4 close-out.
++# one triple per pinned version, sorted. Regenerated at T5 close-out.
+ # Historical evidence files are never exempted here.
+-adc24e7c03e1a63e5d7addbda15ff40ce630367152699c5d9659cd8db65f357b cb3be2b51330e7e2558cab30fca6907b48f4d34209b0b0c223f558ee31dd57bd CHANGELOG.md
+-c83d08301a703c9db11462aa541bc898e52548589972118465164895eed44dc7 cb3be2b51330e7e2558cab30fca6907b48f4d34209b0b0c223f558ee31dd57bd CHANGELOG.md
++adc24e7c03e1a63e5d7addbda15ff40ce630367152699c5d9659cd8db65f357b 5679c655b454c1381b8f0a25deef44df55fdffee195dd243062cd4a6ff28acd4 CHANGELOG.md
++c83d08301a703c9db11462aa541bc898e52548589972118465164895eed44dc7 5679c655b454c1381b8f0a25deef44df55fdffee195dd243062cd4a6ff28acd4 CHANGELOG.md
+ f0d3511cd02f3007c0a18fc5d94c8997cfa512449313776117265708a36c8553 c9680cc436d806fa7fa2ce8545bd148dc9fcc9ae444973d4968a3f4f4fc069dc Cargo.lock
+ d5518138eae73219f8da0d7297af44a471dbd7135a39587a0da1587bfe3d1e70 23185f790bc4697bbd163004e2c78873755c13efba05b46260b4827cdeabdff7 Cargo.toml
+-5fb6ce43826495321f697e138e71e87954b2fcabec1ceef70549bb49a2f38988 1d1222fd4ad80131f9eacf79bcd09b5a25bd2d1dc41100ab5a485538a2c4cdef Makefile
+-c5e92007c53a22253ad7d2cc779863b9592562a394d1b26ff09ea8d031991e29 1d1222fd4ad80131f9eacf79bcd09b5a25bd2d1dc41100ab5a485538a2c4cdef Makefile
++5fb6ce43826495321f697e138e71e87954b2fcabec1ceef70549bb49a2f38988 67c421dd39dff2568018058e06e13d5051e37474e1fe44fb196adc37e5da438c Makefile
++c5e92007c53a22253ad7d2cc779863b9592562a394d1b26ff09ea8d031991e29 67c421dd39dff2568018058e06e13d5051e37474e1fe44fb196adc37e5da438c Makefile
+ bcc7328bd9c464a857c4b97c8491277bf401299d3c7963f1925b075d4313feb6 f2e4a249573a5b902b3f566b3f1db1ebab12d994f1ab6ef9be2dc15df63d7e26 crates/aura-consensus/src/fork_choice.rs
+ 7e396fbb4fd1d4103f26db16796ab0b6ad9626b7ba2ea0d56cae379bde5c2d59 8ec730ce2dc2cb1bc266990f4f29133038e98e390a63be0edbb3eaa23fa48f23 crates/aura-consensus/src/governance.rs
+ bd58be73dc4e0f6da16735be1d5ed17306d16c08569d798a4af20fcf72b91d40 b2e8ddad5b281da54e9c68107b563c9125b3931fe0e8e26023c74dcf3011ccc3 crates/aura-consensus/src/slashing.rs
+@@ -46,8 +46,8 @@ c477f915b427982ca83fcb253fa0ab850d619ca5bf4a764137f0407078af4986 26a28bcc51e2cab
+ b4897ba4dbc33f098c27e415669e2e0bbca45933694b67aa590181041ebfdf0f e7b3e704bb1c5688159f38f66f31ba17893bad818c8876e097631ab2725abf5b fuzz/Cargo.toml
+ dca80316562fefcf24c45b40fb635412e1d4e5e09b5abe26f7d0e6b67e1e906e 53ac68024a82d40e64badd40ead1ebea5e0af8be1e56d4184a0eb0f22eab55a2 fuzz/README.md
+ 6e80f8eab5695501a3350e70bd086675cf4d1669cf370d92e98702d18c7bfe6e 7414f1e69a9690bdf93c79dc0ca32ec5cac7ca3b4f0df2d317e39c6fa95abc99 fuzz/src/lib.rs
+-1259c6bbc3bd3d53cbe0dd1d69d8d762336dc26287215d2ee35307bba90ea85c 333da3e9983a92b3128671808fedd7d20cd437460278592ea83e96f6318298fa tools/audit_closeout.py
+-7bd672503f104aa733dff03e84f57ac26ef926607657ab6a799f9d2bc14c0dc9 333da3e9983a92b3128671808fedd7d20cd437460278592ea83e96f6318298fa tools/audit_closeout.py
++1259c6bbc3bd3d53cbe0dd1d69d8d762336dc26287215d2ee35307bba90ea85c 8776f55d6ba4c7579094c8cb0ff1b10ad60cd4c11b4f84d69f2c14c159121149 tools/audit_closeout.py
++7bd672503f104aa733dff03e84f57ac26ef926607657ab6a799f9d2bc14c0dc9 8776f55d6ba4c7579094c8cb0ff1b10ad60cd4c11b4f84d69f2c14c159121149 tools/audit_closeout.py
+ 4d7d73580e09a49f1a0a9faf668254b0ec12f891efa527db863fa3abf8cce4a1 ab356092fc59ed98bff8d3622ef74e35eb33da5f342c5b6dccf5d73aeb20763b tools/gen_w0_vectors.py
+ 303fc648659cc72d9f8cf7cf6bc71ed8c9bd5a9f9a8d923d5a1e78bcffba0b5b 5e62e17226bfc601e8775b54e7f6a025d36c1357b7206d33c18c442cb49746eb tools/nc_b10.py
+ f86dee929549c751519e1749e0976c561e47a174a129412caf8cd23680887f61 3ae536e2637862525ca6edb1eeaa927a018a529856402d60c7260e92481d0b19 tools/nc_b5.py
+diff --git a/docs/evidence/t5/SHA256SUMS b/docs/evidence/t5/SHA256SUMS
+new file mode 100644
+index 0000000..63f5c9f
+--- /dev/null
++++ b/docs/evidence/t5/SHA256SUMS
+@@ -0,0 +1,9 @@
++1d0dfe7cd8a56621fc58bc319aac18e590e4f2d81e92f1d2cfa881c9f1419d61  docs/evidence/t5/baseline.log
++f02094391ab294d48a77a589a812fe7a25ea9a97e2a35fb44c6f14360cfd1e5a  docs/evidence/t5/gates.txt
++addcf142b6b021e654c1ac73c57fdafc1541f8a6c97bb1c62f7df29cbfc6dc95  docs/evidence/t5/inventory.txt
++263aed07c948b5d5c34e004c2215f9fd2af4cc7cc185408ce76d22843bb4e5a2  docs/evidence/t5/nc-suite.log
++0383f06947c35e51904848be338107f360e947bdbcd9227639ca2e9e183ef834  docs/evidence/t5/nc.log
++88e12ac446199158f65fb03ea073a1e5266d0ae3a2dba3b70bd075f61beb6ac4  docs/evidence/t5/report.md
++32cd5eb9d1153c23f676506c60b638f5eda6e5993cdedac76703022ea7504eb9  docs/evidence/t5/t5-slashing.log
++a255f6e69d78ef3b1a14e236f60c4017143748912e9700604af0e573b04aacad  docs/evidence/t5/campaign/result.json
++32cd5eb9d1153c23f676506c60b638f5eda6e5993cdedac76703022ea7504eb9  docs/evidence/t5/campaign/t5-slashing.log
+diff --git a/docs/evidence/t5/baseline.log b/docs/evidence/t5/baseline.log
+new file mode 100644
+index 0000000..cce44c7
+--- /dev/null
++++ b/docs/evidence/t5/baseline.log
+@@ -0,0 +1,2 @@
++[evidence_t5] cmd=/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/t5_slashing_check.py exit=0 duration=0.55s
++RESULT: T5 slashing check PASS — 7 scenarios, penalty >= damage, fund never negative (covered 558451499999999999999998, shortfall 635150500000000000000002, deferred drained to 0, digest 4cc9ea0319374c3c2c74bc88db6d7747b23f0e21ea637ae2270bc4c5707c9cef)
+diff --git a/docs/evidence/t5/campaign/result.json b/docs/evidence/t5/campaign/result.json
+new file mode 100644
+index 0000000..afad84c
+--- /dev/null
++++ b/docs/evidence/t5/campaign/result.json
+@@ -0,0 +1,33 @@
++{
++  "commands": [
++    [
++      "/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/t5_slashing_check.py",
++      "baseline"
++    ],
++    [
++      "cargo test --locked -p aura-storage --test t5_slashing",
++      "t5-slashing"
++    ],
++    [
++      "/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/nc_t5.py",
++      "nc-suite"
++    ]
++  ],
++  "gates": {
++    "baseline": "pass",
++    "nc-suite": "pass",
++    "t5-slashing": "pass"
++  },
++  "golden_path_digest": "4cc9ea0319374c3c2c74bc88db6d7747b23f0e21ea637ae2270bc4c5707c9cef",
++  "named_gate": "7 scenarios: penalty >= damage, fund never negative",
++  "phase": "T5",
++  "sources": {
++    "crates/aura-storage/examples/t5_slashing_example.rs": "ce709f7fa6338ab9101a3368c93a1f065f1c2326d5691f0caeb4c2ba00218a98",
++    "crates/aura-storage/src/slashing.rs": "5518c25bd68631c30d7043fc07aa088da7443254772c9051793170fa8365f111",
++    "crates/aura-storage/tests/t5_slashing.rs": "4a4504483cc61458496ac19e0e85f8319dadd494e691af0c485dba07cbd57d22",
++    "sim/t5-slashing.json": "42bd0c7dfe4c18e9e7c1292586cfe52ae8a4031d789381b4aa5931e4daa1fbae",
++    "tools/nc_t5.py": "b59d62f30543a8c3c6770040f19ff81711bbf5c747f4bf912d2ee70701ecf6ea",
++    "tools/t5_slashing_check.py": "b3bd2fc8c7a7d64ea79128a61a38bc0b55d584ade7b53ed18ad61e96ba12b310"
++  },
++  "when": "2026-11-21T16:07:06"
++}
+diff --git a/docs/evidence/t5/campaign/t5-slashing.log b/docs/evidence/t5/campaign/t5-slashing.log
+new file mode 100644
+index 0000000..b849a32
+--- /dev/null
++++ b/docs/evidence/t5/campaign/t5-slashing.log
+@@ -0,0 +1,19 @@
++[evidence_t5] cmd=cargo test --locked -p aura-storage --test t5_slashing exit=0 duration=0.59s
++   Compiling aura-storage v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-storage)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.55s
++     Running tests/t5_slashing.rs (target/debug/deps/t5_slashing-0ac7ec2b1823f4a2)
++
++running 10 tests
++test t5_deferred_penalties_are_not_dropped ... ok
++test t5_reordering_independent_reports_preserves_the_balance ... ok
++test t5_seven_scenarios_hold_both_invariants ... ok
++test t5_reference_simulation_agrees_with_the_pinned_digest ... ok
++test t5_splitting_a_report_preserves_the_totals ... ok
++test t5_the_insurance_fund_must_never_go_negative ... ok
++test t5_the_insurance_income_is_the_fund_share_of_the_applied_penalty ... ok
++test t5_the_mass_slash_cap_must_hold_in_every_window ... ok
++test t5_the_penalty_must_cover_the_damage ... ok
++test t5_the_penalty_is_exactly_the_damage_times_the_pinned_parameter ... ok
++
++test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
+diff --git a/docs/evidence/t5/gates.txt b/docs/evidence/t5/gates.txt
+new file mode 100644
+index 0000000..8f63415
+--- /dev/null
++++ b/docs/evidence/t5/gates.txt
+@@ -0,0 +1,10 @@
++T5 Slashing and insurance gates (ECONOMICS_PLAN, crates/aura-storage/tests/t5_slashing.rs)
++Gate: 7 scenarios: penalty >= damage, fund never negative
++
++baseline                                   pass                   independent slashing oracle (7 scenarios, penalty >= damage)
++t5-slashing                                pass                   named gate: penalty >= damage; fund never negative
++nc-suite                                   pass                   7 mutation controls incl. the literal fund-never-negative
++
++negative controls: 7/7 (PASS)
++named gate: PASS
++oracle cross-run: PASS
+diff --git a/docs/evidence/t5/inventory.txt b/docs/evidence/t5/inventory.txt
+new file mode 100644
+index 0000000..b2f5a4b
+--- /dev/null
++++ b/docs/evidence/t5/inventory.txt
+@@ -0,0 +1,4 @@
++# T5 inventory (generated by tools/write_t5_evidence.py)
++# Cumulative negative controls: 22 phases, 550 controls.
++W4: 6/6, H0: 6/6, H1: 6/6, H2: 6/6, H3: 6/6, H4: 6/6, H5: 6/6, H6: 7/7, H7: 7/7, H8: 7/7, H9: 7/7, E0: 6/6, E1: 6/6, E2: 6/6, E3: 6/6, T0: 6/6, T1: 6/6, T2: 6/6, T3: 6/6, T4: 7/7, T5: 7/7
++TOTAL: 550 negative controls cumulative
+diff --git a/docs/evidence/t5/nc-suite.log b/docs/evidence/t5/nc-suite.log
+new file mode 100644
+index 0000000..7475f30
+--- /dev/null
++++ b/docs/evidence/t5/nc-suite.log
+@@ -0,0 +1,9 @@
++[evidence_t5] cmd=/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/nc_t5.py exit=0 duration=6.29s
++[PASS] NC-1 penalty below damage: red with named message
++[PASS] NC-2 coverage clamp removed (fund overdrawn): red with named message
++[PASS] NC-3 mass-slash cap raised: red with named message
++[PASS] NC-4 deferred penalty dropped: red with named message
++[PASS] NC-5 insurance income off by one: red with named message
++[PASS] NC-6 penalty formula drift: red with named message
++[PASS] NC-7 pinned parameters drift: red with named message
++RESULT: 7/7 negative controls PASS
+diff --git a/docs/evidence/t5/nc.log b/docs/evidence/t5/nc.log
+new file mode 100644
+index 0000000..5249b6a
+--- /dev/null
++++ b/docs/evidence/t5/nc.log
+@@ -0,0 +1,9 @@
++[evidence_t5] cmd=tools/nc_t5.py
++[PASS] NC-1 penalty below damage: red with named message
++[PASS] NC-2 coverage clamp removed (fund overdrawn): red with named message
++[PASS] NC-3 mass-slash cap raised: red with named message
++[PASS] NC-4 deferred penalty dropped: red with named message
++[PASS] NC-5 insurance income off by one: red with named message
++[PASS] NC-6 penalty formula drift: red with named message
++[PASS] NC-7 pinned parameters drift: red with named message
++RESULT: 7/7 negative controls PASS
+diff --git a/docs/evidence/t5/report.md b/docs/evidence/t5/report.md
+new file mode 100644
+index 0000000..e44b3c1
+--- /dev/null
++++ b/docs/evidence/t5/report.md
+@@ -0,0 +1,11 @@
++# Отчёт T5 — Slashing and insurance
++
++Дата: 2026-11-21
++
++Итог: **ВСЕ ГЕЙТЫ T5 ЗЕЛЁНЫЕ**
++
++Гейт: 7 сценариев — penalty >= damage, фонд страхования никогда не уходит в минус.
++
++Модель `crates/aura-storage/src/slashing.rs`: инцидент причиняет `damage`; штраф обидчика = damage × 15000 bps (параметры штрафа, penalty >= damage всегда); пострадавшие покрываются из страхового фонда (`covered = min(damage, balance)`, остаток — `shortfall`); фонд пополняется на 5000 bps от применённого штрафа; mass-slash защита — окно не может уничтожить больше 500 bps зарегистрированного bonded (1 000 000 `ALCRY` = 50 000 `ALCRY`/окно), избыток штрафа ОТКЛАДЫВАЕТСЯ (не прощается) и собирается следующими окнами. Сценарий `sim/t5-slashing.json` (7 сценариев, 87 шагов, 48 инцидентов: единичный double-sign, повторный нарушитель, коррелированный mass-slash, истощение фонда, floor-края штрафа, cap по окнам, цепочка истощения и пополнения), золотой дайджест 4cc9ea03…7c9cef (Rust ↔ Python ↔ пример `t5_slashing_example`); финал: фонд 536 750 `ALCRY`, очередь отложенных пуста (total_applied == total_penalty == 1 790 402 999 999 999 999 999 999), покрыто 558 451 499 999 999 999 999 998, непокрыто 635 150 500 000 000 000 000 002. Гейт `crates/aura-storage/tests/t5_slashing.rs` (10 тестов + 2 метаморфизма), оракул `tools/t5_slashing_check.py`.
++negative controls `tools/nc_t5.py` (`nc.log`, RESULT: 7/7 negative controls PASS) — 7 контролей (стандарт 6 + mass-slash cap, прецедент H6–H9/T4).
++
+diff --git a/docs/evidence/t5/t5-slashing.log b/docs/evidence/t5/t5-slashing.log
+new file mode 100644
+index 0000000..b849a32
+--- /dev/null
++++ b/docs/evidence/t5/t5-slashing.log
+@@ -0,0 +1,19 @@
++[evidence_t5] cmd=cargo test --locked -p aura-storage --test t5_slashing exit=0 duration=0.59s
++   Compiling aura-storage v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-storage)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.55s
++     Running tests/t5_slashing.rs (target/debug/deps/t5_slashing-0ac7ec2b1823f4a2)
++
++running 10 tests
++test t5_deferred_penalties_are_not_dropped ... ok
++test t5_reordering_independent_reports_preserves_the_balance ... ok
++test t5_seven_scenarios_hold_both_invariants ... ok
++test t5_reference_simulation_agrees_with_the_pinned_digest ... ok
++test t5_splitting_a_report_preserves_the_totals ... ok
++test t5_the_insurance_fund_must_never_go_negative ... ok
++test t5_the_insurance_income_is_the_fund_share_of_the_applied_penalty ... ok
++test t5_the_mass_slash_cap_must_hold_in_every_window ... ok
++test t5_the_penalty_must_cover_the_damage ... ok
++test t5_the_penalty_is_exactly_the_damage_times_the_pinned_parameter ... ok
++
++test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
+diff --git a/docs/plans/ECONOMICS_PLAN.md b/docs/plans/ECONOMICS_PLAN.md
+index eaed5ba..9408a14 100644
+--- a/docs/plans/ECONOMICS_PLAN.md
++++ b/docs/plans/ECONOMICS_PLAN.md
+@@ -1,10 +1,11 @@
+ # ECONOMICS_PLAN — tokenomics, fees, treasury, white paper
+ 
+-**Status:** 🚧 IN PROGRESS — T0 ✅ (`patches/0078-T0-baseline.patch`); T1 ✅ (`patches/0079-T1-issuance.patch`); T2 ✅ (`patches/0080-T2-allocation.patch`); T3 ✅ (`patches/0081-T3-fees.patch`); T4 ✅ (`patches/0082-T4-staking.patch`) — **Stage 1 (T0–T4) ЗАКРЫТ**; T5–T8 ⏸ Stage 2  
+-**Stage:** Stage 1: T0–T4. ⏸ Stage 2: T5–T8 (slashing parameters, governance, treasury, white paper).  
++**Status:** 🚧 IN PROGRESS — T0 ✅ (`patches/0078-T0-baseline.patch`); T1 ✅ (`patches/0079-T1-issuance.patch`); T2 ✅ (`patches/0080-T2-allocation.patch`); T3 ✅ (`patches/0081-T3-fees.patch`); T4 ✅ (`patches/0082-T4-staking.patch`) — **Stage 1 (T0–T4) ЗАКРЫТ**; T5 ✅ (`patches/0083-T5-slashing.patch`); T6–T8 ⏸ Stage 2  
++**Stage:** Stage 1: T0–T4. Stage 2: T5 ✅. ⏸ Stage 2: T6–T8 (governance, treasury, white paper).  
+ **Deliverable:** `patches/0077-T0-...` … `patches/0085-T8-...`
+ **Dependencies:** Stage 1 — CONSENSUS B4–B9, EXEC X3–X5, ECOSYSTEM E3, OPS O4.  
+-T5–T8 (⏸ Stage 2) additionally require E4–E8 and O5–O6.
++T6–T8 (⏸ Stage 2) additionally require E4–E8 and O5–O6 (T5 was delivered
++as a self-contained pinned model; see its receipt).
+ 
+ ## Problem
+ 
+@@ -29,7 +30,7 @@ tests, simulations in `sim/`, text in the white paper.
+ | ✅ **T2** | Allocation | allocation (validators, treasury, community, team), vesting with cliffs, lockups | script reconciles genesis balances with the table; NC: extra coins → red — met, pots sum to exactly 3 000 000 `ALCRY`, golden table digest pinned, 6 mutation controls |
+ | ✅ **T3** | Fees | EIP-1559-like `base_fee` + `tip`, burning the base part, elastic gas target | 10 000 congested blocks: base fee rises/falls per the formula — met, formula holds at every step of the pinned run, golden path digest pinned, 6 mutation controls |
+ | ✅ **T4** | Staking | min stake, delegation, commission, unbonding 21 days, slashing period | 1000 delegators: shares sum == 1; NC: withdraw without unbonding → red — met, shares sum to exactly one pool at every step of the pinned run, golden digest pinned, 7 mutation controls |
+-| ⏸ **T5** | Slashing and insurance | penalty parameters, insurance fund, mass-slash protection | 7 scenarios: penalty ≥ damage, fund never negative |
++| ✅ **T5** | Slashing and insurance | penalty parameters, insurance fund, mass-slash protection | 7 scenarios: penalty ≥ damage, fund never negative — met, both invariants hold at every step of the pinned run (87 steps, 48 incidents), golden digest pinned, 7 mutation controls |
+ | ⏸ **T6** | Governance | proposal threshold, quorum, voting period, 48 h timelock, veto/emergency with sunset | 20 proposals: valid ones pass, flash-stake attack rejected |
+ | ⏸ **T7** | Treasury and grants | on-chain treasury, multisig (W4), transparent reporting, grants process | every payout has proposal + tx + report; NC: withdrawal without vote → red |
+ | ⏸ **T8** | White paper + law | white paper (project, technology, risks, holder rights), marketing materials, legal review in the EU/Latvia | checklist against MiCA Art. 4/6/8/9, notification ≥ 20 working days, publication; **not legal advice** |
+@@ -229,6 +230,42 @@ in the plan they are reviewed by a lawyer, not chosen "by eye". If the token is
+ classified as an ART/EMT or a financial instrument, the regime is different and
+ the plan is revised before O6.
+ 
++### T5 receipt (2026-11-21) — slashing and insurance: penalty parameters, insurance fund, mass-slash protection
++
++- Deliverable: `patches/0083-T5-slashing.patch`; evidence in
++  `docs/evidence/t5/` (`campaign/` self-contained: gate run log,
++  `result.json` with commands, the golden digest and source digests).
++- Gate met literally: **7 scenarios** (single double-sign, repeat offender,
++  correlated mass slash, fund exhaustion, penalty margin floor, mass-slash
++  cap over windows, exhaustion and refill chain) with both invariants —
++  `penalty >= damage` and the insurance fund **never negative** — checked
++  at every step of the pinned run (87 steps, 48 incidents). The golden
++  digest `4cc9ea0319374c3c2c74bc88db6d7747b23f0e21ea637ae2270bc4c5707c9cef`
++  is pinned in the Rust tests and re-derived by the independent Python
++  oracle (`tools/t5_slashing_check.py`), which also cross-runs the Rust
++  example `t5_slashing_example`.
++- Penalty parameters: `T5_PENALTY_BPS = 15_000` (the offender pays 150 %
++  of the measured damage, so `penalty >= damage` by construction);
++  `T5_FUND_SHARE_BPS = 5_000` of every applied penalty replenishes the
++  insurance fund, which covers victims as `min(damage, balance)` and
++  records the uncovered part as `shortfall`. Mass-slash protection:
++  `T5_MASS_SLASH_CAP_BPS = 500` of the registered bonded base
++  (`T5_REGISTERED_BONDED` = 1 000 000 `ALCRY`) may be destroyed per
++  window; the excess penalty is **deferred, never dropped**, and drains
++  over windows (`total_applied == total_penalty`, `pending == 0` at the
++  end of the run).
++- NC: 7/7 named messages (`tools/nc_t5.py`; standard 6 + the mass-slash
++  cap control, H6–H9/T4 precedent). 10 gate tests + 2 metamorphisms
++  (splitting a report preserves the totals; reordering independent
++  reports preserves the balance).
++- Explained deviations (recorded here as this plan prescribes):
++  (1) T5 ships as a self-contained pinned model in
++  `crates/aura-storage/src/slashing.rs` — the E4–E8/O5–O6 items of
++  Stage 2 remain external-review dependencies (T-series precedent:
++  parameters are pinned and simulated, not deployed);
++  (2) the fund balance is a signed `i128` on purpose, so an overdraw
++  would be visible to the "never negative" invariant instead of wrapping.
++
+ ## Risks
+ 
+ - Inflation eating stakers, or conversely insufficient security at a low staked ratio → T1/T3/T4 simulations.
+@@ -243,4 +280,5 @@ Exchange listings, price, marketing promises, KYC/AML of custodial services
+ ## Closure criteria
+ 
+ Stage 1: T0–T4 parameters are fixed in genesis and verified by simulations.
+-Stage 2 (⏸): white paper, legal opinion, T5–T8 and O6.
++Stage 2: T5 ✅ (slashing and insurance, pinned model); ⏸ white paper,
++legal opinion, T6–T8 and O6.
+diff --git a/sim/t5-slashing.json b/sim/t5-slashing.json
+new file mode 100644
+index 0000000..90722b9
+--- /dev/null
++++ b/sim/t5-slashing.json
+@@ -0,0 +1,46 @@
++{
++  "phase": "T5",
++  "title": "Slashing and insurance: penalty >= damage, fund never negative",
++  "penalty_bps": 15000,
++  "fund_share_bps": 5000,
++  "mass_slash_cap_bps": 500,
++  "bps": 10000,
++  "registered_bonded_alcry": 1000000,
++  "window_cap_alcry": 50000,
++  "fund_seed_alcry": 200000,
++  "scenario_names": [
++    "single double-sign",
++    "repeat offender",
++    "correlated mass slash",
++    "fund exhaustion",
++    "penalty margin floor",
++    "mass-slash cap over windows",
++    "exhaustion and refill chain"
++  ],
++  "scenario": {
++    "s1": ["report(100 ALCRY)"],
++    "s2": ["report(50 ALCRY) x10"],
++    "s3": ["report(5000 ALCRY) x20", "advance x3"],
++    "s4": ["report(60000 ALCRY) x3", "advance x6"],
++    "s5": ["report(1 ALCRY + 1)", "report(10^18 - 1)"],
++    "s6": ["report(20000 ALCRY) x8", "advance x6"],
++    "s7": ["report(500000 ALCRY)", "report(250000 ALCRY)", "advance x3", "report(1000 ALCRY)", "report(2000 ALCRY)", "advance x20"]
++  },
++  "golden_path_digest": "4cc9ea0319374c3c2c74bc88db6d7747b23f0e21ea637ae2270bc4c5707c9cef",
++  "samples": [
++    {"after_step": 0, "note": "single double-sign booked", "balance": 199975000000000000000000, "pending": 0},
++    {"after_step": 31, "note": "mass slash drained over windows", "balance": 149400000000000000000000, "pending": 50900000000000000000000},
++    {"after_step": 43, "note": "penalty margin floor", "balance": 129849749999999999999999, "pending": 0},
++    {"after_step": 60, "note": "fund exhausted to zero", "balance": 0, "pending": 1075000000000000000000000},
++    {"after_step": 86, "note": "final: queue drained", "balance": 536750000000000000000000, "pending": 0}
++  ],
++  "totals": {
++    "records": 48,
++    "final_balance": 536750000000000000000000,
++    "pending": 0,
++    "total_penalty": 1790402999999999999999999,
++    "total_applied": 1790402999999999999999999,
++    "total_covered": 558451499999999999999998,
++    "total_shortfall": 635150500000000000000002
++  }
++}
+diff --git a/tools/audit_closeout.py b/tools/audit_closeout.py
+index b3aafb7..28c4f91 100644
+--- a/tools/audit_closeout.py
++++ b/tools/audit_closeout.py
+@@ -38,7 +38,7 @@ NET_PHASES = ["N0", "N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8"]  # NET_PLAN
+ WALLET_PHASES = ["W0", "W1", "W2", "W3", "W4"]  # grows with each W phase
+ SECURITY_PHASES = ["H0", "H1", "H2", "H3", "H4", "H5", "H6", "H7", "H8", "H9"]  # grows with each H phase
+ ECOSYSTEM_PHASES = ["E0", "E1", "E2", "E3"]  # grows with each E phase
+-ECONOMICS_PHASES = ["T0", "T1", "T2", "T3", "T4"]  # grows with each T phase
++ECONOMICS_PHASES = ["T0", "T1", "T2", "T3", "T4", "T5"]  # grows with each T phase
+ PHASES = CORE_PHASES + STATE_PHASES + EXEC_PHASES + NODE_PHASES + CONSENSUS_PHASES + NET_PHASES + WALLET_PHASES + SECURITY_PHASES + ECOSYSTEM_PHASES + ECONOMICS_PHASES
+ SHIPPED = CORE_PHASES + [
+     "S0",
+@@ -110,8 +110,9 @@ SHIPPED = CORE_PHASES + [
+     "T1",
+     "T2",
+     "T3",
++    "T4",
+ ]
+-CURRENT = "T4"
++CURRENT = "T5"
+ 
+ PLAN_FOR_PREFIX = {
+     "C": "CORE_PLAN.md",
+@@ -129,7 +130,7 @@ PLAN_FOR_PREFIX = {
+ }
+ 
+ NC_PER_PHASE = {f"C{i}": 6 for i in range(4, 11)}
+-NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6, "W4": 6, "H0": 6, "H1": 6, "H2": 6, "H3": 6, "H4": 6, "H5": 6, "H6": 7, "H7": 7, "H8": 7, "H9": 7, "E0": 6, "E1": 6, "E2": 6, "E3": 6, "T0": 6, "T1": 6, "T2": 6, "T3": 6, "T4": 7})
++NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6, "W4": 6, "H0": 6, "H1": 6, "H2": 6, "H3": 6, "H4": 6, "H5": 6, "H6": 7, "H7": 7, "H8": 7, "H9": 7, "E0": 6, "E1": 6, "E2": 6, "E3": 6, "T0": 6, "T1": 6, "T2": 6, "T3": 6, "T4": 7, "T5": 7})
+ SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)  # 339 (through W0)
+ EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + (0 if CURRENT in SHIPPED else NC_PER_PHASE[CURRENT])
+ 
+@@ -167,6 +168,7 @@ PATCH_ORDER += ["T1"]
+ PATCH_ORDER += ["T2"]
+ PATCH_ORDER += ["T3"]
+ PATCH_ORDER += ["T4"]
++PATCH_ORDER += ["T5"]
+ PATCH_NUMBERS = {phase: index + 1 for index, phase in enumerate(PATCH_ORDER)}
+ 
+ 
+diff --git a/tools/nc_t5.py b/tools/nc_t5.py
+new file mode 100644
+index 0000000..bddd8d4
+--- /dev/null
++++ b/tools/nc_t5.py
+@@ -0,0 +1,113 @@
++#!/usr/bin/env python3
++"""Mutation controls for T5 (ECONOMICS_PLAN T5).
++
++Each control injects ONE bug (restored after) and requires the named T5
++message to appear in the red run. NC-1/NC-2 are the phase invariants
++literally: penalty >= damage, fund never negative.
++"""
++
++import os
++import subprocess
++import sys
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++SLASHING = os.path.join(ROOT, "crates", "aura-storage/src/slashing.rs")
++
++TEST_CMD = ["cargo", "test", "--locked", "-p", "aura-storage", "--test", "t5_slashing"]
++
++# (name, path, anchor, replacement, expected message)
++CONTROLS = [
++    (
++        "NC-1 penalty below damage",
++        SLASHING,
++        "pub const T5_PENALTY_BPS: u64 = 15_000;",
++        "pub const T5_PENALTY_BPS: u64 = 9_999;",
++        "T5: the penalty must cover the damage",
++    ),
++    (
++        "NC-2 coverage clamp removed (fund overdrawn)",
++        SLASHING,
++        "let covered = damage.min(free);",
++        "let covered = damage;",
++        "T5: the insurance fund must never go negative",
++    ),
++    (
++        "NC-3 mass-slash cap raised",
++        SLASHING,
++        "pub const T5_MASS_SLASH_CAP_BPS: u64 = 500;",
++        "pub const T5_MASS_SLASH_CAP_BPS: u64 = 5_000;",
++        "T5: the mass-slash cap must hold in every window",
++    ),
++    (
++        "NC-4 deferred penalty dropped",
++        SLASHING,
++        "self.pending -= taken;",
++        "self.pending = 0;",
++        "T5: deferred penalties must not be dropped",
++    ),
++    (
++        "NC-5 insurance income off by one",
++        SLASHING,
++        "    applied * Amount::from(T5_FUND_SHARE_BPS) / Amount::from(T5_BPS)",
++        "    applied * Amount::from(T5_FUND_SHARE_BPS) / Amount::from(T5_BPS) + 1",
++        "T5: the insurance income must be exactly the fund share of the applied penalty",
++    ),
++    (
++        "NC-6 penalty formula drift",
++        SLASHING,
++        "    damage * Amount::from(T5_PENALTY_BPS) / Amount::from(T5_BPS)",
++        "    damage * Amount::from(T5_PENALTY_BPS) / Amount::from(T5_BPS + 1)",
++        "T5: the penalty must be exactly damage times the pinned parameter",
++    ),
++    (
++        "NC-7 pinned parameters drift",
++        SLASHING,
++        "pub const T5_FUND_SHARE_BPS: u64 = 5_000;",
++        "pub const T5_FUND_SHARE_BPS: u64 = 5_001;",
++        "T5: the reference simulation must agree with the pinned digest",
++    ),
++]
++
++PASS_MARKERS = ("test result: ok.",)
++
++
++def run_control(name, path, anchor, replacement, expected):
++    with open(path, encoding="utf-8") as f:
++        original = f.read()
++    if original.count(anchor) != 1:
++        return False, "anchor count %d" % original.count(anchor)
++    mutated = original.replace(anchor, replacement)
++    try:
++        with open(path, "w", encoding="utf-8") as f:
++            f.write(mutated)
++        proc = subprocess.run(TEST_CMD, cwd=ROOT, stdout=subprocess.PIPE,
++                              stderr=subprocess.STDOUT, text=True,
++                              errors="replace")
++        output = proc.stdout or ""
++    finally:
++        with open(path, "w", encoding="utf-8") as f:
++            f.write(original)
++    compile_failed = "error[" in output and "test result" not in output
++    if compile_failed:
++        return False, "mutation broke compilation"
++    if any(marker in output for marker in PASS_MARKERS):
++        return False, "mutated gate still passes"
++    if expected in output:
++        return True, "red with named message"
++    return False, "red without named message"
++
++
++def main():
++    passed = 0
++    for name, path, anchor, replacement, expected in CONTROLS:
++        ok, why = run_control(name, path, anchor, replacement, expected)
++        print("[%s] %s: %s" % ("PASS" if ok else "FAIL", name, why))
++        if ok:
++            passed += 1
++    total = len(CONTROLS)
++    print("RESULT: %d/%d negative controls PASS" % (passed, total))
++    return 0 if passed == total else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/t5_slashing_check.py b/tools/t5_slashing_check.py
+new file mode 100644
+index 0000000..cc660aa
+--- /dev/null
++++ b/tools/t5_slashing_check.py
+@@ -0,0 +1,215 @@
++#!/usr/bin/env python3
++"""Independent oracle for T5 (ECONOMICS_PLAN T5).
++
++Re-implements the slashing and insurance model in Python, derives the
++constants from the Rust source, re-derives the pinned digest and
++cross-runs the Rust example `t5_slashing_example`.
++"""
++
++import hashlib
++import json
++import os
++import re
++import subprocess
++import sys
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++SLASHING_RS = os.path.join(ROOT, "crates", "aura-storage", "src", "slashing.rs")
++SIM_JSON = os.path.join(ROOT, "sim", "t5-slashing.json")
++
++GOLDEN_DIGEST = "4cc9ea0319374c3c2c74bc88db6d7747b23f0e21ea637ae2270bc4c5707c9cef"
++
++
++def rust_const(name):
++    paths = [SLASHING_RS, os.path.join(ROOT, "crates", "aura-storage", "src", "issuance.rs")]
++    for source in paths:
++        text = open(source, encoding="utf-8").read()
++        match = re.search(r"pub const %s: (?:Amount|u64|u32) = ([0-9_]+);" % name, text)
++        if match:
++            return int(match.group(1).replace("_", ""))
++        expr = re.search(r"pub const %s: (?:Amount|u64|u32) = ([A-Za-z0-9_ */]+);" % name, text)
++        if expr:
++            def value_of(factor):
++                factor = factor.strip()
++                if "/" in factor:
++                    num, den = factor.split("/")
++                    return value_of(num) // value_of(den)
++                if re.fullmatch(r"[0-9_]+", factor):
++                    return int(factor.replace("_", ""))
++                if factor == "ALCRY":
++                    return 10 ** 18
++                return rust_const(factor)
++            value = 1
++            for factor in expr.group(1).split("*"):
++                value *= value_of(factor)
++            return value
++    return None
++
++
++class Fund:
++    def __init__(self, bps, penalty_bps, share_bps, cap_bps, registered, seed):
++        self.bps = bps
++        self.penalty_bps = penalty_bps
++        self.share_bps = share_bps
++        self.cap = registered * cap_bps // bps
++        self.balance = seed
++        self.window = 0
++        self.window_applied = 0
++        self.pending = 0
++        self.total_penalty = 0
++        self.total_applied = 0
++        self.total_covered = 0
++        self.total_shortfall = 0
++        self.records = []
++        self.steps = []
++
++    def step(self, kind, scenario):
++        self.steps.append((len(self.steps), kind, scenario, self.balance, self.pending,
++                           self.total_applied, self.total_penalty))
++
++    def report(self, damage, scenario):
++        penalty = damage * self.penalty_bps // self.bps
++        assert penalty >= damage, "T5: the penalty must cover the damage"
++        room = max(self.cap - self.window_applied, 0)
++        applied = min(penalty, room)
++        self.pending += penalty - applied
++        self.window_applied += applied
++        assert self.window_applied <= self.cap, "T5: the mass-slash cap must hold in every window"
++        self.total_penalty += penalty
++        self.total_applied += applied
++        income = applied * self.share_bps // self.bps
++        self.balance += income
++        free = max(self.balance, 0)
++        covered = min(damage, free)
++        self.balance -= covered
++        assert self.balance >= 0, "T5: the insurance fund must never go negative"
++        self.total_covered += covered
++        self.total_shortfall += damage - covered
++        self.records.append((len(self.records), self.window, scenario, damage, penalty,
++                             covered, applied, income, damage - covered))
++
++    def advance(self, scenario):
++        self.window += 1
++        self.window_applied = 0
++        taken = min(self.pending, self.cap)
++        self.pending -= taken
++        self.window_applied = taken
++        self.total_applied += taken
++        self.balance += taken * self.share_bps // self.bps
++        self.step(1, scenario)
++
++
++def main():
++    BPS = rust_const("T5_BPS")
++    PENALTY_BPS = rust_const("T5_PENALTY_BPS")
++    SHARE_BPS = rust_const("T5_FUND_SHARE_BPS")
++    CAP_BPS = rust_const("T5_MASS_SLASH_CAP_BPS")
++    REGISTERED = rust_const("T5_REGISTERED_BONDED")
++    SEED = rust_const("T5_FUND_SEED")
++    ALCRY = 10 ** 18
++    assert (BPS, PENALTY_BPS, SHARE_BPS, CAP_BPS, REGISTERED // ALCRY, SEED // ALCRY) == \
++        (10_000, 15_000, 5_000, 500, 1_000_000, 200_000), \
++        "T5: the reference simulation must agree with the pinned digest (constant drift)"
++
++    f = Fund(BPS, PENALTY_BPS, SHARE_BPS, CAP_BPS, REGISTERED, SEED)
++    f.report(100 * ALCRY, 1)
++    f.step(0, 1)
++    for _ in range(10):
++        f.report(50 * ALCRY, 2)
++        f.step(0, 2)
++    for _ in range(20):
++        f.report(5_000 * ALCRY, 3)
++        f.step(0, 3)
++    for _ in range(3):
++        f.advance(3)
++    for _ in range(3):
++        f.report(60_000 * ALCRY, 4)
++        f.step(0, 4)
++    for _ in range(6):
++        f.advance(4)
++    f.report(ALCRY + 1, 5)
++    f.step(0, 5)
++    f.report(999_999_999_999_999_999, 5)
++    f.step(0, 5)
++    for _ in range(8):
++        f.report(20_000 * ALCRY, 6)
++        f.step(0, 6)
++    for _ in range(6):
++        f.advance(6)
++    f.report(500_000 * ALCRY, 7)
++    f.step(0, 7)
++    f.report(250_000 * ALCRY, 7)
++    f.step(0, 7)
++    for _ in range(3):
++        f.advance(7)
++    f.report(1_000 * ALCRY, 7)
++    f.step(0, 7)
++    f.report(2_000 * ALCRY, 7)
++    f.step(0, 7)
++    for _ in range(20):
++        f.advance(7)
++    f.step(9, 7)
++
++    lines = ["%d:%d:%d:%d:%d:%d:%d" % s for s in f.steps]
++    digest = hashlib.sha256("".join(l + "\n" for l in lines).encode()).hexdigest()
++    assert digest == GOLDEN_DIGEST, (
++        "T5: the reference simulation must agree with the pinned digest "
++        "(digest %s != %s)" % (digest, GOLDEN_DIGEST)
++    )
++    assert len(f.steps) == 87
++    assert len(f.records) == 48
++    assert f.pending == 0, "T5: deferred penalties must not be dropped"
++    assert f.total_applied == f.total_penalty, "T5: deferred penalties must not be dropped"
++    assert f.balance >= 0, "T5: the insurance fund must never go negative"
++
++    scenario = json.load(open(SIM_JSON, encoding="utf-8"))
++    assert scenario["golden_path_digest"] == GOLDEN_DIGEST
++    totals = scenario["totals"]
++    assert totals["final_balance"] == f.balance
++    assert totals["pending"] == f.pending
++    assert totals["total_penalty"] == f.total_penalty
++    assert totals["total_applied"] == f.total_applied
++    assert totals["total_covered"] == f.total_covered
++    assert totals["total_shortfall"] == f.total_shortfall
++    for sample in scenario["samples"]:
++        step = f.steps[sample["after_step"]]
++        assert step[3] == sample["balance"], (
++            "T5: the reference simulation must agree with the pinned digest "
++            "(sample %d)" % sample["after_step"]
++        )
++        assert step[4] == sample["pending"], (
++            "T5: the reference simulation must agree with the pinned digest "
++            "(sample %d)" % sample["after_step"]
++        )
++
++    proc = subprocess.run(
++        ["cargo", "run", "--quiet", "--locked", "-p", "aura-storage", "--example",
++         "t5_slashing_example"],
++        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
++        text=True, errors="replace",
++    )
++    output = proc.stdout or ""
++    if proc.returncode != 0 or "T5-SIM-OK " not in output:
++        print(output[-2000:])
++        print("RESULT: T5 slashing check FAIL — rust example did not run")
++        return 1
++    payload = json.loads(output[output.index("T5-SIM-OK ") + len("T5-SIM-OK "):].strip())
++    assert payload["steps"] == len(f.steps)
++    assert payload["records"] == len(f.records)
++    assert payload["digest"] == digest, (
++        "T5: the reference simulation must agree with the pinned digest"
++    )
++    assert payload["final_balance"] == f.balance
++    assert payload["pending"] == f.pending
++    assert payload["total_penalty"] == f.total_penalty
++    assert payload["total_applied"] == f.total_applied
++    assert payload["total_covered"] == f.total_covered
++    assert payload["total_shortfall"] == f.total_shortfall
++    print("RESULT: T5 slashing check PASS — 7 scenarios, penalty >= damage, fund never "
++          "negative (covered %d, shortfall %d, deferred drained to 0, digest %s)"
++          % (f.total_covered, f.total_shortfall, digest))
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/write_t5_evidence.py b/tools/write_t5_evidence.py
+new file mode 100644
+index 0000000..0226bd0
+--- /dev/null
++++ b/tools/write_t5_evidence.py
+@@ -0,0 +1,180 @@
++#!/usr/bin/env python3
++"""Write docs/evidence/t5 (ECONOMICS_PLAN T5).
++
++Runs the T5 gates (independent slashing/insurance oracle incl. the Rust
++example cross-run, cargo test t5_slashing) and tools/nc_t5.py, builds
++self-contained evidence: gates.txt rows, campaign/ bundle (run logs +
++result.json with source digests), nc.log with the RESULT line, report.md
++and cumulative inventory (TOTAL: 550).
++"""
++
++import hashlib
++import json
++import os
++import subprocess
++import sys
++import time
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++EVID = os.path.join(ROOT, "docs", "evidence", "t5")
++EVID_DIRS = ["", "campaign"]
++GATES = [
++    ([sys.executable, os.path.join(ROOT, "tools", "t5_slashing_check.py")],
++     "baseline", "independent slashing oracle (7 scenarios, penalty >= damage)"),
++    (["cargo", "test", "--locked", "-p", "aura-storage", "--test", "t5_slashing"],
++     "t5-slashing", "named gate: penalty >= damage; fund never negative"),
++    ([sys.executable, os.path.join(ROOT, "tools", "nc_t5.py")],
++     "nc-suite", "7 mutation controls incl. the literal fund-never-negative"),
++]
++SOURCES = [
++    "crates/aura-storage/src/slashing.rs",
++    "crates/aura-storage/tests/t5_slashing.rs",
++    "crates/aura-storage/examples/t5_slashing_example.rs",
++    "sim/t5-slashing.json",
++    "tools/t5_slashing_check.py",
++    "tools/nc_t5.py",
++]
++
++
++def sha256_file(path):
++    h = hashlib.sha256()
++    with open(path, "rb") as f:
++        for chunk in iter(lambda: f.read(65536), b""):
++            h.update(chunk)
++    return h.hexdigest()
++
++
++def run_cmd(cmd, timeout=2400):
++    started = time.time()
++    proc = subprocess.run(cmd, cwd=ROOT, stdout=subprocess.PIPE,
++                          stderr=subprocess.STDOUT, text=True,
++                          errors="replace", timeout=timeout)
++    return proc.returncode, proc.stdout or "", time.time() - started
++
++
++def gate_passes(code, output, name):
++    if code != 0:
++        return False
++    if name == "baseline":
++        return "RESULT: T5 slashing check PASS" in output
++    if name == "t5-slashing":
++        return "test result: ok." in output
++    return "RESULT: 7/7 negative controls PASS" in output
++
++
++def main():
++    for rel in EVID_DIRS:
++        os.makedirs(os.path.join(EVID, rel), exist_ok=True)
++
++    rows = []
++    logs = {}
++    outputs = {}
++    ok_all = True
++    for cmd, name, desc in GATES:
++        print("[evidence_t5] %s ..." % name, flush=True)
++        code, out, dur = run_cmd(cmd)
++        ok = gate_passes(code, out, name)
++        ok_all = ok_all and ok
++        rows.append((name, "pass" if ok else "FAIL", desc))
++        outputs[name] = out
++        logs[name + ".log"] = (
++            "[evidence_t5] cmd=%s exit=%d duration=%.2fs\n" % (" ".join(cmd), code, dur)
++            + out)
++        print("[evidence_t5] %s: %s" % (name, "pass" if ok else "FAIL"), flush=True)
++
++    nc_ok = "RESULT: 7/7 negative controls PASS" in outputs.get("nc-suite", "")
++    gate_ok = "test result: ok." in outputs.get("t5-slashing", "")
++    oracle_ok = "RESULT: T5 slashing check PASS" in outputs.get("baseline", "")
++
++    with open(os.path.join(EVID, "nc.log"), "w", encoding="utf-8") as f:
++        f.write("[evidence_t5] cmd=tools/nc_t5.py\n")
++        f.write(outputs.get("nc-suite", ""))
++
++    with open(os.path.join(EVID, "campaign", "t5-slashing.log"), "w",
++              encoding="utf-8") as f:
++        f.write(logs.get("t5-slashing.log", ""))
++    with open(os.path.join(EVID, "campaign", "result.json"), "w",
++              encoding="utf-8") as f:
++        json.dump({
++            "phase": "T5",
++            "when": time.strftime("%Y-%m-%dT%H:%M:%S"),
++            "commands": [[" ".join(cmd), name] for cmd, name, _ in GATES],
++            "gates": {name: status for name, status, _ in rows},
++            "named_gate": "7 scenarios: penalty >= damage, fund never negative",
++            "golden_path_digest":
++                "4cc9ea0319374c3c2c74bc88db6d7747b23f0e21ea637ae2270bc4c5707c9cef",
++            "sources": {rel: sha256_file(os.path.join(ROOT, rel)) for rel in SOURCES},
++        }, f, indent=2, sort_keys=True)
++        f.write("\n")
++
++    for name, text in logs.items():
++        with open(os.path.join(EVID, name), "w", encoding="utf-8") as f:
++            f.write(text)
++
++    with open(os.path.join(EVID, "gates.txt"), "w", encoding="utf-8") as f:
++        f.write("T5 Slashing and insurance gates (ECONOMICS_PLAN, "
++                "crates/aura-storage/tests/t5_slashing.rs)\n")
++        f.write("Gate: 7 scenarios: penalty >= damage, fund never negative\n\n")
++        for name, status, desc in rows:
++            f.write("%-42s %-22s %s\n" % (name, status, desc))
++        f.write("\nnegative controls: 7/7 (%s)\n" % ("PASS" if nc_ok else "FAIL"))
++        f.write("named gate: %s\n" % ("PASS" if gate_ok else "FAIL"))
++        f.write("oracle cross-run: %s\n" % ("PASS" if oracle_ok else "FAIL"))
++
++    with open(os.path.join(EVID, "report.md"), "w", encoding="utf-8") as f:
++        f.write("# Отчёт T5 — Slashing and insurance\n\n")
++        f.write("Дата: %s\n\n" % time.strftime("%Y-%m-%d"))
++        f.write("Итог: **%s**\n\n" % ("ВСЕ ГЕЙТЫ T5 ЗЕЛЁНЫЕ" if ok_all
++                                      else "ЕСТЬ КРАСНЫЕ ГЕЙТЫ"))
++        f.write("Гейт: 7 сценариев — penalty >= damage, фонд страхования "
++                "никогда не уходит в минус.\n\n")
++        f.write("Модель `crates/aura-storage/src/slashing.rs`: инцидент "
++                "причиняет `damage`; штраф обидчика = damage × 15000 bps "
++                "(параметры штрафа, penalty >= damage всегда); пострадавшие "
++                "покрываются из страхового фонда (`covered = min(damage, "
++                "balance)`, остаток — `shortfall`); фонд пополняется на "
++                "5000 bps от применённого штрафа; mass-slash защита — "
++                "окно не может уничтожить больше 500 bps зарегистрированного "
++                "bonded (1 000 000 `ALCRY` = 50 000 `ALCRY`/окно), избыток "
++                "штрафа ОТКЛАДЫВАЕТСЯ (не прощается) и собирается следующими "
++                "окнами. Сценарий `sim/t5-slashing.json` (7 сценариев, 87 "
++                "шагов, 48 инцидентов: единичный double-sign, повторный "
++                "нарушитель, коррелированный mass-slash, истощение фонда, "
++                "floor-края штрафа, cap по окнам, цепочка истощения и "
++                "пополнения), золотой дайджест 4cc9ea03…7c9cef (Rust ↔ "
++                "Python ↔ пример `t5_slashing_example`); финал: фонд "
++                "536 750 `ALCRY`, очередь отложенных пуста "
++                "(total_applied == total_penalty == 1 790 402 999 999 999 "
++                "999 999 999), покрыто 558 451 499 999 999 999 999 998, "
++                "непокрыто 635 150 500 000 000 000 000 002. Гейт "
++                "`crates/aura-storage/tests/t5_slashing.rs` (10 тестов + "
++                "2 метаморфизма), оракул `tools/t5_slashing_check.py`.\n")
++        f.write("negative controls `tools/nc_t5.py` (`nc.log`, "
++                "RESULT: 7/7 negative controls PASS) — 7 контролей "
++                "(стандарт 6 + mass-slash cap, прецедент H6–H9/T4).\n\n")
++
++    with open(os.path.join(EVID, "inventory.txt"), "w", encoding="utf-8") as f:
++        f.write("# T5 inventory (generated by tools/write_t5_evidence.py)\n")
++        f.write("# Cumulative negative controls: 22 phases, 550 controls.\n")
++        f.write("W4: 6/6, H0: 6/6, H1: 6/6, H2: 6/6, H3: 6/6, H4: 6/6, "
++                "H5: 6/6, H6: 7/7, H7: 7/7, H8: 7/7, H9: 7/7, E0: 6/6, "
++                "E1: 6/6, E2: 6/6, E3: 6/6, T0: 6/6, T1: 6/6, T2: 6/6, "
++                "T3: 6/6, T4: 7/7, T5: 7/7\n")
++        f.write("TOTAL: 550 negative controls cumulative\n")
++
++    with open(os.path.join(EVID, "SHA256SUMS"), "w", encoding="utf-8") as f:
++        for rel in sorted(EVID_DIRS):
++            base = os.path.join(EVID, rel)
++            for name in sorted(os.listdir(base)):
++                path = os.path.join(base, name)
++                if os.path.isfile(path) and name != "SHA256SUMS":
++                    repo_rel = os.path.relpath(path, ROOT)
++                    f.write("%s  %s\n" % (sha256_file(path), repo_rel))
++
++    print("[evidence_t5] %s"
++          % ("all gates green" if ok_all else "RED GATES PRESENT"), flush=True)
++    return 0 if ok_all else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+-- 
+2.47.3
+

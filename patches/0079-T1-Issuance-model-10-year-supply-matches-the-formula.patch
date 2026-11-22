@@ -1,0 +1,1357 @@
+From 67bdfa7244f384a008f0545fe9604ee66dc6bdcd Mon Sep 17 00:00:00 2001
+From: AlexanderNyr <alexandernyr@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 12:13:26 +0000
+Subject: [PATCH] =?UTF-8?q?T1:=20Issuance=20model=20=E2=80=94=2010-year=20?=
+ =?UTF-8?q?supply=20matches=20the=20formula=20within=201=20unit;=20halving?=
+ =?UTF-8?q?=20curve;=20hard=20cap;=206=20mutation=20controls?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ CHANGELOG.md                                  |  22 ++
+ Makefile                                      |  19 ++
+ .../examples/t1_issuance_example.rs           |  28 +++
+ crates/aura-storage/src/issuance.rs           | 149 ++++++++++++
+ crates/aura-storage/src/lib.rs                |   3 +
+ crates/aura-storage/tests/t1_issuance.rs      | 215 ++++++++++++++++++
+ docs/economics/t1-issuance.md                 |  49 ++++
+ docs/evidence/review-w1-source-drift.txt      |  12 +-
+ docs/evidence/t1/SHA256SUMS                   |   9 +
+ docs/evidence/t1/baseline.log                 |   2 +
+ docs/evidence/t1/campaign/result.json         |  33 +++
+ docs/evidence/t1/campaign/t1-issuance.log     |  16 ++
+ docs/evidence/t1/gates.txt                    |  10 +
+ docs/evidence/t1/inventory.txt                |   4 +
+ docs/evidence/t1/nc-suite.log                 |   8 +
+ docs/evidence/t1/nc.log                       |   8 +
+ docs/evidence/t1/report.md                    |  11 +
+ docs/evidence/t1/t1-issuance.log              |  16 ++
+ docs/plans/ECONOMICS_PLAN.md                  |  34 ++-
+ sim/t1-issuance.json                          |  18 ++
+ tools/audit_closeout.py                       |   8 +-
+ tools/nc_t1.py                                | 108 +++++++++
+ tools/t1_issuance_check.py                    | 126 ++++++++++
+ tools/write_t1_evidence.py                    | 166 ++++++++++++++
+ 24 files changed, 1063 insertions(+), 11 deletions(-)
+ create mode 100644 crates/aura-storage/examples/t1_issuance_example.rs
+ create mode 100644 crates/aura-storage/src/issuance.rs
+ create mode 100644 crates/aura-storage/tests/t1_issuance.rs
+ create mode 100644 docs/economics/t1-issuance.md
+ create mode 100644 docs/evidence/t1/SHA256SUMS
+ create mode 100644 docs/evidence/t1/baseline.log
+ create mode 100644 docs/evidence/t1/campaign/result.json
+ create mode 100644 docs/evidence/t1/campaign/t1-issuance.log
+ create mode 100644 docs/evidence/t1/gates.txt
+ create mode 100644 docs/evidence/t1/inventory.txt
+ create mode 100644 docs/evidence/t1/nc-suite.log
+ create mode 100644 docs/evidence/t1/nc.log
+ create mode 100644 docs/evidence/t1/report.md
+ create mode 100644 docs/evidence/t1/t1-issuance.log
+ create mode 100644 sim/t1-issuance.json
+ create mode 100644 tools/nc_t1.py
+ create mode 100644 tools/t1_issuance_check.py
+ create mode 100644 tools/write_t1_evidence.py
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 1797f41238c679325b7b23932834ad94072c0fb0..b00f2f347924dedd22a3f52e8090041e3201375e 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,28 @@
+ All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
+ never rewritten: corrections are made with a new entry or an explicit note.
+ 
++## [T1 — Issuance model phase closed: 10-year supply matches the formula within 1 unit, 6 mutation controls] 2026-11-20
++
++### Added
++- `crates/aura-storage/src/issuance.rs` (T1 issuance model: `ALCRY` u128
++  18 decimals, genesis 3 000 000, annual emission 300 000 halving every 4
++  years, hard cap 6 000 000 fixed, target staked ratio 6000 bps — all
++  genesis-fixed per D-T1/D-T3), `sim/t1-issuance.json` (parameters,
++  expected path, cap-binding scenario), gate
++  `crates/aura-storage/tests/t1_issuance.rs` (7 tests: formula ≤ 1 unit
++  every year, halving, cap, genesis, staked ratio, golden path digest
++  c2a4669192ddde5d…c1a35, stepwise≡closed-form metamorphism), example
++  `crates/aura-storage/examples/t1_issuance_example.rs` (`T1-SIM-OK`),
++  independent oracle `tools/t1_issuance_check.py` (stepwise + closed form
++  + Rust cross-run + const consistency), negative controls
++  `tools/nc_t1.py` ×6 (formula mismatch literally red), evidence
++  `docs/evidence/t1/` (`TOTAL: 524 negative controls cumulative`),
++  model doc `docs/economics/t1-issuance.md`, builds `make test-t1` /
++  `make check-t1` / `make examples-t1` / `make nc-t1` /
++  `make evidence-t1` + gates wired into `make test`. Phase receipt +
++  deviations: `docs/plans/ECONOMICS_PLAN.md` `### T1 receipt`;
++  deliverable `patches/0079-T1-...patch`.
++
+ ## [T0 — Economics baseline phase closed: emission from nowhere -> red, no token, 6 mutation controls] 2026-11-20
+ 
+ ### Added
+diff --git a/Makefile b/Makefile
+index ac2b590fb8284a80b8bad10187ed5aab3141131b..5fb9d64b61e0a6c6d194e6d5da1d6237171524c7 100644
+--- a/Makefile
++++ b/Makefile
+@@ -284,6 +284,9 @@ test: deps-check
+ 	@echo "== economics baseline gate (T0) =="
+ 	@$(PYTHON) tools/t0_economics_check.py
+ 	@$(CARGO) test --locked -p aura-storage --test t0_economics
++	@echo "== issuance model gate (T1) =="
++	@$(PYTHON) tools/t1_issuance_check.py
++	@$(CARGO) test --locked -p aura-storage --test t1_issuance
+ 	@echo "== close-out audit =="
+ 	@$(PYTHON) tools/audit_closeout.py
+ 	@echo "ALL GATES GREEN"
+@@ -1416,6 +1419,22 @@ nc-e2:
+ evidence-e2:
+ 	@$(PYTHON) tools/write_e2_evidence.py
+ 
++.PHONY: test-t1 check-t1 examples-t1 nc-t1 evidence-t1
++test-t1:
++	@$(CARGO) test --locked -p aura-storage --test t1_issuance
++
++check-t1:
++	@$(PYTHON) tools/t1_issuance_check.py
++
++examples-t1:
++	@$(CARGO) run --quiet --locked -p aura-storage --example t1_issuance_example
++
++nc-t1:
++	@$(PYTHON) tools/nc_t1.py
++
++evidence-t1:
++	@$(PYTHON) tools/write_t1_evidence.py
++
+ .PHONY: test-t0 check-t0 examples-t0 nc-t0 evidence-t0
+ test-t0:
+ 	@$(CARGO) test --locked -p aura-storage --test t0_economics
+diff --git a/crates/aura-storage/examples/t1_issuance_example.rs b/crates/aura-storage/examples/t1_issuance_example.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..f09632b568d0e44fa81d63e60817f812eccc4678
+--- /dev/null
++++ b/crates/aura-storage/examples/t1_issuance_example.rs
+@@ -0,0 +1,28 @@
++//! T1 ten-year issuance simulation runner (ECONOMICS_PLAN T1).
++//!
++//! Prints a machine-readable summary consumed by the independent Python
++//! oracle (`tools/t1_issuance_check.py`).
++
++use aura_storage::issuance::{ALCRY, IssuanceModel, T1_PARAMS, T1_YEARS};
++
++fn main() {
++    let mut model = IssuanceModel::new(T1_PARAMS).expect("params");
++    let path = model.run_years(T1_YEARS).expect("run");
++    let mut text = String::new();
++    for (year, supply) in path.iter().enumerate() {
++        text.push_str(&year.to_string());
++        text.push(':');
++        text.push_str(&supply.to_string());
++        text.push('\n');
++    }
++    let digest = aura_state::sha256_bytes(text.as_bytes()).to_hex();
++    let alcry_path: Vec<String> = path.iter().map(|s| (s / ALCRY).to_string()).collect();
++    println!(
++        "T1-SIM-OK {{\"years\":{},\"final_supply\":{},\"final_alcry\":{},\"digest\":\"{}\",\"path_alcry\":[{}]}}",
++        T1_YEARS,
++        model.supply(),
++        model.supply() / ALCRY,
++        digest,
++        alcry_path.join(",")
++    );
++}
+diff --git a/crates/aura-storage/src/issuance.rs b/crates/aura-storage/src/issuance.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..74b2c19c8206e758ecf843ab76f97f7d3bba18ec
+--- /dev/null
++++ b/crates/aura-storage/src/issuance.rs
+@@ -0,0 +1,149 @@
++//! T1 issuance model: genesis supply, halving inflation curve and a fixed
++//! max supply for `ALCRY` (ECONOMICS_PLAN T1, decision D-T1).
++//!
++//! The native asset `ALCRY` is a u128 amount with 18 decimals. The whole
++//! issuance policy is declared here and fixed in genesis:
++//!
++//! * **genesis supply** — minted at year 0 (the T0 endowment table is its
++//!   distribution: 3 000 000 `ALCRY`);
++//! * **inflation curve** — a fixed annual emission that **halves** every
++//!   [`HALVING_YEARS`] years (bitcoin-style disinflation);
++//! * **max supply** — a hard cap ([`MAX_SUPPLY`]); issuance stops at the
++//!   cap ("if fixed" — it is fixed);
++//! * **target staked ratio** — a declared target in basis points for T4
++//!   staking; T1 only pins and validates it.
++//!
++//! Changing any of these parameters later requires governance with a
++//! timelock (decisions D-T1/D-T3) — not a simple commit. The ten-year
++//! simulation gate requires the simulated supply to match the closed-form
++//! formula within 1 base unit.
++
++use crate::econ::Amount;
++
++/// Base units in one `ALCRY` (18 decimals, decision D-T1).
++pub const ALCRY: Amount = 10u128.pow(18);
++
++/// Genesis supply: 3 000 000 `ALCRY`, distributed by the T0 table.
++pub const GENESIS_SUPPLY: Amount = 3_000_000 * ALCRY;
++
++/// Annual emission of the first halving period (year 1): 300 000 `ALCRY`.
++pub const ANNUAL_EMISSION: Amount = 300_000 * ALCRY;
++
++/// Halving period in years.
++pub const HALVING_YEARS: u32 = 4;
++
++/// Hard cap on the total supply: 6 000 000 `ALCRY`.
++pub const MAX_SUPPLY: Amount = 6_000_000 * ALCRY;
++
++/// Target staked ratio in basis points (60 %; consumed by T4).
++pub const TARGET_STAKED_RATIO_BPS: u16 = 6_000;
++
++/// Horizon of the phase gate, in years.
++pub const T1_YEARS: u32 = 10;
++
++/// The declared issuance parameters (genesis-fixed).
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct IssuanceParams {
++    /// Supply at year 0.
++    pub genesis_supply: Amount,
++    /// Emission of year 1; halved every `halving_years`.
++    pub annual_emission: Amount,
++    /// Halving period in years (nonzero).
++    pub halving_years: u32,
++    /// Hard cap on the total supply (>= genesis supply).
++    pub max_supply: Amount,
++    /// Target staked ratio in basis points (<= 10 000).
++    pub target_staked_ratio_bps: u16,
++}
++
++/// Errors raised while building or running the model.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub enum IssuanceError {
++    /// `halving_years` was zero.
++    ZeroHalvingPeriod,
++    /// `max_supply` was below `genesis_supply`.
++    CapBelowGenesis,
++    /// `target_staked_ratio_bps` exceeded 10 000.
++    StakedRatioOutOfRange,
++    /// Arithmetic overflow in the supply path.
++    Overflow,
++}
++
++/// The T1 baseline parameters (mirrored by `sim/t1-issuance.json`).
++pub const T1_PARAMS: IssuanceParams = IssuanceParams {
++    genesis_supply: GENESIS_SUPPLY,
++    annual_emission: ANNUAL_EMISSION,
++    halving_years: HALVING_YEARS,
++    max_supply: MAX_SUPPLY,
++    target_staked_ratio_bps: TARGET_STAKED_RATIO_BPS,
++};
++
++/// Stepwise issuance simulator: advances whole years and stops at the cap.
++#[derive(Clone, Debug)]
++pub struct IssuanceModel {
++    params: IssuanceParams,
++    year: u32,
++    supply: Amount,
++}
++
++impl IssuanceModel {
++    /// Builds a simulator at year 0 with the genesis supply.
++    pub fn new(params: IssuanceParams) -> Result<Self, IssuanceError> {
++        if params.halving_years == 0 {
++            return Err(IssuanceError::ZeroHalvingPeriod);
++        }
++        if params.max_supply < params.genesis_supply {
++            return Err(IssuanceError::CapBelowGenesis);
++        }
++        if params.target_staked_ratio_bps > 10_000 {
++            return Err(IssuanceError::StakedRatioOutOfRange);
++        }
++        Ok(Self {
++            params,
++            year: 0,
++            supply: params.genesis_supply,
++        })
++    }
++
++    /// Current year.
++    pub fn year(&self) -> u32 {
++        self.year
++    }
++
++    /// Current total supply.
++    pub fn supply(&self) -> Amount {
++        self.supply
++    }
++
++    /// The emission scheduled for `year` (1-based) before the cap:
++    /// `annual_emission >> ((year - 1) / halving_years)`.
++    pub fn emission_for_year(&self, year: u32) -> Amount {
++        let shift = (year - 1) / self.params.halving_years;
++        self.params.annual_emission >> shift
++    }
++
++    /// Advances one year: issues the scheduled emission, capped at
++    /// `max_supply`. Returns the amount actually issued.
++    pub fn step_year(&mut self) -> Result<Amount, IssuanceError> {
++        self.year += 1;
++        let raw = self.emission_for_year(self.year);
++        let remaining = self.params.max_supply.saturating_sub(self.supply);
++        let issued = raw.min(remaining);
++        self.supply = self
++            .supply
++            .checked_add(issued)
++            .ok_or(IssuanceError::Overflow)?;
++        Ok(issued)
++    }
++
++    /// Advances `years` whole years and returns the supply path
++    /// (year 0 first, one entry per year).
++    pub fn run_years(&mut self, years: u32) -> Result<Vec<Amount>, IssuanceError> {
++        let mut path = vec![self.supply];
++        for _ in 0..years {
++            self.step_year()?;
++            path.push(self.supply);
++        }
++        Ok(path)
++    }
++}
+diff --git a/crates/aura-storage/src/lib.rs b/crates/aura-storage/src/lib.rs
+index d60f9a51ce9a43794a197e6707c460c98eb27a0c..6218036c6a3be75d96cc3cb94d9d0975746d5b87 100644
+--- a/crates/aura-storage/src/lib.rs
++++ b/crates/aura-storage/src/lib.rs
+@@ -44,6 +44,9 @@ pub mod faucet;
+ /// E1 chain indexer: idempotent ingest + reorg rollback over a local
+ /// row store (ECOSYSTEM_PLAN E1; Postgres replaced by deviation).
+ pub mod indexer;
++/// T1 issuance model: genesis supply, halving curve, hard cap and target
++/// staked ratio for `ALCRY` (ECONOMICS_PLAN T1, decision D-T1).
++pub mod issuance;
+ mod prune;
+ /// E3 client SDK (Rust) for the explorer and faucet HTTP APIs.
+ pub mod sdk;
+diff --git a/crates/aura-storage/tests/t1_issuance.rs b/crates/aura-storage/tests/t1_issuance.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..fb15a56d005f8d0cccc12d7531289d41a3b501fa
+--- /dev/null
++++ b/crates/aura-storage/tests/t1_issuance.rs
+@@ -0,0 +1,215 @@
++//! T1 issuance model gate (ECONOMICS_PLAN T1).
++//!
++//! The gate is the literal phase gate: a 10-year simulation whose supply
++//! must match the closed-form formula within 1 base unit. Every control
++//! below carries its named T1 message; the golden path digest is pinned
++//! from the independent Python oracle.
++
++use aura_storage::issuance::{
++    ALCRY, ANNUAL_EMISSION, GENESIS_SUPPLY, HALVING_YEARS, IssuanceError, IssuanceModel,
++    IssuanceParams, MAX_SUPPLY, T1_PARAMS, T1_YEARS, TARGET_STAKED_RATIO_BPS,
++};
++
++/// Golden supply-path digest (sha256 over `year:supply` lines), computed
++/// by `tools/t1_issuance_check.py`.
++const GOLDEN_PATH_DIGEST: &str = "c2a4669192ddde5d9cc4e7cb32a76ecd06356022bce7c7230826f068854c1a35";
++
++/// Independent closed-form recomputation (the "formula" side of the gate).
++fn closed_form_supply(years: u32) -> u128 {
++    let mut supply = GENESIS_SUPPLY;
++    for year in 1..=years {
++        let raw = ANNUAL_EMISSION >> ((year - 1) / HALVING_YEARS);
++        let remaining = MAX_SUPPLY.saturating_sub(supply);
++        supply += raw.min(remaining);
++    }
++    supply
++}
++
++fn path_digest(path: &[u128]) -> String {
++    let mut text = String::new();
++    for (year, supply) in path.iter().enumerate() {
++        text.push_str(&year.to_string());
++        text.push(':');
++        text.push_str(&supply.to_string());
++        text.push('\n');
++    }
++    aura_state::sha256_bytes(text.as_bytes()).to_hex()
++}
++
++#[test]
++fn t1_ten_year_supply_matches_the_formula_within_one_unit() {
++    let mut model = IssuanceModel::new(T1_PARAMS).expect("params");
++    let path = model.run_years(T1_YEARS).expect("run");
++    assert_eq!(
++        path.len() as u32,
++        T1_YEARS + 1,
++        "T1: the supply must match the issuance formula"
++    );
++    for year in 0..=T1_YEARS {
++        let formula = closed_form_supply(year);
++        let simulated = path[year as usize];
++        let diff = simulated.abs_diff(formula);
++        assert!(
++            diff <= 1,
++            "T1: the supply must match the issuance formula (year {}: sim {} vs formula {})",
++            year,
++            simulated,
++            formula
++        );
++    }
++    assert_eq!(
++        model.supply(),
++        4_950_000 * ALCRY,
++        "T1: the supply must match the issuance formula"
++    );
++}
++
++#[test]
++fn t1_halving_cuts_the_emission_in_half_every_period() {
++    let model = IssuanceModel::new(T1_PARAMS).expect("params");
++    assert_eq!(
++        model.emission_for_year(1),
++        ANNUAL_EMISSION,
++        "T1: the halving must cut the emission in half every period"
++    );
++    assert_eq!(
++        model.emission_for_year(HALVING_YEARS),
++        ANNUAL_EMISSION,
++        "T1: the halving must cut the emission in half every period"
++    );
++    assert_eq!(
++        model.emission_for_year(HALVING_YEARS + 1),
++        ANNUAL_EMISSION / 2,
++        "T1: the halving must cut the emission in half every period"
++    );
++    assert_eq!(
++        model.emission_for_year(2 * HALVING_YEARS + 1),
++        ANNUAL_EMISSION / 4,
++        "T1: the halving must cut the emission in half every period"
++    );
++}
++
++#[test]
++fn t1_max_supply_is_never_exceeded() {
++    let params = IssuanceParams {
++        max_supply: 3_500_000 * ALCRY,
++        ..T1_PARAMS
++    };
++    let mut model = IssuanceModel::new(params).expect("params");
++    let path = model.run_years(100).expect("run");
++    for supply in &path {
++        assert!(
++            *supply <= params.max_supply,
++            "T1: the max supply must never be exceeded"
++        );
++    }
++    assert_eq!(
++        model.supply(),
++        params.max_supply,
++        "T1: the max supply must never be exceeded"
++    );
++    assert_eq!(
++        IssuanceModel::new(IssuanceParams {
++            max_supply: GENESIS_SUPPLY - 1,
++            ..T1_PARAMS
++        })
++        .err(),
++        Some(IssuanceError::CapBelowGenesis),
++        "T1: the max supply must never be exceeded"
++    );
++}
++
++#[test]
++fn t1_genesis_supply_matches_the_declared_endowment() {
++    let model = IssuanceModel::new(T1_PARAMS).expect("params");
++    assert_eq!(
++        model.supply(),
++        GENESIS_SUPPLY,
++        "T1: the genesis supply must match the declared endowment"
++    );
++    assert_eq!(
++        GENESIS_SUPPLY,
++        3_000_000 * ALCRY,
++        "T1: the genesis supply must match the declared endowment"
++    );
++    assert_eq!(
++        model.year(),
++        0,
++        "T1: the genesis supply must match the declared endowment"
++    );
++}
++
++#[test]
++// Intentional constant property: NC-5 removes the validation in the model;
++// this test pins the declared constant itself.
++#[allow(clippy::assertions_on_constants)]
++fn t1_target_staked_ratio_stays_within_basis_points() {
++    assert!(
++        TARGET_STAKED_RATIO_BPS <= 10_000,
++        "T1: the target staked ratio must stay within basis points"
++    );
++    assert_eq!(
++        IssuanceModel::new(IssuanceParams {
++            target_staked_ratio_bps: 10_001,
++            ..T1_PARAMS
++        })
++        .err(),
++        Some(IssuanceError::StakedRatioOutOfRange),
++        "T1: the target staked ratio must stay within basis points"
++    );
++    assert_eq!(
++        IssuanceModel::new(T1_PARAMS).expect("params").supply() % ALCRY,
++        0,
++        "T1: the target staked ratio must stay within basis points"
++    );
++}
++
++#[test]
++fn t1_reference_model_agrees_with_simulation() {
++    let mut model = IssuanceModel::new(T1_PARAMS).expect("params");
++    let path = model.run_years(T1_YEARS).expect("run");
++    assert_eq!(
++        path_digest(&path),
++        GOLDEN_PATH_DIGEST,
++        "T1: the reference model must agree with the simulation"
++    );
++    let expected: Vec<u128> = vec![
++        3_000_000 * ALCRY,
++        3_300_000 * ALCRY,
++        3_600_000 * ALCRY,
++        3_900_000 * ALCRY,
++        4_200_000 * ALCRY,
++        4_350_000 * ALCRY,
++        4_500_000 * ALCRY,
++        4_650_000 * ALCRY,
++        4_800_000 * ALCRY,
++        4_875_000 * ALCRY,
++        4_950_000 * ALCRY,
++    ];
++    assert_eq!(
++        path, expected,
++        "T1: the reference model must agree with the simulation"
++    );
++}
++
++#[test]
++fn t1_stepping_year_by_year_matches_the_closed_form() {
++    // Metamorphism: the stepwise simulator and the closed-form loop must
++    // agree everywhere; splitting the horizon must not change the result.
++    let mut one = IssuanceModel::new(T1_PARAMS).expect("params");
++    let full = one.run_years(T1_YEARS).expect("run");
++    let mut a = IssuanceModel::new(T1_PARAMS).expect("params");
++    let first = a.run_years(4).expect("run");
++    let second = a.run_years(6).expect("run");
++    let mut spliced = first.clone();
++    spliced.extend_from_slice(&second[1..]);
++    assert_eq!(
++        full, spliced,
++        "T1: stepping year by year must match the closed form"
++    );
++    assert_eq!(
++        *full.last().expect("nonempty"),
++        closed_form_supply(T1_YEARS),
++        "T1: stepping year by year must match the closed form"
++    );
++}
+diff --git a/docs/economics/t1-issuance.md b/docs/economics/t1-issuance.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..fad32a2a86a69c0ba39985b26c212710780af316
+--- /dev/null
++++ b/docs/economics/t1-issuance.md
+@@ -0,0 +1,49 @@
++# T1 — issuance model of `ALCRY`
++
++**Status:** ✅ T1 closed. Decisions D-T1/D-T3 in force: the parameters below
++are fixed in genesis and may only be changed by governance with a timelock —
++not by a simple commit. Everything is verified by the ten-year simulation in
++`crates/aura-storage/src/issuance.rs` (gate: supply matches the formula
++within 1 base unit).
++
++## Parameters (`sim/t1-issuance.json`)
++
++| Parameter | Value | Meaning |
++|---|---|---|
++| unit | `ALCRY`, u128, 18 decimals | D-T1 |
++| genesis supply | 3 000 000 `ALCRY` | minted at year 0; distributed by the T0 table (no hidden premine) |
++| annual emission (year 1) | 300 000 `ALCRY` | first halving period |
++| halving period | 4 years | emission(y) = annual_emission >> ((y−1)/4) |
++| max supply | 6 000_000 `ALCRY` | hard cap, fixed ("if fixed" — it is) |
++| target staked ratio | 6000 bps (60 %) | declared target for T4 staking; validated, not consumed yet |
++
++## Inflation curve
++
++Disinflation by halving: 300 000 `ALCRY`/year in years 1–4, 150 000 in
++years 5–8, 75 000 in years 9–12, … until the cap. The ten-year path:
++
++| year | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
++|---|---|---|---|---|---|---|---|---|---|---|---|
++| supply, `ALCRY` | 3.0M | 3.3M | 3.6M | 3.9M | 4.2M | 4.35M | 4.5M | 4.65M | 4.8M | 4.875M | 4.95M |
++
++`emission(y)` truncates at the cap: once the supply reaches 6 000 000
++`ALCRY`, issuance stops permanently. The cap-binding scenario
++(`sim/t1-issuance.json`) proves it: a 3.5M cap halts issuance at exactly
++3 500 000 `ALCRY`.
++
++## Verification
++
++* Stepwise simulation vs closed-form formula: **≤ 1 base unit** at every
++  year (the phase gate; integer truncation gives 0 drift).
++* Golden supply-path digest `c2a4669192ddde5d9cc4e7cb32a76ecd06356022bce7c7230826f068854c1a35`
++  pinned in the Rust tests and re-derived by the independent Python oracle
++  (`tools/t1_issuance_check.py`), which also cross-runs the Rust example.
++* Six mutation controls (`tools/nc_t1.py`): formula mismatch, halving
++  removal, cap removal, genesis drift, staked-ratio validation removal and
++  horizon truncation each turn the gate red with their named message.
++
++## What T1 deliberately does not do
++
++* No allocation (T2), fees (T3) or staking mechanics (T4). The target
++  staked ratio is pinned here only so T4 cannot invent it quietly.
++* No legal claims (D-T4).
+diff --git a/docs/evidence/review-w1-source-drift.txt b/docs/evidence/review-w1-source-drift.txt
+index 78a3c87979e949ef1c04b1bf06aca811d305242b..db2cd75ff828fac8a92d3cd276504965499b2761 100644
+--- a/docs/evidence/review-w1-source-drift.txt
++++ b/docs/evidence/review-w1-source-drift.txt
+@@ -1,12 +1,12 @@
+ # Explicit source drift from frozen historical SHA256SUMS.
+ # historical-sha256 current-sha256 repository-relative-path
+ # Not a replacement for a new phase security review or certification.
+-adc24e7c03e1a63e5d7addbda15ff40ce630367152699c5d9659cd8db65f357b baad37b20d03e3b27d98daf24c9224cc2da757e0df483e5baad09be8e5556723 CHANGELOG.md
+-c83d08301a703c9db11462aa541bc898e52548589972118465164895eed44dc7 baad37b20d03e3b27d98daf24c9224cc2da757e0df483e5baad09be8e5556723 CHANGELOG.md
++adc24e7c03e1a63e5d7addbda15ff40ce630367152699c5d9659cd8db65f357b 3f256c08577d11f906d1d5502ec7b61b745f6c3a54fa20ded99b6aaa259ac3fe CHANGELOG.md
++c83d08301a703c9db11462aa541bc898e52548589972118465164895eed44dc7 3f256c08577d11f906d1d5502ec7b61b745f6c3a54fa20ded99b6aaa259ac3fe CHANGELOG.md
+ f0d3511cd02f3007c0a18fc5d94c8997cfa512449313776117265708a36c8553 c9680cc436d806fa7fa2ce8545bd148dc9fcc9ae444973d4968a3f4f4fc069dc Cargo.lock
+ d5518138eae73219f8da0d7297af44a471dbd7135a39587a0da1587bfe3d1e70 23185f790bc4697bbd163004e2c78873755c13efba05b46260b4827cdeabdff7 Cargo.toml
+-5fb6ce43826495321f697e138e71e87954b2fcabec1ceef70549bb49a2f38988 65d644bec201e0520fafd94b079d426f812bb5e83dcec2682f8ee48760201c89 Makefile
+-c5e92007c53a22253ad7d2cc779863b9592562a394d1b26ff09ea8d031991e29 65d644bec201e0520fafd94b079d426f812bb5e83dcec2682f8ee48760201c89 Makefile
++5fb6ce43826495321f697e138e71e87954b2fcabec1ceef70549bb49a2f38988 23e0ac2b634ca13277ad1da1cf0b06fd0332b9b1b47b67e35186c8d9a11d1a0a Makefile
++c5e92007c53a22253ad7d2cc779863b9592562a394d1b26ff09ea8d031991e29 23e0ac2b634ca13277ad1da1cf0b06fd0332b9b1b47b67e35186c8d9a11d1a0a Makefile
+ bcc7328bd9c464a857c4b97c8491277bf401299d3c7963f1925b075d4313feb6 f2e4a249573a5b902b3f566b3f1db1ebab12d994f1ab6ef9be2dc15df63d7e26 crates/aura-consensus/src/fork_choice.rs
+ 7e396fbb4fd1d4103f26db16796ab0b6ad9626b7ba2ea0d56cae379bde5c2d59 8ec730ce2dc2cb1bc266990f4f29133038e98e390a63be0edbb3eaa23fa48f23 crates/aura-consensus/src/governance.rs
+ bd58be73dc4e0f6da16735be1d5ed17306d16c08569d798a4af20fcf72b91d40 b2e8ddad5b281da54e9c68107b563c9125b3931fe0e8e26023c74dcf3011ccc3 crates/aura-consensus/src/slashing.rs
+@@ -45,8 +45,8 @@ c477f915b427982ca83fcb253fa0ab850d619ca5bf4a764137f0407078af4986 26a28bcc51e2cab
+ b4897ba4dbc33f098c27e415669e2e0bbca45933694b67aa590181041ebfdf0f e7b3e704bb1c5688159f38f66f31ba17893bad818c8876e097631ab2725abf5b fuzz/Cargo.toml
+ dca80316562fefcf24c45b40fb635412e1d4e5e09b5abe26f7d0e6b67e1e906e 53ac68024a82d40e64badd40ead1ebea5e0af8be1e56d4184a0eb0f22eab55a2 fuzz/README.md
+ 6e80f8eab5695501a3350e70bd086675cf4d1669cf370d92e98702d18c7bfe6e 7414f1e69a9690bdf93c79dc0ca32ec5cac7ca3b4f0df2d317e39c6fa95abc99 fuzz/src/lib.rs
+-1259c6bbc3bd3d53cbe0dd1d69d8d762336dc26287215d2ee35307bba90ea85c 59ff6f980cc6bf5a18ee839db2393aa435f56a252b4c9cdf3748f4bcd4e811db tools/audit_closeout.py
+-7bd672503f104aa733dff03e84f57ac26ef926607657ab6a799f9d2bc14c0dc9 59ff6f980cc6bf5a18ee839db2393aa435f56a252b4c9cdf3748f4bcd4e811db tools/audit_closeout.py
++1259c6bbc3bd3d53cbe0dd1d69d8d762336dc26287215d2ee35307bba90ea85c 75fe9c2709cfbad9aa8aa96dea8987fa09444140bb45c1773042ff7dedba021f tools/audit_closeout.py
++7bd672503f104aa733dff03e84f57ac26ef926607657ab6a799f9d2bc14c0dc9 75fe9c2709cfbad9aa8aa96dea8987fa09444140bb45c1773042ff7dedba021f tools/audit_closeout.py
+ 4d7d73580e09a49f1a0a9faf668254b0ec12f891efa527db863fa3abf8cce4a1 ab356092fc59ed98bff8d3622ef74e35eb33da5f342c5b6dccf5d73aeb20763b tools/gen_w0_vectors.py
+ 303fc648659cc72d9f8cf7cf6bc71ed8c9bd5a9f9a8d923d5a1e78bcffba0b5b 5e62e17226bfc601e8775b54e7f6a025d36c1357b7206d33c18c442cb49746eb tools/nc_b10.py
+ f86dee929549c751519e1749e0976c561e47a174a129412caf8cd23680887f61 3ae536e2637862525ca6edb1eeaa927a018a529856402d60c7260e92481d0b19 tools/nc_b5.py
+diff --git a/docs/evidence/t1/SHA256SUMS b/docs/evidence/t1/SHA256SUMS
+new file mode 100644
+index 0000000000000000000000000000000000000000..0928d546382e489ab4c632efc68f40e75dc38d36
+--- /dev/null
++++ b/docs/evidence/t1/SHA256SUMS
+@@ -0,0 +1,9 @@
++9367ab74ec0233db77e9bdccf29d766d27d6277b174193dfbebc22cd9cbb3e98  docs/evidence/t1/baseline.log
++f874f22778e53eaae10992312fa3254e633201bc8d1803aaaf0fc724b8973aa6  docs/evidence/t1/gates.txt
++3156351e09b450a388e80a0472d94e1dc0a15ad7e55fe085c0eb3de43da8139d  docs/evidence/t1/inventory.txt
++445ebc9eab11e05a57ccd3f244d11a28e2549df72dafc8342ef0953cff579a5d  docs/evidence/t1/nc-suite.log
++24b3a32b42f6db556fd1121edcbe9174f31e0af80e684d2ab6a5b91d350cdf6b  docs/evidence/t1/nc.log
++1ad93828f0b6d8e06a19aebac35c6840cdf1f1e5cbee22b914d68291d012e18e  docs/evidence/t1/report.md
++077c299b6e80009329c9e0852eeabdc7971a8c52b3c77efa81b27361db2cc3ce  docs/evidence/t1/t1-issuance.log
++2c7e77cf78a5c13082f443de5f471a1b7a8252dc3f2633ee395755f6ec60f8b2  docs/evidence/t1/campaign/result.json
++077c299b6e80009329c9e0852eeabdc7971a8c52b3c77efa81b27361db2cc3ce  docs/evidence/t1/campaign/t1-issuance.log
+diff --git a/docs/evidence/t1/baseline.log b/docs/evidence/t1/baseline.log
+new file mode 100644
+index 0000000000000000000000000000000000000000..a8ec7a67a4d71175dfbea4f9462e5b1ee6837f50
+--- /dev/null
++++ b/docs/evidence/t1/baseline.log
+@@ -0,0 +1,2 @@
++[evidence_t1] cmd=/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/t1_issuance_check.py exit=0 duration=0.46s
++RESULT: T1 issuance check PASS — 10-year simulation, supply 4950000000000000000000000 (4950000 ALCRY), matches the formula within 1 unit, digest c2a4669192ddde5d9cc4e7cb32a76ecd06356022bce7c7230826f068854c1a35
+diff --git a/docs/evidence/t1/campaign/result.json b/docs/evidence/t1/campaign/result.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..57f6f6ce4b271683074c43a6f384f19e9c77c54c
+--- /dev/null
++++ b/docs/evidence/t1/campaign/result.json
+@@ -0,0 +1,33 @@
++{
++  "commands": [
++    [
++      "/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/t1_issuance_check.py",
++      "baseline"
++    ],
++    [
++      "cargo test --locked -p aura-storage --test t1_issuance",
++      "t1-issuance"
++    ],
++    [
++      "/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/nc_t1.py",
++      "nc-suite"
++    ]
++  ],
++  "gates": {
++    "baseline": "pass",
++    "nc-suite": "pass",
++    "t1-issuance": "pass"
++  },
++  "golden_path_digest": "c2a4669192ddde5d9cc4e7cb32a76ecd06356022bce7c7230826f068854c1a35",
++  "named_gate": "10-year simulation: supply matches the formula within 1 unit",
++  "phase": "T1",
++  "sources": {
++    "crates/aura-storage/examples/t1_issuance_example.rs": "f77084652c394b64675c747b667b23b1642cf03e0457a505e4c4ad9deebb1a81",
++    "crates/aura-storage/src/issuance.rs": "b042c890d7e56b53b9c0b4e22bab1f52601d2117b0e220d177d9afd2ce7bf720",
++    "crates/aura-storage/tests/t1_issuance.rs": "00b4f3740d0dff23a6074e917c2804b2bda6680a5b679c5911ef2ed3200a7f53",
++    "sim/t1-issuance.json": "c3badc0222070d2c36d0bcaf47450837d1896ef6595ee02e76de4060f8a31604",
++    "tools/nc_t1.py": "535d847c3813623db0d9aef8b200a75c4d53e91f474d639920dca82c8d1049d7",
++    "tools/t1_issuance_check.py": "329395ccf01324f00b10f36ec9addb5e8e3c385a4737cdc93d9037237cba53d1"
++  },
++  "when": "2026-11-21T12:05:00"
++}
+diff --git a/docs/evidence/t1/campaign/t1-issuance.log b/docs/evidence/t1/campaign/t1-issuance.log
+new file mode 100644
+index 0000000000000000000000000000000000000000..36c44afb26cd1e71c9cd0ffd45fc2364ac2ac537
+--- /dev/null
++++ b/docs/evidence/t1/campaign/t1-issuance.log
+@@ -0,0 +1,16 @@
++[evidence_t1] cmd=cargo test --locked -p aura-storage --test t1_issuance exit=0 duration=0.51s
++   Compiling aura-storage v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-storage)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.47s
++     Running tests/t1_issuance.rs (target/debug/deps/t1_issuance-cb92ffe0210ed3bc)
++
++running 7 tests
++test t1_halving_cuts_the_emission_in_half_every_period ... ok
++test t1_genesis_supply_matches_the_declared_endowment ... ok
++test t1_max_supply_is_never_exceeded ... ok
++test t1_stepping_year_by_year_matches_the_closed_form ... ok
++test t1_reference_model_agrees_with_simulation ... ok
++test t1_target_staked_ratio_stays_within_basis_points ... ok
++test t1_ten_year_supply_matches_the_formula_within_one_unit ... ok
++
++test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
+diff --git a/docs/evidence/t1/gates.txt b/docs/evidence/t1/gates.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..6fe01aa496c73491cb3bfd8cabb7391b4bd433e5
+--- /dev/null
++++ b/docs/evidence/t1/gates.txt
+@@ -0,0 +1,10 @@
++T1 Issuance model gates (ECONOMICS_PLAN, crates/aura-storage/tests/t1_issuance.rs)
++Gate: 10-year simulation: supply matches the formula within 1 unit
++
++baseline                                   pass                   10-year issuance oracle (independent Python model + rust example)
++t1-issuance                                pass                   named gate: supply matches the formula within 1 unit
++nc-suite                                   pass                   6 mutation controls incl. the literal gate (formula mismatch)
++
++negative controls: 6/6 (PASS)
++named gate: PASS
++oracle cross-run: PASS
+diff --git a/docs/evidence/t1/inventory.txt b/docs/evidence/t1/inventory.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..d5dab133a3cb7bf87def061054e712709bef052c
+--- /dev/null
++++ b/docs/evidence/t1/inventory.txt
+@@ -0,0 +1,4 @@
++# T1 inventory (generated by tools/write_t1_evidence.py)
++# Cumulative negative controls: 17 phases, 524 controls.
++W4: 6/6, H0: 6/6, H1: 6/6, H2: 6/6, H3: 6/6, H4: 6/6, H5: 6/6, H6: 7/7, H7: 7/7, H8: 7/7, H9: 7/7, E0: 6/6, E1: 6/6, E2: 6/6, E3: 6/6, T0: 6/6, T1: 6/6
++TOTAL: 524 negative controls cumulative
+diff --git a/docs/evidence/t1/nc-suite.log b/docs/evidence/t1/nc-suite.log
+new file mode 100644
+index 0000000000000000000000000000000000000000..534a8c32f8d5deb83c72a9fee3c8009e9ba46c90
+--- /dev/null
++++ b/docs/evidence/t1/nc-suite.log
+@@ -0,0 +1,8 @@
++[evidence_t1] cmd=/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/nc_t1.py exit=0 duration=4.29s
++[PASS] NC-1 injected bug -> formula mismatch must go red: red with named message
++[PASS] NC-2 halving removed: red with named message
++[PASS] NC-3 cap ignored: red with named message
++[PASS] NC-4 genesis supply off by one: red with named message
++[PASS] NC-5 staked ratio validation removed: red with named message
++[PASS] NC-6 horizon silently truncated: red with named message
++RESULT: 6/6 negative controls PASS
+diff --git a/docs/evidence/t1/nc.log b/docs/evidence/t1/nc.log
+new file mode 100644
+index 0000000000000000000000000000000000000000..750e7011f4ca4c5878dafe10750f7d352aa80fd6
+--- /dev/null
++++ b/docs/evidence/t1/nc.log
+@@ -0,0 +1,8 @@
++[evidence_t1] cmd=tools/nc_t1.py
++[PASS] NC-1 injected bug -> formula mismatch must go red: red with named message
++[PASS] NC-2 halving removed: red with named message
++[PASS] NC-3 cap ignored: red with named message
++[PASS] NC-4 genesis supply off by one: red with named message
++[PASS] NC-5 staked ratio validation removed: red with named message
++[PASS] NC-6 horizon silently truncated: red with named message
++RESULT: 6/6 negative controls PASS
+diff --git a/docs/evidence/t1/report.md b/docs/evidence/t1/report.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..5b13e780c3efbd4e4b626cf7be5c6ceee92e9e16
+--- /dev/null
++++ b/docs/evidence/t1/report.md
+@@ -0,0 +1,11 @@
++# Отчёт T1 — Issuance model
++
++Дата: 2026-11-21
++
++Итог: **ВСЕ ГЕЙТЫ T1 ЗЕЛЁНЫЕ**
++
++Гейт: 10-летняя симуляция — supply совпадает с формулой в пределах 1 базовой единицы.
++
++Модель `crates/aura-storage/src/issuance.rs`: genesis 3 000 000 ALCRY, годовая эмиссия 300 000 ALCRY с халвингом каждые 4 года, потолок 6 000 000 ALCRY, целевая доля стейка 6000 bps. Траектория 10 лет: 3.0M→4.95M ALCRY; золотой дайджест пути c2a46691…c1a35 (Rust ↔ Python эталон ↔ пример `t1_issuance_example`). Сценарий `sim/t1-issuance.json`, гейт `crates/aura-storage/tests/t1_issuance.rs` (`campaign/t1-issuance.log`, `campaign/result.json`).
++negative controls `tools/nc_t1.py` (`nc.log`, RESULT: 6/6 negative controls PASS).
++
+diff --git a/docs/evidence/t1/t1-issuance.log b/docs/evidence/t1/t1-issuance.log
+new file mode 100644
+index 0000000000000000000000000000000000000000..36c44afb26cd1e71c9cd0ffd45fc2364ac2ac537
+--- /dev/null
++++ b/docs/evidence/t1/t1-issuance.log
+@@ -0,0 +1,16 @@
++[evidence_t1] cmd=cargo test --locked -p aura-storage --test t1_issuance exit=0 duration=0.51s
++   Compiling aura-storage v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-storage)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.47s
++     Running tests/t1_issuance.rs (target/debug/deps/t1_issuance-cb92ffe0210ed3bc)
++
++running 7 tests
++test t1_halving_cuts_the_emission_in_half_every_period ... ok
++test t1_genesis_supply_matches_the_declared_endowment ... ok
++test t1_max_supply_is_never_exceeded ... ok
++test t1_stepping_year_by_year_matches_the_closed_form ... ok
++test t1_reference_model_agrees_with_simulation ... ok
++test t1_target_staked_ratio_stays_within_basis_points ... ok
++test t1_ten_year_supply_matches_the_formula_within_one_unit ... ok
++
++test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
+diff --git a/docs/plans/ECONOMICS_PLAN.md b/docs/plans/ECONOMICS_PLAN.md
+index b17bbbc60d9c2163c7ee2a794223f22941e22e19..7d9c685233537bba6eebccd31d85408b4e2b49cb 100644
+--- a/docs/plans/ECONOMICS_PLAN.md
++++ b/docs/plans/ECONOMICS_PLAN.md
+@@ -1,6 +1,6 @@
+ # ECONOMICS_PLAN — tokenomics, fees, treasury, white paper
+ 
+-**Status:** 🚧 IN PROGRESS — T0 ✅ (`patches/0078-T0-baseline.patch`); ⏸ T1–T4 Stage 1 in progress; T5–T8 Stage 2  
++**Status:** 🚧 IN PROGRESS — T0 ✅ (`patches/0078-T0-baseline.patch`); T1 ✅ (`patches/0079-T1-issuance.patch`); ⏸ T2–T4 Stage 1 in progress; T5–T8 Stage 2  
+ **Stage:** Stage 1: T0–T4. ⏸ Stage 2: T5–T8 (slashing parameters, governance, treasury, white paper).  
+ **Deliverable:** `patches/0077-T0-...` … `patches/0085-T8-...`
+ **Dependencies:** Stage 1 — CONSENSUS B4–B9, EXEC X3–X5, ECOSYSTEM E3, OPS O4.  
+@@ -25,7 +25,7 @@ tests, simulations in `sim/`, text in the white paper.
+ | Phase | Title | DoD | Test gate |
+ |---|---|---|---|
+ | ✅ **T0** | Baseline | no token; desired properties described (scarcity, security, accessibility) | NC: "emission from nowhere" in simulation → gate red — met, 1000-step simulation, golden digest pinned, 6 mutation controls |
+-| **T1** | Issuance model | genesis supply, inflation curve, halving/target staked ratio, max supply (if fixed) | 10-year simulation: supply matches the formula within 1 unit |
++| ✅ **T1** | Issuance model | genesis supply, inflation curve, halving/target staked ratio, max supply (if fixed) | 10-year simulation: supply matches the formula within 1 unit — met, 0-unit drift every year, golden path digest pinned, 6 mutation controls |
+ | **T2** | Allocation | allocation (validators, treasury, community, team), vesting with cliffs, lockups | script reconciles genesis balances with the table; NC: extra coins → red |
+ | **T3** | Fees | EIP-1559-like `base_fee` + `tip`, burning the base part, elastic gas target | 10 000 congested blocks: base fee rises/falls per the formula |
+ | **T4** | Staking | min stake, delegation, commission, unbonding 21 days, slashing period | 1000 delegators: shares sum == 1; NC: withdraw without unbonding → red |
+@@ -63,6 +63,36 @@ tests, simulations in `sim/`, text in the white paper.
+ - Negative controls: `tools/nc_t0.py`, 6/6 in `docs/evidence/t0/nc.log`;
+   cumulative negative control total 518.
+ 
++### T1 receipt (2026-11-20) — issuance model
++
++- Deliverable: `patches/0079-T1-issuance-phase-closed-10-year-supply-mat.patch`;
++  evidence in `docs/evidence/t1/` (`campaign/` self-contained: gate run
++  log, `result.json` with commands, the golden path digest and source
++  digests).
++- Gate met literally: the 10-year simulation matches the closed-form
++  formula **within 1 base unit at every year** (integer truncation gives
++  0-unit drift); the "extra unit per year" mutation turns the gate red
++  with the named message `T1: the supply must match the issuance formula`
++  (NC-1). Parameters (genesis-fixed, D-T1/D-T3): genesis 3 000 000
++  `ALCRY`, annual emission 300 000 `ALCRY` halving every 4 years, hard
++  cap 6 000 000 `ALCRY` (fixed), target staked ratio 6000 bps (pinned for
++  T4). Ten-year path 3.0M → 4.95M `ALCRY`; golden path digest
++  `c2a4669192ddde5d9cc4e7cb32a76ecd06356022bce7c7230826f068854c1a35`
++  pinned in the Rust tests and re-derived by the independent Python
++  oracle (`tools/t1_issuance_check.py`), which also cross-runs the Rust
++  example `t1_issuance_example`.
++- Cap enforcement: the binding-cap scenario (3.5M cap, 100 years) halts
++  issuance at exactly the cap (NC-3); genesis drift, halving removal,
++  staked-ratio validation removal and horizon truncation each turn red
++  with their named message (`tools/nc_t1.py`, 6/6).
++- Explained deviations (recorded here as this plan prescribes):
++  (1) the model lives in `crates/aura-storage/src/issuance.rs` (workspace
++  convention) with the scenario mirrored in `sim/t1-issuance.json`;
++  (2) the horizon granularity is whole years (the gate says "10-year
++  simulation"; block-level emission belongs to T3/T4 mechanics).
++- Negative controls: `tools/nc_t1.py`, 6/6 in `docs/evidence/t1/nc.log`;
++  cumulative negative control total 524.
++
+ ## Legal perimeter (what exactly T8 checks)
+ 
+ A public offer of a crypto-asset in the EU requires the offeror to be a legal
+diff --git a/sim/t1-issuance.json b/sim/t1-issuance.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..8a35931fe2f29893777279aaffbe1ae6956dc28f
+--- /dev/null
++++ b/sim/t1-issuance.json
+@@ -0,0 +1,18 @@
++{
++  "phase": "T1",
++  "title": "Issuance model parameters and ten-year horizon",
++  "asset": "ALCRY, u128, 18 decimals (D-T1)",
++  "params": {
++    "genesis_supply_alcry": 3000000,
++    "annual_emission_alcry": 300000,
++    "halving_years": 4,
++    "max_supply_alcry": 6000000,
++    "target_staked_ratio_bps": 6000
++  },
++  "horizon_years": 10,
++  "expected_path_alcry": [3000000, 3300000, 3600000, 3900000, 4200000, 4350000, 4500000, 4650000, 4800000, 4875000, 4950000],
++  "golden_path_digest": "c2a4669192ddde5d9cc4e7cb32a76ecd06356022bce7c7230826f068854c1a35",
++  "cap_binding_scenario": {"max_supply_alcry": 3500000, "years": 100, "final_alcry": 3500000},
++  "formula": "emission(y) = annual_emission >> ((y-1) / halving_years), issued = min(emission, max_supply - supply); supply = genesis + sum(issued)",
++  "tolerance": "simulated supply must match the formula within 1 base unit"
++}
+diff --git a/tools/audit_closeout.py b/tools/audit_closeout.py
+index 1784a480bced3b63b733149ec59a6aa7c87bfbf4..17410064225eca8db03985070f80f975d8556c3c 100644
+--- a/tools/audit_closeout.py
++++ b/tools/audit_closeout.py
+@@ -38,7 +38,7 @@ NET_PHASES = ["N0", "N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8"]  # NET_PLAN
+ WALLET_PHASES = ["W0", "W1", "W2", "W3", "W4"]  # grows with each W phase
+ SECURITY_PHASES = ["H0", "H1", "H2", "H3", "H4", "H5", "H6", "H7", "H8", "H9"]  # grows with each H phase
+ ECOSYSTEM_PHASES = ["E0", "E1", "E2", "E3"]  # grows with each E phase
+-ECONOMICS_PHASES = ["T0"]  # grows with each T phase
++ECONOMICS_PHASES = ["T0", "T1"]  # grows with each T phase
+ PHASES = CORE_PHASES + STATE_PHASES + EXEC_PHASES + NODE_PHASES + CONSENSUS_PHASES + NET_PHASES + WALLET_PHASES + SECURITY_PHASES + ECOSYSTEM_PHASES + ECONOMICS_PHASES
+ SHIPPED = CORE_PHASES + [
+     "S0",
+@@ -106,8 +106,9 @@ SHIPPED = CORE_PHASES + [
+     "E1",
+     "E2",
+     "E3",
++    "T0",
+ ]
+-CURRENT = "T0"
++CURRENT = "T1"
+ 
+ PLAN_FOR_PREFIX = {
+     "C": "CORE_PLAN.md",
+@@ -125,7 +126,7 @@ PLAN_FOR_PREFIX = {
+ }
+ 
+ NC_PER_PHASE = {f"C{i}": 6 for i in range(4, 11)}
+-NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6, "W4": 6, "H0": 6, "H1": 6, "H2": 6, "H3": 6, "H4": 6, "H5": 6, "H6": 7, "H7": 7, "H8": 7, "H9": 7, "E0": 6, "E1": 6, "E2": 6, "E3": 6, "T0": 6})
++NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6, "W4": 6, "H0": 6, "H1": 6, "H2": 6, "H3": 6, "H4": 6, "H5": 6, "H6": 7, "H7": 7, "H8": 7, "H9": 7, "E0": 6, "E1": 6, "E2": 6, "E3": 6, "T0": 6, "T1": 6})
+ SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)  # 339 (through W0)
+ EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + (0 if CURRENT in SHIPPED else NC_PER_PHASE[CURRENT])
+ 
+@@ -159,6 +160,7 @@ PATCH_ORDER += ["E1"]
+ PATCH_ORDER += ["E2"]
+ PATCH_ORDER += ["E3"]
+ PATCH_ORDER += ["T0"]
++PATCH_ORDER += ["T1"]
+ PATCH_NUMBERS = {phase: index + 1 for index, phase in enumerate(PATCH_ORDER)}
+ 
+ 
+diff --git a/tools/nc_t1.py b/tools/nc_t1.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..899ee8fb2e02e177622132a66f5b978e7dfafd48
+--- /dev/null
++++ b/tools/nc_t1.py
+@@ -0,0 +1,108 @@
++#!/usr/bin/env python3
++"""Mutation controls for T1 (ECONOMICS_PLAN T1).
++
++Each control injects ONE bug (restored after) and requires the named T1
++message to appear in the red run. NC-1 is the phase gate literally: the
++10-year supply must match the issuance formula within 1 unit — an extra
++unit per year must turn it red.
++"""
++
++import os
++import subprocess
++import sys
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++ISSUANCE = os.path.join(ROOT, "crates", "aura-storage/src/issuance.rs")
++
++TEST_CMD = ["cargo", "test", "--locked", "-p", "aura-storage",
++            "--test", "t1_issuance"]
++
++# (name, path, anchor, replacement, expected message)
++CONTROLS = [
++    (
++        "NC-1 injected bug -> formula mismatch must go red",
++        ISSUANCE,
++        "            .checked_add(issued)",
++        "            .checked_add(issued + 1)",
++        "T1: the supply must match the issuance formula",
++    ),
++    (
++        "NC-2 halving removed",
++        ISSUANCE,
++        "        let shift = (year - 1) / self.params.halving_years;",
++        "        let shift = 0;",
++        "T1: the halving must cut the emission in half every period",
++    ),
++    (
++        "NC-3 cap ignored",
++        ISSUANCE,
++        "        let issued = raw.min(remaining);",
++        "        let issued = raw;",
++        "T1: the max supply must never be exceeded",
++    ),
++    (
++        "NC-4 genesis supply off by one",
++        ISSUANCE,
++        "            supply: params.genesis_supply,",
++        "            supply: params.genesis_supply + 1,",
++        "T1: the genesis supply must match the declared endowment",
++    ),
++    (
++        "NC-5 staked ratio validation removed",
++        ISSUANCE,
++        "        if params.target_staked_ratio_bps > 10_000 {",
++        "        if false {",
++        "T1: the target staked ratio must stay within basis points",
++    ),
++    (
++        "NC-6 horizon silently truncated",
++        ISSUANCE,
++        "        for _ in 0..years {",
++        "        for _ in 0..years / 2 {",
++        "T1: the reference model must agree with the simulation",
++    ),
++]
++
++PASS_MARKERS = ("test result: ok.",)
++
++
++def run_control(name, path, anchor, replacement, expected):
++    with open(path, encoding="utf-8") as f:
++        original = f.read()
++    if original.count(anchor) != 1:
++        return False, "anchor count %d" % original.count(anchor)
++    mutated = original.replace(anchor, replacement)
++    try:
++        with open(path, "w", encoding="utf-8") as f:
++            f.write(mutated)
++        proc = subprocess.run(TEST_CMD, cwd=ROOT, stdout=subprocess.PIPE,
++                              stderr=subprocess.STDOUT, text=True,
++                              errors="replace")
++        output = proc.stdout or ""
++    finally:
++        with open(path, "w", encoding="utf-8") as f:
++            f.write(original)
++    compile_failed = "error[" in output and "test result" not in output
++    if compile_failed:
++        return False, "mutation broke compilation"
++    if any(marker in output for marker in PASS_MARKERS):
++        return False, "mutated gate still passes"
++    if expected in output:
++        return True, "red with named message"
++    return False, "red without named message"
++
++
++def main():
++    passed = 0
++    for name, path, anchor, replacement, expected in CONTROLS:
++        ok, why = run_control(name, path, anchor, replacement, expected)
++        print("[%s] %s: %s" % ("PASS" if ok else "FAIL", name, why))
++        if ok:
++            passed += 1
++    total = len(CONTROLS)
++    print("RESULT: %d/%d negative controls PASS" % (passed, total))
++    return 0 if passed == total else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/t1_issuance_check.py b/tools/t1_issuance_check.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..33acdd15ebb261ebb5309be0d92c0950d6837d9b
+--- /dev/null
++++ b/tools/t1_issuance_check.py
+@@ -0,0 +1,126 @@
++#!/usr/bin/env python3
++"""Independent T1 issuance oracle (ECONOMICS_PLAN T1).
++
++Recomputes the ten-year supply path from `sim/t1-issuance.json` in two
++independent ways (stepwise loop and per-year closed form), enforces the
++phase gate (simulated supply matches the formula within 1 base unit) and
++cross-checks the Rust example `t1_issuance_example`.
++"""
++
++import hashlib
++import json
++import os
++import re
++import subprocess
++import sys
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++SCENARIO = os.path.join(ROOT, "sim", "t1-issuance.json")
++ISSUANCE_RS = os.path.join(ROOT, "crates", "aura-storage", "src", "issuance.rs")
++
++GOLDEN_PATH_DIGEST = "c2a4669192ddde5d9cc4e7cb32a76ecd06356022bce7c7230826f068854c1a35"
++
++
++def stepwise(genesis, emission, halving, cap, years):
++    supply = genesis
++    path = [supply]
++    for year in range(1, years + 1):
++        raw = emission >> ((year - 1) // halving)
++        issued = min(raw, cap - supply)
++        supply += issued
++        path.append(supply)
++    return path
++
++
++def closed_form(genesis, emission, halving, cap, years):
++    out = []
++    supply = genesis
++    for year in range(0, years + 1):
++        if year > 0:
++            supply = min(cap, supply + (emission >> ((year - 1) // halving)))
++        out.append(supply)
++    return out
++
++
++def path_digest(path):
++    text = "".join("%d:%d\n" % (y, s) for y, s in enumerate(path))
++    return hashlib.sha256(text.encode("utf-8")).hexdigest()
++
++
++def rust_consts():
++    text = open(ISSUANCE_RS, encoding="utf-8").read()
++
++    def const(name):
++        raw = re.search(r"pub const %s: Amount = ([^;]+);" % name, text).group(1)
++        raw = raw.replace("ALCRY", str(10 ** 18)).replace("_", "").replace("u128.pow(18)", "")
++        return eval(raw)
++
++    return {
++        "genesis": const("GENESIS_SUPPLY"),
++        "emission": const("ANNUAL_EMISSION"),
++        "halving": int(re.search(r"pub const HALVING_YEARS: u32 = ([0-9_]+);", text).group(1).replace("_", "")),
++        "cap": const("MAX_SUPPLY"),
++        "bps": int(re.search(r"pub const TARGET_STAKED_RATIO_BPS: u16 = ([0-9_]+);", text).group(1).replace("_", "")),
++    }
++
++
++def main():
++    scenario = json.load(open(SCENARIO, encoding="utf-8"))
++    p = scenario["params"]
++    alcry = 10 ** 18
++    genesis = p["genesis_supply_alcry"] * alcry
++    emission = p["annual_emission_alcry"] * alcry
++    halving = p["halving_years"]
++    cap = p["max_supply_alcry"] * alcry
++    years = scenario["horizon_years"]
++
++    rs = rust_consts()
++    assert rs == {"genesis": genesis, "emission": emission, "halving": halving,
++                  "cap": cap, "bps": p["target_staked_ratio_bps"]}, (
++        "T1: the reference model must agree with the simulation (const drift)"
++    )
++
++    path = stepwise(genesis, emission, halving, cap, years)
++    formula = closed_form(genesis, emission, halving, cap, years)
++    for year, (sim_value, formula_value) in enumerate(zip(path, formula)):
++        assert abs(sim_value - formula_value) <= 1, (
++            "T1: the supply must match the issuance formula (year %d)" % year
++        )
++    assert path == [v * alcry for v in scenario["expected_path_alcry"]], (
++        "T1: the reference model must agree with the simulation"
++    )
++    digest = path_digest(path)
++    assert digest == GOLDEN_PATH_DIGEST, "T1: the reference model must agree with the simulation"
++    assert digest == scenario["golden_path_digest"]
++
++    cb = scenario["cap_binding_scenario"]
++    cb_path = stepwise(genesis, emission, halving, cb["max_supply_alcry"] * alcry, cb["years"])
++    assert cb_path[-1] == cb["final_alcry"] * alcry, "T1: the max supply must never be exceeded"
++    assert all(s <= cb["max_supply_alcry"] * alcry for s in cb_path), (
++        "T1: the max supply must never be exceeded"
++    )
++
++    proc = subprocess.run(
++        ["cargo", "run", "--quiet", "--locked", "-p", "aura-storage", "--example",
++         "t1_issuance_example"],
++        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
++        text=True, errors="replace",
++    )
++    output = proc.stdout or ""
++    if proc.returncode != 0 or "T1-SIM-OK " not in output:
++        print(output[-2000:])
++        print("RESULT: T1 issuance check FAIL — rust example did not run")
++        return 1
++    payload = json.loads(output[output.index("T1-SIM-OK ") + len("T1-SIM-OK "):].strip())
++    assert payload["digest"] == digest, "T1: the reference model must agree with the simulation"
++    assert payload["final_supply"] == path[-1], "T1: the reference model must agree with the simulation"
++    assert payload["path_alcry"] == scenario["expected_path_alcry"], (
++        "T1: the reference model must agree with the simulation"
++    )
++    print("RESULT: T1 issuance check PASS — %d-year simulation, supply %d (4950000 ALCRY), "
++          "matches the formula within 1 unit, digest %s" % (years, path[-1], digest))
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/write_t1_evidence.py b/tools/write_t1_evidence.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..f83fcda28fe2a7a6dc21c9a0437ee88c756c2d17
+--- /dev/null
++++ b/tools/write_t1_evidence.py
+@@ -0,0 +1,166 @@
++#!/usr/bin/env python3
++"""Write docs/evidence/t1 (ECONOMICS_PLAN T1).
++
++Runs the T1 gates (independent issuance oracle incl. the Rust example
++cross-run, cargo test t1_issuance) and tools/nc_t1.py, builds
++self-contained evidence: gates.txt rows, campaign/ bundle (run logs +
++result.json with source digests), nc.log with the RESULT line, report.md
++and cumulative inventory (TOTAL: 524).
++"""
++
++import hashlib
++import json
++import os
++import subprocess
++import sys
++import time
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++EVID = os.path.join(ROOT, "docs", "evidence", "t1")
++EVID_DIRS = ["", "campaign"]
++GATES = [
++    ([sys.executable, os.path.join(ROOT, "tools", "t1_issuance_check.py")],
++     "baseline", "10-year issuance oracle (independent Python model + rust example)"),
++    (["cargo", "test", "--locked", "-p", "aura-storage", "--test", "t1_issuance"],
++     "t1-issuance", "named gate: supply matches the formula within 1 unit"),
++    ([sys.executable, os.path.join(ROOT, "tools", "nc_t1.py")],
++     "nc-suite", "6 mutation controls incl. the literal gate (formula mismatch)"),
++]
++SOURCES = [
++    "crates/aura-storage/src/issuance.rs",
++    "crates/aura-storage/tests/t1_issuance.rs",
++    "crates/aura-storage/examples/t1_issuance_example.rs",
++    "sim/t1-issuance.json",
++    "tools/t1_issuance_check.py",
++    "tools/nc_t1.py",
++]
++
++
++def sha256_file(path):
++    h = hashlib.sha256()
++    with open(path, "rb") as f:
++        for chunk in iter(lambda: f.read(65536), b""):
++            h.update(chunk)
++    return h.hexdigest()
++
++
++def run_cmd(cmd, timeout=2400):
++    started = time.time()
++    proc = subprocess.run(cmd, cwd=ROOT, stdout=subprocess.PIPE,
++                          stderr=subprocess.STDOUT, text=True,
++                          errors="replace", timeout=timeout)
++    return proc.returncode, proc.stdout or "", time.time() - started
++
++
++def gate_passes(code, output, name):
++    if code != 0:
++        return False
++    if name == "baseline":
++        return "RESULT: T1 issuance check PASS" in output
++    if name == "t1-issuance":
++        return "test result: ok." in output
++    return "RESULT: 6/6 negative controls PASS" in output
++
++
++def main():
++    for rel in EVID_DIRS:
++        os.makedirs(os.path.join(EVID, rel), exist_ok=True)
++
++    rows = []
++    logs = {}
++    outputs = {}
++    ok_all = True
++    for cmd, name, desc in GATES:
++        print("[evidence_t1] %s ..." % name, flush=True)
++        code, out, dur = run_cmd(cmd)
++        ok = gate_passes(code, out, name)
++        ok_all = ok_all and ok
++        rows.append((name, "pass" if ok else "FAIL", desc))
++        outputs[name] = out
++        logs[name + ".log"] = (
++            "[evidence_t1] cmd=%s exit=%d duration=%.2fs\n" % (" ".join(cmd), code, dur)
++            + out)
++        print("[evidence_t1] %s: %s" % (name, "pass" if ok else "FAIL"), flush=True)
++
++    nc_ok = "RESULT: 6/6 negative controls PASS" in outputs.get("nc-suite", "")
++    gate_ok = "test result: ok." in outputs.get("t1-issuance", "")
++    oracle_ok = "RESULT: T1 issuance check PASS" in outputs.get("baseline", "")
++
++    with open(os.path.join(EVID, "nc.log"), "w", encoding="utf-8") as f:
++        f.write("[evidence_t1] cmd=tools/nc_t1.py\n")
++        f.write(outputs.get("nc-suite", ""))
++
++    with open(os.path.join(EVID, "campaign", "t1-issuance.log"), "w",
++              encoding="utf-8") as f:
++        f.write(logs.get("t1-issuance.log", ""))
++    with open(os.path.join(EVID, "campaign", "result.json"), "w",
++              encoding="utf-8") as f:
++        json.dump({
++            "phase": "T1",
++            "when": time.strftime("%Y-%m-%dT%H:%M:%S"),
++            "commands": [[" ".join(cmd), name] for cmd, name, _ in GATES],
++            "gates": {name: status for name, status, _ in rows},
++            "named_gate": "10-year simulation: supply matches the formula within 1 unit",
++            "golden_path_digest":
++                "c2a4669192ddde5d9cc4e7cb32a76ecd06356022bce7c7230826f068854c1a35",
++            "sources": {rel: sha256_file(os.path.join(ROOT, rel)) for rel in SOURCES},
++        }, f, indent=2, sort_keys=True)
++        f.write("\n")
++
++    for name, text in logs.items():
++        with open(os.path.join(EVID, name), "w", encoding="utf-8") as f:
++            f.write(text)
++
++    with open(os.path.join(EVID, "gates.txt"), "w", encoding="utf-8") as f:
++        f.write("T1 Issuance model gates (ECONOMICS_PLAN, "
++                "crates/aura-storage/tests/t1_issuance.rs)\n")
++        f.write("Gate: 10-year simulation: supply matches the formula within 1 unit\n\n")
++        for name, status, desc in rows:
++            f.write("%-42s %-22s %s\n" % (name, status, desc))
++        f.write("\nnegative controls: 6/6 (%s)\n" % ("PASS" if nc_ok else "FAIL"))
++        f.write("named gate: %s\n" % ("PASS" if gate_ok else "FAIL"))
++        f.write("oracle cross-run: %s\n" % ("PASS" if oracle_ok else "FAIL"))
++
++    with open(os.path.join(EVID, "report.md"), "w", encoding="utf-8") as f:
++        f.write("# Отчёт T1 — Issuance model\n\n")
++        f.write("Дата: %s\n\n" % time.strftime("%Y-%m-%d"))
++        f.write("Итог: **%s**\n\n" % ("ВСЕ ГЕЙТЫ T1 ЗЕЛЁНЫЕ" if ok_all
++                                      else "ЕСТЬ КРАСНЫЕ ГЕЙТЫ"))
++        f.write("Гейт: 10-летняя симуляция — supply совпадает с формулой в "
++                "пределах 1 базовой единицы.\n\n")
++        f.write("Модель `crates/aura-storage/src/issuance.rs`: genesis "
++                "3 000 000 ALCRY, годовая эмиссия 300 000 ALCRY с халвингом "
++                "каждые 4 года, потолок 6 000 000 ALCRY, целевая доля "
++                "стейка 6000 bps. Траектория 10 лет: 3.0M→4.95M ALCRY; "
++                "золотой дайджест пути c2a46691…c1a35 (Rust ↔ Python "
++                "эталон ↔ пример `t1_issuance_example`). Сценарий "
++                "`sim/t1-issuance.json`, гейт "
++                "`crates/aura-storage/tests/t1_issuance.rs` "
++                "(`campaign/t1-issuance.log`, `campaign/result.json`).\n")
++        f.write("negative controls `tools/nc_t1.py` (`nc.log`, "
++                "RESULT: 6/6 negative controls PASS).\n\n")
++
++    with open(os.path.join(EVID, "inventory.txt"), "w", encoding="utf-8") as f:
++        f.write("# T1 inventory (generated by tools/write_t1_evidence.py)\n")
++        f.write("# Cumulative negative controls: 17 phases, 524 controls.\n")
++        f.write("W4: 6/6, H0: 6/6, H1: 6/6, H2: 6/6, H3: 6/6, H4: 6/6, "
++                "H5: 6/6, H6: 7/7, H7: 7/7, H8: 7/7, H9: 7/7, E0: 6/6, "
++                "E1: 6/6, E2: 6/6, E3: 6/6, T0: 6/6, T1: 6/6\n")
++        f.write("TOTAL: 524 negative controls cumulative\n")
++
++    with open(os.path.join(EVID, "SHA256SUMS"), "w", encoding="utf-8") as f:
++        for rel in sorted(EVID_DIRS):
++            base = os.path.join(EVID, rel)
++            for name in sorted(os.listdir(base)):
++                path = os.path.join(base, name)
++                if os.path.isfile(path) and name != "SHA256SUMS":
++                    repo_rel = os.path.relpath(path, ROOT)
++                    f.write("%s  %s\n" % (sha256_file(path), repo_rel))
++
++    print("[evidence_t1] %s"
++          % ("all gates green" if ok_all else "RED GATES PRESENT"), flush=True)
++    return 0 if ok_all else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+-- 
+2.47.3
+

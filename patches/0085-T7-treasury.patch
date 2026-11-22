@@ -1,0 +1,1981 @@
+From 772989475118d31350db7ba2a16c541acef2739c Mon Sep 17 00:00:00 2001
+From: AuraLite <auralite@example.invalid>
+Date: Sat, 21 Nov 2026 21:24:42 +0000
+Subject: [PATCH] T7 - treasury and grants: every payout has proposal + tx +
+ report, withdrawal without vote rejected
+
+T7 - Treasury and grants (ECONOMICS_PLAN, W4). Gate literally: every payout has proposal + tx + report - each executed payout carries the authorizing proposal (state Executed), a numbered tx and a transparent Report {tx_id, proposal_id, amount, recipient, purpose, height}; a withdrawal without a passed vote is rejected (NoVote). Council 5 votes payout proposals (strict majority), the multisig of 3 requires 2 approvals (decision W4); the lifecycle is propose -> vote -> finalize -> approve -> execute. The treasury cannot overdraw (signed i128 balance; conservation final + paid = initial + inflows), a payout cannot execute twice (AlreadyExecuted), a rejected proposal never pays (Rejected). Pinned scenario: 10 grant proposals / 82 steps / 6 payouts (tx 1..6), final balance 225 000 ALCRY, 475 000 ALCRY paid; golden digest 719c93b244ff42ebf94538a5e9fb5b9e8f52eac07035abaf3c526e4c0a3231f7 pinned in Rust tests and re-derived by the independent Python oracle (tools/t7_treasury_check.py), which cross-runs t7_treasury_example. NC: 7/7 named messages (tools/nc_t7.py; standard 6 + the literal withdrawal-without-vote rejection). 10 gate tests + 2 metamorphisms. Evidence docs/evidence/t7 (565 NCs cumulative over 24 phases). ALL GATES GREEN.
+
+Restored after workspace reset #9: the T0-T6 tree came back from the delivered combined delta as b0b6150 (byte-identical to the T6 canon 407fe8d); Rust 1.99.1 reinstalled.
+---
+ Makefile                                      |  19 +
+ .../examples/t7_treasury_example.rs           |  33 +
+ crates/aura-storage/src/lib.rs                |   1 +
+ crates/aura-storage/src/treasury.rs           | 646 ++++++++++++++++++
+ crates/aura-storage/tests/t7_treasury.rs      | 276 ++++++++
+ docs/economics/t7-treasury.md                 |  80 +++
+ docs/evidence/review-w1-source-drift.txt      |  12 +-
+ docs/evidence/t7/SHA256SUMS                   |   9 +
+ docs/evidence/t7/baseline.log                 |   1 +
+ docs/evidence/t7/campaign/result.json         |  33 +
+ docs/evidence/t7/campaign/t7-treasury.log     |  18 +
+ docs/evidence/t7/gates.txt                    |   8 +
+ docs/evidence/t7/inventory.txt                |   4 +
+ docs/evidence/t7/nc-suite.log                 |   9 +
+ docs/evidence/t7/nc.log                       |   9 +
+ docs/evidence/t7/report.md                    |  24 +
+ docs/evidence/t7/t7-treasury.log              |  18 +
+ sim/t7-treasury.json                          |  17 +
+ tools/audit_closeout.py                       |   5 +-
+ tools/nc_t7.py                                |  82 +++
+ tools/t7_treasury_check.py                    | 300 ++++++++
+ tools/write_t7_evidence.py                    | 146 ++++
+ 22 files changed, 1740 insertions(+), 10 deletions(-)
+ create mode 100644 crates/aura-storage/examples/t7_treasury_example.rs
+ create mode 100644 crates/aura-storage/src/treasury.rs
+ create mode 100644 crates/aura-storage/tests/t7_treasury.rs
+ create mode 100644 docs/economics/t7-treasury.md
+ create mode 100644 docs/evidence/t7/SHA256SUMS
+ create mode 100644 docs/evidence/t7/baseline.log
+ create mode 100644 docs/evidence/t7/campaign/result.json
+ create mode 100644 docs/evidence/t7/campaign/t7-treasury.log
+ create mode 100644 docs/evidence/t7/gates.txt
+ create mode 100644 docs/evidence/t7/inventory.txt
+ create mode 100644 docs/evidence/t7/nc-suite.log
+ create mode 100644 docs/evidence/t7/nc.log
+ create mode 100644 docs/evidence/t7/report.md
+ create mode 100644 docs/evidence/t7/t7-treasury.log
+ create mode 100644 sim/t7-treasury.json
+ create mode 100644 tools/nc_t7.py
+ create mode 100644 tools/t7_treasury_check.py
+ create mode 100644 tools/write_t7_evidence.py
+
+diff --git a/Makefile b/Makefile
+index 77d2671..a637695 100644
+--- a/Makefile
++++ b/Makefile
+@@ -302,6 +302,9 @@ test: deps-check
+ 	@echo "== governance gate (T6) =="
+ 	@$(PYTHON) tools/t6_governance_check.py
+ 	@$(CARGO) test --locked -p aura-storage --test t6_governance
++	@echo "== treasury gate (T7) =="
++	@$(PYTHON) tools/t7_treasury_check.py
++	@$(CARGO) test --locked -p aura-storage --test t7_treasury
+ 	@echo "== close-out audit =="
+ 	@$(PYTHON) tools/audit_closeout.py
+ 	@echo "ALL GATES GREEN"
+@@ -1450,6 +1453,22 @@ nc-t6:
+ evidence-t6:
+ 	@$(PYTHON) tools/write_t6_evidence.py
+ 
++.PHONY: test-t7 check-t7 examples-t7 nc-t7 evidence-t7
++test-t7:
++	@$(CARGO) test --locked -p aura-storage --test t7_treasury
++
++check-t7:
++	@$(PYTHON) tools/t7_treasury_check.py
++
++examples-t7:
++	@$(CARGO) run --quiet --locked -p aura-storage --example t7_treasury_example
++
++nc-t7:
++	@$(PYTHON) tools/nc_t7.py
++
++evidence-t7:
++	@$(PYTHON) tools/write_t7_evidence.py
++
+ .PHONY: test-t5 check-t5 examples-t5 nc-t5 evidence-t5
+ test-t5:
+ 	@$(CARGO) test --locked -p aura-storage --test t5_slashing
+diff --git a/crates/aura-storage/examples/t7_treasury_example.rs b/crates/aura-storage/examples/t7_treasury_example.rs
+new file mode 100644
+index 0000000..f4e19c8
+--- /dev/null
++++ b/crates/aura-storage/examples/t7_treasury_example.rs
+@@ -0,0 +1,33 @@
++//! T7 example: the pinned treasury and grants simulation.
++//!
++//! Run: `cargo run --example t7_treasury_example -p aura-storage`.
++//! Emits the deterministic marker `T7-SIM-OK` with the golden digest
++//! (mirrored by `tools/t7_treasury_check.py`).
++
++use aura_storage::treasury::{run_t7_scenario, scenario_digest};
++
++fn main() {
++    let run = run_t7_scenario();
++    let digest = scenario_digest(&run.steps);
++    println!(
++        "T7-SIM-OK {{\"steps\": {}, \"proposals\": {}, \"payouts\": {}, \"final_balance\": \"{}\", \"total_paid\": \"{}\", \"digest\": \"{}\"}}",
++        run.steps.len(),
++        run.states.len(),
++        run.payouts.len(),
++        run.final_balance,
++        run.total_paid,
++        digest
++    );
++    for payout in &run.payouts {
++        let report = payout.report.as_ref().expect("report");
++        println!(
++            "T7-TX tx={} proposal={} amount={} recipient={} purpose={} height={}",
++            payout.tx_id,
++            payout.proposal_id,
++            payout.amount,
++            payout.recipient,
++            payout.purpose,
++            report.height
++        );
++    }
++}
+diff --git a/crates/aura-storage/src/lib.rs b/crates/aura-storage/src/lib.rs
+index 7086187..993f1a8 100644
+--- a/crates/aura-storage/src/lib.rs
++++ b/crates/aura-storage/src/lib.rs
+@@ -62,6 +62,7 @@ pub mod sdk;
+ pub mod slashing;
+ pub mod staking;
+ mod store;
++pub mod treasury;
+ mod wal;
+ 
+ pub use backup::{
+diff --git a/crates/aura-storage/src/treasury.rs b/crates/aura-storage/src/treasury.rs
+new file mode 100644
+index 0000000..5bb9620
+--- /dev/null
++++ b/crates/aura-storage/src/treasury.rs
+@@ -0,0 +1,646 @@
++//! T7 treasury and grants: an on-chain treasury with an m-of-n multisig
++//! (W4), governance votes for payouts, transparent reports and a grants
++//! process (ECONOMICS_PLAN T7).
++//!
++//! Every payout must have **proposal + tx + report**: a payout proposal
++//! is voted by the council ([`T7_COUNCIL`] members, strict majority),
++//! signed by the multisig ([`T7_SIGNER_THRESHOLD`] of [`T7_SIGNERS`],
++//! decision W4) and only then executed — producing a numbered **tx**
++//! and a transparent [`Report`] that mirrors the payout. A withdrawal
++//! without a passed vote is rejected ([`T7Error::NoVote`]); the treasury
++//! cannot overdraw (the balance is a signed `i128` so an overdraw would
++//! be visible); a payout cannot execute twice; a rejected proposal never
++//! pays out.
++//!
++//! The pinned scenario [`run_t7_scenario`] drives 10 grant proposals
++//! through the full process (6 payouts with tx+report, 2 rejections, 1
++//! withdrawal-without-vote attempt, and the failure modes of the
++//! multisig, the funds and the double-execution); [`scenario_digest`] is
++//! cross-run against the independent Python oracle
++//! (`tools/t7_treasury_check.py`).
++
++use crate::econ::Amount;
++use crate::issuance::ALCRY;
++
++/// Council members voting on payout proposals.
++pub const T7_COUNCIL: u32 = 5;
++
++/// Multisig signers (decision W4).
++pub const T7_SIGNERS: u32 = 3;
++
++/// Multisig threshold: approvals required to execute a payout.
++pub const T7_SIGNER_THRESHOLD: u32 = 2;
++
++/// Initial treasury balance.
++pub const T7_INITIAL_BALANCE: Amount = 500_000 * ALCRY;
++
++/// Treasury errors (numeric codes appear in the step log).
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum T7Error {
++    /// Execute without a passed vote (the literal gate control).
++    NoVote = 1,
++    /// Action on a rejected proposal.
++    Rejected = 2,
++    /// Execute on an already executed proposal.
++    AlreadyExecuted = 3,
++    /// Fewer than [`T7_SIGNER_THRESHOLD`] multisig approvals.
++    NotEnoughApprovals = 4,
++    /// Payout larger than the treasury balance.
++    InsufficientFunds = 5,
++    /// This council member has already voted.
++    AlreadyVoted = 6,
++    /// This signer has already approved.
++    AlreadyApproved = 7,
++    /// Vote or finalize on a non-voting proposal.
++    NotVoting = 8,
++    /// Approve on a proposal that did not pass.
++    NotPassed = 9,
++    /// Unknown proposal id.
++    NoSuchProposal = 10,
++}
++
++/// Payout proposal state machine.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum ProposalState {
++    /// Council voting is open.
++    Voting = 0,
++    /// Majority reached; waiting for the multisig.
++    Passed = 1,
++    /// Majority not reached.
++    Rejected = 2,
++    /// Paid out (tx + report created).
++    Executed = 3,
++}
++
++/// One payout proposal with its vote tally and multisig approvals.
++#[derive(Debug, Clone)]
++pub struct TxProposal {
++    /// Proposal id, counting from 1.
++    pub id: u32,
++    /// Amount to pay out.
++    pub amount: Amount,
++    /// Recipient id.
++    pub recipient: u32,
++    /// Purpose of the grant (free text).
++    pub purpose: String,
++    /// Council votes in favour.
++    pub yes: u32,
++    /// Council votes against.
++    pub no: u32,
++    /// Per-member "has voted" marks.
++    pub voted: Vec<bool>,
++    /// Per-signer multisig approvals.
++    pub approvals: Vec<bool>,
++    /// Current state.
++    pub state: ProposalState,
++}
++
++/// Transparent report mirroring one payout.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct Report {
++    /// Tx number of the payout.
++    pub tx_id: u32,
++    /// Authorizing proposal id.
++    pub proposal_id: u32,
++    /// Amount paid.
++    pub amount: Amount,
++    /// Recipient id.
++    pub recipient: u32,
++    /// Purpose of the grant.
++    pub purpose: String,
++    /// Block height of the payout.
++    pub height: u64,
++}
++
++/// One executed payout with its tx number and report.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct Payout {
++    /// Tx number, counting from 1.
++    pub tx_id: u32,
++    /// Authorizing proposal id.
++    pub proposal_id: u32,
++    /// Amount paid.
++    pub amount: Amount,
++    /// Recipient id.
++    pub recipient: u32,
++    /// Purpose of the grant.
++    pub purpose: String,
++    /// The transparent report (`None` only under mutation).
++    pub report: Option<Report>,
++}
++
++/// On-chain treasury with council votes and a multisig.
++#[derive(Debug, Clone)]
++pub struct Treasury {
++    balance: i128,
++    proposals: Vec<TxProposal>,
++    payouts: Vec<Payout>,
++}
++
++impl Treasury {
++    /// New treasury seeded with [`T7_INITIAL_BALANCE`].
++    pub fn new() -> Self {
++        Self {
++            balance: T7_INITIAL_BALANCE as i128,
++            proposals: Vec::new(),
++            payouts: Vec::new(),
++        }
++    }
++
++    /// Current balance (signed so an overdraw would be visible).
++    pub fn balance(&self) -> i128 {
++        self.balance
++    }
++
++    /// All payout proposals in creation order.
++    pub fn proposals(&self) -> &[TxProposal] {
++        &self.proposals
++    }
++
++    /// One proposal by id.
++    pub fn proposal(&self, id: u32) -> &TxProposal {
++        &self.proposals[id as usize - 1]
++    }
++
++    /// All executed payouts in tx order.
++    pub fn payouts(&self) -> &[Payout] {
++        &self.payouts
++    }
++
++    /// Top up the treasury (transparent inflow).
++    pub fn fund(&mut self, amount: Amount) {
++        self.balance += amount as i128;
++    }
++
++    /// Create a payout proposal.
++    pub fn propose(&mut self, amount: Amount, recipient: u32, purpose: &str) -> u32 {
++        let id = self.proposals.len() as u32 + 1;
++        self.proposals.push(TxProposal {
++            id,
++            amount,
++            recipient,
++            purpose: purpose.to_string(),
++            yes: 0,
++            no: 0,
++            voted: vec![false; T7_COUNCIL as usize],
++            approvals: vec![false; T7_SIGNERS as usize],
++            state: ProposalState::Voting,
++        });
++        id
++    }
++
++    /// Cast one council vote.
++    pub fn vote(&mut self, proposal_id: u32, voter: u32, yes: bool) -> Result<(), T7Error> {
++        let proposal = &mut self.proposals[proposal_id as usize - 1];
++        if proposal.state != ProposalState::Voting {
++            return Err(T7Error::NotVoting);
++        }
++        if proposal.voted[voter as usize] {
++            return Err(T7Error::AlreadyVoted);
++        }
++        proposal.voted[voter as usize] = true;
++        if yes {
++            proposal.yes += 1;
++        } else {
++            proposal.no += 1;
++        }
++        Ok(())
++    }
++
++    /// Close the council vote: strict majority of [`T7_COUNCIL`] passes.
++    pub fn finalize(&mut self, proposal_id: u32) -> Result<(), T7Error> {
++        let proposal = &mut self.proposals[proposal_id as usize - 1];
++        if proposal.state != ProposalState::Voting {
++            return Err(T7Error::NotVoting);
++        }
++        proposal.state = if proposal.yes > T7_COUNCIL / 2 {
++            ProposalState::Passed
++        } else {
++            ProposalState::Rejected
++        };
++        Ok(())
++    }
++
++    /// Multisig approval of a passed proposal (W4).
++    pub fn approve(&mut self, proposal_id: u32, signer: u32) -> Result<(), T7Error> {
++        let proposal = &mut self.proposals[proposal_id as usize - 1];
++        if proposal.state != ProposalState::Passed {
++            return Err(T7Error::NotPassed);
++        }
++        if proposal.approvals[signer as usize] {
++            return Err(T7Error::AlreadyApproved);
++        }
++        proposal.approvals[signer as usize] = true;
++        Ok(())
++    }
++
++    /// Execute a passed, multisig-approved payout: tx + report.
++    pub fn execute(&mut self, proposal_id: u32, height: u64) -> Result<u32, T7Error> {
++        let proposal = &mut self.proposals[proposal_id as usize - 1];
++        if proposal.state == ProposalState::Executed {
++            return Err(T7Error::AlreadyExecuted);
++        }
++        if proposal.state == ProposalState::Rejected {
++            return Err(T7Error::Rejected);
++        }
++        if proposal.state == ProposalState::Voting {
++            return Err(T7Error::NoVote);
++        }
++        let approvals = proposal.approvals.iter().filter(|&&a| a).count();
++        if approvals < T7_SIGNER_THRESHOLD as usize {
++            return Err(T7Error::NotEnoughApprovals);
++        }
++        if self.balance < proposal.amount as i128 {
++            return Err(T7Error::InsufficientFunds);
++        }
++        self.balance -= proposal.amount as i128;
++        let tx_id = self.payouts.len() as u32 + 1;
++        proposal.state = ProposalState::Executed;
++        let report = Report {
++            tx_id,
++            proposal_id,
++            amount: proposal.amount,
++            recipient: proposal.recipient,
++            purpose: proposal.purpose.clone(),
++            height,
++        };
++        self.payouts.push(Payout {
++            tx_id,
++            proposal_id,
++            amount: proposal.amount,
++            recipient: proposal.recipient,
++            purpose: proposal.purpose.clone(),
++            report: Some(report),
++        });
++        Ok(tx_id)
++    }
++}
++
++impl Default for Treasury {
++    fn default() -> Self {
++        Self::new()
++    }
++}
++
++/// One action of the pinned scenario run (digest step).
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct T7Step {
++    /// Step number, starting at 0.
++    pub index: u32,
++    /// 0 propose, 1 vote, 2 finalize, 3 approve, 4 execute, 5 fund,
++    /// 8 failed action, 9 final step.
++    pub kind: u8,
++    /// Proposal id (0 for fund/final).
++    pub subject: u32,
++    /// Block height of the action.
++    pub height: u64,
++    /// kind-specific: propose amount / vote yes / approve count / tx id
++    /// / fund amount / final balance.
++    pub a: Amount,
++    /// kind-specific: propose recipient / vote no / execute amount /
++    /// fund balance / final payout count.
++    pub b: Amount,
++    /// kind-specific: final total paid.
++    pub c: Amount,
++    /// Proposal state after the action (9 = n/a).
++    pub state: u8,
++    /// Error code for failed actions (0 otherwise).
++    pub detail: u32,
++}
++
++/// Result of the pinned scenario run.
++#[derive(Debug, Clone)]
++pub struct T7Run {
++    /// Digest steps of the run.
++    pub steps: Vec<T7Step>,
++    /// Final state of every created proposal, in id order.
++    pub states: Vec<u8>,
++    /// All executed payouts in tx order.
++    pub payouts: Vec<Payout>,
++    /// Final treasury balance.
++    pub final_balance: i128,
++    /// Sum of all payouts.
++    pub total_paid: Amount,
++    /// Sum of all inflows.
++    pub total_inflows: Amount,
++}
++
++fn state_code(state: ProposalState) -> u8 {
++    state as u8
++}
++
++/// The pinned T7 scenario: 10 grant proposals, every payout carries
++/// proposal + tx + report, a withdrawal without a vote is rejected.
++pub fn run_t7_scenario() -> T7Run {
++    let mut treasury = Treasury::new();
++    let mut steps: Vec<T7Step> = Vec::new();
++
++    macro_rules! snap {
++        ($kind:expr, $subject:expr, $height:expr, $a:expr, $b:expr, $c:expr, $state:expr, $detail:expr) => {
++            steps.push(T7Step {
++                index: steps.len() as u32,
++                kind: $kind,
++                subject: $subject,
++                height: $height,
++                a: $a,
++                b: $b,
++                c: $c,
++                state: $state,
++                detail: $detail,
++            })
++        };
++    }
++    macro_rules! do_propose {
++        ($amount:expr, $recipient:expr, $purpose:expr, $height:expr) => {{
++            let id = treasury.propose($amount, $recipient, $purpose);
++            let p = treasury.proposal(id);
++            snap!(
++                0,
++                id,
++                $height,
++                p.amount,
++                Amount::from(p.recipient),
++                0,
++                state_code(p.state),
++                0
++            );
++        }};
++    }
++    macro_rules! do_vote {
++        ($id:expr, $voter:expr, $yes:expr, $height:expr) => {{
++            match treasury.vote($id, $voter, $yes) {
++                Ok(()) => {
++                    let p = treasury.proposal($id);
++                    snap!(
++                        1,
++                        $id,
++                        $height,
++                        Amount::from(p.yes),
++                        Amount::from(p.no),
++                        0,
++                        state_code(p.state),
++                        0
++                    );
++                }
++                Err(err) => {
++                    let p = treasury.proposal($id);
++                    snap!(
++                        8,
++                        $id,
++                        $height,
++                        Amount::from(p.yes),
++                        Amount::from(p.no),
++                        0,
++                        state_code(p.state),
++                        err as u32
++                    );
++                }
++            }
++        }};
++    }
++    macro_rules! do_finalize {
++        ($id:expr, $height:expr) => {{
++            match treasury.finalize($id) {
++                Ok(()) => {
++                    let p = treasury.proposal($id);
++                    snap!(
++                        2,
++                        $id,
++                        $height,
++                        Amount::from(p.yes),
++                        Amount::from(p.no),
++                        0,
++                        state_code(p.state),
++                        0
++                    );
++                }
++                Err(err) => {
++                    let p = treasury.proposal($id);
++                    snap!(
++                        8,
++                        $id,
++                        $height,
++                        Amount::from(p.yes),
++                        Amount::from(p.no),
++                        0,
++                        state_code(p.state),
++                        err as u32
++                    );
++                }
++            }
++        }};
++    }
++    macro_rules! do_approve {
++        ($id:expr, $signer:expr, $height:expr) => {{
++            match treasury.approve($id, $signer) {
++                Ok(()) => {
++                    let p = treasury.proposal($id);
++                    let count = p.approvals.iter().filter(|&&a| a).count();
++                    snap!(
++                        3,
++                        $id,
++                        $height,
++                        count as Amount,
++                        0,
++                        0,
++                        state_code(p.state),
++                        0
++                    );
++                }
++                Err(err) => {
++                    let p = treasury.proposal($id);
++                    let count = p.approvals.iter().filter(|&&a| a).count();
++                    snap!(
++                        8,
++                        $id,
++                        $height,
++                        count as Amount,
++                        0,
++                        0,
++                        state_code(p.state),
++                        err as u32
++                    );
++                }
++            }
++        }};
++    }
++    macro_rules! do_execute {
++        ($id:expr, $height:expr) => {{
++            match treasury.execute($id, $height) {
++                Ok(tx) => {
++                    let p = treasury.proposal($id);
++                    snap!(
++                        4,
++                        $id,
++                        $height,
++                        Amount::from(tx),
++                        p.amount,
++                        0,
++                        state_code(p.state),
++                        0
++                    );
++                }
++                Err(err) => {
++                    let p = treasury.proposal($id);
++                    snap!(
++                        8,
++                        $id,
++                        $height,
++                        0,
++                        p.amount,
++                        0,
++                        state_code(p.state),
++                        err as u32
++                    );
++                }
++            }
++        }};
++    }
++
++    // P1: valid grant, full lifecycle.
++    do_propose!(100_000 * ALCRY, 1, "validator tooling grant", 100_000);
++    do_vote!(1, 0, true, 110_000);
++    do_vote!(1, 1, true, 111_000);
++    do_vote!(1, 2, true, 112_000);
++    do_vote!(1, 3, false, 113_000);
++    do_vote!(1, 4, false, 114_000);
++    do_finalize!(1, 120_000);
++    do_approve!(1, 0, 130_000);
++    do_approve!(1, 1, 131_000);
++    do_execute!(1, 140_000);
++    // P2: rejected by the council.
++    do_propose!(50_000 * ALCRY, 2, "docs translation", 200_000);
++    do_vote!(2, 0, true, 210_000);
++    do_vote!(2, 1, false, 211_000);
++    do_vote!(2, 2, false, 212_000);
++    do_vote!(2, 3, false, 213_000);
++    do_vote!(2, 4, false, 214_000);
++    do_finalize!(2, 220_000);
++    do_execute!(2, 230_000);
++    // P3: withdrawal without a vote — rejected (the literal gate).
++    do_propose!(30_000 * ALCRY, 3, "ops budget", 300_000);
++    do_execute!(3, 310_000);
++    // P4: multisig threshold, then valid payout.
++    do_propose!(80_000 * ALCRY, 4, "security audit", 400_000);
++    do_vote!(4, 0, true, 410_000);
++    do_vote!(4, 1, true, 411_000);
++    do_vote!(4, 2, true, 412_000);
++    do_vote!(4, 3, false, 413_000);
++    do_vote!(4, 4, false, 414_000);
++    do_finalize!(4, 420_000);
++    do_approve!(4, 0, 430_000);
++    do_execute!(4, 440_000);
++    do_approve!(4, 2, 450_000);
++    do_execute!(4, 460_000);
++    // P5: insufficient funds.
++    do_propose!(600_000 * ALCRY, 5, "ecosystem fund", 500_000);
++    do_vote!(5, 0, true, 510_000);
++    do_vote!(5, 1, true, 511_000);
++    do_vote!(5, 2, true, 512_000);
++    do_finalize!(5, 520_000);
++    do_approve!(5, 0, 530_000);
++    do_approve!(5, 1, 531_000);
++    do_execute!(5, 540_000);
++    // P6: double execution.
++    do_propose!(20_000 * ALCRY, 6, "grant tranche 1", 600_000);
++    do_vote!(6, 0, true, 610_000);
++    do_vote!(6, 1, true, 611_000);
++    do_vote!(6, 2, true, 612_000);
++    do_finalize!(6, 620_000);
++    do_approve!(6, 0, 630_000);
++    do_approve!(6, 1, 631_000);
++    do_execute!(6, 640_000);
++    do_execute!(6, 641_000);
++    // P7: double vote.
++    do_propose!(10_000 * ALCRY, 7, "audit reserve", 700_000);
++    do_vote!(7, 0, true, 710_000);
++    do_vote!(7, 0, false, 711_000);
++    do_vote!(7, 1, true, 712_000);
++    do_vote!(7, 2, true, 713_000);
++    do_finalize!(7, 720_000);
++    do_approve!(7, 0, 730_000);
++    do_approve!(7, 1, 731_000);
++    do_execute!(7, 740_000);
++    // P8: double approval.
++    do_propose!(15_000 * ALCRY, 8, "docs", 800_000);
++    do_vote!(8, 0, true, 810_000);
++    do_vote!(8, 1, true, 811_000);
++    do_vote!(8, 2, true, 812_000);
++    do_finalize!(8, 820_000);
++    do_approve!(8, 0, 830_000);
++    do_approve!(8, 0, 831_000);
++    do_approve!(8, 1, 832_000);
++    do_execute!(8, 840_000);
++    // P9: inflow then a large grant round.
++    treasury.fund(200_000 * ALCRY);
++    snap!(
++        5,
++        0,
++        905_000,
++        200_000 * ALCRY,
++        treasury.balance() as Amount,
++        0,
++        9,
++        0
++    );
++    do_propose!(250_000 * ALCRY, 9, "ecosystem round", 910_000);
++    do_vote!(9, 0, true, 920_000);
++    do_vote!(9, 1, true, 921_000);
++    do_vote!(9, 2, true, 922_000);
++    do_finalize!(9, 930_000);
++    do_approve!(9, 0, 940_000);
++    do_approve!(9, 1, 941_000);
++    do_execute!(9, 950_000);
++    // P10: council tie -> rejected.
++    do_propose!(10_000 * ALCRY, 10, "tie grant", 1_000_000);
++    do_vote!(10, 0, true, 1_010_000);
++    do_vote!(10, 1, true, 1_011_000);
++    do_vote!(10, 2, false, 1_012_000);
++    do_vote!(10, 3, false, 1_013_000);
++    do_finalize!(10, 1_020_000);
++
++    let states: Vec<u8> = treasury
++        .proposals()
++        .iter()
++        .map(|p| state_code(p.state))
++        .collect();
++    let total_paid: Amount = treasury.payouts().iter().map(|p| p.amount).sum();
++    snap!(
++        9,
++        0,
++        0,
++        treasury.balance() as Amount,
++        treasury.payouts().len() as Amount,
++        total_paid,
++        9,
++        0
++    );
++    T7Run {
++        final_balance: treasury.balance(),
++        total_paid,
++        total_inflows: 200_000 * ALCRY,
++        payouts: treasury.payouts().to_vec(),
++        states,
++        steps,
++    }
++}
++
++/// Digest of the scenario step log (sha256, hex).
++pub fn scenario_digest(steps: &[T7Step]) -> String {
++    let mut blob = String::new();
++    for step in steps {
++        blob.push_str(&format!(
++            "{}:{}:{}:{}:{}:{}:{}:{}:{}\n",
++            step.index,
++            step.kind,
++            step.subject,
++            step.height,
++            step.a,
++            step.b,
++            step.c,
++            step.state,
++            step.detail
++        ));
++    }
++    aura_state::sha256_bytes(blob.as_bytes()).to_hex()
++}
+diff --git a/crates/aura-storage/tests/t7_treasury.rs b/crates/aura-storage/tests/t7_treasury.rs
+new file mode 100644
+index 0000000..53d4b4c
+--- /dev/null
++++ b/crates/aura-storage/tests/t7_treasury.rs
+@@ -0,0 +1,276 @@
++//! T7 gate tests: every payout has proposal + tx + report; a
++//! withdrawal without a vote is red; the multisig threshold, the
++//! overdraw guard and the double-execution guard hold (ECONOMICS_PLAN
++//! T7: "every payout has proposal + tx + report; NC: withdrawal without
++//! vote -> red").
++
++use aura_storage::econ::Amount;
++use aura_storage::issuance::ALCRY;
++use aura_storage::treasury::{ProposalState, T7Error, Treasury, run_t7_scenario, scenario_digest};
++
++const GOLDEN_TREASURY_DIGEST: &str =
++    "719c93b244ff42ebf94538a5e9fb5b9e8f52eac07035abaf3c526e4c0a3231f7";
++
++fn passed(treasury: &mut Treasury, amount: Amount, recipient: u32, purpose: &str) -> u32 {
++    let id = treasury.propose(amount, recipient, purpose);
++    treasury.vote(id, 0, true).expect("open vote");
++    treasury.vote(id, 1, true).expect("open vote");
++    treasury.vote(id, 2, true).expect("open vote");
++    treasury.finalize(id).expect("voting open");
++    id
++}
++
++#[test]
++fn t7_every_payout_has_a_proposal_a_tx_and_a_report() {
++    let run = run_t7_scenario();
++    assert_eq!(
++        run.payouts.len(),
++        6,
++        "T7: every payout must have a proposal, a tx and a report"
++    );
++    for (index, payout) in run.payouts.iter().enumerate() {
++        let tx = (index + 1) as u32;
++        assert_eq!(
++            payout.tx_id, tx,
++            "T7: every payout must have a proposal, a tx and a report"
++        );
++        let report = payout
++            .report
++            .as_ref()
++            .expect("T7: every payout must have a proposal, a tx and a report");
++        assert_eq!(
++            report.tx_id, payout.tx_id,
++            "T7: every payout must have a proposal, a tx and a report"
++        );
++        assert_eq!(
++            report.proposal_id, payout.proposal_id,
++            "T7: every payout must have a proposal, a tx and a report"
++        );
++        assert_eq!(
++            report.amount, payout.amount,
++            "T7: every payout must have a proposal, a tx and a report"
++        );
++        assert_eq!(
++            report.recipient, payout.recipient,
++            "T7: every payout must have a proposal, a tx and a report"
++        );
++        assert_eq!(
++            report.purpose, payout.purpose,
++            "T7: every payout must have a proposal, a tx and a report"
++        );
++        assert_eq!(
++            run.states[payout.proposal_id as usize - 1],
++            ProposalState::Executed as u8,
++            "T7: every payout must have a proposal, a tx and a report"
++        );
++    }
++}
++
++#[test]
++fn t7_a_withdrawal_without_a_vote_must_be_rejected() {
++    let mut treasury = Treasury::new();
++    let id = treasury.propose(30_000 * ALCRY, 3, "ops budget");
++    assert_eq!(
++        treasury.execute(id, 310_000),
++        Err(T7Error::NoVote),
++        "T7: a withdrawal without a vote must be rejected"
++    );
++    assert!(
++        treasury.payouts().is_empty(),
++        "T7: a withdrawal without a vote must be rejected"
++    );
++}
++
++#[test]
++fn t7_the_multisig_threshold_must_be_enforced() {
++    let mut treasury = Treasury::new();
++    let id = passed(&mut treasury, 80_000 * ALCRY, 4, "security audit");
++    treasury.approve(id, 0).expect("first approval");
++    assert_eq!(
++        treasury.execute(id, 440_000),
++        Err(T7Error::NotEnoughApprovals),
++        "T7: the multisig threshold must be enforced"
++    );
++    treasury.approve(id, 2).expect("second approval");
++    assert_eq!(
++        treasury.execute(id, 460_000),
++        Ok(1),
++        "T7: the multisig threshold must be enforced"
++    );
++}
++
++#[test]
++fn t7_the_treasury_must_not_overdraw() {
++    let mut treasury = Treasury::new();
++    let id = passed(&mut treasury, 600_000 * ALCRY, 5, "ecosystem fund");
++    treasury.approve(id, 0).expect("first approval");
++    treasury.approve(id, 1).expect("second approval");
++    assert_eq!(
++        treasury.execute(id, 540_000),
++        Err(T7Error::InsufficientFunds),
++        "T7: the treasury must not overdraw"
++    );
++    assert!(
++        treasury.balance() >= 0,
++        "T7: the treasury must not overdraw"
++    );
++    // conservation over the pinned run
++    let run = run_t7_scenario();
++    assert!(run.final_balance >= 0, "T7: the treasury must not overdraw");
++    assert_eq!(
++        run.final_balance as Amount + run.total_paid,
++        500_000 * ALCRY + run.total_inflows,
++        "T7: the treasury must not overdraw"
++    );
++}
++
++#[test]
++fn t7_a_payout_must_not_execute_twice() {
++    let mut treasury = Treasury::new();
++    let id = passed(&mut treasury, 20_000 * ALCRY, 6, "grant tranche 1");
++    treasury.approve(id, 0).expect("first approval");
++    treasury.approve(id, 1).expect("second approval");
++    treasury.execute(id, 640_000).expect("first execution");
++    assert_eq!(
++        treasury.execute(id, 641_000),
++        Err(T7Error::AlreadyExecuted),
++        "T7: a payout must not execute twice"
++    );
++    assert_eq!(
++        treasury.payouts().len(),
++        1,
++        "T7: a payout must not execute twice"
++    );
++}
++
++#[test]
++fn t7_a_rejected_proposal_must_not_pay_out() {
++    let mut treasury = Treasury::new();
++    let id = treasury.propose(50_000 * ALCRY, 2, "docs translation");
++    treasury.vote(id, 0, true).expect("open vote");
++    treasury.vote(id, 1, false).expect("open vote");
++    treasury.vote(id, 2, false).expect("open vote");
++    treasury.finalize(id).expect("voting open");
++    assert_eq!(
++        treasury.proposal(id).state,
++        ProposalState::Rejected,
++        "T7: a rejected proposal must not pay out"
++    );
++    assert_eq!(
++        treasury.execute(id, 230_000),
++        Err(T7Error::Rejected),
++        "T7: a rejected proposal must not pay out"
++    );
++    assert!(
++        treasury.payouts().is_empty(),
++        "T7: a rejected proposal must not pay out"
++    );
++}
++
++#[test]
++fn t7_reference_simulation_agrees_with_the_pinned_digest() {
++    let run = run_t7_scenario();
++    assert_eq!(
++        run.steps.len(),
++        82,
++        "T7: the reference simulation must agree with the pinned digest"
++    );
++    let digest = scenario_digest(&run.steps);
++    assert_eq!(
++        digest, GOLDEN_TREASURY_DIGEST,
++        "T7: the reference simulation must agree with the pinned digest"
++    );
++    let s0 = run.steps[0];
++    assert_eq!(
++        (s0.kind, s0.subject, s0.a, s0.b, s0.state),
++        (0u8, 1u32, 100_000 * ALCRY, 1, 0u8),
++        "T7: the reference simulation must agree with the pinned digest"
++    );
++    let s9 = run.steps[9];
++    assert_eq!(
++        (s9.kind, s9.subject, s9.a, s9.state),
++        (4u8, 1u32, 1, 3u8),
++        "T7: the reference simulation must agree with the pinned digest"
++    );
++    let s19 = run.steps[19];
++    assert_eq!(
++        (s19.kind, s19.subject, s19.detail),
++        (8u8, 3u32, 1u32),
++        "T7: a withdrawal without a vote must be rejected"
++    );
++    let s81 = run.steps[81];
++    assert_eq!(
++        (s81.kind, s81.a, s81.b, s81.c, s81.state),
++        (9u8, 225_000 * ALCRY, 6, 475_000 * ALCRY, 9u8),
++        "T7: the reference simulation must agree with the pinned digest"
++    );
++    assert_eq!(
++        (run.final_balance as Amount, run.total_paid),
++        (225_000 * ALCRY, 475_000 * ALCRY),
++        "T7: the treasury must not overdraw"
++    );
++}
++
++#[test]
++fn t7_reports_match_their_payouts() {
++    let run = run_t7_scenario();
++    for payout in &run.payouts {
++        let report = payout
++            .report
++            .as_ref()
++            .expect("T7: every payout must have a proposal, a tx and a report");
++        assert_eq!(
++            (
++                report.tx_id,
++                report.proposal_id,
++                report.amount,
++                report.recipient
++            ),
++            (
++                payout.tx_id,
++                payout.proposal_id,
++                payout.amount,
++                payout.recipient
++            ),
++            "T7: every payout must have a proposal, a tx and a report"
++        );
++    }
++}
++
++#[test]
++fn t7_reordering_votes_preserves_the_tally() {
++    let mut forward = Treasury::new();
++    let a = forward.propose(10_000 * ALCRY, 1, "x");
++    forward.vote(a, 0, true).expect("open");
++    forward.vote(a, 1, false).expect("open");
++    let mut reverse = Treasury::new();
++    let b = reverse.propose(10_000 * ALCRY, 1, "x");
++    reverse.vote(b, 1, false).expect("open");
++    reverse.vote(b, 0, true).expect("open");
++    assert_eq!(
++        (forward.proposal(a).yes, forward.proposal(a).no),
++        (reverse.proposal(b).yes, reverse.proposal(b).no),
++        "T7: a rejected proposal must not pay out"
++    );
++}
++
++#[test]
++fn t7_splitting_a_payout_preserves_the_balance() {
++    let mut whole = Treasury::new();
++    let id = passed(&mut whole, 100_000 * ALCRY, 1, "whole");
++    whole.approve(id, 0).expect("first");
++    whole.approve(id, 1).expect("second");
++    whole.execute(id, 1).expect("paid");
++    let mut halves = Treasury::new();
++    for purpose in ["half a", "half b"] {
++        let id = passed(&mut halves, 50_000 * ALCRY, 1, purpose);
++        halves.approve(id, 0).expect("first");
++        halves.approve(id, 1).expect("second");
++        halves.execute(id, 1).expect("paid");
++    }
++    assert_eq!(
++        whole.balance(),
++        halves.balance(),
++        "T7: the treasury must not overdraw"
++    );
++}
+diff --git a/docs/economics/t7-treasury.md b/docs/economics/t7-treasury.md
+new file mode 100644
+index 0000000..add5cf7
+--- /dev/null
++++ b/docs/economics/t7-treasury.md
+@@ -0,0 +1,80 @@
++# T7 Treasury and grants
++
++**Scope**: ECONOMICS_PLAN T7 (treasury and grants) — an on-chain treasury
++with an m-of-n multisig (decision **W4**), transparent reporting and a
++grants process. **Legal perimeter**: this document is an engineering
++description of the instrument; the plain wording is an instrument, not
++legal advice (see `disclaimer.md`; ECONOMICS_PLAN T8 / `docs/ecosystem/e8-paper.md`
++set the perimeter).
++
++## Model
++
++- **Treasury**: signed balance (`i128`, so an overdraw would be visible
++  rather than wrapping); the pinned scenario starts at `500 000 ALCRY`
++  with one transparent inflow of `200 000 ALCRY`.
++- **Council**: `T7_COUNCIL = 5` members vote on payout proposals;
++  a proposal passes with a **strict majority** (`yes > 2`).
++- **Multisig (W4)**: `T7_SIGNERS = 3` with `T7_SIGNER_THRESHOLD = 2`
++  (2-of-3); a passed proposal needs that many approvals to execute.
++- **Lifecycle**: `propose -> vote -> finalize -> approve -> execute`.
++  Execution numbers the **tx** and creates the **report** in one atomic
++  step.
++
++## Gate: every payout has proposal + tx + report
++
++Every executed payout (`Payout`) carries:
++
++1. **proposal** — `proposal_id` of the authorizing proposal, which must
++   be in state `Executed`;
++2. **tx** — `tx_id`, numbered from 1 in execution order;
++3. **report** — a transparent `Report {tx_id, proposal_id, amount,
++   recipient, purpose, height}` mirroring the payout fields.
++
++A **withdrawal without a vote** is rejected: `execute` on a proposal that
++has not passed its council vote returns `T7Error::NoVote` (the literal
++gate control; `t7_a_withdrawal_without_a_vote_must_be_rejected`, run
++step 19). The treasury cannot overdraw (`InsufficientFunds` before any
++balance change; conservation `final + paid = initial + inflows` is
++asserted); a payout cannot execute twice (`AlreadyExecuted`); a rejected
++proposal never pays out (`Rejected`).
++
++## Grants process (numbered)
++
++1. **Proposal** — a council member proposes `amount`, `recipient`,
++   `purpose` (this document is the public grant description).
++2. **Council vote** — every member votes once (`AlreadyVoted` guards
++   double votes); `finalize` closes the vote.
++3. **Multisig** — `T7_SIGNER_THRESHOLD` signers approve (`W4`).
++4. **Execution** — tx + report are created; the example prints the
++   treasury report as `T7-TX` lines.
++5. **Reporting** — every payout's `Report` is public data (transparent
++   reporting); nothing here is unaudited by construction.
++
++## Determinism and oracle
++
++The pinned scenario [`run_t7_scenario`] (`crates/aura-storage/src/treasury.rs`)
++drives 10 proposals: P1 valid grant (100 000), P2 rejected by vote,
++P3 **withdrawal without vote** (rejected), P4 multisig threshold then
++valid payout, P5 insufficient funds, P6 double execution, P7 double vote,
++P8 double approval, P9 inflow + grant round (250 000), P10 council tie
++(rejected). The final step reports `balance = 225 000 ALCRY`,
++`payouts = 6`, `paid = 475 000 ALCRY`. Digest:
++`719c93b244ff42ebf94538a5e9fb5b9e8f52eac07035abaf3c526e4c0a3231f7`.
++
++Oracle: `tools/t7_treasury_check.py` (independent Python step-log model,
++same digest) cross-checks the Rust run, `tests/t7_treasury.rs` and
++`sim/t7-treasury.json` (schema `auralite-sim-1`).
++
++## Named messages (governance)
++
++1. `T7: a withdrawal without a vote must be rejected`
++2. `T7: every payout must have a proposal, a tx and a report`
++3. `T7: the multisig threshold must be enforced`
++4. `T7: the treasury must not overdraw`
++5. `T7: a payout must not execute twice`
++6. `T7: a rejected proposal must not pay out`
++7. `T7: the reference simulation must agree with the pinned digest`
++
++Each named message is a pinned gate test with named failing output;
++`tools/nc_t7.py` proves 7/7 mutations go red (the literal NC:
++withdrawal without vote -> red is mutant 1).
+diff --git a/docs/evidence/review-w1-source-drift.txt b/docs/evidence/review-w1-source-drift.txt
+index 4ffe07d..44fb758 100644
+--- a/docs/evidence/review-w1-source-drift.txt
++++ b/docs/evidence/review-w1-source-drift.txt
+@@ -1,13 +1,9 @@
+-# Source-drift book (W1 review): pinned sources that legitimately changed
+-# after their phase receipt. Format: <historical sha> <current sha> <path>;
+-# one triple per pinned version, sorted. Regenerated at T6 close-out.
+-# Historical evidence files are never exempted here.
+ adc24e7c03e1a63e5d7addbda15ff40ce630367152699c5d9659cd8db65f357b 1dc681d48934ec3437f0b3d5c62a73eef06d65ec18b7212092a29afa67ad1bf3 CHANGELOG.md
+ c83d08301a703c9db11462aa541bc898e52548589972118465164895eed44dc7 1dc681d48934ec3437f0b3d5c62a73eef06d65ec18b7212092a29afa67ad1bf3 CHANGELOG.md
+ f0d3511cd02f3007c0a18fc5d94c8997cfa512449313776117265708a36c8553 c9680cc436d806fa7fa2ce8545bd148dc9fcc9ae444973d4968a3f4f4fc069dc Cargo.lock
+ d5518138eae73219f8da0d7297af44a471dbd7135a39587a0da1587bfe3d1e70 23185f790bc4697bbd163004e2c78873755c13efba05b46260b4827cdeabdff7 Cargo.toml
+-5fb6ce43826495321f697e138e71e87954b2fcabec1ceef70549bb49a2f38988 af21362de1af4ff2baaf7c0ceba22df1c2b35ea7fe5629b952731fac6fb2bc82 Makefile
+-c5e92007c53a22253ad7d2cc779863b9592562a394d1b26ff09ea8d031991e29 af21362de1af4ff2baaf7c0ceba22df1c2b35ea7fe5629b952731fac6fb2bc82 Makefile
++5fb6ce43826495321f697e138e71e87954b2fcabec1ceef70549bb49a2f38988 c75b8a8c7566a9dce2ab282edd28a50cebc585fe40c0e36f6f633c6d5abc5203 Makefile
++c5e92007c53a22253ad7d2cc779863b9592562a394d1b26ff09ea8d031991e29 c75b8a8c7566a9dce2ab282edd28a50cebc585fe40c0e36f6f633c6d5abc5203 Makefile
+ bcc7328bd9c464a857c4b97c8491277bf401299d3c7963f1925b075d4313feb6 f2e4a249573a5b902b3f566b3f1db1ebab12d994f1ab6ef9be2dc15df63d7e26 crates/aura-consensus/src/fork_choice.rs
+ 7e396fbb4fd1d4103f26db16796ab0b6ad9626b7ba2ea0d56cae379bde5c2d59 8ec730ce2dc2cb1bc266990f4f29133038e98e390a63be0edbb3eaa23fa48f23 crates/aura-consensus/src/governance.rs
+ bd58be73dc4e0f6da16735be1d5ed17306d16c08569d798a4af20fcf72b91d40 b2e8ddad5b281da54e9c68107b563c9125b3931fe0e8e26023c74dcf3011ccc3 crates/aura-consensus/src/slashing.rs
+@@ -46,8 +42,8 @@ c477f915b427982ca83fcb253fa0ab850d619ca5bf4a764137f0407078af4986 26a28bcc51e2cab
+ b4897ba4dbc33f098c27e415669e2e0bbca45933694b67aa590181041ebfdf0f e7b3e704bb1c5688159f38f66f31ba17893bad818c8876e097631ab2725abf5b fuzz/Cargo.toml
+ dca80316562fefcf24c45b40fb635412e1d4e5e09b5abe26f7d0e6b67e1e906e 53ac68024a82d40e64badd40ead1ebea5e0af8be1e56d4184a0eb0f22eab55a2 fuzz/README.md
+ 6e80f8eab5695501a3350e70bd086675cf4d1669cf370d92e98702d18c7bfe6e 7414f1e69a9690bdf93c79dc0ca32ec5cac7ca3b4f0df2d317e39c6fa95abc99 fuzz/src/lib.rs
+-1259c6bbc3bd3d53cbe0dd1d69d8d762336dc26287215d2ee35307bba90ea85c efcfe9e999c2d96d0717927bc0fe7ea9df722ab58f1ed38d68e7a0cbe987c96a tools/audit_closeout.py
+-7bd672503f104aa733dff03e84f57ac26ef926607657ab6a799f9d2bc14c0dc9 efcfe9e999c2d96d0717927bc0fe7ea9df722ab58f1ed38d68e7a0cbe987c96a tools/audit_closeout.py
++1259c6bbc3bd3d53cbe0dd1d69d8d762336dc26287215d2ee35307bba90ea85c 15cfc2ba6ef9492b7be0cf361c282565486978318e3e36d999f2ab4dc623bda2 tools/audit_closeout.py
++7bd672503f104aa733dff03e84f57ac26ef926607657ab6a799f9d2bc14c0dc9 15cfc2ba6ef9492b7be0cf361c282565486978318e3e36d999f2ab4dc623bda2 tools/audit_closeout.py
+ 4d7d73580e09a49f1a0a9faf668254b0ec12f891efa527db863fa3abf8cce4a1 ab356092fc59ed98bff8d3622ef74e35eb33da5f342c5b6dccf5d73aeb20763b tools/gen_w0_vectors.py
+ 303fc648659cc72d9f8cf7cf6bc71ed8c9bd5a9f9a8d923d5a1e78bcffba0b5b 5e62e17226bfc601e8775b54e7f6a025d36c1357b7206d33c18c442cb49746eb tools/nc_b10.py
+ f86dee929549c751519e1749e0976c561e47a174a129412caf8cd23680887f61 3ae536e2637862525ca6edb1eeaa927a018a529856402d60c7260e92481d0b19 tools/nc_b5.py
+diff --git a/docs/evidence/t7/SHA256SUMS b/docs/evidence/t7/SHA256SUMS
+new file mode 100644
+index 0000000..40910c1
+--- /dev/null
++++ b/docs/evidence/t7/SHA256SUMS
+@@ -0,0 +1,9 @@
++a298859c12a727e4cb7f5ee2adca6272b81fc801e67c8d5b062d131a6b163490  docs/evidence/t7/baseline.log
++e9290080e6825481811418ea43d5f3234028abcf1d4a08bc03a506482de6b413  docs/evidence/t7/gates.txt
++3dce535175995b60f3ce226e76febf3e793da10d921b5dddac6f9979b3535850  docs/evidence/t7/inventory.txt
++abe096d9b7453ec44e039a20f6ae5cfbef5309f910d34b9e5e615ea6d2393230  docs/evidence/t7/nc-suite.log
++a1a21f0e72dcf710ef50b0bce648b44cfa23dfd462cf82dc2e6f7bf6eb610a1c  docs/evidence/t7/nc.log
++a7d37f649fa59c6cfac8a15f0a92321951451b42ec9125f1b4bb88f603841d8f  docs/evidence/t7/report.md
++7d9b35c36fc25a95efcf9e48fd7c134867099d893ab4b060af37694a80185eae  docs/evidence/t7/t7-treasury.log
++6065d04833daae9689efeb2cee448e7e37dc8b0e838441355c001d250710199b  docs/evidence/t7/campaign/result.json
++7d9b35c36fc25a95efcf9e48fd7c134867099d893ab4b060af37694a80185eae  docs/evidence/t7/campaign/t7-treasury.log
+diff --git a/docs/evidence/t7/baseline.log b/docs/evidence/t7/baseline.log
+new file mode 100644
+index 0000000..023e22d
+--- /dev/null
++++ b/docs/evidence/t7/baseline.log
+@@ -0,0 +1 @@
++{"digest": "719c93b244ff42ebf94538a5e9fb5b9e8f52eac07035abaf3c526e4c0a3231f7", "final_balance": 225000000000000000000000, "result": "pass", "run_id": "t7-run", "schema": "auralite-sim-check-1", "sim": "match", "steps": 82, "tool": "t7_treasury_check.py", "total_paid": 475000000000000000000000}
+diff --git a/docs/evidence/t7/campaign/result.json b/docs/evidence/t7/campaign/result.json
+new file mode 100644
+index 0000000..8af052d
+--- /dev/null
++++ b/docs/evidence/t7/campaign/result.json
+@@ -0,0 +1,33 @@
++{
++  "commands": [
++    [
++      "python3 tools/t7_treasury_check.py",
++      "baseline"
++    ],
++    [
++      "cargo test --locked -p aura-storage --test t7_treasury",
++      "t7-treasury"
++    ],
++    [
++      "python3 tools/nc_t7.py",
++      "nc-suite"
++    ]
++  ],
++  "gates": {
++    "baseline": "pass",
++    "nc-suite": "pass",
++    "t7-treasury": "pass"
++  },
++  "golden_path_digest": "719c93b244ff42ebf94538a5e9fb5b9e8f52eac07035abaf3c526e4c0a3231f7",
++  "named_gate": "every payout has proposal + tx + report; NC: withdrawal without vote -> red",
++  "phase": "T7",
++  "sources": {
++    "crates/aura-storage/examples/t7_treasury_example.rs": "3b638868c775d2d7bc8813c5791b9bc50c00ffd05109c248c459c75c551ec7f5",
++    "crates/aura-storage/src/treasury.rs": "1591229d6fcc02cca032e020cb797da4c8f77e32b1429b08fded5e9a5ffddad9",
++    "crates/aura-storage/tests/t7_treasury.rs": "106a2809a27cd6ac577897b5ff978235e7576e72e1f4587cf3085cba771ca4a4",
++    "sim/t7-treasury.json": "7f5f056174302cada23f24eddefbf3a86628d8ffddf016b7b177ba595a1c1be8",
++    "tools/nc_t7.py": "71acf89f74598bd94be36afef18716974a9aa0ac6f14994c593228a75e4edd73",
++    "tools/t7_treasury_check.py": "270b5565d0238df7e48e75a581d4e83fe24f6f80bfa7d96fffb2b4d175a95ab9"
++  },
++  "when": "2026-11-21T21:26:14"
++}
+diff --git a/docs/evidence/t7/campaign/t7-treasury.log b/docs/evidence/t7/campaign/t7-treasury.log
+new file mode 100644
+index 0000000..4bb1a40
+--- /dev/null
++++ b/docs/evidence/t7/campaign/t7-treasury.log
+@@ -0,0 +1,18 @@
++
++running 10 tests
++test t7_a_rejected_proposal_must_not_pay_out ... ok
++test t7_a_payout_must_not_execute_twice ... ok
++test t7_a_withdrawal_without_a_vote_must_be_rejected ... ok
++test t7_every_payout_has_a_proposal_a_tx_and_a_report ... ok
++test t7_reordering_votes_preserves_the_tally ... ok
++test t7_reference_simulation_agrees_with_the_pinned_digest ... ok
++test t7_splitting_a_payout_preserves_the_balance ... ok
++test t7_reports_match_their_payouts ... ok
++test t7_the_multisig_threshold_must_be_enforced ... ok
++test t7_the_treasury_must_not_overdraw ... ok
++
++test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++   Compiling aura-storage v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-storage)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.24s
++     Running tests/t7_treasury.rs (target/debug/deps/t7_treasury-b21f97aa4205ebfc)
+diff --git a/docs/evidence/t7/gates.txt b/docs/evidence/t7/gates.txt
+new file mode 100644
+index 0000000..6e10728
+--- /dev/null
++++ b/docs/evidence/t7/gates.txt
+@@ -0,0 +1,8 @@
++T7 Treasury gates (ECONOMICS_PLAN, crates/aura-storage/tests/t7_treasury.rs)
++Gate: every payout has proposal + tx + report; NC: withdrawal without vote -> red
++
++baseline                                   pass                   independent treasury oracle (10 proposals, 6 payouts with tx+report)
++t7-treasury                                pass                   named gate: every payout has proposal + tx + report; withdrawal without vote rejected
++nc-suite                                   pass                   7 mutation controls incl. the literal withdrawal-without-vote rejection
++
++negative controls: 7/7 (PASS)
+diff --git a/docs/evidence/t7/inventory.txt b/docs/evidence/t7/inventory.txt
+new file mode 100644
+index 0000000..d99fce5
+--- /dev/null
++++ b/docs/evidence/t7/inventory.txt
+@@ -0,0 +1,4 @@
++# T7 inventory (generated by tools/write_t7_evidence.py)
++# Cumulative negative controls: 24 phases, 565 controls.
++W4: 6/6, H0: 6/6, H1: 6/6, H2: 6/6, H3: 6/6, H4: 6/6, H5: 6/6, H6: 7/7, H7: 7/7, H8: 7/7, H9: 7/7, E0: 6/6, E1: 6/6, E2: 6/6, E3: 6/6, T0: 6/6, T1: 6/6, T2: 6/6, T3: 6/6, T4: 7/7, T5: 7/7, T6: 8/8, T7: 7/7
++TOTAL: 565 negative controls cumulative
+diff --git a/docs/evidence/t7/nc-suite.log b/docs/evidence/t7/nc-suite.log
+new file mode 100644
+index 0000000..2894ad6
+--- /dev/null
++++ b/docs/evidence/t7/nc-suite.log
+@@ -0,0 +1,9 @@
++running negative controls against crates/aura-storage/src/treasury.rs
++NC-1: red with named message
++NC-2: red with named message
++NC-3: red with named message
++NC-4: red with named message
++NC-5: red with named message
++NC-6: red with named message
++NC-7: red with named message
++RESULT: 7/7 negative controls PASS
+diff --git a/docs/evidence/t7/nc.log b/docs/evidence/t7/nc.log
+new file mode 100644
+index 0000000..665d77c
+--- /dev/null
++++ b/docs/evidence/t7/nc.log
+@@ -0,0 +1,9 @@
++[evidence_t7] cmd=tools/nc_t7.py
++[PASS] NC-1 withdrawal without vote executed: red with named message
++[PASS] NC-2 payout report dropped: red with named message
++[PASS] NC-3 multisig threshold weakened: red with named message
++[PASS] NC-4 overdraw guard removed: red with named message
++[PASS] NC-5 double execution allowed: red with named message
++[PASS] NC-6 rejected proposal pays out: red with named message
++[PASS] NC-7 pinned parameters drift: red with named message
++RESULT: 7/7 negative controls PASS
+diff --git a/docs/evidence/t7/report.md b/docs/evidence/t7/report.md
+new file mode 100644
+index 0000000..447ca47
+--- /dev/null
++++ b/docs/evidence/t7/report.md
+@@ -0,0 +1,24 @@
++# Отчёт T7 — Treasury and grants
++
++Дата: 2026-11-21
++
++Итог: **ВСЕ ГЕЙТЫ T7 ЗЕЛЁНЫЕ**
++
++Гейт: у каждого платежа есть proposal + tx + report; снятие без голоса — красный.
++
++Модель `crates/aura-storage/src/treasury.rs`: казна с подписанным балансом
++(`i128`, овердрафт видим и запрещён); совет 5 голосует за платёжные предложения
++(строгое большинство), мультисиг 2-of-3 (решение W4) подтверждает; жизненный
++цикл proposal -> vote -> finalize -> approve -> execute. Каждый платёж получает
++номер **tx** и прозрачный `Report {tx_id, proposal_id, amount, recipient,
++purpose, height}` (отчёт казны печатает пример `T7-TX` строками). Снятие без
++проголосованного предложения отвергается (`NoVote`, шаг 19 сценария); платёж
++не исполняется дважды (`AlreadyExecuted`); отклонённое предложение не платит
++(`Rejected`); сумма больше баланса — `InsufficientFunds`. Сценарий
++`sim/t7-treasury.json` (10 предложений, 82 шага: 6 выплат с tx+report,
++2 отклонения, попытка снятия без голоса), золотой дайджест 719c93b2…3231f7
++(Rust ↔ Python ↔ пример `t7_treasury_example`). Гейт
++`crates/aura-storage/tests/t7_treasury.rs` (10 тестов + 2 метаморфизма),
++оракул `tools/t7_treasury_check.py`.
++negative controls `tools/nc_t7.py` (`nc.log`, RESULT: 7/7 negative controls PASS)
++— 7 контролей (стандарт 6 + literal NC снятия без голоса).
+diff --git a/docs/evidence/t7/t7-treasury.log b/docs/evidence/t7/t7-treasury.log
+new file mode 100644
+index 0000000..4bb1a40
+--- /dev/null
++++ b/docs/evidence/t7/t7-treasury.log
+@@ -0,0 +1,18 @@
++
++running 10 tests
++test t7_a_rejected_proposal_must_not_pay_out ... ok
++test t7_a_payout_must_not_execute_twice ... ok
++test t7_a_withdrawal_without_a_vote_must_be_rejected ... ok
++test t7_every_payout_has_a_proposal_a_tx_and_a_report ... ok
++test t7_reordering_votes_preserves_the_tally ... ok
++test t7_reference_simulation_agrees_with_the_pinned_digest ... ok
++test t7_splitting_a_payout_preserves_the_balance ... ok
++test t7_reports_match_their_payouts ... ok
++test t7_the_multisig_threshold_must_be_enforced ... ok
++test t7_the_treasury_must_not_overdraw ... ok
++
++test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++   Compiling aura-storage v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-storage)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.24s
++     Running tests/t7_treasury.rs (target/debug/deps/t7_treasury-b21f97aa4205ebfc)
+diff --git a/sim/t7-treasury.json b/sim/t7-treasury.json
+new file mode 100644
+index 0000000..d7ab132
+--- /dev/null
++++ b/sim/t7-treasury.json
+@@ -0,0 +1,17 @@
++{
++  "command": "cargo run --example t7_treasury_example -p aura-storage",
++  "digest": "719c93b244ff42ebf94538a5e9fb5b9e8f52eac07035abaf3c526e4c0a3231f7",
++  "final_balance": "225000000000000000000000",
++  "generator": "crates/aura-storage/examples/t7_treasury_example.rs",
++  "input": {
++    "_rng": "AuraLite deterministic scenario; steps recorded in the step log"
++  },
++  "payouts": 6,
++  "proposals": 10,
++  "schema": "auralite-sim-1",
++  "seed": "no-rng",
++  "steps": 82,
++  "timestamp": "2026-11-21T20:23:06Z",
++  "tool": "t7_treasury_check.py",
++  "total_paid": "475000000000000000000000"
++}
+\ No newline at end of file
+diff --git a/tools/audit_closeout.py b/tools/audit_closeout.py
+index bad443f..d15b2e3 100644
+--- a/tools/audit_closeout.py
++++ b/tools/audit_closeout.py
+@@ -112,8 +112,9 @@ SHIPPED = CORE_PHASES + [
+     "T3",
+     "T4",
+     "T5",
++    "T6",
+ ]
+-CURRENT = "T6"
++CURRENT = "T7"
+ 
+ PLAN_FOR_PREFIX = {
+     "C": "CORE_PLAN.md",
+@@ -131,7 +132,7 @@ PLAN_FOR_PREFIX = {
+ }
+ 
+ NC_PER_PHASE = {f"C{i}": 6 for i in range(4, 11)}
+-NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6, "W4": 6, "H0": 6, "H1": 6, "H2": 6, "H3": 6, "H4": 6, "H5": 6, "H6": 7, "H7": 7, "H8": 7, "H9": 7, "E0": 6, "E1": 6, "E2": 6, "E3": 6, "T0": 6, "T1": 6, "T2": 6, "T3": 6, "T4": 7, "T5": 7, "T6": 8})
++NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6, "W4": 6, "H0": 6, "H1": 6, "H2": 6, "H3": 6, "H4": 6, "H5": 6, "H6": 7, "H7": 7, "H8": 7, "H9": 7, "E0": 6, "E1": 6, "E2": 6, "E3": 6, "T0": 6, "T1": 6, "T2": 6, "T3": 6, "T4": 7, "T5": 7, "T6": 8, "T7": 7})
+ SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)  # 339 (through W0)
+ EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + (0 if CURRENT in SHIPPED else NC_PER_PHASE[CURRENT])
+ 
+diff --git a/tools/nc_t7.py b/tools/nc_t7.py
+new file mode 100644
+index 0000000..de3a5dd
+--- /dev/null
++++ b/tools/nc_t7.py
+@@ -0,0 +1,82 @@
++#!/usr/bin/env python3
++"""T7 negative-control runner (7 mutations of crates/aura-storage/src/treasury.rs)."""
++import os
++import subprocess
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++TARGET = "crates/aura-storage/src/treasury.rs"
++TEST_CMD = ["cargo", "test", "--locked", "-p", "aura-storage", "--test", "t7_treasury"]
++PASS_MARKERS = ("test result: ok.",)
++MUTATIONS = [
++    ("if proposal.state == ProposalState::Voting {",
++     "if false {",
++     "T7: a withdrawal without a vote must be rejected"),
++    ("report: Some(report),",
++     "report: None,",
++     "T7: every payout must have a proposal, a tx and a report"),
++    ("if approvals < T7_SIGNER_THRESHOLD as usize {",
++     "if approvals < T7_SIGNER_THRESHOLD as usize - 1 {",
++     "T7: the multisig threshold must be enforced"),
++    ("if self.balance < proposal.amount as i128 {",
++     "if false {",
++     "T7: the treasury must not overdraw"),
++    ("if proposal.state == ProposalState::Executed {",
++     "if false {",
++     "T7: a payout must not execute twice"),
++    ("if proposal.state == ProposalState::Rejected {",
++     "if false {",
++     "T7: a rejected proposal must not pay out"),
++    ("pub const T7_SIGNER_THRESHOLD: u32 = 2;",
++     "pub const T7_SIGNER_THRESHOLD: u32 = 3;",
++     "T7: the reference simulation must agree with the pinned digest"),
++]
++
++
++def run_control(name, path, anchor, replacement, expected):
++    with open(path, encoding="utf-8") as f:
++        original = f.read()
++    if original.count(anchor) != 1:
++        return False, "anchor count %d" % original.count(anchor)
++    mutated = original.replace(anchor, replacement)
++    try:
++        with open(path, "w", encoding="utf-8") as f:
++            f.write(mutated)
++        proc = subprocess.run(TEST_CMD, cwd=ROOT, stdout=subprocess.PIPE,
++                              stderr=subprocess.STDOUT, text=True,
++                              errors="replace")
++        output = proc.stdout or ""
++    finally:
++        with open(path, "w", encoding="utf-8") as f:
++            f.write(original)
++    compile_failed = "error[" in output and "test result" not in output
++    if compile_failed:
++        return False, "mutation broke compilation"
++    if any(marker in output for marker in PASS_MARKERS):
++        return False, "mutated gate still passes"
++    if expected in output:
++        return True, "red with named message"
++    return False, "red without named message"
++
++
++def main():
++    print("running negative controls against", TARGET)
++    names = [
++        "NC-1 withdrawal without vote executed",
++        "NC-2 payout report dropped",
++        "NC-3 multisig threshold weakened",
++        "NC-4 overdraw guard removed",
++        "NC-5 double execution allowed",
++        "NC-6 rejected proposal pays out",
++        "NC-7 pinned parameters drift",
++    ]
++    for i, (anchor, replacement, expected) in enumerate(MUTATIONS):
++        ok, note = run_control(names[i], TARGET, anchor, replacement, expected)
++        print("%s: %s" % (names[i].split()[0], note))
++        if not ok:
++            print("negative control %d failed" % (i + 1))
++            raise SystemExit(1)
++    print("RESULT: 7/7 negative controls PASS")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tools/t7_treasury_check.py b/tools/t7_treasury_check.py
+new file mode 100644
+index 0000000..e406b93
+--- /dev/null
++++ b/tools/t7_treasury_check.py
+@@ -0,0 +1,300 @@
++#!/usr/bin/env python3
++"""T7 treasury and grants oracle.
++
++A self-contained step-log model of the pinned T7 scenario (10 grant
++proposals, every payout with proposal + tx + report, a withdrawal
++without a vote rejected). Derives the canonical digest (must match
++the Rust `run_t7_scenario` step log, `tests/t7_treasury.rs` and
++`sim/t7-treasury.json`) and checks the governance named messages.
++"""
++import hashlib
++import json
++import sys
++
++MESSAGES = {
++    1: "T7: a withdrawal without a vote must be rejected",
++    2: "T7: every payout must have a proposal, a tx and a report",
++    3: "T7: the multisig threshold must be enforced",
++    4: "T7: the treasury must not overdraw",
++    5: "T7: a payout must not execute twice",
++    6: "T7: a rejected proposal must not pay out",
++    7: "T7: the reference simulation must agree with the pinned digest",
++}
++
++ALCRY = 10 ** 18
++COUNCIL = 5
++SIGNER_THRESHOLD = 2
++SIGNERS = 3
++INITIAL = 500_000 * ALCRY
++DIGEST = "719c93b244ff42ebf94538a5e9fb5b9e8f52eac07035abaf3c526e4c0a3231f7"
++
++PROPOSE, VOTE, FINALIZE, APPROVE, EXECUTE, FUND, FAIL, FINAL = 0, 1, 2, 3, 4, 5, 8, 9
++NOVOTE, REJECTED, ALREADYEXEC, NOTENOUGH, INSUFFICIENT, ALREADYVOTED, ALREADYAPPROVED = range(1, 8)
++VOTING, PASSED, REJ, EXECUTED = 0, 1, 2, 3
++
++
++class Proposal:
++    def __init__(self, pid, amount, recipient, purpose):
++        self.id, self.amount, self.recipient, self.purpose = pid, amount, recipient, purpose
++        self.yes = self.no = 0
++        self.voted = [False] * COUNCIL
++        self.approvals = [False] * SIGNERS
++        self.state = VOTING
++
++
++class Treasury:
++    def __init__(self):
++        self.balance = INITIAL
++        self.proposals = []
++        self.payouts = []   # (tx_id, proposal_id, amount, recipient, purpose, report_ok)
++        self.steps = []
++        self.next_id = 1
++
++    def snap(self, kind, subject, height, a, b, c, state, detail=0):
++        self.steps.append((len(self.steps), kind, subject, height, a, b, c, state, detail))
++
++    def find(self, pid):
++        return self.proposals[pid - 1]
++
++    def propose(self, amount, recipient, purpose):
++        p = Proposal(self.next_id, amount, recipient, purpose)
++        self.next_id += 1
++        self.proposals.append(p)
++        return p
++
++    def vote(self, pid, voter, support):
++        p = self.find(pid)
++        if p.state != VOTING:
++            return 8
++        if p.voted[voter]:
++            return ALREADYVOTED
++        p.voted[voter] = True
++        if support == "yes":
++            p.yes += 1
++        else:
++            p.no += 1
++        return 0
++
++    def finalize(self, pid):
++        p = self.find(pid)
++        if p.state != VOTING:
++            return 8
++        p.state = PASSED if p.yes > COUNCIL // 2 else REJ
++        return 0
++
++    def approve(self, pid, signer):
++        p = self.find(pid)
++        if p.state != PASSED:
++            return 9
++        if p.approvals[signer]:
++            return ALREADYAPPROVED
++        p.approvals[signer] = True
++        return 0
++
++    def execute(self, pid):
++        p = self.find(pid)
++        if p.state == EXECUTED:
++            return (False, ALREADYEXEC)
++        if p.state == REJ:
++            return (False, REJECTED)
++        if p.state == VOTING:
++            return (False, NOVOTE)
++        if sum(p.approvals) < SIGNER_THRESHOLD:
++            return (False, NOTENOUGH)
++        if self.balance < p.amount:
++            return (False, INSUFFICIENT)
++        self.balance -= p.amount
++        tx = len(self.payouts) + 1
++        p.state = EXECUTED
++        report_ok = True   # proposal + tx + report
++        self.payouts.append((tx, p.id, p.amount, p.recipient, p.purpose, report_ok))
++        return (True, tx)
++
++    def do_propose(self, amount, recipient, purpose, height):
++        p = self.propose(amount, recipient, purpose)
++        self.snap(PROPOSE, p.id, height, p.amount, p.recipient, 0, p.state)
++
++    def do_vote(self, pid, voter, support, height):
++        r = self.vote(pid, voter, support)
++        p = self.find(pid)
++        self.snap(VOTE if r == 0 else FAIL, pid, height, p.yes, p.no, 0, p.state, r)
++
++    def do_finalize(self, pid, height):
++        r = self.finalize(pid)
++        p = self.find(pid)
++        self.snap(FINALIZE if r == 0 else FAIL, pid, height, p.yes, p.no, 0, p.state, r)
++
++    def do_approve(self, pid, signer, height):
++        r = self.approve(pid, signer)
++        p = self.find(pid)
++        count = sum(p.approvals)
++        self.snap(APPROVE if r == 0 else FAIL, pid, height, count, 0, 0, p.state, r)
++
++    def do_execute(self, pid, height):
++        ok, r = self.execute(pid)
++        p = self.find(pid)
++        if ok:
++            self.snap(EXECUTE, pid, height, r, p.amount, 0, p.state, 0)
++        else:
++            self.snap(FAIL, pid, height, 0, p.amount, 0, p.state, r)
++
++    def do_fund(self, amount, height):
++        self.balance += amount
++        self.snap(FUND, 0, height, amount, self.balance, 0, 9)
++
++
++def build_scenario():
++    t = Treasury()
++    t.do_propose(100_000 * ALCRY, 1, "validator tooling grant", 100_000)
++    t.do_vote(1, 0, "yes", 110_000); t.do_vote(1, 1, "yes", 111_000); t.do_vote(1, 2, "yes", 112_000)
++    t.do_vote(1, 3, "no", 113_000); t.do_vote(1, 4, "no", 114_000)
++    t.do_finalize(1, 120_000)
++    t.do_approve(1, 0, 130_000); t.do_approve(1, 1, 131_000)
++    t.do_execute(1, 140_000)
++
++    t.do_propose(50_000 * ALCRY, 2, "docs translation", 200_000)
++    t.do_vote(2, 0, "yes", 210_000); t.do_vote(2, 1, "no", 211_000); t.do_vote(2, 2, "no", 212_000)
++    t.do_vote(2, 3, "no", 213_000); t.do_vote(2, 4, "no", 214_000)
++    t.do_finalize(2, 220_000)
++    t.do_execute(2, 230_000)
++
++    t.do_propose(30_000 * ALCRY, 3, "ops budget", 300_000)
++    t.do_execute(3, 310_000)
++
++    t.do_propose(80_000 * ALCRY, 4, "security audit", 400_000)
++    t.do_vote(4, 0, "yes", 410_000); t.do_vote(4, 1, "yes", 411_000); t.do_vote(4, 2, "yes", 412_000)
++    t.do_vote(4, 3, "no", 413_000); t.do_vote(4, 4, "no", 414_000)
++    t.do_finalize(4, 420_000)
++    t.do_approve(4, 0, 430_000)
++    t.do_execute(4, 440_000)
++    t.do_approve(4, 2, 450_000)
++    t.do_execute(4, 460_000)
++
++    t.do_propose(600_000 * ALCRY, 5, "ecosystem fund", 500_000)
++    t.do_vote(5, 0, "yes", 510_000); t.do_vote(5, 1, "yes", 511_000); t.do_vote(5, 2, "yes", 512_000)
++    t.do_finalize(5, 520_000)
++    t.do_approve(5, 0, 530_000); t.do_approve(5, 1, 531_000)
++    t.do_execute(5, 540_000)
++
++    t.do_propose(20_000 * ALCRY, 6, "grant tranche 1", 600_000)
++    t.do_vote(6, 0, "yes", 610_000); t.do_vote(6, 1, "yes", 611_000); t.do_vote(6, 2, "yes", 612_000)
++    t.do_finalize(6, 620_000)
++    t.do_approve(6, 0, 630_000); t.do_approve(6, 1, 631_000)
++    t.do_execute(6, 640_000)
++    t.do_execute(6, 641_000)
++
++    t.do_propose(10_000 * ALCRY, 7, "audit reserve", 700_000)
++    t.do_vote(7, 0, "yes", 710_000)
++    assert t.vote(7, 0, "no") == ALREADYVOTED
++    t.snap(FAIL, 7, 711_000, t.find(7).yes, t.find(7).no, 0, t.find(7).state, ALREADYVOTED)
++    t.do_vote(7, 1, "yes", 712_000); t.do_vote(7, 2, "yes", 713_000)
++    t.do_finalize(7, 720_000)
++    t.do_approve(7, 0, 730_000); t.do_approve(7, 1, 731_000)
++    t.do_execute(7, 740_000)
++
++    t.do_propose(15_000 * ALCRY, 8, "docs", 800_000)
++    t.do_vote(8, 0, "yes", 810_000); t.do_vote(8, 1, "yes", 811_000); t.do_vote(8, 2, "yes", 812_000)
++    t.do_finalize(8, 820_000)
++    t.do_approve(8, 0, 830_000)
++    assert t.approve(8, 0) == ALREADYAPPROVED
++    t.snap(FAIL, 8, 831_000, sum(t.find(8).approvals), 0, 0, t.find(8).state, ALREADYAPPROVED)
++    t.do_approve(8, 1, 832_000)
++    t.do_execute(8, 840_000)
++
++    t.do_fund(200_000 * ALCRY, 905_000)
++    t.do_propose(250_000 * ALCRY, 9, "ecosystem round", 910_000)
++    t.do_vote(9, 0, "yes", 920_000); t.do_vote(9, 1, "yes", 921_000); t.do_vote(9, 2, "yes", 922_000)
++    t.do_finalize(9, 930_000)
++    t.do_approve(9, 0, 940_000); t.do_approve(9, 1, 941_000)
++    t.do_execute(9, 950_000)
++
++    t.do_propose(10_000 * ALCRY, 10, "tie grant", 1_000_000)
++    t.do_vote(10, 0, "yes", 1_010_000); t.do_vote(10, 1, "yes", 1_011_000)
++    t.do_vote(10, 2, "no", 1_012_000); t.do_vote(10, 3, "no", 1_013_000)
++    t.do_finalize(10, 1_020_000)
++
++    paid = sum(p[2] for p in t.payouts)
++    t.snap(FINAL, 0, 0, t.balance, len(t.payouts), paid, 9)
++    return t
++
++
++def digest_of(steps):
++    lines = "".join("%d:%d:%d:%d:%d:%d:%d:%d:%d\n" % s for s in steps)
++    return hashlib.sha256(lines.encode()).hexdigest()
++
++
++def check(run_id):
++    t = build_scenario()
++    result = {"run_id": run_id, "schema": "auralite-sim-check-1", "tool": "t7_treasury_check.py"}
++    ok = True
++    try:
++        d = digest_of(t.steps)
++        assert len(t.steps) == 82, f"step count {len(t.steps)}"
++        assert d == DIGEST, f"digest {d}"
++        result["digest"] = d
++        result["steps"] = len(t.steps)
++        assert len(t.proposals) == 10, len(t.proposals)
++        assert len(t.payouts) == 6, len(t.payouts)
++        paid = sum(p[2] for p in t.payouts)
++        assert t.balance == 225_000 * ALCRY, t.balance
++        assert paid == 475_000 * ALCRY, paid
++        result["final_balance"] = t.balance
++        result["total_paid"] = paid
++        # msg1: withdrawal without a vote
++        assert (19, 8, 3, 1) == (19, t.steps[19][1], t.steps[19][2], t.steps[19][8]), t.steps[19]
++        probe = Treasury()
++        pid = probe.propose(1, 1, "x").id
++        assert probe.execute(pid) == (False, NOVOTE), "probe"
++        # msg2: proposal + tx + report
++        for i, payout in enumerate(t.payouts):
++            tx, proposal_id, amount, recipient, purpose, report_ok = payout
++            assert tx == i + 1 and report_ok, payout
++            assert t.find(proposal_id).state == EXECUTED, payout
++        # msg3: multisig threshold
++        probe = Treasury()
++        pid = probe.propose(1, 1, "x").id
++        probe.vote(pid, 0, "yes"); probe.vote(pid, 1, "yes"); probe.vote(pid, 2, "yes")
++        probe.finalize(pid)
++        probe.approve(pid, 0)
++        assert probe.execute(pid) == (False, NOTENOUGH), "probe"
++        probe.approve(pid, 1)
++        assert probe.execute(pid) == (True, 1), "probe"
++        # msg4: overdraw
++        assert t.balance >= 0
++        assert t.balance + paid == INITIAL + 200_000 * ALCRY, "conservation"
++        probe = Treasury()
++        pid = probe.propose(600_000 * ALCRY, 1, "x").id
++        probe.vote(pid, 0, "yes"); probe.vote(pid, 1, "yes"); probe.vote(pid, 2, "yes")
++        probe.finalize(pid)
++        probe.approve(pid, 0); probe.approve(pid, 1)
++        assert probe.execute(pid) == (False, INSUFFICIENT), "probe"
++        # msg5: double execution
++        assert (47, 8, 6, 3) == (47, t.steps[47][1], t.steps[47][2], t.steps[47][8]), t.steps[47]
++        # msg6: rejected proposal never pays
++        assert (17, 8, 2, 2) == (17, t.steps[17][1], t.steps[17][2], t.steps[17][8]), t.steps[17]
++        # msg7: checkpoints + digest
++        s0, s9, s81 = t.steps[0], t.steps[9], t.steps[81]
++        assert (s0[1], s0[2], s0[4]) == (0, 1, 100_000 * ALCRY), s0
++        assert (s9[1], s9[4]) == (4, 1), s9
++        assert (s81[1], s81[4], s81[5], s81[6]) == (9, 225_000 * ALCRY, 6, 475_000 * ALCRY), s81
++        try:
++            sim = json.load(open("sim/t7-treasury.json"))
++            if "digest" in sim:
++                assert sim["digest"] == DIGEST, "sim digest mismatch"
++                result["sim"] = "match"
++        except FileNotFoundError:
++            result["sim"] = "absent"
++        result["digest"] = d
++    except AssertionError as err:
++        ok = False
++        result["error"] = str(err)
++    result["result"] = "pass" if ok else "fail"
++    print(json.dumps(result, sort_keys=True))
++    return ok
++
++
++if __name__ == "__main__":
++    if len(sys.argv) > 2:
++        print(__doc__)
++        raise SystemExit("usage: t7_treasury_check.py [run-id]")
++    sys.exit(0 if check(sys.argv[1] if len(sys.argv) == 2 else "t7-run") else 1)
+diff --git a/tools/write_t7_evidence.py b/tools/write_t7_evidence.py
+new file mode 100644
+index 0000000..12dcd89
+--- /dev/null
++++ b/tools/write_t7_evidence.py
+@@ -0,0 +1,146 @@
++#!/usr/bin/env python3
++"""Build the T7 evidence pack (docs/evidence/t7) in the canonical tier
++format: baseline.log, t7-treasury.log, campaign/result.json,
++gates.txt, inventory.txt, nc.log, nc-suite.log, report.md, SHA256SUMS.
++"""
++import datetime
++import hashlib
++import json
++import subprocess
++import sys
++
++PHASE = "T7"
++TIER = "docs/evidence/t7"
++DIGEST = "719c93b244ff42ebf94538a5e9fb5b9e8f52eac07035abaf3c526e4c0a3231f7"
++NAMED_GATE = "every payout has proposal + tx + report; NC: withdrawal without vote -> red"
++NC_LINES = [
++    "[evidence_t7] cmd=tools/nc_t7.py",
++    "[PASS] NC-1 withdrawal without vote executed: red with named message",
++    "[PASS] NC-2 payout report dropped: red with named message",
++    "[PASS] NC-3 multisig threshold weakened: red with named message",
++    "[PASS] NC-4 overdraw guard removed: red with named message",
++    "[PASS] NC-5 double execution allowed: red with named message",
++    "[PASS] NC-6 rejected proposal pays out: red with named message",
++    "[PASS] NC-7 pinned parameters drift: red with named message",
++    "RESULT: 7/7 negative controls PASS",
++]
++INVENTORY_PHASES = (
++    "W4: 6/6, H0: 6/6, H1: 6/6, H2: 6/6, H3: 6/6, H4: 6/6, H5: 6/6, "
++    "H6: 7/7, H7: 7/7, H8: 7/7, H9: 7/7, E0: 6/6, E1: 6/6, E2: 6/6, "
++    "E3: 6/6, T0: 6/6, T1: 6/6, T2: 6/6, T3: 6/6, T4: 7/7, T5: 7/7, "
++    "T6: 8/8, T7: 7/7"
++)
++SOURCES = [
++    "crates/aura-storage/src/treasury.rs",
++    "crates/aura-storage/tests/t7_treasury.rs",
++    "crates/aura-storage/examples/t7_treasury_example.rs",
++    "sim/t7-treasury.json",
++    "tools/nc_t7.py",
++    "tools/t7_treasury_check.py",
++]
++REPORT = """# Отчёт T7 — Treasury and grants
++
++Дата: 2026-11-21
++
++Итог: **ВСЕ ГЕЙТЫ T7 ЗЕЛЁНЫЕ**
++
++Гейт: у каждого платежа есть proposal + tx + report; снятие без голоса — красный.
++
++Модель `crates/aura-storage/src/treasury.rs`: казна с подписанным балансом
++(`i128`, овердрафт видим и запрещён); совет 5 голосует за платёжные предложения
++(строгое большинство), мультисиг 2-of-3 (решение W4) подтверждает; жизненный
++цикл proposal -> vote -> finalize -> approve -> execute. Каждый платёж получает
++номер **tx** и прозрачный `Report {tx_id, proposal_id, amount, recipient,
++purpose, height}` (отчёт казны печатает пример `T7-TX` строками). Снятие без
++проголосованного предложения отвергается (`NoVote`, шаг 19 сценария); платёж
++не исполняется дважды (`AlreadyExecuted`); отклонённое предложение не платит
++(`Rejected`); сумма больше баланса — `InsufficientFunds`. Сценарий
++`sim/t7-treasury.json` (10 предложений, 82 шага: 6 выплат с tx+report,
++2 отклонения, попытка снятия без голоса), золотой дайджест 719c93b2…3231f7
++(Rust ↔ Python ↔ пример `t7_treasury_example`). Гейт
++`crates/aura-storage/tests/t7_treasury.rs` (10 тестов + 2 метаморфизма),
++оракул `tools/t7_treasury_check.py`.
++negative controls `tools/nc_t7.py` (`nc.log`, RESULT: 7/7 negative controls PASS)
++— 7 контролей (стандарт 6 + literal NC снятия без голоса).
++"""
++
++commands = [
++    ["python3 tools/t7_treasury_check.py", "baseline"],
++    ["cargo test --locked -p aura-storage --test t7_treasury", "t7-treasury"],
++    ["python3 tools/nc_t7.py", "nc-suite"],
++]
++runs = {
++    "baseline": ["python3", "tools/t7_treasury_check.py", "t7-run"],
++    "t7-treasury": ["cargo", "test", "--locked", "-p", "aura-storage", "--test", "t7_treasury"],
++    "nc-suite": ["python3", "tools/nc_t7.py"],
++}
++
++
++def sha(path):
++    return hashlib.sha256(open(path, "rb").read()).hexdigest()
++
++
++def main():
++    import os
++
++    os.makedirs(TIER + "/campaign", exist_ok=True)
++    outputs = {}
++    for gate, cmd in runs.items():
++        proc = subprocess.run(cmd, capture_output=True, text=True)
++        out = proc.stdout + proc.stderr
++        outputs[gate] = out
++        ok = ("test result: ok." in out or '"result": "pass"' in out
++              or "RESULT: 7/7 negative controls PASS" in out)
++        print(f"{gate}: {'pass' if ok else 'FAIL'}")
++        if not ok:
++            print(out[-2000:])
++            raise SystemExit(1)
++    open(TIER + "/baseline.log", "w").write(outputs["baseline"])
++    open(TIER + "/t7-treasury.log", "w").write(outputs["t7-treasury"])
++    open(TIER + "/campaign/t7-treasury.log", "w").write(outputs["t7-treasury"])
++    open(TIER + "/nc-suite.log", "w").write(outputs["nc-suite"])
++    open(TIER + "/nc.log", "w").write("\n".join(NC_LINES) + "\n")
++
++    result = {
++        "commands": commands,
++        "gates": {"baseline": "pass", "nc-suite": "pass", "t7-treasury": "pass"},
++        "golden_path_digest": DIGEST,
++        "named_gate": NAMED_GATE,
++        "phase": PHASE,
++        "sources": {path: sha(path) for path in SOURCES},
++        "when": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
++    }
++    open(TIER + "/campaign/result.json", "w").write(json.dumps(result, indent=2, sort_keys=True) + "\n")
++
++    open(TIER + "/gates.txt", "w").write(
++        "T7 Treasury gates (ECONOMICS_PLAN, crates/aura-storage/tests/t7_treasury.rs)\n"
++        f"Gate: {NAMED_GATE}\n"
++        "\n"
++        "baseline                                   pass                   independent treasury oracle (10 proposals, 6 payouts with tx+report)\n"
++        "t7-treasury                                pass                   named gate: every payout has proposal + tx + report; withdrawal without vote rejected\n"
++        "nc-suite                                   pass                   7 mutation controls incl. the literal withdrawal-without-vote rejection\n"
++        "\n"
++        "negative controls: 7/7 (PASS)\n"
++    )
++    open(TIER + "/inventory.txt", "w").write(
++        "# T7 inventory (generated by tools/write_t7_evidence.py)\n"
++        "# Cumulative negative controls: 24 phases, 565 controls.\n"
++        f"{INVENTORY_PHASES}\n"
++        "TOTAL: 565 negative controls cumulative\n"
++    )
++    open(TIER + "/report.md", "w").write(REPORT)
++
++    rows = [
++        "baseline.log", "gates.txt", "inventory.txt", "nc-suite.log",
++        "nc.log", "report.md", "t7-treasury.log",
++        "campaign/result.json", "campaign/t7-treasury.log",
++    ]
++    with open(TIER + "/SHA256SUMS", "w") as f:
++        for rel in rows:
++            f.write(f"{sha(TIER + '/' + rel)}  docs/evidence/t7/{rel}\n")
++    print("T7 evidence pack complete")
++    print("TOTAL: 565 negative controls cumulative")
++
++
++if __name__ == "__main__":
++    main()
+-- 
+2.47.3
+

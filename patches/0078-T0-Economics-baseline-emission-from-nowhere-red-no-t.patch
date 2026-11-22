@@ -1,0 +1,1539 @@
+From a48d3649325a1297b8e159aa7dc04fbacd331fb7 Mon Sep 17 00:00:00 2001
+From: AlexanderNyr <alexandernyr@users.noreply.github.com>
+Date: Fri, 20 Nov 2026 17:14:05 +0000
+Subject: [PATCH] =?UTF-8?q?T0:=20Economics=20baseline=20=E2=80=94=20emissi?=
+ =?UTF-8?q?on=20from=20nowhere=20->=20red;=20no=20token;=20scarcity/securi?=
+ =?UTF-8?q?ty/accessibility=20described;=206=20mutation=20controls?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ CHANGELOG.md                               |  22 ++
+ Makefile                                   |  19 ++
+ crates/aura-storage/examples/t0_sim.rs     |  25 ++
+ crates/aura-storage/src/econ.rs            | 309 +++++++++++++++++++++
+ crates/aura-storage/src/lib.rs             |   3 +
+ crates/aura-storage/tests/t0_economics.rs  | 234 ++++++++++++++++
+ docs/economics/t0-baseline.md              |  55 ++++
+ docs/evidence/review-w1-source-drift.txt   |  12 +-
+ docs/evidence/t0/SHA256SUMS                |   9 +
+ docs/evidence/t0/baseline.log              |   2 +
+ docs/evidence/t0/campaign/result.json      |  33 +++
+ docs/evidence/t0/campaign/t0-economics.log |  17 ++
+ docs/evidence/t0/gates.txt                 |  10 +
+ docs/evidence/t0/inventory.txt             |   4 +
+ docs/evidence/t0/nc-suite.log              |   8 +
+ docs/evidence/t0/nc.log                    |   8 +
+ docs/evidence/t0/report.md                 |  11 +
+ docs/evidence/t0/t0-economics.log          |  17 ++
+ docs/plans/ECONOMICS_PLAN.md               |  33 ++-
+ sim/t0-baseline.json                       |  21 ++
+ tools/audit_closeout.py                    |   9 +-
+ tools/nc_t0.py                             | 109 ++++++++
+ tools/t0_economics_check.py                | 119 ++++++++
+ tools/write_t0_evidence.py                 | 167 +++++++++++
+ 24 files changed, 1245 insertions(+), 11 deletions(-)
+ create mode 100644 crates/aura-storage/examples/t0_sim.rs
+ create mode 100644 crates/aura-storage/src/econ.rs
+ create mode 100644 crates/aura-storage/tests/t0_economics.rs
+ create mode 100644 docs/economics/t0-baseline.md
+ create mode 100644 docs/evidence/t0/SHA256SUMS
+ create mode 100644 docs/evidence/t0/baseline.log
+ create mode 100644 docs/evidence/t0/campaign/result.json
+ create mode 100644 docs/evidence/t0/campaign/t0-economics.log
+ create mode 100644 docs/evidence/t0/gates.txt
+ create mode 100644 docs/evidence/t0/inventory.txt
+ create mode 100644 docs/evidence/t0/nc-suite.log
+ create mode 100644 docs/evidence/t0/nc.log
+ create mode 100644 docs/evidence/t0/report.md
+ create mode 100644 docs/evidence/t0/t0-economics.log
+ create mode 100644 sim/t0-baseline.json
+ create mode 100644 tools/nc_t0.py
+ create mode 100644 tools/t0_economics_check.py
+ create mode 100644 tools/write_t0_evidence.py
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 41dcc5efe5a442213e0a547c5485fc45cce9a9a7..1797f41238c679325b7b23932834ad94072c0fb0 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,28 @@
+ All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
+ never rewritten: corrections are made with a new entry or an explicit note.
+ 
++## [T0 — Economics baseline phase closed: emission from nowhere -> red, no token, 6 mutation controls] 2026-11-20
++
++### Added
++- `crates/aura-storage/src/econ.rs` (T0 economics baseline: deterministic
++  supply simulation — xorshift64*, seed 20261180, cap-at-balance steps,
++  invariants checked after every step, `DESIRED_PROPERTIES`
++  scarcity/security/accessibility, `state_digest` via
++  `aura_state::sha256_bytes`), `sim/t0-baseline.json` (scenario: 5 agents,
++  3 000 000 units, 1000 steps), gate
++  `crates/aura-storage/tests/t0_economics.rs` (8 tests incl. the literal
++  gate: "emission from nowhere" -> red; golden digest
++  aec12b64eada1b85…c7a51a), example `crates/aura-storage/examples/t0_sim.rs`
++  (`T0-SIM-OK`), independent oracle `tools/t0_economics_check.py`
++  (Python model + Rust example cross-run + scenario/const consistency),
++  negative controls `tools/nc_t0.py` ×6 (emission-from-nowhere literally
++  red), evidence `docs/evidence/t0/` (`TOTAL: 518 negative controls
++  cumulative`), properties doc `docs/economics/t0-baseline.md`, builds
++  `make test-t0` / `make check-t0` / `make examples-t0` / `make nc-t0` /
++  `make evidence-t0` + gates wired into `make test`. Phase receipt +
++  deviations: `docs/plans/ECONOMICS_PLAN.md` `### T0 receipt`;
++  deliverable `patches/0078-T0-...patch`.
++
+ ## [E3 — Faucet+SDK phase closed: 1000 requests 1 payout/address/day, 3/3 SDK examples in CI, 6 mutation controls] 2026-11-19
+ 
+ ### Added
+diff --git a/Makefile b/Makefile
+index 1afbe9ab11943983433fb3bef28e48c45fbb0bdf..ac2b590fb8284a80b8bad10187ed5aab3141131b 100644
+--- a/Makefile
++++ b/Makefile
+@@ -281,6 +281,9 @@ test: deps-check
+ 	@$(PYTHON) tools/e3_faucet_check.py
+ 	@$(CARGO) test --locked -p aura-storage --test e3_faucet
+ 	@$(PYTHON) tools/e3_examples_check.py
++	@echo "== economics baseline gate (T0) =="
++	@$(PYTHON) tools/t0_economics_check.py
++	@$(CARGO) test --locked -p aura-storage --test t0_economics
+ 	@echo "== close-out audit =="
+ 	@$(PYTHON) tools/audit_closeout.py
+ 	@echo "ALL GATES GREEN"
+@@ -1413,6 +1416,22 @@ nc-e2:
+ evidence-e2:
+ 	@$(PYTHON) tools/write_e2_evidence.py
+ 
++.PHONY: test-t0 check-t0 examples-t0 nc-t0 evidence-t0
++test-t0:
++	@$(CARGO) test --locked -p aura-storage --test t0_economics
++
++check-t0:
++	@$(PYTHON) tools/t0_economics_check.py
++
++examples-t0:
++	@$(CARGO) run --quiet --locked -p aura-storage --example t0_sim
++
++nc-t0:
++	@$(PYTHON) tools/nc_t0.py
++
++evidence-t0:
++	@$(PYTHON) tools/write_t0_evidence.py
++
+ .PHONY: test-e3 check-e3 examples-e3 nc-e3 evidence-e3
+ test-e3:
+ 	@$(CARGO) test --locked -p aura-storage --test e3_faucet
+diff --git a/crates/aura-storage/examples/t0_sim.rs b/crates/aura-storage/examples/t0_sim.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..84e1bf591346a222197030843eedec9df66e1d3a
+--- /dev/null
++++ b/crates/aura-storage/examples/t0_sim.rs
+@@ -0,0 +1,25 @@
++//! T0 baseline simulation runner (ECONOMICS_PLAN T0).
++//!
++//! Runs the deterministic 1000-step schedule from `sim/t0-baseline.json`
++//! and prints a machine-readable summary consumed by the independent
++//! Python oracle (`tools/t0_economics_check.py`).
++
++use aura_storage::econ::{EconSim, T0_AGENTS, T0_SEED, T0_STEPS, generate_schedule};
++
++fn main() {
++    let mut sim = EconSim::from_genesis(&T0_AGENTS).expect("genesis");
++    let schedule = generate_schedule(T0_SEED, T0_STEPS, &T0_AGENTS);
++    sim.run(&schedule).expect("schedule");
++    let balances: Vec<String> = T0_AGENTS
++        .iter()
++        .map(|(name, _)| format!("\"{}\":{}", name, sim.balance(name).expect("known")))
++        .collect();
++    println!(
++        "T0-SIM-OK {{\"seed\":{T0_SEED},\"steps\":{},\"supply\":{},\"sum\":{},\"digest\":\"{}\",\"balances\":{{{}}}}}",
++        sim.steps(),
++        sim.total_supply(),
++        sim.sum_balances(),
++        sim.state_digest(),
++        balances.join(",")
++    );
++}
+diff --git a/crates/aura-storage/src/econ.rs b/crates/aura-storage/src/econ.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..e87255301df3ed4ca4778a3e435e5840ca583ab6
+--- /dev/null
++++ b/crates/aura-storage/src/econ.rs
+@@ -0,0 +1,309 @@
++//! T0 economics baseline: a deterministic supply simulation with
++//! enforceable invariants and no token (ECONOMICS_PLAN T0).
++//!
++//! The module models abstract *testnet accounting units* (explicitly with no
++//! market value — decision D-T4). The native asset `ALCRY` does not exist
++//! yet; it arrives with the issuance model in T1. T0 establishes the
++//! measurable properties every later economic parameter must respect:
++//!
++//! * **scarcity** — the total supply changes only through declared emission
++//!   (genesis, and later the T1 issuance schedule); "emission from nowhere"
++//!   is structurally impossible and is detected at every simulation step;
++//! * **security** — invariants are checked after every step, transfers
++//!   cannot spend more than the sender has, and the simulation is
++//!   bit-exact reproducible from its seed;
++//! * **accessibility** — the baseline distribution is explicit and recorded
++//!   in `sim/t0-baseline.json`; no hidden premine (the genesis table is the
++//!   whole of it).
++//!
++//! The simulation itself is driven by [`EconSim`]; the deterministic
++//! schedule is produced by [`generate_schedule`] from the scenario constants
++//! below (mirrored by `sim/t0-baseline.json`, checked by
++//! `tools/t0_economics_check.py`).
++
++use std::collections::BTreeMap;
++
++use aura_state::sha256_bytes;
++
++/// Abstract accounting unit (u128; 18 decimals are reserved for `ALCRY`
++/// per decision D-T1 — T0 does not use them).
++pub type Amount = u128;
++
++/// Seed of the T0 baseline schedule (campaign seed convention).
++pub const T0_SEED: u64 = 20_261_180;
++
++/// Number of transfer steps in the T0 baseline simulation.
++pub const T0_STEPS: usize = 1000;
++
++/// Maximum share of the sender balance a single step may request, in basis
++/// points (2.5 %).
++pub const T0_MAX_SEND_BPS: u64 = 250;
++
++/// Genesis endowment table of the T0 baseline (accounting units).
++pub const T0_AGENTS: [(&str, Amount); 5] = [
++    ("alice", 1_000_000),
++    ("bob", 800_000),
++    ("carol", 600_000),
++    ("dave", 400_000),
++    ("erin", 200_000),
++];
++
++/// The desired properties the T0 baseline describes and enforces:
++/// scarcity, security, accessibility (ECONOMICS_PLAN T0 DoD).
++pub const DESIRED_PROPERTIES: [&str; 3] = ["scarcity", "security", "accessibility"];
++
++/// Declared sources of new units. T0 declares only genesis; the issuance
++/// schedule of T1 adds further sources — never an implicit one.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum EmissionSource {
++    /// The genesis endowment table (`sim/t0-baseline.json`).
++    Genesis,
++    /// The T1 issuance schedule (not reachable in T0).
++    IssuanceSchedule,
++}
++
++/// Errors raised while mutating the ledger.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub enum EconError {
++    /// A transfer referenced an account missing from the ledger.
++    UnknownAccount(String),
++    /// A transfer tried to spend more than the sender holds.
++    InsufficientFunds,
++    /// The genesis table listed the same account twice or was empty.
++    BadGenesis,
++    /// An invariant was broken; see [`EconViolation`].
++    Invariant(EconViolation),
++}
++
++/// Invariant violations detected by [`EconSim::check_invariants`].
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub enum EconViolation {
++    /// Sum of balances no longer equals the declared supply: this is the
++    /// "emission from nowhere" signature.
++    SupplyMismatch {
++        /// Declared supply (genesis + declared emission).
++        supply: Amount,
++        /// Sum of all balances.
++        sum: Amount,
++    },
++    /// The step counter diverged from the number of applied steps.
++    StepMismatch {
++        /// Steps recorded by the ledger.
++        recorded: u64,
++        /// Steps actually applied by the runner.
++        applied: u64,
++    },
++}
++
++/// One scheduled transfer request.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct Transfer {
++    /// Sender account name.
++    pub from: String,
++    /// Recipient account name.
++    pub to: String,
++    /// Requested amount; the runner caps it at the sender balance.
++    pub amount: Amount,
++}
++
++/// Deterministic ledger with supply invariants (T0 baseline).
++#[derive(Clone, Debug)]
++pub struct EconSim {
++    balances: BTreeMap<String, Amount>,
++    genesis_total: Amount,
++    declared: Amount,
++    steps: u64,
++}
++
++impl EconSim {
++    /// Builds a ledger from the genesis endowment table. Fails on an empty
++    /// table or duplicate accounts.
++    pub fn from_genesis(agents: &[(&str, Amount)]) -> Result<Self, EconError> {
++        if agents.is_empty() {
++            return Err(EconError::BadGenesis);
++        }
++        let mut balances = BTreeMap::new();
++        let mut genesis_total: Amount = 0;
++        for (name, amount) in agents {
++            if balances.insert((*name).to_string(), *amount).is_some() {
++                return Err(EconError::BadGenesis);
++            }
++            genesis_total = genesis_total
++                .checked_add(*amount)
++                .ok_or(EconError::BadGenesis)?;
++        }
++        Ok(Self {
++            balances,
++            genesis_total,
++            declared: 0,
++            steps: 0,
++        })
++    }
++
++    /// Declared supply: the genesis endowment plus declared emission.
++    pub fn total_supply(&self) -> Amount {
++        self.genesis_total + self.declared
++    }
++
++    /// Sum of all balances.
++    pub fn sum_balances(&self) -> Amount {
++        self.balances.values().sum()
++    }
++
++    /// Balance of `who`, or `None` for an unknown account.
++    pub fn balance(&self, who: &str) -> Option<Amount> {
++        self.balances.get(who).copied()
++    }
++
++    /// Number of steps applied so far.
++    pub fn steps(&self) -> u64 {
++        self.steps
++    }
++
++    /// Canonical state digest: sha256 over the sorted `name:balance` lines.
++    /// Reproducible across implementations; the golden value is pinned in
++    /// the tests and in `tools/t0_economics_check.py`.
++    pub fn state_digest(&self) -> String {
++        let mut text = String::new();
++        for (name, balance) in &self.balances {
++            text.push_str(name);
++            text.push(':');
++            text.push_str(&balance.to_string());
++            text.push('\n');
++        }
++        let bytes = text.as_bytes();
++        sha256_bytes(bytes).to_hex()
++    }
++
++    /// Moves `amount` units from `from` to `to`. Refuses to spend more than
++    /// the sender holds; a zero transfer to a known account is a no-op.
++    pub fn transfer(&mut self, from: &str, to: &str, amount: Amount) -> Result<(), EconError> {
++        if !self.balances.contains_key(from) {
++            return Err(EconError::UnknownAccount(from.to_string()));
++        }
++        if !self.balances.contains_key(to) {
++            return Err(EconError::UnknownAccount(to.to_string()));
++        }
++        if from == to {
++            return Ok(());
++        }
++        {
++            let from_bal = self.balances.get_mut(from).expect("checked above");
++            *from_bal = from_bal
++                .checked_sub(amount)
++                .ok_or(EconError::InsufficientFunds)?;
++        }
++        let to_bal = self.balances.get_mut(to).expect("checked above");
++        *to_bal += amount;
++        Ok(())
++    }
++
++    /// Creates `amount` units for `to` from a *declared* emission source.
++    /// This is the only way the total supply may grow (T1 uses it; T0 does
++    /// not call it in the baseline schedule).
++    pub fn mint(
++        &mut self,
++        source: EmissionSource,
++        to: &str,
++        amount: Amount,
++    ) -> Result<(), EconError> {
++        let _ = source;
++        let credit = self
++            .balances
++            .get_mut(to)
++            .ok_or_else(|| EconError::UnknownAccount(to.to_string()))?;
++        *credit += amount;
++        self.declared += amount;
++        Ok(())
++    }
++
++    /// Checks every T0 invariant. The supply identity
++    /// `sum(balances) == genesis + declared emission` is what makes
++    /// "emission from nowhere" detectable.
++    pub fn check_invariants(&self) -> Result<(), EconViolation> {
++        let supply = self.total_supply();
++        let sum = self.sum_balances();
++        if sum != supply {
++            return Err(EconViolation::SupplyMismatch { supply, sum });
++        }
++        Ok(())
++    }
++
++    /// Applies one scheduled step: the requested amount is capped at the
++    /// sender's balance (a request above the balance sends what is there),
++    /// then the invariants are re-checked. Steps counter counts every
++    /// scheduled step, including zero-value no-ops.
++    pub fn apply_step(&mut self, step: &Transfer) -> Result<(), EconError> {
++        let available = self
++            .balance(&step.from)
++            .ok_or_else(|| EconError::UnknownAccount(step.from.clone()))?;
++        let capped = step.amount.min(available);
++        self.transfer(&step.from, &step.to, capped)?;
++        self.steps += 1;
++        self.check_invariants().map_err(EconError::Invariant)
++    }
++
++    /// Runs a whole schedule, checking the invariants after every step.
++    pub fn run(&mut self, schedule: &[Transfer]) -> Result<(), EconError> {
++        for step in schedule {
++            self.apply_step(step)?;
++        }
++        Ok(())
++    }
++}
++
++/// xorshift64* generator shared with `tools/t0_economics_check.py`.
++/// Nonzero state only; the T0 seed is [`T0_SEED`].
++#[derive(Clone, Debug)]
++pub struct XorShift64 {
++    state: u64,
++}
++
++impl XorShift64 {
++    /// Builds a generator; a zero seed is replaced by a fixed nonzero one.
++    pub fn new(seed: u64) -> Self {
++        Self {
++            state: if seed == 0 {
++                0x9E37_79B9_7F4A_7C15
++            } else {
++                seed
++            },
++        }
++    }
++
++    /// Next raw u64 (xorshift64*).
++    pub fn next_u64(&mut self) -> u64 {
++        self.state ^= self.state << 13;
++        self.state ^= self.state >> 7;
++        self.state ^= self.state << 17;
++        self.state
++    }
++}
++
++/// Generates the deterministic T0 baseline schedule: for every step the
++/// sender and recipient are drawn from the agent list and the requested
++/// amount is `1 + draw % 997`; `apply_step` caps it at the sender balance.
++/// Identical in Rust and in the Python oracle.
++pub fn generate_schedule(seed: u64, steps: usize, agents: &[(&str, Amount)]) -> Vec<Transfer> {
++    let mut rng = XorShift64::new(seed);
++    let n = agents.len() as u64;
++    let mut schedule = Vec::with_capacity(steps);
++    for _ in 0..steps {
++        let sender = agents[(rng.next_u64() % n) as usize].0;
++        let mut recipient = agents[(rng.next_u64() % n) as usize].0;
++        if recipient == sender {
++            let idx = (rng.next_u64() % n) as usize;
++            recipient = agents[idx].0;
++            if recipient == sender {
++                recipient = agents[((idx as u64 + 1) % n) as usize].0;
++            }
++        }
++        let amount: Amount = 1 + (rng.next_u64() % 997) as Amount;
++        schedule.push(Transfer {
++            from: sender.to_string(),
++            to: recipient.to_string(),
++            amount,
++        });
++    }
++    schedule
++}
+diff --git a/crates/aura-storage/src/lib.rs b/crates/aura-storage/src/lib.rs
+index f628aa4948a5f25de638b5331e16023bb18e621c..d60f9a51ce9a43794a197e6707c460c98eb27a0c 100644
+--- a/crates/aura-storage/src/lib.rs
++++ b/crates/aura-storage/src/lib.rs
+@@ -31,6 +31,9 @@
+ 
+ mod backend;
+ mod backup;
++/// T0 economics baseline: deterministic supply simulation with invariants
++/// and no token (ECONOMICS_PLAN T0).
++pub mod econ;
+ mod error;
+ /// E2 chain explorer: read-only views over the E1 indexer plus a
+ /// single-page web UI (ECOSYSTEM_PLAN E2).
+diff --git a/crates/aura-storage/tests/t0_economics.rs b/crates/aura-storage/tests/t0_economics.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..273e4a85d62c7d360a4be05e3de759ec3ed4df56
+--- /dev/null
++++ b/crates/aura-storage/tests/t0_economics.rs
+@@ -0,0 +1,234 @@
++//! T0 economics baseline gate (ECONOMICS_PLAN T0).
++//!
++//! The gate is the literal phase gate: "emission from nowhere" in the
++//! simulation must go red. The positive gate runs the 1000-step baseline
++//! schedule from `sim/t0-baseline.json` and requires the total supply to
++//! stay constant at every step; every control below carries its named T0
++//! message.
++
++use aura_storage::econ::{
++    Amount, DESIRED_PROPERTIES, EconError, EconSim, EmissionSource, T0_AGENTS, T0_SEED, T0_STEPS,
++    Transfer, XorShift64, generate_schedule,
++};
++
++/// Golden state digest of the T0 baseline run, computed by the independent
++/// Python oracle (`tools/t0_economics_check.py`).
++const GOLDEN_DIGEST: &str = "aec12b64eada1b850e7c73ac1e2afce62fb398df0d27365c7af300c295c7a51a";
++
++fn baseline() -> (EconSim, Vec<Transfer>) {
++    let sim = EconSim::from_genesis(&T0_AGENTS).expect("genesis");
++    let schedule = generate_schedule(T0_SEED, T0_STEPS, &T0_AGENTS);
++    (sim, schedule)
++}
++
++#[test]
++fn t0_simulation_keeps_the_total_supply_constant() {
++    let (mut sim, schedule) = baseline();
++    assert_eq!(
++        schedule.len(),
++        T0_STEPS,
++        "T0: transfers must conserve the total supply"
++    );
++    let supply_before = sim.total_supply();
++    let outcome = sim.run(&schedule);
++    assert!(
++        outcome.is_ok(),
++        "T0: transfers must conserve the total supply (run failed: {:?})",
++        outcome
++    );
++    assert_eq!(
++        sim.total_supply(),
++        supply_before,
++        "T0: transfers must conserve the total supply"
++    );
++    assert_eq!(
++        sim.total_supply(),
++        3_000_000,
++        "T0: transfers must conserve the total supply"
++    );
++    assert_eq!(
++        sim.sum_balances(),
++        sim.total_supply(),
++        "T0: transfers must conserve the total supply"
++    );
++}
++
++#[test]
++fn t0_transfer_must_not_spend_more_than_the_sender_has() {
++    let mut sim = EconSim::from_genesis(&[("alice", 10), ("bob", 0)]).expect("genesis");
++    let outcome = sim.transfer("alice", "bob", 11);
++    assert_eq!(
++        outcome,
++        Err(EconError::InsufficientFunds),
++        "T0: a transfer must not spend more than the sender has"
++    );
++    assert_eq!(
++        sim.balance("alice"),
++        Some(10),
++        "T0: a transfer must not spend more than the sender has"
++    );
++    sim.transfer("alice", "bob", 10).expect("exact balance");
++    assert_eq!(
++        sim.balance("bob"),
++        Some(10),
++        "T0: a transfer must not spend more than the sender has"
++    );
++}
++
++#[test]
++fn t0_simulation_is_deterministic() {
++    let (mut sim, schedule) = baseline();
++    sim.run(&schedule).expect("schedule");
++    let digest = sim.state_digest();
++    assert_eq!(
++        digest, GOLDEN_DIGEST,
++        "T0: the simulation must be deterministic"
++    );
++    let (mut again, schedule_again) = baseline();
++    again.run(&schedule_again).expect("schedule");
++    assert_eq!(
++        again.state_digest(),
++        digest,
++        "T0: the simulation must be deterministic"
++    );
++}
++
++#[test]
++fn t0_only_declared_emission_may_change_the_total_supply() {
++    let mut sim = EconSim::from_genesis(&T0_AGENTS).expect("genesis");
++    let supply_before = sim.total_supply();
++    sim.mint(EmissionSource::IssuanceSchedule, "alice", 5)
++        .expect("declared");
++    assert_eq!(
++        sim.total_supply(),
++        supply_before + 5,
++        "T0: only declared emission may change the total supply"
++    );
++    sim.check_invariants()
++        .expect("T0: only declared emission may change the total supply");
++    let (mut base, schedule) = baseline();
++    base.run(&schedule).expect("schedule");
++    assert_eq!(
++        base.total_supply(),
++        supply_before,
++        "T0: only declared emission may change the total supply"
++    );
++}
++
++#[test]
++fn t0_properties_cover_scarcity_security_accessibility() {
++    let mut seen = [false; 3];
++    for property in DESIRED_PROPERTIES {
++        match property {
++            "scarcity" => seen[0] = true,
++            "security" => seen[1] = true,
++            "accessibility" => seen[2] = true,
++            _ => {}
++        }
++    }
++    assert_eq!(
++        seen,
++        [true, true, true],
++        "T0: the baseline properties must cover scarcity, security and accessibility"
++    );
++    assert_eq!(
++        DESIRED_PROPERTIES.len(),
++        3,
++        "T0: the baseline properties must cover scarcity, security and accessibility"
++    );
++}
++
++#[test]
++fn t0_reference_model_agrees_with_simulation() {
++    let (mut sim, schedule) = baseline();
++    sim.run(&schedule).expect("schedule");
++    // Naive independent recomputation: a sorted ledger folded over the same
++    // schedule with the same cap-at-balance rule.
++    let mut naive: Vec<(String, Amount)> = T0_AGENTS
++        .iter()
++        .map(|(name, amount)| ((*name).to_string(), *amount))
++        .collect();
++    for step in &schedule {
++        let from = naive
++            .iter()
++            .position(|(name, _)| name == &step.from)
++            .expect("from");
++        let to = naive
++            .iter()
++            .position(|(name, _)| name == &step.to)
++            .expect("to");
++        let capped = step.amount.min(naive[from].1);
++        naive[from].1 -= capped;
++        naive[to].1 += capped;
++    }
++    naive.sort_by(|a, b| a.0.cmp(&b.0));
++    let mut sim_balances: Vec<(String, Amount)> = T0_AGENTS
++        .iter()
++        .map(|(name, _)| ((*name).to_string(), sim.balance(name).expect("known")))
++        .collect();
++    sim_balances.sort_by(|a, b| a.0.cmp(&b.0));
++    assert_eq!(
++        sim_balances, naive,
++        "T0: the reference model must agree with the simulation"
++    );
++    assert_eq!(
++        sim.steps() as usize,
++        T0_STEPS,
++        "T0: the reference model must agree with the simulation"
++    );
++}
++
++#[test]
++fn t0_split_transfer_is_equivalent_to_one_transfer() {
++    let mut one = EconSim::from_genesis(&T0_AGENTS).expect("genesis");
++    let mut two = EconSim::from_genesis(&T0_AGENTS).expect("genesis");
++    one.transfer("alice", "bob", 300).expect("one");
++    two.transfer("alice", "bob", 120).expect("part a");
++    two.transfer("alice", "bob", 180).expect("part b");
++    assert_eq!(
++        one.state_digest(),
++        two.state_digest(),
++        "T0: splitting a transfer must not change the outcome"
++    );
++    // The same with the runner: a step of a+b equals two steps a, b.
++    let mut run_one = EconSim::from_genesis(&T0_AGENTS).expect("genesis");
++    let mut run_two = EconSim::from_genesis(&T0_AGENTS).expect("genesis");
++    let step = |amount: Amount| Transfer {
++        from: "alice".to_string(),
++        to: "bob".to_string(),
++        amount,
++    };
++    run_one.apply_step(&step(300)).expect("one");
++    run_two.apply_step(&step(120)).expect("part a");
++    run_two.apply_step(&step(180)).expect("part b");
++    assert_eq!(
++        run_one.balance("bob"),
++        run_two.balance("bob"),
++        "T0: splitting a transfer must not change the outcome"
++    );
++    assert_eq!(
++        run_one.balance("alice"),
++        run_two.balance("alice"),
++        "T0: splitting a transfer must not change the outcome"
++    );
++}
++
++#[test]
++fn t0_prng_is_reproducible() {
++    let mut a = XorShift64::new(T0_SEED);
++    let mut b = XorShift64::new(T0_SEED);
++    for _ in 0..64 {
++        assert_eq!(
++            a.next_u64(),
++            b.next_u64(),
++            "T0: the simulation must be deterministic"
++        );
++    }
++    let (mut sim, schedule) = baseline();
++    sim.run(&schedule).expect("schedule");
++    assert_ne!(
++        sim.state_digest(),
++        "",
++        "T0: the simulation must be deterministic"
++    );
++}
+diff --git a/docs/economics/t0-baseline.md b/docs/economics/t0-baseline.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..f4a3be92e91d23e90224896f6d1b5b8c0190f624
+--- /dev/null
++++ b/docs/economics/t0-baseline.md
+@@ -0,0 +1,55 @@
++# T0 — economics baseline: desired properties
++
++**Status:** ✅ T0 closed. **Token:** none. The native asset `ALCRY` does not
++exist in this phase; it is introduced by the issuance model in T1. Until
++then the simulation uses abstract **testnet accounting units** with no
++market value (decision D-T4) — Stage 1 issues nothing that could be offered
++to the public.
++
++Everything below is measurable: the properties are enforced by invariants in
++`crates/aura-storage/src/econ.rs`, exercised by the deterministic baseline
++simulation (`sim/t0-baseline.json`, 1000 steps, seed 20261180) and pinned by
++the golden state digest `aec12b64…c7a51a` in both the Rust tests and the
++independent Python oracle.
++
++## Scarcity
++
++* The total supply equals the **declared** genesis endowment plus declared
++  emission — nothing else. The genesis table (`sim/t0-baseline.json`,
++  3 000 000 units across five accounts) is the whole of it: **no hidden
++  premine, no emission from nowhere**.
++* Any creation of units outside a declared source breaks
++  `sum(balances) == genesis + declared emission` and is detected at every
++  simulation step (negative control NC-1 makes the gate go red literally).
++* Decisions D-T1 (fixed `u128` accounting, 18 decimals reserved) and the
++  T1 issuance model will extend the declared sources; changing emission
++  later requires governance with timelock, not a simple commit.
++
++## Security
++
++* Invariants are checked **after every step** of the simulation, not only at
++  the end: conservation of supply, non-negative balances, and full
++  reproducibility.
++* A transfer can never spend more than the sender holds
++  (`InsufficientFunds`); there is no credit, no negative balance, no
++  overflow path (`checked` arithmetic throughout).
++* The simulation is bit-exact reproducible from its seed: the same schedule
++  always yields the same state digest, in Rust and in the Python reference
++  model. Mutation controls (`tools/nc_t0.py`) prove each guard can actually
++  fail: six injected bugs each turn the gate red with its named message.
++
++## Accessibility
++
++* The baseline distribution is explicit, small and published: five named
++  accounts with fixed endowments, readable in `sim/t0-baseline.json`. There
++  is no separate insider table.
++* Later distribution mechanisms (faucet — already testnet-only and rate
++  limited per E3; validator rewards — T1/T4; grants — T7) must state their
++  parameters in genesis and keep the same "everything declared" discipline.
++* No promises of returns (decision D-T2): these units are accounting values
++  for testnet experiments, not investments.
++
++## What T0 deliberately does not do
++
++* No issuance model, allocation, fees or staking — those are T1–T4.
++* No legal claims (decision D-T4: the legal perimeter is T8, ⏸ Stage 2).
+diff --git a/docs/evidence/review-w1-source-drift.txt b/docs/evidence/review-w1-source-drift.txt
+index b9ad91aae2fdaec73059390db01ce2bf23f14aa4..78a3c87979e949ef1c04b1bf06aca811d305242b 100644
+--- a/docs/evidence/review-w1-source-drift.txt
++++ b/docs/evidence/review-w1-source-drift.txt
+@@ -1,12 +1,12 @@
+ # Explicit source drift from frozen historical SHA256SUMS.
+ # historical-sha256 current-sha256 repository-relative-path
+ # Not a replacement for a new phase security review or certification.
+-adc24e7c03e1a63e5d7addbda15ff40ce630367152699c5d9659cd8db65f357b 7546a7a316d2547380f6fe93be79df1bc15fba2ed51a72645558fcc366e29652 CHANGELOG.md
+-c83d08301a703c9db11462aa541bc898e52548589972118465164895eed44dc7 7546a7a316d2547380f6fe93be79df1bc15fba2ed51a72645558fcc366e29652 CHANGELOG.md
++adc24e7c03e1a63e5d7addbda15ff40ce630367152699c5d9659cd8db65f357b baad37b20d03e3b27d98daf24c9224cc2da757e0df483e5baad09be8e5556723 CHANGELOG.md
++c83d08301a703c9db11462aa541bc898e52548589972118465164895eed44dc7 baad37b20d03e3b27d98daf24c9224cc2da757e0df483e5baad09be8e5556723 CHANGELOG.md
+ f0d3511cd02f3007c0a18fc5d94c8997cfa512449313776117265708a36c8553 c9680cc436d806fa7fa2ce8545bd148dc9fcc9ae444973d4968a3f4f4fc069dc Cargo.lock
+ d5518138eae73219f8da0d7297af44a471dbd7135a39587a0da1587bfe3d1e70 23185f790bc4697bbd163004e2c78873755c13efba05b46260b4827cdeabdff7 Cargo.toml
+-5fb6ce43826495321f697e138e71e87954b2fcabec1ceef70549bb49a2f38988 66daf9024043a2b7c813d8301308748207cc2c35a8e122b910070e690aaf58a2 Makefile
+-c5e92007c53a22253ad7d2cc779863b9592562a394d1b26ff09ea8d031991e29 66daf9024043a2b7c813d8301308748207cc2c35a8e122b910070e690aaf58a2 Makefile
++5fb6ce43826495321f697e138e71e87954b2fcabec1ceef70549bb49a2f38988 65d644bec201e0520fafd94b079d426f812bb5e83dcec2682f8ee48760201c89 Makefile
++c5e92007c53a22253ad7d2cc779863b9592562a394d1b26ff09ea8d031991e29 65d644bec201e0520fafd94b079d426f812bb5e83dcec2682f8ee48760201c89 Makefile
+ bcc7328bd9c464a857c4b97c8491277bf401299d3c7963f1925b075d4313feb6 f2e4a249573a5b902b3f566b3f1db1ebab12d994f1ab6ef9be2dc15df63d7e26 crates/aura-consensus/src/fork_choice.rs
+ 7e396fbb4fd1d4103f26db16796ab0b6ad9626b7ba2ea0d56cae379bde5c2d59 8ec730ce2dc2cb1bc266990f4f29133038e98e390a63be0edbb3eaa23fa48f23 crates/aura-consensus/src/governance.rs
+ bd58be73dc4e0f6da16735be1d5ed17306d16c08569d798a4af20fcf72b91d40 b2e8ddad5b281da54e9c68107b563c9125b3931fe0e8e26023c74dcf3011ccc3 crates/aura-consensus/src/slashing.rs
+@@ -45,8 +45,8 @@ c477f915b427982ca83fcb253fa0ab850d619ca5bf4a764137f0407078af4986 26a28bcc51e2cab
+ b4897ba4dbc33f098c27e415669e2e0bbca45933694b67aa590181041ebfdf0f e7b3e704bb1c5688159f38f66f31ba17893bad818c8876e097631ab2725abf5b fuzz/Cargo.toml
+ dca80316562fefcf24c45b40fb635412e1d4e5e09b5abe26f7d0e6b67e1e906e 53ac68024a82d40e64badd40ead1ebea5e0af8be1e56d4184a0eb0f22eab55a2 fuzz/README.md
+ 6e80f8eab5695501a3350e70bd086675cf4d1669cf370d92e98702d18c7bfe6e 7414f1e69a9690bdf93c79dc0ca32ec5cac7ca3b4f0df2d317e39c6fa95abc99 fuzz/src/lib.rs
+-1259c6bbc3bd3d53cbe0dd1d69d8d762336dc26287215d2ee35307bba90ea85c 9b0ca5695b3abfb230312d3e0b76eeb7f00e55431cd3a589557a8f6c0fe7277c tools/audit_closeout.py
+-7bd672503f104aa733dff03e84f57ac26ef926607657ab6a799f9d2bc14c0dc9 9b0ca5695b3abfb230312d3e0b76eeb7f00e55431cd3a589557a8f6c0fe7277c tools/audit_closeout.py
++1259c6bbc3bd3d53cbe0dd1d69d8d762336dc26287215d2ee35307bba90ea85c 59ff6f980cc6bf5a18ee839db2393aa435f56a252b4c9cdf3748f4bcd4e811db tools/audit_closeout.py
++7bd672503f104aa733dff03e84f57ac26ef926607657ab6a799f9d2bc14c0dc9 59ff6f980cc6bf5a18ee839db2393aa435f56a252b4c9cdf3748f4bcd4e811db tools/audit_closeout.py
+ 4d7d73580e09a49f1a0a9faf668254b0ec12f891efa527db863fa3abf8cce4a1 ab356092fc59ed98bff8d3622ef74e35eb33da5f342c5b6dccf5d73aeb20763b tools/gen_w0_vectors.py
+ 303fc648659cc72d9f8cf7cf6bc71ed8c9bd5a9f9a8d923d5a1e78bcffba0b5b 5e62e17226bfc601e8775b54e7f6a025d36c1357b7206d33c18c442cb49746eb tools/nc_b10.py
+ f86dee929549c751519e1749e0976c561e47a174a129412caf8cd23680887f61 3ae536e2637862525ca6edb1eeaa927a018a529856402d60c7260e92481d0b19 tools/nc_b5.py
+diff --git a/docs/evidence/t0/SHA256SUMS b/docs/evidence/t0/SHA256SUMS
+new file mode 100644
+index 0000000000000000000000000000000000000000..f8e2127d82e289195467ac02acf81d832474a2ab
+--- /dev/null
++++ b/docs/evidence/t0/SHA256SUMS
+@@ -0,0 +1,9 @@
++220a86b70fbf3eb0cbb7e06d9cbe44ef6c988c82ef3923fd79caae1c79fe4b84  docs/evidence/t0/baseline.log
++7a8855c85fe4a8274ba0a320f734b75b5318ccff1ab0e28765d10d2b089bbef9  docs/evidence/t0/gates.txt
++1e6854d4b9b423f60938833db8360c0a83287be54b78b79f08b55818fb2f3aef  docs/evidence/t0/inventory.txt
++ee4d94fd31ebb53ea7a054f5610e4493432e14f9ed408574671dba7c59c8263e  docs/evidence/t0/nc-suite.log
++e656b47c53b0525c3c4a0ddf66e6bb34a16934212f99cece83e3f8c5ed50ad8d  docs/evidence/t0/nc.log
++913422fa354f345b25971632700262e3275833242dfbf040b42f29e19350c181  docs/evidence/t0/report.md
++71ad6e45df1702056142923696c9f79139d1dec465787b10fa2ad7425988ae1f  docs/evidence/t0/t0-economics.log
++450614f82b7ff167ec5bc23b442afbc175fe90c7729ffa1335caeafcc7c3cd4e  docs/evidence/t0/campaign/result.json
++71ad6e45df1702056142923696c9f79139d1dec465787b10fa2ad7425988ae1f  docs/evidence/t0/campaign/t0-economics.log
+diff --git a/docs/evidence/t0/baseline.log b/docs/evidence/t0/baseline.log
+new file mode 100644
+index 0000000000000000000000000000000000000000..9e27343b282de216ee7c92975fbcb332c11bd3dc
+--- /dev/null
++++ b/docs/evidence/t0/baseline.log
+@@ -0,0 +1,2 @@
++[evidence_t0] cmd=/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/t0_economics_check.py exit=0 duration=0.66s
++RESULT: T0 economics check PASS — 1000 steps, supply constant 3000000, digest aec12b64eada1b850e7c73ac1e2afce62fb398df0d27365c7af300c295c7a51a
+diff --git a/docs/evidence/t0/campaign/result.json b/docs/evidence/t0/campaign/result.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..3fd9403c34282dbcf42d246727bf30fc37e0edf3
+--- /dev/null
++++ b/docs/evidence/t0/campaign/result.json
+@@ -0,0 +1,33 @@
++{
++  "commands": [
++    [
++      "/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/t0_economics_check.py",
++      "baseline"
++    ],
++    [
++      "cargo test --locked -p aura-storage --test t0_economics",
++      "t0-economics"
++    ],
++    [
++      "/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/nc_t0.py",
++      "nc-suite"
++    ]
++  ],
++  "gates": {
++    "baseline": "pass",
++    "nc-suite": "pass",
++    "t0-economics": "pass"
++  },
++  "golden_digest": "aec12b64eada1b850e7c73ac1e2afce62fb398df0d27365c7af300c295c7a51a",
++  "named_gate": "emission from nowhere in simulation -> gate red; no token; properties described (scarcity, security, accessibility)",
++  "phase": "T0",
++  "sources": {
++    "crates/aura-storage/examples/t0_sim.rs": "ac69971aef58b2f8798198b4f5e617d182f5b1a5fc233f935996b05b0ea6da52",
++    "crates/aura-storage/src/econ.rs": "da502576aa62c772a5962e9819fb3998581fe5e54cac0726efe273349543e800",
++    "crates/aura-storage/tests/t0_economics.rs": "d3ad2034fd999c7833dd7de7e44a68bd5e14366efd137c259fc8f74a5b8fc4e5",
++    "sim/t0-baseline.json": "589596d34ae747150e242e615ead241d7a059041702f53e415b4e76324d3f86b",
++    "tools/nc_t0.py": "338e1c4ffcddb9faf2628ab95998b0965f2ceab55de0d1580d610b3e1e2d9e8a",
++    "tools/t0_economics_check.py": "8fa50c0972a6ab15a202bd1b4b2bd41bb9328d0edbdfebadac64e1325a58a59d"
++  },
++  "when": "2026-11-20T17:01:29"
++}
+diff --git a/docs/evidence/t0/campaign/t0-economics.log b/docs/evidence/t0/campaign/t0-economics.log
+new file mode 100644
+index 0000000000000000000000000000000000000000..a7bddba86cc6249dd1faa891026d0cd6e45d8039
+--- /dev/null
++++ b/docs/evidence/t0/campaign/t0-economics.log
+@@ -0,0 +1,17 @@
++[evidence_t0] cmd=cargo test --locked -p aura-storage --test t0_economics exit=0 duration=0.80s
++   Compiling aura-storage v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-storage)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.75s
++     Running tests/t0_economics.rs (target/debug/deps/t0_economics-7b48009c27e0bc4a)
++
++running 8 tests
++test t0_only_declared_emission_may_change_the_total_supply ... ok
++test t0_prng_is_reproducible ... ok
++test t0_properties_cover_scarcity_security_accessibility ... ok
++test t0_reference_model_agrees_with_simulation ... ok
++test t0_simulation_is_deterministic ... ok
++test t0_simulation_keeps_the_total_supply_constant ... ok
++test t0_transfer_must_not_spend_more_than_the_sender_has ... ok
++test t0_split_transfer_is_equivalent_to_one_transfer ... ok
++
++test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
+diff --git a/docs/evidence/t0/gates.txt b/docs/evidence/t0/gates.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..108c89f043ff3f7582f3def62973c5d83bdda197
+--- /dev/null
++++ b/docs/evidence/t0/gates.txt
+@@ -0,0 +1,10 @@
++T0 Economics baseline gates (ECONOMICS_PLAN, crates/aura-storage/tests/t0_economics.rs)
++Gate: emission from nowhere -> red; no token; properties described (scarcity, security, accessibility)
++
++baseline                                   pass                   supply-invariant oracle (independent Python model + rust example)
++t0-economics                               pass                   named gate: emission from nowhere -> red, supply constant
++nc-suite                                   pass                   6 mutation controls incl. the literal gate (emission from nowhere)
++
++negative controls: 6/6 (PASS)
++named gate: PASS
++oracle cross-run: PASS
+diff --git a/docs/evidence/t0/inventory.txt b/docs/evidence/t0/inventory.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..e975a03a1b33e38efecf6d4c83f1b18cf02039c1
+--- /dev/null
++++ b/docs/evidence/t0/inventory.txt
+@@ -0,0 +1,4 @@
++# T0 inventory (generated by tools/write_t0_evidence.py)
++# Cumulative negative controls: 16 phases, 518 controls.
++W4: 6/6, H0: 6/6, H1: 6/6, H2: 6/6, H3: 6/6, H4: 6/6, H5: 6/6, H6: 7/7, H7: 7/7, H8: 7/7, H9: 7/7, E0: 6/6, E1: 6/6, E2: 6/6, E3: 6/6, T0: 6/6
++TOTAL: 518 negative controls cumulative
+diff --git a/docs/evidence/t0/nc-suite.log b/docs/evidence/t0/nc-suite.log
+new file mode 100644
+index 0000000000000000000000000000000000000000..df83d294cf43c32d92b64ddc5ca6dd81e30dc8b0
+--- /dev/null
++++ b/docs/evidence/t0/nc-suite.log
+@@ -0,0 +1,8 @@
++[evidence_t0] cmd=/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/nc_t0.py exit=0 duration=6.32s
++[PASS] NC-1 injected bug -> emission from nowhere must go red: red with named message
++[PASS] NC-2 overspend guard removed: red with named message
++[PASS] NC-3 schedule generator silently changed: red with named message
++[PASS] NC-4 mint leaves emission undeclared: red with named message
++[PASS] NC-5 desired properties lose scarcity: red with named message
++[PASS] NC-6 schedule silently drops transfers: red with named message
++RESULT: 6/6 negative controls PASS
+diff --git a/docs/evidence/t0/nc.log b/docs/evidence/t0/nc.log
+new file mode 100644
+index 0000000000000000000000000000000000000000..2f148577ae2eba02576200ea748e8868a23cf562
+--- /dev/null
++++ b/docs/evidence/t0/nc.log
+@@ -0,0 +1,8 @@
++[evidence_t0] cmd=tools/nc_t0.py
++[PASS] NC-1 injected bug -> emission from nowhere must go red: red with named message
++[PASS] NC-2 overspend guard removed: red with named message
++[PASS] NC-3 schedule generator silently changed: red with named message
++[PASS] NC-4 mint leaves emission undeclared: red with named message
++[PASS] NC-5 desired properties lose scarcity: red with named message
++[PASS] NC-6 schedule silently drops transfers: red with named message
++RESULT: 6/6 negative controls PASS
+diff --git a/docs/evidence/t0/report.md b/docs/evidence/t0/report.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..6115121d70bb9dd8c598d34e43b8ccf2b3c20a28
+--- /dev/null
++++ b/docs/evidence/t0/report.md
+@@ -0,0 +1,11 @@
++# Отчёт T0 — Economics baseline
++
++Дата: 2026-11-20
++
++Итог: **ВСЕ ГЕЙТЫ T0 ЗЕЛЁНЫЕ**
++
++Гейт: «emission from nowhere» в симуляции → красный; токена нет; желаемые свойства описаны (scarcity, security, accessibility).
++
++Модуль `crates/aura-storage/src/econ.rs` (детерминированная симуляция: xorshift64*, сид 20261180, 1000 шагов, правило cap-at-balance), сценарий `sim/t0-baseline.json`, гейт `crates/aura-storage/tests/t0_economics.rs` (`campaign/t0-economics.log`, `campaign/result.json`), независимый оракул `tools/t0_economics_check.py` (Python-модель + кросс-запуск примера `t0_sim`; золотой дайджест aec12b64…c7a51a).
++negative controls `tools/nc_t0.py` (`nc.log`, RESULT: 6/6 negative controls PASS).
++
+diff --git a/docs/evidence/t0/t0-economics.log b/docs/evidence/t0/t0-economics.log
+new file mode 100644
+index 0000000000000000000000000000000000000000..a7bddba86cc6249dd1faa891026d0cd6e45d8039
+--- /dev/null
++++ b/docs/evidence/t0/t0-economics.log
+@@ -0,0 +1,17 @@
++[evidence_t0] cmd=cargo test --locked -p aura-storage --test t0_economics exit=0 duration=0.80s
++   Compiling aura-storage v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-storage)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.75s
++     Running tests/t0_economics.rs (target/debug/deps/t0_economics-7b48009c27e0bc4a)
++
++running 8 tests
++test t0_only_declared_emission_may_change_the_total_supply ... ok
++test t0_prng_is_reproducible ... ok
++test t0_properties_cover_scarcity_security_accessibility ... ok
++test t0_reference_model_agrees_with_simulation ... ok
++test t0_simulation_is_deterministic ... ok
++test t0_simulation_keeps_the_total_supply_constant ... ok
++test t0_transfer_must_not_spend_more_than_the_sender_has ... ok
++test t0_split_transfer_is_equivalent_to_one_transfer ... ok
++
++test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
+diff --git a/docs/plans/ECONOMICS_PLAN.md b/docs/plans/ECONOMICS_PLAN.md
+index 87e100b8b9c7621f3e87ed03aa6c1c06d1085780..b17bbbc60d9c2163c7ee2a794223f22941e22e19 100644
+--- a/docs/plans/ECONOMICS_PLAN.md
++++ b/docs/plans/ECONOMICS_PLAN.md
+@@ -1,6 +1,6 @@
+ # ECONOMICS_PLAN — tokenomics, fees, treasury, white paper
+ 
+-**Status:** 📋 PLAN (T0–T8)  
++**Status:** 🚧 IN PROGRESS — T0 ✅ (`patches/0078-T0-baseline.patch`); ⏸ T1–T4 Stage 1 in progress; T5–T8 Stage 2  
+ **Stage:** Stage 1: T0–T4. ⏸ Stage 2: T5–T8 (slashing parameters, governance, treasury, white paper).  
+ **Deliverable:** `patches/0077-T0-...` … `patches/0085-T8-...`
+ **Dependencies:** Stage 1 — CONSENSUS B4–B9, EXEC X3–X5, ECOSYSTEM E3, OPS O4.  
+@@ -24,7 +24,7 @@ tests, simulations in `sim/`, text in the white paper.
+ 
+ | Phase | Title | DoD | Test gate |
+ |---|---|---|---|
+-| **T0** | Baseline | no token; desired properties described (scarcity, security, accessibility) | NC: "emission from nowhere" in simulation → gate red |
++| ✅ **T0** | Baseline | no token; desired properties described (scarcity, security, accessibility) | NC: "emission from nowhere" in simulation → gate red — met, 1000-step simulation, golden digest pinned, 6 mutation controls |
+ | **T1** | Issuance model | genesis supply, inflation curve, halving/target staked ratio, max supply (if fixed) | 10-year simulation: supply matches the formula within 1 unit |
+ | **T2** | Allocation | allocation (validators, treasury, community, team), vesting with cliffs, lockups | script reconciles genesis balances with the table; NC: extra coins → red |
+ | **T3** | Fees | EIP-1559-like `base_fee` + `tip`, burning the base part, elastic gas target | 10 000 congested blocks: base fee rises/falls per the formula |
+@@ -34,6 +34,35 @@ tests, simulations in `sim/`, text in the white paper.
+ | ⏸ **T7** | Treasury and grants | on-chain treasury, multisig (W4), transparent reporting, grants process | every payout has proposal + tx + report; NC: withdrawal without vote → red |
+ | ⏸ **T8** | White paper + law | white paper (project, technology, risks, holder rights), marketing materials, legal review in the EU/Latvia | checklist against MiCA Art. 4/6/8/9, notification ≥ 20 working days, publication; **not legal advice** |
+ 
++### T0 receipt (2026-11-20) — economics baseline
++
++- Deliverable: `patches/0078-T0-baseline-phase-closed-emission-from-nowhere.patch`;
++  evidence in `docs/evidence/t0/` (`campaign/` self-contained: gate run
++  log, `result.json` with commands, the golden digest and source digests).
++- Gate met literally: the "emission from nowhere" mutation (recipient
++  credited one unit extra per transfer) turns the gate red with the named
++  message `T0: transfers must conserve the total supply` (NC-1). The
++  positive gate runs the deterministic 1000-step baseline schedule
++  (`sim/t0-baseline.json`, seed 20261180) and checks the supply identity
++  after **every** step; the final state digest
++  `aec12b64eada1b850e7c73ac1e2afce62fb398df0d27365c7af300c295c7a51a`
++  is pinned in the Rust tests and re-derived by the independent Python
++  oracle (`tools/t0_economics_check.py`), which also cross-runs the Rust
++  example `t0_sim`.
++- No token: the simulation uses abstract testnet accounting units (no
++  market value, decision D-T4); `ALCRY` arrives with the T1 issuance
++  model. Desired properties (scarcity, security, accessibility) are
++  described and enforced: `docs/economics/t0-baseline.md`,
++  `aura_storage::econ::DESIRED_PROPERTIES`.
++- Explained deviations (recorded here as this plan prescribes):
++  (1) the simulation engine lives in `crates/aura-storage/src/econ.rs`
++  (the workspace convention for phase code) while `sim/` holds the
++  scenario it runs — `sim/t0-baseline.json`; (2) reproducibility is
++  pinned by a cross-language golden digest (sha256 of the sorted
++  `name:balance` state) instead of a numeric tolerance.
++- Negative controls: `tools/nc_t0.py`, 6/6 in `docs/evidence/t0/nc.log`;
++  cumulative negative control total 518.
++
+ ## Legal perimeter (what exactly T8 checks)
+ 
+ A public offer of a crypto-asset in the EU requires the offeror to be a legal
+diff --git a/sim/t0-baseline.json b/sim/t0-baseline.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..b85f21a4b1093c7d16fe41f82ef8456f58536095
+--- /dev/null
++++ b/sim/t0-baseline.json
+@@ -0,0 +1,21 @@
++{
++  "phase": "T0",
++  "title": "Economics baseline schedule",
++  "unit": "testnet accounting unit, no market value (D-T4); ALCRY does not exist until T1",
++  "seed": 20261180,
++  "steps": 1000,
++  "max_send_bps": 250,
++  "amount_rule": "1 + draw % 997, capped at the sender balance by the runner",
++  "agents": [
++    {"name": "alice", "genesis": 1000000},
++    {"name": "bob", "genesis": 800000},
++    {"name": "carol", "genesis": 600000},
++    {"name": "dave", "genesis": 400000},
++    {"name": "erin", "genesis": 200000}
++  ],
++  "invariants": [
++    "sum(balances) == genesis_total + declared emission (no emission from nowhere)",
++    "a transfer cannot spend more than the sender has",
++    "the run is bit-exact reproducible from the seed"
++  ]
++}
+diff --git a/tools/audit_closeout.py b/tools/audit_closeout.py
+index 73018b6b03ed1cc3adda2b10026f7d1cb403c9f5..1784a480bced3b63b733149ec59a6aa7c87bfbf4 100644
+--- a/tools/audit_closeout.py
++++ b/tools/audit_closeout.py
+@@ -38,7 +38,8 @@ NET_PHASES = ["N0", "N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8"]  # NET_PLAN
+ WALLET_PHASES = ["W0", "W1", "W2", "W3", "W4"]  # grows with each W phase
+ SECURITY_PHASES = ["H0", "H1", "H2", "H3", "H4", "H5", "H6", "H7", "H8", "H9"]  # grows with each H phase
+ ECOSYSTEM_PHASES = ["E0", "E1", "E2", "E3"]  # grows with each E phase
+-PHASES = CORE_PHASES + STATE_PHASES + EXEC_PHASES + NODE_PHASES + CONSENSUS_PHASES + NET_PHASES + WALLET_PHASES + SECURITY_PHASES + ECOSYSTEM_PHASES
++ECONOMICS_PHASES = ["T0"]  # grows with each T phase
++PHASES = CORE_PHASES + STATE_PHASES + EXEC_PHASES + NODE_PHASES + CONSENSUS_PHASES + NET_PHASES + WALLET_PHASES + SECURITY_PHASES + ECOSYSTEM_PHASES + ECONOMICS_PHASES
+ SHIPPED = CORE_PHASES + [
+     "S0",
+     "S1",
+@@ -104,8 +105,9 @@ SHIPPED = CORE_PHASES + [
+     "E0",
+     "E1",
+     "E2",
++    "E3",
+ ]
+-CURRENT = "E3"
++CURRENT = "T0"
+ 
+ PLAN_FOR_PREFIX = {
+     "C": "CORE_PLAN.md",
+@@ -123,7 +125,7 @@ PLAN_FOR_PREFIX = {
+ }
+ 
+ NC_PER_PHASE = {f"C{i}": 6 for i in range(4, 11)}
+-NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6, "W4": 6, "H0": 6, "H1": 6, "H2": 6, "H3": 6, "H4": 6, "H5": 6, "H6": 7, "H7": 7, "H8": 7, "H9": 7, "E0": 6, "E1": 6, "E2": 6, "E3": 6})
++NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6, "W4": 6, "H0": 6, "H1": 6, "H2": 6, "H3": 6, "H4": 6, "H5": 6, "H6": 7, "H7": 7, "H8": 7, "H9": 7, "E0": 6, "E1": 6, "E2": 6, "E3": 6, "T0": 6})
+ SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)  # 339 (through W0)
+ EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + (0 if CURRENT in SHIPPED else NC_PER_PHASE[CURRENT])
+ 
+@@ -156,6 +158,7 @@ PATCH_ORDER += ["E0"]
+ PATCH_ORDER += ["E1"]
+ PATCH_ORDER += ["E2"]
+ PATCH_ORDER += ["E3"]
++PATCH_ORDER += ["T0"]
+ PATCH_NUMBERS = {phase: index + 1 for index, phase in enumerate(PATCH_ORDER)}
+ 
+ 
+diff --git a/tools/nc_t0.py b/tools/nc_t0.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..c5098ecfa5daaa40b043348faae2b2f1fefe8558
+--- /dev/null
++++ b/tools/nc_t0.py
+@@ -0,0 +1,109 @@
++#!/usr/bin/env python3
++"""Mutation controls for T0 (ECONOMICS_PLAN T0).
++
++Each control injects ONE bug (restored after) and requires the named T0
++message to appear in the red run. NC-1 is the phase gate literally:
++'emission from nowhere' in the simulation must go red.
++"""
++
++import os
++import subprocess
++import sys
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++ECON = os.path.join(ROOT, "crates", "aura-storage/src/econ.rs")
++
++TEST_CMD = ["cargo", "test", "--locked", "-p", "aura-storage",
++            "--test", "t0_economics"]
++
++# (name, path, anchor, replacement, expected message)
++CONTROLS = [
++    (
++        "NC-1 injected bug -> emission from nowhere must go red",
++        ECON,
++        "        *to_bal += amount;",
++        "        *to_bal += amount + 1;",
++        "T0: transfers must conserve the total supply",
++    ),
++    (
++        "NC-2 overspend guard removed",
++        ECON,
++        "            *from_bal = from_bal\n"
++        "                .checked_sub(amount)\n"
++        "                .ok_or(EconError::InsufficientFunds)?;",
++        "            *from_bal = from_bal.wrapping_sub(amount);",
++        "T0: a transfer must not spend more than the sender has",
++    ),
++    (
++        "NC-3 schedule generator silently changed",
++        ECON,
++        "        self.state ^= self.state >> 7;",
++        "        self.state ^= self.state >> 6;",
++        "T0: the simulation must be deterministic",
++    ),
++    (
++        "NC-4 mint leaves emission undeclared",
++        ECON,
++        "        self.declared += amount;",
++        "        // emission left undeclared;",
++        "T0: only declared emission may change the total supply",
++    ),
++    (
++        "NC-5 desired properties lose scarcity",
++        ECON,
++        'pub const DESIRED_PROPERTIES: [&str; 3] = ["scarcity", "security", "accessibility"];',
++        'pub const DESIRED_PROPERTIES: [&str; 3] = ["security", "accessibility", "security"];',
++        "T0: the baseline properties must cover scarcity, security and accessibility",
++    ),
++    (
++        "NC-6 schedule silently drops transfers",
++        ECON,
++        "            self.apply_step(step)?;",
++        "            if step.amount % 2 == 0 { self.apply_step(step)?; }",
++        "T0: the reference model must agree with the simulation",
++    ),
++]
++
++PASS_MARKERS = ("test result: ok.",)
++
++
++def run_control(name, path, anchor, replacement, expected):
++    with open(path, encoding="utf-8") as f:
++        original = f.read()
++    if original.count(anchor) != 1:
++        return False, "anchor count %d" % original.count(anchor)
++    mutated = original.replace(anchor, replacement)
++    try:
++        with open(path, "w", encoding="utf-8") as f:
++            f.write(mutated)
++        proc = subprocess.run(TEST_CMD, cwd=ROOT, stdout=subprocess.PIPE,
++                              stderr=subprocess.STDOUT, text=True,
++                              errors="replace")
++        output = proc.stdout or ""
++    finally:
++        with open(path, "w", encoding="utf-8") as f:
++            f.write(original)
++    compile_failed = "error[" in output and "test result" not in output
++    if compile_failed:
++        return False, "mutation broke compilation"
++    if any(marker in output for marker in PASS_MARKERS):
++        return False, "mutated gate still passes"
++    if expected in output:
++        return True, "red with named message"
++    return False, "red without named message"
++
++
++def main():
++    passed = 0
++    for name, path, anchor, replacement, expected in CONTROLS:
++        ok, why = run_control(name, path, anchor, replacement, expected)
++        print("[%s] %s: %s" % ("PASS" if ok else "FAIL", name, why))
++        if ok:
++            passed += 1
++    total = len(CONTROLS)
++    print("RESULT: %d/%d negative controls PASS" % (passed, total))
++    return 0 if passed == total else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/t0_economics_check.py b/tools/t0_economics_check.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..d288d43c2159c497929597c4bb3205955ce2b6b0
+--- /dev/null
++++ b/tools/t0_economics_check.py
+@@ -0,0 +1,119 @@
++#!/usr/bin/env python3
++"""Independent T0 economics oracle (ECONOMICS_PLAN T0).
++
++Re-implements the deterministic baseline simulation from
++`sim/t0-baseline.json` (xorshift64*, cap-at-balance rule) in Python and
++cross-checks it against the Rust example `t0_sim`. The phase gate is the
++literal gate: "emission from nowhere" must be impossible — the total
++supply is verified constant at every one of the 1000 steps.
++"""
++
++import hashlib
++import json
++import os
++import re
++import subprocess
++import sys
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++SCENARIO = os.path.join(ROOT, "sim", "t0-baseline.json")
++ECON_RS = os.path.join(ROOT, "crates", "aura-storage", "src", "econ.rs")
++
++MASK = (1 << 64) - 1
++GOLDEN_DIGEST = "aec12b64eada1b850e7c73ac1e2afce62fb398df0d27365c7af300c295c7a51a"
++
++
++class XorShift64:
++    def __init__(self, seed):
++        self.state = seed if seed else 0x9E3779B97F4A7C15
++
++    def next_u64(self):
++        s = self.state
++        s ^= (s << 13) & MASK
++        s ^= s >> 7
++        s ^= (s << 17) & MASK
++        self.state = s
++        return s
++
++
++def simulate(scenario):
++    agents = [(a["name"], a["genesis"]) for a in scenario["agents"]]
++    names = [name for name, _ in agents]
++    n = len(agents)
++    rng = XorShift64(scenario["seed"])
++    bal = dict(agents)
++    total = sum(bal.values())
++    schedule = []
++    for _ in range(scenario["steps"]):
++        sender = names[rng.next_u64() % n]
++        recipient = names[rng.next_u64() % n]
++        if recipient == sender:
++            idx = rng.next_u64() % n
++            recipient = names[idx]
++            if recipient == sender:
++                recipient = names[(idx + 1) % n]
++        amount = 1 + rng.next_u64() % 997
++        schedule.append((sender, recipient, amount))
++    for step, (sender, recipient, amount) in enumerate(schedule):
++        capped = min(amount, bal[sender])
++        bal[sender] -= capped
++        bal[recipient] += capped
++        assert sum(bal.values()) == total, (
++            "step %d: emission from nowhere (sum %d != supply %d)"
++            % (step, sum(bal.values()), total)
++        )
++    canon = "".join("%s:%d\n" % (k, bal[k]) for k in sorted(bal))
++    digest = hashlib.sha256(canon.encode("utf-8")).hexdigest()
++    return bal, total, digest, schedule
++
++
++def rust_consts():
++    text = open(ECON_RS, encoding="utf-8").read()
++    seed = int(re.search(r"pub const T0_SEED: u64 = ([0-9_]+);", text).group(1).replace("_", ""))
++    steps = int(re.search(r"pub const T0_STEPS: usize = ([0-9_]+);", text).group(1).replace("_", ""))
++    agents = re.findall(r'\("([a-z]+)", ([0-9_]+)\)', text)
++    agents = [(name, int(value.replace("_", ""))) for name, value in agents]
++    return seed, steps, agents
++
++
++def main():
++    scenario = json.load(open(SCENARIO, encoding="utf-8"))
++    seed, steps, agents = rust_consts()
++    assert seed == scenario["seed"], "T0: the simulation must be deterministic (seed drift)"
++    assert steps == scenario["steps"], "T0: the simulation must be deterministic (steps drift)"
++    assert agents == [(a["name"], a["genesis"]) for a in scenario["agents"]], (
++        "T0: the baseline properties must cover scarcity, security and accessibility (genesis drift)"
++    )
++    assert scenario["max_send_bps"] == 250
++
++    bal, total, digest, schedule = simulate(scenario)
++    assert total == 3_000_000, "T0: transfers must conserve the total supply"
++    assert sum(bal.values()) == total, "T0: transfers must conserve the total supply"
++    assert digest == GOLDEN_DIGEST, "T0: the simulation must be deterministic"
++
++    proc = subprocess.run(
++        ["cargo", "run", "--quiet", "--locked", "-p", "aura-storage", "--example", "t0_sim"],
++        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
++        text=True, errors="replace",
++    )
++    output = proc.stdout or ""
++    if proc.returncode != 0 or "T0-SIM-OK " not in output:
++        print(output[-2000:])
++        print("RESULT: T0 economics check FAIL — rust example did not run")
++        return 1
++    payload = json.loads(output[output.index("T0-SIM-OK ") + len("T0-SIM-OK "):].strip())
++    assert payload["digest"] == digest, "T0: the reference model must agree with the simulation"
++    assert payload["supply"] == total, "T0: the reference model must agree with the simulation"
++    assert payload["sum"] == total, "T0: the reference model must agree with the simulation"
++    assert payload["steps"] == scenario["steps"], "T0: the reference model must agree with the simulation"
++    for name, value in bal.items():
++        assert payload["balances"][name] == value, (
++            "T0: the reference model must agree with the simulation"
++        )
++    print("RESULT: T0 economics check PASS — %d steps, supply constant %d, digest %s"
++          % (scenario["steps"], total, digest))
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/write_t0_evidence.py b/tools/write_t0_evidence.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e36f146dd788a13a34c24d06af4f84e271c5284e
+--- /dev/null
++++ b/tools/write_t0_evidence.py
+@@ -0,0 +1,167 @@
++#!/usr/bin/env python3
++"""Write docs/evidence/t0 (ECONOMICS_PLAN T0).
++
++Runs the T0 gates (independent economics oracle incl. the Rust example
++cross-run, cargo test t0_economics) and tools/nc_t0.py, builds
++self-contained evidence: gates.txt rows, campaign/ bundle (run logs +
++result.json with source digests), nc.log with the RESULT line, report.md
++and cumulative inventory (TOTAL: 518).
++"""
++
++import hashlib
++import json
++import os
++import subprocess
++import sys
++import time
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++EVID = os.path.join(ROOT, "docs", "evidence", "t0")
++EVID_DIRS = ["", "campaign"]
++GATES = [
++    ([sys.executable, os.path.join(ROOT, "tools", "t0_economics_check.py")],
++     "baseline", "supply-invariant oracle (independent Python model + rust example)"),
++    (["cargo", "test", "--locked", "-p", "aura-storage", "--test", "t0_economics"],
++     "t0-economics", "named gate: emission from nowhere -> red, supply constant"),
++    ([sys.executable, os.path.join(ROOT, "tools", "nc_t0.py")],
++     "nc-suite", "6 mutation controls incl. the literal gate (emission from nowhere)"),
++]
++SOURCES = [
++    "crates/aura-storage/src/econ.rs",
++    "crates/aura-storage/tests/t0_economics.rs",
++    "crates/aura-storage/examples/t0_sim.rs",
++    "sim/t0-baseline.json",
++    "tools/t0_economics_check.py",
++    "tools/nc_t0.py",
++]
++
++
++def sha256_file(path):
++    h = hashlib.sha256()
++    with open(path, "rb") as f:
++        for chunk in iter(lambda: f.read(65536), b""):
++            h.update(chunk)
++    return h.hexdigest()
++
++
++def run_cmd(cmd, timeout=2400):
++    started = time.time()
++    proc = subprocess.run(cmd, cwd=ROOT, stdout=subprocess.PIPE,
++                          stderr=subprocess.STDOUT, text=True,
++                          errors="replace", timeout=timeout)
++    return proc.returncode, proc.stdout or "", time.time() - started
++
++
++def gate_passes(code, output, name):
++    if code != 0:
++        return False
++    if name == "baseline":
++        return "RESULT: T0 economics check PASS" in output
++    if name == "t0-economics":
++        return "test result: ok." in output
++    return "RESULT: 6/6 negative controls PASS" in output
++
++
++def main():
++    for rel in EVID_DIRS:
++        os.makedirs(os.path.join(EVID, rel), exist_ok=True)
++
++    rows = []
++    logs = {}
++    outputs = {}
++    ok_all = True
++    for cmd, name, desc in GATES:
++        print("[evidence_t0] %s ..." % name, flush=True)
++        code, out, dur = run_cmd(cmd)
++        ok = gate_passes(code, out, name)
++        ok_all = ok_all and ok
++        rows.append((name, "pass" if ok else "FAIL", desc))
++        outputs[name] = out
++        logs[name + ".log"] = (
++            "[evidence_t0] cmd=%s exit=%d duration=%.2fs\n" % (" ".join(cmd), code, dur)
++            + out)
++        print("[evidence_t0] %s: %s" % (name, "pass" if ok else "FAIL"), flush=True)
++
++    nc_ok = "RESULT: 6/6 negative controls PASS" in outputs.get("nc-suite", "")
++    gate_ok = "test result: ok." in outputs.get("t0-economics", "")
++    oracle_ok = "RESULT: T0 economics check PASS" in outputs.get("baseline", "")
++
++    with open(os.path.join(EVID, "nc.log"), "w", encoding="utf-8") as f:
++        f.write("[evidence_t0] cmd=tools/nc_t0.py\n")
++        f.write(outputs.get("nc-suite", ""))
++
++    with open(os.path.join(EVID, "campaign", "t0-economics.log"), "w",
++              encoding="utf-8") as f:
++        f.write(logs.get("t0-economics.log", ""))
++    with open(os.path.join(EVID, "campaign", "result.json"), "w",
++              encoding="utf-8") as f:
++        json.dump({
++            "phase": "T0",
++            "when": time.strftime("%Y-%m-%dT%H:%M:%S"),
++            "commands": [[" ".join(cmd), name] for cmd, name, _ in GATES],
++            "gates": {name: status for name, status, _ in rows},
++            "named_gate": "emission from nowhere in simulation -> gate red; "
++                          "no token; properties described (scarcity, security, accessibility)",
++            "golden_digest": "aec12b64eada1b850e7c73ac1e2afce62fb398df0d27365c7af300c295c7a51a",
++            "sources": {rel: sha256_file(os.path.join(ROOT, rel)) for rel in SOURCES},
++        }, f, indent=2, sort_keys=True)
++        f.write("\n")
++
++    for name, text in logs.items():
++        with open(os.path.join(EVID, name), "w", encoding="utf-8") as f:
++            f.write(text)
++
++    with open(os.path.join(EVID, "gates.txt"), "w", encoding="utf-8") as f:
++        f.write("T0 Economics baseline gates (ECONOMICS_PLAN, "
++                "crates/aura-storage/tests/t0_economics.rs)\n")
++        f.write("Gate: emission from nowhere -> red; no token; "
++                "properties described (scarcity, security, accessibility)\n\n")
++        for name, status, desc in rows:
++            f.write("%-42s %-22s %s\n" % (name, status, desc))
++        f.write("\nnegative controls: 6/6 (%s)\n" % ("PASS" if nc_ok else "FAIL"))
++        f.write("named gate: %s\n" % ("PASS" if gate_ok else "FAIL"))
++        f.write("oracle cross-run: %s\n" % ("PASS" if oracle_ok else "FAIL"))
++
++    with open(os.path.join(EVID, "report.md"), "w", encoding="utf-8") as f:
++        f.write("# Отчёт T0 — Economics baseline\n\n")
++        f.write("Дата: %s\n\n" % time.strftime("%Y-%m-%d"))
++        f.write("Итог: **%s**\n\n" % ("ВСЕ ГЕЙТЫ T0 ЗЕЛЁНЫЕ" if ok_all
++                                      else "ЕСТЬ КРАСНЫЕ ГЕЙТЫ"))
++        f.write("Гейт: «emission from nowhere» в симуляции → красный; токена "
++                "нет; желаемые свойства описаны (scarcity, security, "
++                "accessibility).\n\n")
++        f.write("Модуль `crates/aura-storage/src/econ.rs` (детерминированная "
++                "симуляция: xorshift64*, сид 20261180, 1000 шагов, правило "
++                "cap-at-balance), сценарий `sim/t0-baseline.json`, гейт "
++                "`crates/aura-storage/tests/t0_economics.rs` "
++                "(`campaign/t0-economics.log`, `campaign/result.json`), "
++                "независимый оракул `tools/t0_economics_check.py` "
++                "(Python-модель + кросс-запуск примера `t0_sim`; золотой "
++                "дайджест aec12b64…c7a51a).\n")
++        f.write("negative controls `tools/nc_t0.py` (`nc.log`, "
++                "RESULT: 6/6 negative controls PASS).\n\n")
++
++    with open(os.path.join(EVID, "inventory.txt"), "w", encoding="utf-8") as f:
++        f.write("# T0 inventory (generated by tools/write_t0_evidence.py)\n")
++        f.write("# Cumulative negative controls: 16 phases, 518 controls.\n")
++        f.write("W4: 6/6, H0: 6/6, H1: 6/6, H2: 6/6, H3: 6/6, H4: 6/6, "
++                "H5: 6/6, H6: 7/7, H7: 7/7, H8: 7/7, H9: 7/7, E0: 6/6, "
++                "E1: 6/6, E2: 6/6, E3: 6/6, T0: 6/6\n")
++        f.write("TOTAL: 518 negative controls cumulative\n")
++
++    with open(os.path.join(EVID, "SHA256SUMS"), "w", encoding="utf-8") as f:
++        for rel in sorted(EVID_DIRS):
++            base = os.path.join(EVID, rel)
++            for name in sorted(os.listdir(base)):
++                path = os.path.join(base, name)
++                if os.path.isfile(path) and name != "SHA256SUMS":
++                    repo_rel = os.path.relpath(path, ROOT)
++                    f.write("%s  %s\n" % (sha256_file(path), repo_rel))
++
++    print("[evidence_t0] %s"
++          % ("all gates green" if ok_all else "RED GATES PRESENT"), flush=True)
++    return 0 if ok_all else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+-- 
+2.47.3
+

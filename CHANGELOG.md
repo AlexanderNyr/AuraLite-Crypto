@@ -3,6 +3,348 @@
 All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
 never rewritten: corrections are made with a new entry or an explicit note.
 
+## [T8 — White paper and law phase closed: MiCA checklist Art. 4/6/8/9, notification >= 20 working days, publication; not legal advice] 2026-11-22
+
+### Added
+
+- `docs/whitepaper.md` — the crypto-asset white paper (project,
+  technology, risks, holder rights; summary, table of contents,
+  notification-date field per Art. 6) with every quantitative claim
+  traceable to a pinned model constant; `docs/marketing.md` — marketing
+  materials with the mandatory disclaimer and the after-publication
+  rule (Art. 7); `docs/legal-review.md` — the EU/Latvia review
+  perimeter: the 12-point MiCA checklist (Regulation (EU) 2023/1114
+  Art. 4/6/8/9) with per-item status. **Not legal advice** (D-T4); no
+  income promises (D-T2).
+- `crates/aura-storage/src/whitepaper.rs` — the MiCA white paper
+  machine: Art. 4 (offeror is a legal person; paper drawn up/notified/
+  published), Art. 6 (four sections + claims pinned to `MAX_SUPPLY`,
+  `GENESIS_SUPPLY`, `T3_INITIAL_BASE_FEE`, `T6_PROPOSAL_THRESHOLD`,
+  `T7_SIGNER_THRESHOLD`), Art. 8 (`T8_NOTICE_WORKING_DAYS = 20` working
+  days — boundary: exactly 20 passes, 19 is red), Art. 9 (publication
+  before the offer starts; published version identical to the notified
+  one), Art. 7 (marketing references the published white paper and
+  follows it), mandatory `T8_NOT_LEGAL_ADVICE` disclaimer.
+- `crates/aura-storage/tests/t8_whitepaper.rs` (10 gate tests: the
+  four-article checklist walk, claim traceability, the 20-working-day
+  boundary, publication/marketing/disclaimer gates, pinned digest;
+  metamorphisms — claim reordering, section order), the example
+  `t8_whitepaper_example` (`T8-SIM-OK`), `sim/t8-whitepaper.json` (8
+  documents, 77 steps, outcomes `[0, 2, 3, 4, 7, 6, 1, 9]`) with golden
+  digest `03a859433b58f14d6ad538faf2f3b504631c8b05707856a6ef1580694a89396f`
+  and `docs/economics/t8-whitepaper.md`.
+- `tools/t8_whitepaper_check.py` (the phase gate oracle: independent
+  step-log model, same digest), `tools/nc_t8.py` (7 mutation controls:
+  unverified claim accepted, legal-person/notice-window/publication/
+  marketing/disclaimer gates disabled, parameter drift),
+  `tools/write_t8_evidence.py` (`docs/evidence/t8/`, cumulative
+  inventory `TOTAL: 572 negative controls over 25 phases`).
+- Wiring: Makefile `white paper gate (T8)` + `test-t8/check-t8/
+  examples-t8/nc-t8/evidence-t8`; `tools/audit_closeout.py`
+  (`CURRENT = "T8"`, `SHIPPED` += T7, `ECONOMICS_PHASES` += T7+T8,
+  `NC_PER_PHASE["T8"] = 7`, `PATCH_ORDER` += T7+T8); `### T8 receipt`
+  in `docs/plans/ECONOMICS_PLAN.md`.
+
+### Restored
+
+- The workspace was reset mid-session (reset #10: `crates/` reverted to
+  the github state, `.git` and `cargo` removed). The T0–T7 tree was
+  restored from the delivered combined delta
+  (`AuraLite-T7-delta/AuraLite-T0-T7-vs-github-e1a5b56.patch`) as
+  commit `983196e` «T0 - T7 update» (byte-identical to the T7 canon
+  `6e69f32` of the pre-reset chain) and Rust 1.99.1 was reinstalled.
+
+## [T7 — Treasury and grants phase closed: every payout has proposal + tx + report, withdrawal without vote rejected, multisig 2-of-3 (W4)] 2026-11-21
+
+### Added
+
+- `crates/aura-storage/src/treasury.rs` — the T7 Treasury: an on-chain
+  treasury with a signed `i128` balance (an overdraw is visible and
+  rejected), a council of 5 (strict majority) voting payout proposals,
+  a multisig of 3 with threshold 2 (decision W4) and the lifecycle
+  propose -> vote -> finalize -> approve -> execute. Every payout has
+  **proposal + tx + report**: a numbered tx and a transparent
+  `Report {tx_id, proposal_id, amount, recipient, purpose, height}`;
+  a withdrawal without a passed vote is rejected (`NoVote`); a payout
+  cannot execute twice (`AlreadyExecuted`); a rejected proposal never
+  pays (`Rejected`); the treasury cannot overdraw
+  (`InsufficientFunds`).
+- `crates/aura-storage/tests/t7_treasury.rs` (10 gate tests + 2
+  metamorphisms), the example `t7_treasury_example` (`T7-SIM-OK`),
+  `sim/t7-treasury.json` (10 proposals, 82 steps, 6 payouts; final
+  balance 225 000 ALCRY, 475 000 ALCRY paid) with golden digest
+  `719c93b244ff42ebf94538a5e9fb5b9e8f52eac07035abaf3c526e4c0a3231f7`
+  and `docs/economics/t7-treasury.md`.
+- `tools/t7_treasury_check.py` (independent oracle, same digest),
+  `tools/nc_t7.py` (7 mutation controls incl. the literal
+  withdrawal-without-vote rejection), `tools/write_t7_evidence.py`
+  (`docs/evidence/t7/`, cumulative `TOTAL: 565 negative controls over
+  24 phases`).
+- Wiring: Makefile `treasury gate (T7)` + `test-t7/check-t7/examples-t7/
+  nc-t7/evidence-t7`; `tools/audit_closeout.py` (`CURRENT = "T7"`,
+  `SHIPPED` += T6, `NC_PER_PHASE["T7"] = 7`); `### T7 receipt` in
+  `docs/plans/ECONOMICS_PLAN.md`.
+
+### Restored
+
+- The workspace was reset mid-session (reset #9: `crates/` reverted to
+  the github state, `.git` and `cargo` removed; the plain combined
+  delta was deleted while its `.xz` survived). The T0–T6 tree was
+  restored from `AuraLite-T6-delta/AuraLite-T0-T6-vs-github-e1a5b56.patch`
+  as commit `b0b6150` «T0 - T6 update» (byte-identical to the T6 canon
+  `407fe8d`) and Rust 1.99.1 was reinstalled.
+
+## [T6 — Governance phase closed: 20 proposals, valid ones pass, flash-stake attack rejected, 48 h timelock, veto sunset] 2026-11-21
+
+### Added
+
+- `crates/aura-storage/src/governance.rs` — governance model: proposal
+  threshold 10 000 `ALCRY`; quorum 2000 bps of the power snapshot
+  (strict `yes > no`, a tie is rejected; abstain counts for the quorum
+  only); voting period 120 960 blocks (7 days at 5 s) as the half-open
+  window `[created, created + period)`; **48 h timelock** (34 560
+  blocks) before execution; emergency veto with a **sunset** at block
+  1 521 000; votes carry the **snapshot** power of the proposal's
+  creation block — a flash-stake after the snapshot has no power and is
+  rejected (`NoVotingPower`).
+- `crates/aura-storage/tests/t6_governance.rs` (10 gate tests: the
+  literal 20-proposal gate, flash-stake rejection, threshold/quorum/
+  voting-period/timelock/veto-sunset boundaries incl. exact edges,
+  pinned digest; metamorphisms — vote reordering, late stake vs
+  snapshot) and `crates/aura-storage/examples/t6_governance_example.rs`.
+- `sim/t6-governance.json` — the pinned scenario (20 proposals, 113
+  steps: 15 executed, 4 rejected, 1 vetoed) with golden digest
+  `828b13cf7ca3abcaea65386f7c62e1e155f4d207cb000aceccd86397b5c729aa`
+  and checkpoints; `docs/economics/t6-governance.md`.
+- `tools/t6_governance_check.py` (the phase gate oracle: full model
+  re-implementation, constants, samples, Rust example cross-run),
+  `tools/nc_t6.py` (8 mutation controls: pass condition flipped,
+  snapshot replaced by live stake, threshold/window/quorum/timelock/
+  sunset disabled or drifted, parameter drift), `tools/write_t6_evidence.py`
+  (`docs/evidence/t6/`, cumulative inventory
+  `TOTAL: 558 negative controls over 23 phases`).
+- Wiring: Makefile `governance gate (T6)` + `test-t6/check-t6/examples-t6/
+  nc-t6/evidence-t6`; `tools/audit_closeout.py` (`CURRENT = "T6"`,
+  `SHIPPED` += T5, `NC_PER_PHASE["T6"] = 8`, `PATCH_ORDER` += T6);
+  `### T6 receipt` in `docs/plans/ECONOMICS_PLAN.md`.
+
+### Restored
+
+- The workspace was reset mid-session (reset #8: `crates/` reverted to
+  the github state, `cargo` removed). The T0–T5 tree was restored from
+  the delivered combined delta
+  (`AuraLite-T5-delta/AuraLite-T0-T5-vs-github-e1a5b56.patch`) as
+  commit `e559d94` «T0 - T5 update» (byte-identical to the T5 canon
+  `9b648b6` of the pre-reset chain) and Rust 1.99.1 was reinstalled.
+
+## [T5 — Slashing and insurance phase closed: 7 scenarios, penalty ≥ damage, insurance fund never negative, mass-slash cap with a deferred queue] 2026-11-21
+
+### Added
+
+- `crates/aura-storage/src/slashing.rs` — slashing and insurance model:
+  penalty parameters (`T5_PENALTY_BPS = 15_000`: the offender pays 150 %
+  of the measured damage, `penalty >= damage` at every incident);
+  insurance fund (`T5_FUND_SHARE_BPS = 5_000` of every applied penalty
+  replenishes the fund; victims are covered `min(damage, balance)`, the
+  rest is recorded as `shortfall`; the balance is a signed `i128` and
+  must **never go negative**); mass-slash protection
+  (`T5_MASS_SLASH_CAP_BPS = 500` of the registered bonded base
+  `T5_REGISTERED_BONDED` = 1 000 000 `ALCRY` per window; excess penalty
+  is deferred — never dropped — and drains over windows until
+  `total_applied == total_penalty`).
+- `crates/aura-storage/tests/t5_slashing.rs` (10 gate tests: the literal
+  7-scenario gate with both invariants at every step, penalty coverage,
+  fund-never-negative, the mass-slash cap, deferred penalties, exact
+  penalty margin incl. floor edges, exact fund share, pinned digest;
+  metamorphisms — splitting a report, reordering independent reports)
+  and `crates/aura-storage/examples/t5_slashing_example.rs`.
+- `sim/t5-slashing.json` — the pinned scenario (7 scenarios, 87 steps,
+  48 incidents) with golden digest
+  `4cc9ea0319374c3c2c74bc88db6d7747b23f0e21ea637ae2270bc4c5707c9cef`
+  and checkpoints; `docs/economics/t5-slashing.md`.
+- `tools/t5_slashing_check.py` (the phase gate oracle: full model
+  re-implementation, constants, samples, Rust example cross-run),
+  `tools/nc_t5.py` (7 mutation controls: penalty below damage, coverage
+  clamp removed, mass-slash cap raised, deferred penalty dropped, fund
+  income off by one, penalty formula drift, pinned parameter drift),
+  `tools/write_t5_evidence.py` (`docs/evidence/t5/`, cumulative
+  inventory `TOTAL: 550 negative controls over 22 phases`).
+- Wiring: Makefile `slashing gate (T5)` + `test-t5/check-t5/examples-t5/
+  nc-t5/evidence-t5`; `tools/audit_closeout.py` (`CURRENT = "T5"`,
+  `SHIPPED` += T4, `NC_PER_PHASE["T5"] = 7`, `PATCH_ORDER` += T5);
+  `### T5 receipt` in `docs/plans/ECONOMICS_PLAN.md` (Stage 2 opened).
+
+## [T4 — Staking phase closed: 1000 delegators, shares sum to exactly one, withdrawal without unbonding red, 21-day unbonding, proportional slashing; Stage 1 (T0–T4) complete] 2026-11-21
+
+### Added
+
+- `crates/aura-storage/src/staking.rs` — share-based staking model:
+  min stake 1 000 `ALCRY`; delegation mints shares (rewards compound
+  into the pool, share counts never move — `Σ shares == total_shares`
+  exactly); validator commission 1000 bps **from rewards only**;
+  unbonding 21 days (362 880 blocks at 5 s) with `NoUnbonding`/
+  `StillUnbonding` rejections on early or unbacked withdrawals;
+  slashing period = the unbonding window, `slash(rate_bps)` cuts bonded
+  and unbonding stake proportionally.
+- `crates/aura-storage/tests/t4_staking.rs` (10 gate tests: the
+  1000-delegator shares-sum gate, withdrawal-without-unbonding
+  rejection, the exact 21-day boundary, commission split, min stake,
+  proportional slash incl. 0 %/100 %, slashability of unbonding stake,
+  pinned digest; metamorphisms — split delegations, slash composition)
+  and `crates/aura-storage/examples/t4_staking_example.rs`.
+- `sim/t4-staking.json` — the pinned scenario (2004 steps) with golden
+  digest
+  `e80662c82c74e1d1a0a5b0624beb4cf08af88c24f8091751c277cc7ea6887f07`
+  and checkpoints; `docs/economics/t4-staking.md`.
+- `tools/t4_staking_check.py` (the phase gate oracle: full model
+  re-implementation, constants, samples, Rust example cross-run),
+  `tools/nc_t4.py` (7 mutation controls: share accounting,
+  withdraw-without-unbonding, unbonding window, double commission,
+  min stake, slash proportionality, parameter drift),
+  `tools/write_t4_evidence.py` and the self-contained evidence in
+  `docs/evidence/t4/` (`campaign/`).
+- Makefile targets `test-t4 check-t4 examples-t4 nc-t4 evidence-t4`;
+  `make test` gains the "staking gate (T4)"; `tools/audit_closeout.py`
+  tracks `ECONOMICS_PHASES = [..., "T4"]` (`CURRENT = "T4"`, NC 7,
+  patch order T4). Inventory: 81 phases, 543 negative controls
+  cumulative. **Stage 1 of ECONOMICS_PLAN (T0–T4) is complete.**
+
+### Fixed
+
+- (none)
+
+### Security
+
+- T4 replaces no crypto. Rewards are variable parameters, never
+  promised income (D-T2); parameters stay governance-locked (D-T1) and
+  are simulated on change (D-T3). Every T4 control is mutation-based
+  (`tools/nc_t4.py`, 7/7 — the standard's 6 plus slash
+  proportionality, H6–H9 precedent).
+
+## [T3 — Fees phase closed: base fee follows the EIP-1559 formula over 10 000 congested blocks, base burned, tips to validators, 6 mutation controls] 2026-11-21
+
+### Added
+
+- `crates/aura-storage/src/fees.rs` — EIP-1559-like fee market:
+  `base_fee` + `tip`, integer formula `base ±
+  max(base·|gas−target|/target/8, 1)` (unchanged at target), the base
+  part **burned** (`paid == burned + tips`) and only the tip credited to
+  the validator; elastic gas target 15 000 000 (block limit 30 000 000,
+  elasticity 2) enforced by `check_gas`. Pinned scenario `t3_demand`
+  (250-block segments +25 %/−25 %/+50 %/−50 %/target) over 10 000
+  congested blocks.
+- `crates/aura-storage/tests/t3_fees.rs` (9 gate tests: per-step
+  formula against an independent re-derivation, direction semantics,
+  burn, tip, elastic limit, pinned digest; metamorphisms — at-target
+  flatness with the minimum one-unit delta, transaction splitting,
+  demand monotonicity) and `crates/aura-storage/examples/t3_fees_example.rs`.
+- `sim/t3-fees.json` — scenario with golden path digest
+  `412f1f9e120ec829fb5d2ae65e4590da69771cd7b49bef83f29440d0d93bc124`
+  and checkpoints (base after 249/499/9999, peak, burn/tip totals);
+  `docs/economics/t3-fees.md`.
+- `tools/t3_fees_check.py` (the phase gate oracle: 10 000-block
+  re-derivation, constants, samples, Rust example cross-run),
+  `tools/nc_t3.py` (6 mutation controls: formula denominator, burn,
+  tip credit, directions, elastic limit, parameter drift),
+  `tools/write_t3_evidence.py` and the self-contained evidence in
+  `docs/evidence/t3/` (`campaign/`).
+- Makefile targets `test-t3 check-t3 examples-t3 nc-t3 evidence-t3`;
+  `make test` gains the "fees gate (T3)"; `tools/audit_closeout.py`
+  tracks `ECONOMICS_PHASES = [..., "T3"]` (`CURRENT = "T3"`, NC 6, patch
+  order T3). Inventory: 80 phases, 536 negative controls cumulative.
+
+### Fixed
+
+- (none)
+
+### Security
+
+- T3 replaces no crypto. The tip is payment for inclusion, not a
+  promise of returns (D-T2); parameters stay governance-locked (D-T1).
+  Every T3 control is mutation-based (`tools/nc_t3.py`, 6/6).
+
+## [T2 — Allocation phase closed: genesis pots reconcile exactly, extra coins red, vesting with cliffs enforced, 6 mutation controls] 2026-11-20
+
+### Added
+
+- `crates/aura-storage/src/allocation.rs` — genesis allocation table
+  (validators 1 200 000 / treasury 600 000 / community 750 000 / team
+  450 000 `ALCRY` = 3 000 000 = the T1 genesis supply) with vesting
+  schedules (cliffs 6/24 and 12/36 months), locked/liquid accounting and
+  a strict reconciliation: unique pot names, `sum(pots) == genesis
+  supply` exactly — the literal phase gate, "extra coins -> red".
+- `crates/aura-storage/tests/t2_allocation.rs` (8 gate tests) and
+  `crates/aura-storage/examples/t2_allocation_example.rs` (the
+  reconciliation runner the independent oracle cross-checks).
+- `sim/t2-allocation.json` — the table with golden digest
+  `5fe7417a134011e7028f255cf7cf180335cc23c773ee9657a68de260fcc9ea41`
+  and vesting samples; `docs/economics/t2-allocation.md`.
+- `tools/t2_allocation_check.py` (the phase gate script: reconciles
+  genesis balances with the table, re-derives the vesting rules, pins
+  the Rust constants), `tools/nc_t2.py` (6 mutation controls: extra
+  coins, vesting overflow, cliff removal, non-completing vesting,
+  ignored lockup, table drift), `tools/write_t2_evidence.py` and the
+  self-contained evidence in `docs/evidence/t2/` (`campaign/`).
+- Makefile targets `test-t2 check-t2 examples-t2 nc-t2 evidence-t2`;
+  `make test` gains the "allocation gate (T2)"; `tools/audit_closeout.py`
+  tracks `ECONOMICS_PHASES = [..., "T2"]` (`CURRENT = "T2"`, NC 6, patch
+  order T2). Inventory: 79 phases, 530 negative controls cumulative.
+
+### Fixed
+
+- (none)
+
+### Security
+
+- T2 replaces no crypto. Vesting/lockups are economic guarantees (D-T2:
+  no promises of returns; legal perimeter stays T8). Every T2 control is
+  mutation-based (`tools/nc_t2.py`, 6/6): the "extra coin" mutation turns
+  the reconciliation red with the named message.
+
+## [T1 — Issuance model phase closed: 10-year supply matches the formula within 1 unit, 6 mutation controls] 2026-11-20
+
+### Added
+- `crates/aura-storage/src/issuance.rs` (T1 issuance model: `ALCRY` u128
+  18 decimals, genesis 3 000 000, annual emission 300 000 halving every 4
+  years, hard cap 6 000 000 fixed, target staked ratio 6000 bps — all
+  genesis-fixed per D-T1/D-T3), `sim/t1-issuance.json` (parameters,
+  expected path, cap-binding scenario), gate
+  `crates/aura-storage/tests/t1_issuance.rs` (7 tests: formula ≤ 1 unit
+  every year, halving, cap, genesis, staked ratio, golden path digest
+  c2a4669192ddde5d…c1a35, stepwise≡closed-form metamorphism), example
+  `crates/aura-storage/examples/t1_issuance_example.rs` (`T1-SIM-OK`),
+  independent oracle `tools/t1_issuance_check.py` (stepwise + closed form
+  + Rust cross-run + const consistency), negative controls
+  `tools/nc_t1.py` ×6 (formula mismatch literally red), evidence
+  `docs/evidence/t1/` (`TOTAL: 524 negative controls cumulative`),
+  model doc `docs/economics/t1-issuance.md`, builds `make test-t1` /
+  `make check-t1` / `make examples-t1` / `make nc-t1` /
+  `make evidence-t1` + gates wired into `make test`. Phase receipt +
+  deviations: `docs/plans/ECONOMICS_PLAN.md` `### T1 receipt`;
+  deliverable `patches/0079-T1-...patch`.
+
+## [T0 — Economics baseline phase closed: emission from nowhere -> red, no token, 6 mutation controls] 2026-11-20
+
+### Added
+- `crates/aura-storage/src/econ.rs` (T0 economics baseline: deterministic
+  supply simulation — xorshift64*, seed 20261180, cap-at-balance steps,
+  invariants checked after every step, `DESIRED_PROPERTIES`
+  scarcity/security/accessibility, `state_digest` via
+  `aura_state::sha256_bytes`), `sim/t0-baseline.json` (scenario: 5 agents,
+  3 000 000 units, 1000 steps), gate
+  `crates/aura-storage/tests/t0_economics.rs` (8 tests incl. the literal
+  gate: "emission from nowhere" -> red; golden digest
+  aec12b64eada1b85…c7a51a), example `crates/aura-storage/examples/t0_sim.rs`
+  (`T0-SIM-OK`), independent oracle `tools/t0_economics_check.py`
+  (Python model + Rust example cross-run + scenario/const consistency),
+  negative controls `tools/nc_t0.py` ×6 (emission-from-nowhere literally
+  red), evidence `docs/evidence/t0/` (`TOTAL: 518 negative controls
+  cumulative`), properties doc `docs/economics/t0-baseline.md`, builds
+  `make test-t0` / `make check-t0` / `make examples-t0` / `make nc-t0` /
+  `make evidence-t0` + gates wired into `make test`. Phase receipt +
+  deviations: `docs/plans/ECONOMICS_PLAN.md` `### T0 receipt`;
+  deliverable `patches/0078-T0-...patch`.
+
 ## [E3 — Faucet+SDK phase closed: 1000 requests 1 payout/address/day, 3/3 SDK examples in CI, 6 mutation controls] 2026-11-19
 
 ### Added

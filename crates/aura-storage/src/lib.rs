@@ -29,8 +29,14 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+/// T2 allocation: genesis split (validators/treasury/community/team) with
+/// vesting cliffs and lockups (ECONOMICS_PLAN T2).
+pub mod allocation;
 mod backend;
 mod backup;
+/// T0 economics baseline: deterministic supply simulation with invariants
+/// and no token (ECONOMICS_PLAN T0).
+pub mod econ;
 mod error;
 /// E2 chain explorer: read-only views over the E1 indexer plus a
 /// single-page web UI (ECOSYSTEM_PLAN E2).
@@ -38,14 +44,27 @@ pub mod explorer;
 /// E3 rate-limited faucet: 1 payout per address per day, testnet only
 /// (ECOSYSTEM_PLAN E3).
 pub mod faucet;
+/// T3 fees: EIP-1559-like `base_fee` + `tip` market, burned base part
+/// and elastic gas target (ECONOMICS_PLAN T3).
+pub mod fees;
+pub mod governance;
 /// E1 chain indexer: idempotent ingest + reorg rollback over a local
 /// row store (ECOSYSTEM_PLAN E1; Postgres replaced by deviation).
 pub mod indexer;
+/// T1 issuance model: genesis supply, halving curve, hard cap and target
+/// staked ratio for `ALCRY` (ECONOMICS_PLAN T1, decision D-T1).
+pub mod issuance;
 mod prune;
 /// E3 client SDK (Rust) for the explorer and faucet HTTP APIs.
 pub mod sdk;
+/// T4 staking: min stake, delegation with shares, commission, 21-day
+/// unbonding and a slashing period (ECONOMICS_PLAN T4).
+pub mod slashing;
+pub mod staking;
 mod store;
+pub mod treasury;
 mod wal;
+pub mod whitepaper;
 
 pub use backup::{
     BACKUP_FORMAT_VERSION, BackupBundle, BackupManifest, MANIFEST_MAGIC, MAX_BLOB_BYTES,

@@ -281,6 +281,33 @@ test: deps-check
 	@$(PYTHON) tools/e3_faucet_check.py
 	@$(CARGO) test --locked -p aura-storage --test e3_faucet
 	@$(PYTHON) tools/e3_examples_check.py
+	@echo "== economics baseline gate (T0) =="
+	@$(PYTHON) tools/t0_economics_check.py
+	@$(CARGO) test --locked -p aura-storage --test t0_economics
+	@echo "== issuance model gate (T1) =="
+	@$(PYTHON) tools/t1_issuance_check.py
+	@$(CARGO) test --locked -p aura-storage --test t1_issuance
+	@echo "== allocation gate (T2) =="
+	@$(PYTHON) tools/t2_allocation_check.py
+	@$(CARGO) test --locked -p aura-storage --test t2_allocation
+	@echo "== fees gate (T3) =="
+	@$(PYTHON) tools/t3_fees_check.py
+	@$(CARGO) test --locked -p aura-storage --test t3_fees
+	@echo "== staking gate (T4) =="
+	@$(PYTHON) tools/t4_staking_check.py
+	@$(CARGO) test --locked -p aura-storage --test t4_staking
+	@echo "== slashing gate (T5) =="
+	@$(PYTHON) tools/t5_slashing_check.py
+	@$(CARGO) test --locked -p aura-storage --test t5_slashing
+	@echo "== governance gate (T6) =="
+	@$(PYTHON) tools/t6_governance_check.py
+	@$(CARGO) test --locked -p aura-storage --test t6_governance
+	@echo "== treasury gate (T7) =="
+	@$(PYTHON) tools/t7_treasury_check.py
+	@$(CARGO) test --locked -p aura-storage --test t7_treasury
+	@echo "== white paper gate (T8) =="
+	@$(PYTHON) tools/t8_whitepaper_check.py
+	@$(CARGO) test --locked -p aura-storage --test t8_whitepaper
 	@echo "== close-out audit =="
 	@$(PYTHON) tools/audit_closeout.py
 	@echo "ALL GATES GREEN"
@@ -1412,6 +1439,150 @@ nc-e2:
 
 evidence-e2:
 	@$(PYTHON) tools/write_e2_evidence.py
+
+.PHONY: test-t6 check-t6 examples-t6 nc-t6 evidence-t6
+test-t6:
+	@$(CARGO) test --locked -p aura-storage --test t6_governance
+
+check-t6:
+	@$(PYTHON) tools/t6_governance_check.py
+
+examples-t6:
+	@$(CARGO) run --quiet --locked -p aura-storage --example t6_governance_example
+
+nc-t6:
+	@$(PYTHON) tools/nc_t6.py
+
+evidence-t6:
+	@$(PYTHON) tools/write_t6_evidence.py
+
+.PHONY: test-t7 check-t7 examples-t7 nc-t7 evidence-t7
+test-t7:
+	@$(CARGO) test --locked -p aura-storage --test t7_treasury
+
+check-t7:
+	@$(PYTHON) tools/t7_treasury_check.py
+
+examples-t7:
+	@$(CARGO) run --quiet --locked -p aura-storage --example t7_treasury_example
+
+nc-t7:
+	@$(PYTHON) tools/nc_t7.py
+
+evidence-t7:
+	@$(PYTHON) tools/write_t7_evidence.py
+
+.PHONY: test-t8 check-t8 examples-t8 nc-t8 evidence-t8
+test-t8:
+	@$(CARGO) test --locked -p aura-storage --test t8_whitepaper
+
+check-t8:
+	@$(PYTHON) tools/t8_whitepaper_check.py
+
+examples-t8:
+	@$(CARGO) run --quiet --locked -p aura-storage --example t8_whitepaper_example
+
+nc-t8:
+	@$(PYTHON) tools/nc_t8.py
+
+evidence-t8:
+	@$(PYTHON) tools/write_t8_evidence.py
+
+.PHONY: test-t5 check-t5 examples-t5 nc-t5 evidence-t5
+test-t5:
+	@$(CARGO) test --locked -p aura-storage --test t5_slashing
+
+check-t5:
+	@$(PYTHON) tools/t5_slashing_check.py
+
+examples-t5:
+	@$(CARGO) run --quiet --locked -p aura-storage --example t5_slashing_example
+
+nc-t5:
+	@$(PYTHON) tools/nc_t5.py
+
+evidence-t5:
+	@$(PYTHON) tools/write_t5_evidence.py
+
+.PHONY: test-t4 check-t4 examples-t4 nc-t4 evidence-t4
+test-t4:
+	@$(CARGO) test --locked -p aura-storage --test t4_staking
+
+check-t4:
+	@$(PYTHON) tools/t4_staking_check.py
+
+examples-t4:
+	@$(CARGO) run --quiet --locked -p aura-storage --example t4_staking_example
+
+nc-t4:
+	@$(PYTHON) tools/nc_t4.py
+
+evidence-t4:
+	@$(PYTHON) tools/write_t4_evidence.py
+
+.PHONY: test-t3 check-t3 examples-t3 nc-t3 evidence-t3
+test-t3:
+	@$(CARGO) test --locked -p aura-storage --test t3_fees
+
+check-t3:
+	@$(PYTHON) tools/t3_fees_check.py
+
+examples-t3:
+	@$(CARGO) run --quiet --locked -p aura-storage --example t3_fees_example
+
+nc-t3:
+	@$(PYTHON) tools/nc_t3.py
+
+evidence-t3:
+	@$(PYTHON) tools/write_t3_evidence.py
+
+.PHONY: test-t2 check-t2 examples-t2 nc-t2 evidence-t2
+test-t2:
+	@$(CARGO) test --locked -p aura-storage --test t2_allocation
+
+check-t2:
+	@$(PYTHON) tools/t2_allocation_check.py
+
+examples-t2:
+	@$(CARGO) run --quiet --locked -p aura-storage --example t2_allocation_example
+
+nc-t2:
+	@$(PYTHON) tools/nc_t2.py
+
+evidence-t2:
+	@$(PYTHON) tools/write_t2_evidence.py
+
+.PHONY: test-t1 check-t1 examples-t1 nc-t1 evidence-t1
+test-t1:
+	@$(CARGO) test --locked -p aura-storage --test t1_issuance
+
+check-t1:
+	@$(PYTHON) tools/t1_issuance_check.py
+
+examples-t1:
+	@$(CARGO) run --quiet --locked -p aura-storage --example t1_issuance_example
+
+nc-t1:
+	@$(PYTHON) tools/nc_t1.py
+
+evidence-t1:
+	@$(PYTHON) tools/write_t1_evidence.py
+
+.PHONY: test-t0 check-t0 examples-t0 nc-t0 evidence-t0
+test-t0:
+	@$(CARGO) test --locked -p aura-storage --test t0_economics
+
+check-t0:
+	@$(PYTHON) tools/t0_economics_check.py
+
+examples-t0:
+	@$(CARGO) run --quiet --locked -p aura-storage --example t0_sim
+
+nc-t0:
+	@$(PYTHON) tools/nc_t0.py
+
+evidence-t0:
+	@$(PYTHON) tools/write_t0_evidence.py
 
 .PHONY: test-e3 check-e3 examples-e3 nc-e3 evidence-e3
 test-e3:

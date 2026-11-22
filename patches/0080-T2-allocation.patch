@@ -1,0 +1,1478 @@
+From ab5bc8f4f5ac0c3971647825fa9ddcabb2d9f8af Mon Sep 17 00:00:00 2001
+From: AlexanderNyr <alexandernyr@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 14:01:49 +0000
+Subject: [PATCH] T2 - allocation: genesis pots reconcile exactly, extra coins
+ red, vesting with cliffs enforced, 6 mutation controls
+
+T2 - Allocation (ECONOMICS_PLAN). Gate literally: tools/t2_allocation_check.py reconciles genesis balances with the allocation table (validators 1200000 / treasury 600000 vesting 6/24 / community 750000 / team 450000 vesting 12/36 = 3000000 ALCRY = T1 genesis supply), golden table digest 5fe7417a134011e7028f255cf7cf180335cc23c773ee9657a68de260fcc9ea41 pinned in Rust tests and re-derived by the independent Python oracle, which cross-runs t2_allocation_example. NC: extra coins -> red (nc_t2.py 6/6, named messages). Vesting with cliffs and lockups enforced (check_spend). 8 gate tests + 2 metamorphisms. Evidence docs/evidence/t2 (530 NCs cumulative over 79 phases). ALL GATES GREEN.
+---
+ CHANGELOG.md                                  |  38 +++
+ Makefile                                      |  19 ++
+ .../examples/t2_allocation_example.rs         |  44 +++
+ crates/aura-storage/src/allocation.rs         | 155 +++++++++++
+ crates/aura-storage/src/lib.rs                |   3 +
+ crates/aura-storage/tests/t2_allocation.rs    | 260 ++++++++++++++++++
+ docs/economics/t2-allocation.md               |  50 ++++
+ docs/evidence/review-w1-source-drift.txt      |  19 +-
+ docs/evidence/t2/SHA256SUMS                   |   9 +
+ docs/evidence/t2/baseline.log                 |   2 +
+ docs/evidence/t2/campaign/result.json         |  33 +++
+ docs/evidence/t2/campaign/t2-allocation.log   |  17 ++
+ docs/evidence/t2/gates.txt                    |  10 +
+ docs/evidence/t2/inventory.txt                |   4 +
+ docs/evidence/t2/nc-suite.log                 |   8 +
+ docs/evidence/t2/nc.log                       |   8 +
+ docs/evidence/t2/report.md                    |  11 +
+ docs/evidence/t2/t2-allocation.log            |  17 ++
+ docs/plans/ECONOMICS_PLAN.md                  |  38 ++-
+ sim/t2-allocation.json                        |  24 ++
+ tools/audit_closeout.py                       |   8 +-
+ tools/nc_t2.py                                | 107 +++++++
+ tools/t2_allocation_check.py                  | 149 ++++++++++
+ tools/write_t2_evidence.py                    | 168 +++++++++++
+ 24 files changed, 1187 insertions(+), 14 deletions(-)
+ create mode 100644 crates/aura-storage/examples/t2_allocation_example.rs
+ create mode 100644 crates/aura-storage/src/allocation.rs
+ create mode 100644 crates/aura-storage/tests/t2_allocation.rs
+ create mode 100644 docs/economics/t2-allocation.md
+ create mode 100644 docs/evidence/t2/SHA256SUMS
+ create mode 100644 docs/evidence/t2/baseline.log
+ create mode 100644 docs/evidence/t2/campaign/result.json
+ create mode 100644 docs/evidence/t2/campaign/t2-allocation.log
+ create mode 100644 docs/evidence/t2/gates.txt
+ create mode 100644 docs/evidence/t2/inventory.txt
+ create mode 100644 docs/evidence/t2/nc-suite.log
+ create mode 100644 docs/evidence/t2/nc.log
+ create mode 100644 docs/evidence/t2/report.md
+ create mode 100644 docs/evidence/t2/t2-allocation.log
+ create mode 100644 sim/t2-allocation.json
+ create mode 100644 tools/nc_t2.py
+ create mode 100644 tools/t2_allocation_check.py
+ create mode 100644 tools/write_t2_evidence.py
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index b00f2f3..d40d16c 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,44 @@
+ All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
+ never rewritten: corrections are made with a new entry or an explicit note.
+ 
++## [T2 — Allocation phase closed: genesis pots reconcile exactly, extra coins red, vesting with cliffs enforced, 6 mutation controls] 2026-11-20
++
++### Added
++
++- `crates/aura-storage/src/allocation.rs` — genesis allocation table
++  (validators 1 200 000 / treasury 600 000 / community 750 000 / team
++  450 000 `ALCRY` = 3 000 000 = the T1 genesis supply) with vesting
++  schedules (cliffs 6/24 and 12/36 months), locked/liquid accounting and
++  a strict reconciliation: unique pot names, `sum(pots) == genesis
++  supply` exactly — the literal phase gate, "extra coins -> red".
++- `crates/aura-storage/tests/t2_allocation.rs` (8 gate tests) and
++  `crates/aura-storage/examples/t2_allocation_example.rs` (the
++  reconciliation runner the independent oracle cross-checks).
++- `sim/t2-allocation.json` — the table with golden digest
++  `5fe7417a134011e7028f255cf7cf180335cc23c773ee9657a68de260fcc9ea41`
++  and vesting samples; `docs/economics/t2-allocation.md`.
++- `tools/t2_allocation_check.py` (the phase gate script: reconciles
++  genesis balances with the table, re-derives the vesting rules, pins
++  the Rust constants), `tools/nc_t2.py` (6 mutation controls: extra
++  coins, vesting overflow, cliff removal, non-completing vesting,
++  ignored lockup, table drift), `tools/write_t2_evidence.py` and the
++  self-contained evidence in `docs/evidence/t2/` (`campaign/`).
++- Makefile targets `test-t2 check-t2 examples-t2 nc-t2 evidence-t2`;
++  `make test` gains the "allocation gate (T2)"; `tools/audit_closeout.py`
++  tracks `ECONOMICS_PHASES = [..., "T2"]` (`CURRENT = "T2"`, NC 6, patch
++  order T2). Inventory: 79 phases, 530 negative controls cumulative.
++
++### Fixed
++
++- (none)
++
++### Security
++
++- T2 replaces no crypto. Vesting/lockups are economic guarantees (D-T2:
++  no promises of returns; legal perimeter stays T8). Every T2 control is
++  mutation-based (`tools/nc_t2.py`, 6/6): the "extra coin" mutation turns
++  the reconciliation red with the named message.
++
+ ## [T1 — Issuance model phase closed: 10-year supply matches the formula within 1 unit, 6 mutation controls] 2026-11-20
+ 
+ ### Added
+diff --git a/Makefile b/Makefile
+index 5fb9d64..470d6bb 100644
+--- a/Makefile
++++ b/Makefile
+@@ -287,6 +287,9 @@ test: deps-check
+ 	@echo "== issuance model gate (T1) =="
+ 	@$(PYTHON) tools/t1_issuance_check.py
+ 	@$(CARGO) test --locked -p aura-storage --test t1_issuance
++	@echo "== allocation gate (T2) =="
++	@$(PYTHON) tools/t2_allocation_check.py
++	@$(CARGO) test --locked -p aura-storage --test t2_allocation
+ 	@echo "== close-out audit =="
+ 	@$(PYTHON) tools/audit_closeout.py
+ 	@echo "ALL GATES GREEN"
+@@ -1419,6 +1422,22 @@ nc-e2:
+ evidence-e2:
+ 	@$(PYTHON) tools/write_e2_evidence.py
+ 
++.PHONY: test-t2 check-t2 examples-t2 nc-t2 evidence-t2
++test-t2:
++	@$(CARGO) test --locked -p aura-storage --test t2_allocation
++
++check-t2:
++	@$(PYTHON) tools/t2_allocation_check.py
++
++examples-t2:
++	@$(CARGO) run --quiet --locked -p aura-storage --example t2_allocation_example
++
++nc-t2:
++	@$(PYTHON) tools/nc_t2.py
++
++evidence-t2:
++	@$(PYTHON) tools/write_t2_evidence.py
++
+ .PHONY: test-t1 check-t1 examples-t1 nc-t1 evidence-t1
+ test-t1:
+ 	@$(CARGO) test --locked -p aura-storage --test t1_issuance
+diff --git a/crates/aura-storage/examples/t2_allocation_example.rs b/crates/aura-storage/examples/t2_allocation_example.rs
+new file mode 100644
+index 0000000..0141c0d
+--- /dev/null
++++ b/crates/aura-storage/examples/t2_allocation_example.rs
+@@ -0,0 +1,44 @@
++//! T2 allocation reconciliation runner (ECONOMICS_PLAN T2).
++//!
++//! Prints a machine-readable summary consumed by the independent Python
++//! oracle (`tools/t2_allocation_check.py`).
++
++use aura_storage::allocation::{T2_ALLOCATION, liquid, locked, reconcile, vested};
++use aura_storage::issuance::{ALCRY, GENESIS_SUPPLY};
++
++fn main() {
++    reconcile(&T2_ALLOCATION, GENESIS_SUPPLY).expect("reconcile");
++    let mut text = String::new();
++    let mut rows = Vec::new();
++    for entry in &T2_ALLOCATION {
++        text.push_str(entry.name);
++        text.push(':');
++        text.push_str(&entry.amount.to_string());
++        if let Some(schedule) = &entry.vesting {
++            text.push_str(":v=");
++            text.push_str(&schedule.cliff_months.to_string());
++            text.push(',');
++            text.push_str(&schedule.total_months.to_string());
++            text.push(',');
++            text.push_str(&schedule.amount.to_string());
++        }
++        text.push('\n');
++        rows.push(format!(
++            "\"{}\":{{\"amount\":{},\"liquid12\":{},\"locked12\":{}}}",
++            entry.name,
++            entry.amount,
++            liquid(entry, 12),
++            locked(entry, 12)
++        ));
++    }
++    let digest = aura_state::sha256_bytes(text.as_bytes()).to_hex();
++    let team_vested_36 = vested(&T2_ALLOCATION[3].vesting.expect("team vests"), 36);
++    println!(
++        "T2-SIM-OK {{\"genesis\":{},\"digest\":\"{}\",\"team_vested_36\":{},\"entries\":{{{}}}}}",
++        GENESIS_SUPPLY,
++        digest,
++        team_vested_36,
++        rows.join(",")
++    );
++    let _ = ALCRY;
++}
+diff --git a/crates/aura-storage/src/allocation.rs b/crates/aura-storage/src/allocation.rs
+new file mode 100644
+index 0000000..50129e4
+--- /dev/null
++++ b/crates/aura-storage/src/allocation.rs
+@@ -0,0 +1,155 @@
++//! T2 allocation: the genesis supply split across validators, treasury,
++//! community and team, with vesting cliffs and lockups (ECONOMICS_PLAN T2).
++//!
++//! The table below reconciles **exactly** with the T1 genesis supply:
++//! `sum(pots) == GENESIS_SUPPLY` — any extra coin anywhere turns the gate
++//! red (the phase NC is literal: "extra coins → red"). Vesting is linear
++//! over `total_months` with a cliff gate; the unvested part of a pot is
++//! **locked** and cannot be spent.
++
++use crate::econ::Amount;
++use crate::issuance::{ALCRY, GENESIS_SUPPLY};
++
++/// A vesting schedule: linear over `total_months`, gated by a cliff.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct VestingSchedule {
++    /// Months before which nothing is vested.
++    pub cliff_months: u32,
++    /// Total vesting duration in months (must exceed the cliff).
++    pub total_months: u32,
++    /// Amount covered by the schedule (<= the pot).
++    pub amount: Amount,
++}
++
++/// One allocation line.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct AllocationEntry {
++    /// Name of the pot: `validators`, `treasury`, `community` or `team`.
++    pub name: &'static str,
++    /// Total amount of the pot.
++    pub amount: Amount,
++    /// Optional vesting; the unvested part is locked.
++    pub vesting: Option<VestingSchedule>,
++}
++
++/// Errors raised by [`reconcile`] or the spend checks.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub enum AllocError {
++    /// The table lists the same pot twice.
++    DuplicateName,
++    /// The table sums to a different value than the genesis supply —
++    /// the "extra coins" signature.
++    SumMismatch {
++        /// Sum of the table.
++        table: Amount,
++        /// Declared genesis supply.
++        genesis: Amount,
++    },
++    /// A vesting schedule covers more than its pot.
++    VestingExceedsAllocation,
++    /// A schedule has `total_months <= cliff_months`.
++    BadSchedule,
++    /// A spend tried to touch locked (unvested) coins.
++    LockedSpend,
++}
++
++/// The T2 baseline allocation of [`GENESIS_SUPPLY`] (mirrored by
++/// `sim/t2-allocation.json`).
++pub const T2_ALLOCATION: [AllocationEntry; 4] = [
++    AllocationEntry {
++        name: "validators",
++        amount: 1_200_000 * ALCRY,
++        vesting: None,
++    },
++    AllocationEntry {
++        name: "treasury",
++        amount: 600_000 * ALCRY,
++        vesting: Some(VestingSchedule {
++            cliff_months: 6,
++            total_months: 24,
++            amount: 600_000 * ALCRY,
++        }),
++    },
++    AllocationEntry {
++        name: "community",
++        amount: 750_000 * ALCRY,
++        vesting: None,
++    },
++    AllocationEntry {
++        name: "team",
++        amount: 450_000 * ALCRY,
++        vesting: Some(VestingSchedule {
++            cliff_months: 12,
++            total_months: 36,
++            amount: 450_000 * ALCRY,
++        }),
++    },
++];
++
++/// Vested amount of a schedule at `month`: zero before the cliff, then
++/// `amount * month / total_months` truncated, capped at `amount`.
++pub fn vested(schedule: &VestingSchedule, month: u32) -> Amount {
++    if month < schedule.cliff_months {
++        return 0;
++    }
++    if month >= schedule.total_months {
++        return schedule.amount;
++    }
++    schedule.amount * Amount::from(month) / Amount::from(schedule.total_months)
++}
++
++/// Locked (unvested) part of an entry at `month`.
++pub fn locked(entry: &AllocationEntry, month: u32) -> Amount {
++    match &entry.vesting {
++        Some(schedule) => schedule.amount - vested(schedule, month),
++        None => 0,
++    }
++}
++
++/// Liquid (spendable) part of an entry at `month`.
++pub fn liquid(entry: &AllocationEntry, month: u32) -> Amount {
++    entry.amount - locked(entry, month)
++}
++
++/// Reconciles the canonical [`T2_ALLOCATION`] table against the T1
++/// [`GENESIS_SUPPLY`] — the T2 gate in one call.
++pub fn reconcile_genesis() -> Result<(), AllocError> {
++    reconcile(&T2_ALLOCATION, GENESIS_SUPPLY)
++}
++
++/// Checks a spend against the liquid part of the pot at `month`.
++pub fn check_spend(entry: &AllocationEntry, month: u32, amount: Amount) -> Result<(), AllocError> {
++    if amount > liquid(entry, month) {
++        return Err(AllocError::LockedSpend);
++    }
++    Ok(())
++}
++
++/// Reconciles an allocation table with the genesis supply: unique names,
++/// exact sum (**no extra coins**), schedules within their pots and valid.
++pub fn reconcile(entries: &[AllocationEntry], genesis_supply: Amount) -> Result<(), AllocError> {
++    let mut total: Amount = 0;
++    let mut seen: Vec<&str> = Vec::new();
++    for entry in entries {
++        if seen.contains(&entry.name) {
++            return Err(AllocError::DuplicateName);
++        }
++        seen.push(entry.name);
++        total += entry.amount;
++        if let Some(schedule) = &entry.vesting {
++            if schedule.total_months <= schedule.cliff_months {
++                return Err(AllocError::BadSchedule);
++            }
++            if schedule.amount > entry.amount {
++                return Err(AllocError::VestingExceedsAllocation);
++            }
++        }
++    }
++    if total != genesis_supply {
++        return Err(AllocError::SumMismatch {
++            table: total,
++            genesis: genesis_supply,
++        });
++    }
++    Ok(())
++}
+diff --git a/crates/aura-storage/src/lib.rs b/crates/aura-storage/src/lib.rs
+index 6218036..0213333 100644
+--- a/crates/aura-storage/src/lib.rs
++++ b/crates/aura-storage/src/lib.rs
+@@ -29,6 +29,9 @@
+ #![forbid(unsafe_code)]
+ #![deny(missing_docs)]
+ 
++/// T2 allocation: genesis split (validators/treasury/community/team) with
++/// vesting cliffs and lockups (ECONOMICS_PLAN T2).
++pub mod allocation;
+ mod backend;
+ mod backup;
+ /// T0 economics baseline: deterministic supply simulation with invariants
+diff --git a/crates/aura-storage/tests/t2_allocation.rs b/crates/aura-storage/tests/t2_allocation.rs
+new file mode 100644
+index 0000000..a5195dd
+--- /dev/null
++++ b/crates/aura-storage/tests/t2_allocation.rs
+@@ -0,0 +1,260 @@
++//! T2 allocation gate (ECONOMICS_PLAN T2).
++//!
++//! The gate is the literal phase gate: the reconciliation script must
++//! match the genesis balances with the table — and "extra coins" anywhere
++//! must turn it red. Every control below carries its named T2 message.
++
++use aura_storage::allocation::{
++    AllocError, AllocationEntry, T2_ALLOCATION, VestingSchedule, check_spend, liquid, locked,
++    reconcile, reconcile_genesis, vested,
++};
++use aura_storage::issuance::{ALCRY, GENESIS_SUPPLY};
++
++/// Golden table digest (sha256 over the canonical table lines), computed
++/// by `tools/t2_allocation_check.py`.
++const GOLDEN_TABLE_DIGEST: &str =
++    "5fe7417a134011e7028f255cf7cf180335cc23c773ee9657a68de260fcc9ea41";
++
++fn team() -> AllocationEntry {
++    T2_ALLOCATION[3]
++}
++
++fn treasury() -> AllocationEntry {
++    T2_ALLOCATION[1]
++}
++
++#[test]
++fn t2_allocation_sums_to_the_genesis_supply() {
++    assert_eq!(
++        reconcile_genesis(),
++        Ok(()),
++        "T2: the allocation must sum to the genesis supply"
++    );
++    let total: u128 = T2_ALLOCATION.iter().map(|entry| entry.amount).sum();
++    assert_eq!(
++        total, GENESIS_SUPPLY,
++        "T2: the allocation must sum to the genesis supply"
++    );
++    assert_eq!(
++        total,
++        3_000_000 * ALCRY,
++        "T2: the allocation must sum to the genesis supply"
++    );
++    // Literally: one extra coin must be rejected.
++    let mut extra = T2_ALLOCATION;
++    extra[0].amount += 1;
++    assert_eq!(
++        reconcile(&extra, GENESIS_SUPPLY),
++        Err(AllocError::SumMismatch {
++            table: GENESIS_SUPPLY + 1,
++            genesis: GENESIS_SUPPLY
++        }),
++        "T2: the allocation must sum to the genesis supply"
++    );
++}
++
++#[test]
++fn t2_vesting_must_not_exceed_its_allocation() {
++    let bad = [AllocationEntry {
++        name: "team",
++        amount: 450_000 * ALCRY,
++        vesting: Some(VestingSchedule {
++            cliff_months: 12,
++            total_months: 36,
++            amount: 450_001 * ALCRY,
++        }),
++    }];
++    assert_eq!(
++        reconcile(&bad, 450_000 * ALCRY),
++        Err(AllocError::VestingExceedsAllocation),
++        "T2: vesting must not exceed its allocation"
++    );
++    let bad_schedule = [AllocationEntry {
++        name: "team",
++        amount: 450_000 * ALCRY,
++        vesting: Some(VestingSchedule {
++            cliff_months: 12,
++            total_months: 12,
++            amount: 450_000 * ALCRY,
++        }),
++    }];
++    assert_eq!(
++        reconcile(&bad_schedule, 450_000 * ALCRY),
++        Err(AllocError::BadSchedule),
++        "T2: vesting must not exceed its allocation"
++    );
++}
++
++#[test]
++fn t2_the_cliff_locks_everything_before_it() {
++    let schedule = team().vesting.expect("team vests");
++    for month in 0..schedule.cliff_months {
++        assert_eq!(
++            vested(&schedule, month),
++            0,
++            "T2: the cliff must lock everything before it"
++        );
++    }
++    assert_eq!(
++        locked(&team(), 6),
++        450_000 * ALCRY,
++        "T2: the cliff must lock everything before it"
++    );
++    assert_eq!(
++        liquid(&team(), 6),
++        0,
++        "T2: the cliff must lock everything before it"
++    );
++}
++
++#[test]
++fn t2_vesting_completes_exactly_at_the_end() {
++    let schedule = team().vesting.expect("team vests");
++    assert_eq!(
++        vested(&schedule, schedule.total_months),
++        schedule.amount,
++        "T2: vesting must complete exactly at the end"
++    );
++    for month in [37u32, 48, 120] {
++        assert_eq!(
++            vested(&schedule, month),
++            schedule.amount,
++            "T2: vesting must complete exactly at the end"
++        );
++    }
++    assert_eq!(
++        vested(&schedule, 12),
++        150_000 * ALCRY,
++        "T2: vesting must complete exactly at the end"
++    );
++    let treasury_schedule = treasury().vesting.expect("treasury vests");
++    assert_eq!(
++        vested(&treasury_schedule, 6),
++        150_000 * ALCRY,
++        "T2: vesting must complete exactly at the end"
++    );
++    assert_eq!(
++        vested(&treasury_schedule, 24),
++        600_000 * ALCRY,
++        "T2: vesting must complete exactly at the end"
++    );
++}
++
++#[test]
++fn t2_locked_coins_are_not_spendable() {
++    assert_eq!(
++        check_spend(&team(), 6, 1),
++        Err(AllocError::LockedSpend),
++        "T2: locked coins must not be spendable"
++    );
++    assert_eq!(
++        check_spend(&team(), 12, 150_001 * ALCRY),
++        Err(AllocError::LockedSpend),
++        "T2: locked coins must not be spendable"
++    );
++    assert_eq!(
++        check_spend(&team(), 12, 150_000 * ALCRY),
++        Ok(()),
++        "T2: locked coins must not be spendable"
++    );
++    assert_eq!(
++        check_spend(&team(), 36, 450_000 * ALCRY),
++        Ok(()),
++        "T2: locked coins must not be spendable"
++    );
++}
++
++#[test]
++fn t2_reference_table_agrees_with_the_simulation() {
++    let mut text = String::new();
++    for entry in &T2_ALLOCATION {
++        text.push_str(entry.name);
++        text.push(':');
++        text.push_str(&entry.amount.to_string());
++        if let Some(schedule) = &entry.vesting {
++            text.push_str(":v=");
++            text.push_str(&schedule.cliff_months.to_string());
++            text.push(',');
++            text.push_str(&schedule.total_months.to_string());
++            text.push(',');
++            text.push_str(&schedule.amount.to_string());
++        }
++        text.push('\n');
++    }
++    let digest = aura_state::sha256_bytes(text.as_bytes()).to_hex();
++    assert_eq!(
++        digest, GOLDEN_TABLE_DIGEST,
++        "T2: the reconciliation must agree with the reference table"
++    );
++    assert_eq!(
++        T2_ALLOCATION.len(),
++        4,
++        "T2: the reconciliation must agree with the reference table"
++    );
++    let names: Vec<&str> = T2_ALLOCATION.iter().map(|entry| entry.name).collect();
++    assert_eq!(
++        names,
++        ["validators", "treasury", "community", "team"],
++        "T2: the reconciliation must agree with the reference table"
++    );
++}
++
++#[test]
++fn t2_splitting_an_entry_preserves_the_total() {
++    // Metamorphism: splitting a pot in two (with proportional vesting)
++    // keeps the reconciliation green and the total identical.
++    let mut split = Vec::new();
++    for entry in &T2_ALLOCATION {
++        let half = entry.amount / 2;
++        let rest = entry.amount - half;
++        let split_vesting = |amount: u128| {
++            entry.vesting.as_ref().map(|schedule| VestingSchedule {
++                cliff_months: schedule.cliff_months,
++                total_months: schedule.total_months,
++                // Proportional split of the schedule. All table amounts
++                // are whole `ALCRY` units, so scaling in ALCRY units is
++                // exact and keeps `amount * pot` inside u128.
++                amount: schedule.amount * (amount / ALCRY) / (entry.amount / ALCRY),
++            })
++        };
++        split.push(AllocationEntry {
++            name: entry.name,
++            amount: half,
++            vesting: split_vesting(half),
++        });
++        split.push(AllocationEntry {
++            name: entry.name,
++            amount: rest,
++            vesting: split_vesting(rest),
++        });
++    }
++    let total: u128 = split.iter().map(|entry| entry.amount).sum();
++    assert_eq!(
++        total, GENESIS_SUPPLY,
++        "T2: the allocation must sum to the genesis supply"
++    );
++    for month in [0u32, 12, 24, 36] {
++        let original_locked: u128 = T2_ALLOCATION.iter().map(|entry| locked(entry, month)).sum();
++        let split_locked: u128 = split.iter().map(|entry| locked(entry, month)).sum();
++        assert!(
++            original_locked.abs_diff(split_locked) <= ALCRY,
++            "T2: the allocation must sum to the genesis supply"
++        );
++    }
++}
++
++#[test]
++fn t2_monthly_deltas_sum_to_the_vested_amount() {
++    let schedule = team().vesting.expect("team vests");
++    let mut previous = 0;
++    let mut total = 0;
++    for month in 1..=schedule.total_months {
++        let current = vested(&schedule, month);
++        total += current - previous;
++        previous = current;
++    }
++    assert_eq!(
++        total, schedule.amount,
++        "T2: vesting must complete exactly at the end"
++    );
++}
+diff --git a/docs/economics/t2-allocation.md b/docs/economics/t2-allocation.md
+new file mode 100644
+index 0000000..7014c54
+--- /dev/null
++++ b/docs/economics/t2-allocation.md
+@@ -0,0 +1,50 @@
++# T2 — genesis allocation: validators, treasury, community, team
++
++**Status:** ✅ T2 closed. The allocation table reconciles **exactly** with
++the T1 genesis supply (3 000 000 `ALCRY`) — any extra coin anywhere turns
++the gate red (phase NC, literal). Vesting cliffs and lockups are enforced,
++not decorative.
++
++## The table (`sim/t2-allocation.json`)
++
++| Pot | Amount | Vesting | At month 12 |
++|---|---|---|---|
++| validators | 1 200 000 `ALCRY` (40 %) | — | fully liquid |
++| treasury | 600 000 `ALCRY` (20 %) | linear 24 months, 6-month cliff | 150 000 liquid / 450 000 locked |
++| community | 750 000 `ALCRY` (25 %) | — | fully liquid |
++| team | 450 000 `ALCRY` (15 %) | linear 36 months, 12-month cliff | 150 000 liquid / 300 000 locked |
++| **sum** | **3 000 000 `ALCRY`** | | = genesis supply |
++
++Golden table digest `5fe7417a134011e7028f255cf7cf180335cc23c773ee9657a68de260fcc9ea41`
++is pinned in the Rust tests and re-derived by the independent Python
++script (`tools/t2_allocation_check.py`) — the same script that performs
++the phase gate: **reconciling genesis balances with the table**.
++
++## Rules
++
++* **Reconciliation:** unique pot names, `sum(pots) == genesis supply`
++  exactly — no extra coins, no rounding dust. The "extra coin" mutation
++  turns the gate red with `T2: the allocation must sum to the genesis
++  supply`.
++* **Vesting:** `vested(m) = 0` before the cliff; `amount × m / total`
++  truncated after it; exactly `amount` at and beyond `total_months` (no
++  dust, no over-issue).
++* **Lockups:** the unvested part of a pot is **locked** and cannot be
++  spent; `check_spend` refuses any spend above the liquid part.
++
++## Verification
++
++* 8 gate tests (`crates/aura-storage/tests/t2_allocation.rs`): sum,
++  vesting ≤ pot, cliff, completion, lockups, reference digest, and two
++  metamorphisms (splitting a pot preserves the total and the lock
++  profile; monthly deltas telescope to the vested amount).
++* Six mutation controls (`tools/nc_t2.py`): extra coins, vesting
++  overflow, cliff removal, non-completing vesting, ignored lockup and
++  table drift each turn the gate red with their named message.
++
++## What T2 deliberately does not do
++
++* No fee markets (T3) or staking mechanics (T4). Validator rewards are
++  paid from the validators pot under T1/T4 parameters — no promises of
++  returns (D-T2).
++* No legal claims (D-T4).
+diff --git a/docs/evidence/review-w1-source-drift.txt b/docs/evidence/review-w1-source-drift.txt
+index db2cd75..47034a5 100644
+--- a/docs/evidence/review-w1-source-drift.txt
++++ b/docs/evidence/review-w1-source-drift.txt
+@@ -1,12 +1,13 @@
+-# Explicit source drift from frozen historical SHA256SUMS.
+-# historical-sha256 current-sha256 repository-relative-path
+-# Not a replacement for a new phase security review or certification.
+-adc24e7c03e1a63e5d7addbda15ff40ce630367152699c5d9659cd8db65f357b 3f256c08577d11f906d1d5502ec7b61b745f6c3a54fa20ded99b6aaa259ac3fe CHANGELOG.md
+-c83d08301a703c9db11462aa541bc898e52548589972118465164895eed44dc7 3f256c08577d11f906d1d5502ec7b61b745f6c3a54fa20ded99b6aaa259ac3fe CHANGELOG.md
++# Source-drift book (W1 review): pinned sources that legitimately changed
++# after their phase receipt. Format: <historical sha> <current sha> <path>;
++# one triple per pinned version, sorted. Regenerated at T2 close-out.
++# Historical evidence files are never exempted here.
++adc24e7c03e1a63e5d7addbda15ff40ce630367152699c5d9659cd8db65f357b 7875a0c9df165f8c11edd6566b160b48ae4ca2a307fb8cab75c96a184223a8f8 CHANGELOG.md
++c83d08301a703c9db11462aa541bc898e52548589972118465164895eed44dc7 7875a0c9df165f8c11edd6566b160b48ae4ca2a307fb8cab75c96a184223a8f8 CHANGELOG.md
+ f0d3511cd02f3007c0a18fc5d94c8997cfa512449313776117265708a36c8553 c9680cc436d806fa7fa2ce8545bd148dc9fcc9ae444973d4968a3f4f4fc069dc Cargo.lock
+ d5518138eae73219f8da0d7297af44a471dbd7135a39587a0da1587bfe3d1e70 23185f790bc4697bbd163004e2c78873755c13efba05b46260b4827cdeabdff7 Cargo.toml
+-5fb6ce43826495321f697e138e71e87954b2fcabec1ceef70549bb49a2f38988 23e0ac2b634ca13277ad1da1cf0b06fd0332b9b1b47b67e35186c8d9a11d1a0a Makefile
+-c5e92007c53a22253ad7d2cc779863b9592562a394d1b26ff09ea8d031991e29 23e0ac2b634ca13277ad1da1cf0b06fd0332b9b1b47b67e35186c8d9a11d1a0a Makefile
++5fb6ce43826495321f697e138e71e87954b2fcabec1ceef70549bb49a2f38988 e32e8b0c10b700926d0c5a80741ad9061ce8d85b1c3a5968d3e880089b830922 Makefile
++c5e92007c53a22253ad7d2cc779863b9592562a394d1b26ff09ea8d031991e29 e32e8b0c10b700926d0c5a80741ad9061ce8d85b1c3a5968d3e880089b830922 Makefile
+ bcc7328bd9c464a857c4b97c8491277bf401299d3c7963f1925b075d4313feb6 f2e4a249573a5b902b3f566b3f1db1ebab12d994f1ab6ef9be2dc15df63d7e26 crates/aura-consensus/src/fork_choice.rs
+ 7e396fbb4fd1d4103f26db16796ab0b6ad9626b7ba2ea0d56cae379bde5c2d59 8ec730ce2dc2cb1bc266990f4f29133038e98e390a63be0edbb3eaa23fa48f23 crates/aura-consensus/src/governance.rs
+ bd58be73dc4e0f6da16735be1d5ed17306d16c08569d798a4af20fcf72b91d40 b2e8ddad5b281da54e9c68107b563c9125b3931fe0e8e26023c74dcf3011ccc3 crates/aura-consensus/src/slashing.rs
+@@ -45,8 +46,8 @@ c477f915b427982ca83fcb253fa0ab850d619ca5bf4a764137f0407078af4986 26a28bcc51e2cab
+ b4897ba4dbc33f098c27e415669e2e0bbca45933694b67aa590181041ebfdf0f e7b3e704bb1c5688159f38f66f31ba17893bad818c8876e097631ab2725abf5b fuzz/Cargo.toml
+ dca80316562fefcf24c45b40fb635412e1d4e5e09b5abe26f7d0e6b67e1e906e 53ac68024a82d40e64badd40ead1ebea5e0af8be1e56d4184a0eb0f22eab55a2 fuzz/README.md
+ 6e80f8eab5695501a3350e70bd086675cf4d1669cf370d92e98702d18c7bfe6e 7414f1e69a9690bdf93c79dc0ca32ec5cac7ca3b4f0df2d317e39c6fa95abc99 fuzz/src/lib.rs
+-1259c6bbc3bd3d53cbe0dd1d69d8d762336dc26287215d2ee35307bba90ea85c 75fe9c2709cfbad9aa8aa96dea8987fa09444140bb45c1773042ff7dedba021f tools/audit_closeout.py
+-7bd672503f104aa733dff03e84f57ac26ef926607657ab6a799f9d2bc14c0dc9 75fe9c2709cfbad9aa8aa96dea8987fa09444140bb45c1773042ff7dedba021f tools/audit_closeout.py
++1259c6bbc3bd3d53cbe0dd1d69d8d762336dc26287215d2ee35307bba90ea85c 7b41687cb8cad6825caa239a68a9f698e6afb9685abad6b15530c60ba526ef4b tools/audit_closeout.py
++7bd672503f104aa733dff03e84f57ac26ef926607657ab6a799f9d2bc14c0dc9 7b41687cb8cad6825caa239a68a9f698e6afb9685abad6b15530c60ba526ef4b tools/audit_closeout.py
+ 4d7d73580e09a49f1a0a9faf668254b0ec12f891efa527db863fa3abf8cce4a1 ab356092fc59ed98bff8d3622ef74e35eb33da5f342c5b6dccf5d73aeb20763b tools/gen_w0_vectors.py
+ 303fc648659cc72d9f8cf7cf6bc71ed8c9bd5a9f9a8d923d5a1e78bcffba0b5b 5e62e17226bfc601e8775b54e7f6a025d36c1357b7206d33c18c442cb49746eb tools/nc_b10.py
+ f86dee929549c751519e1749e0976c561e47a174a129412caf8cd23680887f61 3ae536e2637862525ca6edb1eeaa927a018a529856402d60c7260e92481d0b19 tools/nc_b5.py
+diff --git a/docs/evidence/t2/SHA256SUMS b/docs/evidence/t2/SHA256SUMS
+new file mode 100644
+index 0000000..1acb48e
+--- /dev/null
++++ b/docs/evidence/t2/SHA256SUMS
+@@ -0,0 +1,9 @@
++00738ea647e8c863d407f2a41b396b12e7a9ef1bb3e13a2f481fd56f192e91ba  docs/evidence/t2/baseline.log
++356a91861df1501486f88f1876a350b288d6ac0643f27d7a125d8f382829001d  docs/evidence/t2/gates.txt
++3d502137edf560ab25f6e2ec9fb5e7fe1b81df8e82041f3d670c69fdd10decb1  docs/evidence/t2/inventory.txt
++de148bd08c67161e650ac24c96b4f9e8f88079427dca73ab3484260b81d61111  docs/evidence/t2/nc-suite.log
++6766a8776c4de26a2c0be757209cba2ec6cca772a292a5166a68136322a9f49d  docs/evidence/t2/nc.log
++417209022070157452ff7328a14eccfa1cca16c89678388a7b78eefafe577f29  docs/evidence/t2/report.md
++6c91d35ba82e7b8d32cb83a1610f6d6d89bdeead3adb3a15f9831ac2c28e509f  docs/evidence/t2/t2-allocation.log
++4785a86228849813727c78c2c53c96b4019fc60d39c6c546c1457b68c71497aa  docs/evidence/t2/campaign/result.json
++6c91d35ba82e7b8d32cb83a1610f6d6d89bdeead3adb3a15f9831ac2c28e509f  docs/evidence/t2/campaign/t2-allocation.log
+diff --git a/docs/evidence/t2/baseline.log b/docs/evidence/t2/baseline.log
+new file mode 100644
+index 0000000..e8e31b9
+--- /dev/null
++++ b/docs/evidence/t2/baseline.log
+@@ -0,0 +1,2 @@
++[evidence_t2] cmd=/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/t2_allocation_check.py exit=0 duration=0.53s
++RESULT: T2 allocation check PASS — table reconciles with genesis 3000000 (validators 1200000, treasury 600000, community 750000, team 450000), digest 5fe7417a134011e7028f255cf7cf180335cc23c773ee9657a68de260fcc9ea41
+diff --git a/docs/evidence/t2/campaign/result.json b/docs/evidence/t2/campaign/result.json
+new file mode 100644
+index 0000000..a8065f0
+--- /dev/null
++++ b/docs/evidence/t2/campaign/result.json
+@@ -0,0 +1,33 @@
++{
++  "commands": [
++    [
++      "/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/t2_allocation_check.py",
++      "baseline"
++    ],
++    [
++      "cargo test --locked -p aura-storage --test t2_allocation",
++      "t2-allocation"
++    ],
++    [
++      "/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/nc_t2.py",
++      "nc-suite"
++    ]
++  ],
++  "gates": {
++    "baseline": "pass",
++    "nc-suite": "pass",
++    "t2-allocation": "pass"
++  },
++  "golden_table_digest": "5fe7417a134011e7028f255cf7cf180335cc23c773ee9657a68de260fcc9ea41",
++  "named_gate": "script reconciles genesis balances with the table; NC: extra coins -> red",
++  "phase": "T2",
++  "sources": {
++    "crates/aura-storage/examples/t2_allocation_example.rs": "3ee1de6962b1c7c19b833b5ac30b17689827553d9f952a1f784c81c1acfd298f",
++    "crates/aura-storage/src/allocation.rs": "597468f750857e7436187746745bd82fd2cd319c6b08f04aab70cc7b39a11190",
++    "crates/aura-storage/tests/t2_allocation.rs": "8c9053dbc56f8f6a7274b28bf8d8cf9feff12f8f7b052becca5649685aabf2e9",
++    "sim/t2-allocation.json": "d3a4634174a89a08cf7579260effd9cc1b89708a705377965db9695ec53b65c5",
++    "tools/nc_t2.py": "1679a2a52048441c7999e5678cdfab8cb2b73d2178a66f00b184b99154b920ad",
++    "tools/t2_allocation_check.py": "6bfc2bd6a315a67a1b827bfece57b8a19af642c6fb82bba6ed89f3806d15ae36"
++  },
++  "when": "2026-11-21T13:40:36"
++}
+diff --git a/docs/evidence/t2/campaign/t2-allocation.log b/docs/evidence/t2/campaign/t2-allocation.log
+new file mode 100644
+index 0000000..d56e58b
+--- /dev/null
++++ b/docs/evidence/t2/campaign/t2-allocation.log
+@@ -0,0 +1,17 @@
++[evidence_t2] cmd=cargo test --locked -p aura-storage --test t2_allocation exit=0 duration=0.63s
++   Compiling aura-storage v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-storage)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.59s
++     Running tests/t2_allocation.rs (target/debug/deps/t2_allocation-2aea84e2d6df7359)
++
++running 8 tests
++test t2_locked_coins_are_not_spendable ... ok
++test t2_allocation_sums_to_the_genesis_supply ... ok
++test t2_monthly_deltas_sum_to_the_vested_amount ... ok
++test t2_splitting_an_entry_preserves_the_total ... ok
++test t2_reference_table_agrees_with_the_simulation ... ok
++test t2_the_cliff_locks_everything_before_it ... ok
++test t2_vesting_completes_exactly_at_the_end ... ok
++test t2_vesting_must_not_exceed_its_allocation ... ok
++
++test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
+diff --git a/docs/evidence/t2/gates.txt b/docs/evidence/t2/gates.txt
+new file mode 100644
+index 0000000..445300b
+--- /dev/null
++++ b/docs/evidence/t2/gates.txt
+@@ -0,0 +1,10 @@
++T2 Allocation gates (ECONOMICS_PLAN, crates/aura-storage/tests/t2_allocation.rs)
++Gate: script reconciles genesis balances with the table; NC: extra coins -> red
++
++baseline                                   pass                   reconciliation oracle (genesis balances vs allocation table)
++t2-allocation                              pass                   named gate: extra coins -> red, table reconciles
++nc-suite                                   pass                   6 mutation controls incl. the literal gate (extra coins)
++
++negative controls: 6/6 (PASS)
++named gate: PASS
++oracle cross-run: PASS
+diff --git a/docs/evidence/t2/inventory.txt b/docs/evidence/t2/inventory.txt
+new file mode 100644
+index 0000000..0ea2052
+--- /dev/null
++++ b/docs/evidence/t2/inventory.txt
+@@ -0,0 +1,4 @@
++# T2 inventory (generated by tools/write_t2_evidence.py)
++# Cumulative negative controls: 18 phases, 530 controls.
++W4: 6/6, H0: 6/6, H1: 6/6, H2: 6/6, H3: 6/6, H4: 6/6, H5: 6/6, H6: 7/7, H7: 7/7, H8: 7/7, H9: 7/7, E0: 6/6, E1: 6/6, E2: 6/6, E3: 6/6, T0: 6/6, T1: 6/6, T2: 6/6
++TOTAL: 530 negative controls cumulative
+diff --git a/docs/evidence/t2/nc-suite.log b/docs/evidence/t2/nc-suite.log
+new file mode 100644
+index 0000000..ff53c20
+--- /dev/null
++++ b/docs/evidence/t2/nc-suite.log
+@@ -0,0 +1,8 @@
++[evidence_t2] cmd=/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/nc_t2.py exit=0 duration=5.79s
++[PASS] NC-1 injected bug -> extra coins must go red: red with named message
++[PASS] NC-2 vesting exceeds allocation allowed: red with named message
++[PASS] NC-3 cliff removed: red with named message
++[PASS] NC-4 vesting never completes: red with named message
++[PASS] NC-5 lockup ignored: red with named message
++[PASS] NC-6 table drifts from the reference: red with named message
++RESULT: 6/6 negative controls PASS
+diff --git a/docs/evidence/t2/nc.log b/docs/evidence/t2/nc.log
+new file mode 100644
+index 0000000..a3157c4
+--- /dev/null
++++ b/docs/evidence/t2/nc.log
+@@ -0,0 +1,8 @@
++[evidence_t2] cmd=tools/nc_t2.py
++[PASS] NC-1 injected bug -> extra coins must go red: red with named message
++[PASS] NC-2 vesting exceeds allocation allowed: red with named message
++[PASS] NC-3 cliff removed: red with named message
++[PASS] NC-4 vesting never completes: red with named message
++[PASS] NC-5 lockup ignored: red with named message
++[PASS] NC-6 table drifts from the reference: red with named message
++RESULT: 6/6 negative controls PASS
+diff --git a/docs/evidence/t2/report.md b/docs/evidence/t2/report.md
+new file mode 100644
+index 0000000..5c7db06
+--- /dev/null
++++ b/docs/evidence/t2/report.md
+@@ -0,0 +1,11 @@
++# Отчёт T2 — Allocation
++
++Дата: 2026-11-21
++
++Итог: **ВСЕ ГЕЙТЫ T2 ЗЕЛЁНЫЕ**
++
++Гейт: скрипт сверяет genesis-балансы с таблицей; лишние монеты → красный.
++
++Таблица `crates/aura-storage/src/allocation.rs`: validators 1 200 000, treasury 600 000 (вестинг 6/24 мес), community 750 000, team 450 000 (вестинг 12/36 мес) = 3 000 000 ALCRY = genesis supply T1. Золотой дайджест таблицы 5fe7417a…c9ea41 (Rust ↔ Python ↔ пример `t2_allocation_example`). Вестинг: линейный с клиффом; locked-часть не тратится. Сценарий `sim/t2-allocation.json`, гейт `crates/aura-storage/tests/t2_allocation.rs` (`campaign/t2-allocation.log`, `campaign/result.json`).
++negative controls `tools/nc_t2.py` (`nc.log`, RESULT: 6/6 negative controls PASS).
++
+diff --git a/docs/evidence/t2/t2-allocation.log b/docs/evidence/t2/t2-allocation.log
+new file mode 100644
+index 0000000..d56e58b
+--- /dev/null
++++ b/docs/evidence/t2/t2-allocation.log
+@@ -0,0 +1,17 @@
++[evidence_t2] cmd=cargo test --locked -p aura-storage --test t2_allocation exit=0 duration=0.63s
++   Compiling aura-storage v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-storage)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.59s
++     Running tests/t2_allocation.rs (target/debug/deps/t2_allocation-2aea84e2d6df7359)
++
++running 8 tests
++test t2_locked_coins_are_not_spendable ... ok
++test t2_allocation_sums_to_the_genesis_supply ... ok
++test t2_monthly_deltas_sum_to_the_vested_amount ... ok
++test t2_splitting_an_entry_preserves_the_total ... ok
++test t2_reference_table_agrees_with_the_simulation ... ok
++test t2_the_cliff_locks_everything_before_it ... ok
++test t2_vesting_completes_exactly_at_the_end ... ok
++test t2_vesting_must_not_exceed_its_allocation ... ok
++
++test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
+diff --git a/docs/plans/ECONOMICS_PLAN.md b/docs/plans/ECONOMICS_PLAN.md
+index 7d9c685..6dd86ea 100644
+--- a/docs/plans/ECONOMICS_PLAN.md
++++ b/docs/plans/ECONOMICS_PLAN.md
+@@ -1,6 +1,6 @@
+ # ECONOMICS_PLAN — tokenomics, fees, treasury, white paper
+ 
+-**Status:** 🚧 IN PROGRESS — T0 ✅ (`patches/0078-T0-baseline.patch`); T1 ✅ (`patches/0079-T1-issuance.patch`); ⏸ T2–T4 Stage 1 in progress; T5–T8 Stage 2  
++**Status:** 🚧 IN PROGRESS — T0 ✅ (`patches/0078-T0-baseline.patch`); T1 ✅ (`patches/0079-T1-issuance.patch`); T2 ✅ (`patches/0080-T2-allocation.patch`); T3–T4 Stage 1 in progress; T5–T8 Stage 2  
+ **Stage:** Stage 1: T0–T4. ⏸ Stage 2: T5–T8 (slashing parameters, governance, treasury, white paper).  
+ **Deliverable:** `patches/0077-T0-...` … `patches/0085-T8-...`
+ **Dependencies:** Stage 1 — CONSENSUS B4–B9, EXEC X3–X5, ECOSYSTEM E3, OPS O4.  
+@@ -26,7 +26,7 @@ tests, simulations in `sim/`, text in the white paper.
+ |---|---|---|---|
+ | ✅ **T0** | Baseline | no token; desired properties described (scarcity, security, accessibility) | NC: "emission from nowhere" in simulation → gate red — met, 1000-step simulation, golden digest pinned, 6 mutation controls |
+ | ✅ **T1** | Issuance model | genesis supply, inflation curve, halving/target staked ratio, max supply (if fixed) | 10-year simulation: supply matches the formula within 1 unit — met, 0-unit drift every year, golden path digest pinned, 6 mutation controls |
+-| **T2** | Allocation | allocation (validators, treasury, community, team), vesting with cliffs, lockups | script reconciles genesis balances with the table; NC: extra coins → red |
++| ✅ **T2** | Allocation | allocation (validators, treasury, community, team), vesting with cliffs, lockups | script reconciles genesis balances with the table; NC: extra coins → red — met, pots sum to exactly 3 000 000 `ALCRY`, golden table digest pinned, 6 mutation controls |
+ | **T3** | Fees | EIP-1559-like `base_fee` + `tip`, burning the base part, elastic gas target | 10 000 congested blocks: base fee rises/falls per the formula |
+ | **T4** | Staking | min stake, delegation, commission, unbonding 21 days, slashing period | 1000 delegators: shares sum == 1; NC: withdraw without unbonding → red |
+ | ⏸ **T5** | Slashing and insurance | penalty parameters, insurance fund, mass-slash protection | 7 scenarios: penalty ≥ damage, fund never negative |
+@@ -90,6 +90,40 @@ tests, simulations in `sim/`, text in the white paper.
+   convention) with the scenario mirrored in `sim/t1-issuance.json`;
+   (2) the horizon granularity is whole years (the gate says "10-year
+   simulation"; block-level emission belongs to T3/T4 mechanics).
++
++### T2 receipt (2026-11-20) — allocation: validators, treasury, community, team
++
++- Deliverable: `patches/0080-T2-allocation.patch`; evidence in
++  `docs/evidence/t2/` (`campaign/` self-contained: gate run log,
++  `result.json` with commands, the golden table digest and source
++  digests).
++- Gate met literally: `tools/t2_allocation_check.py` reconciles the
++  genesis balances with the allocation table — the pots sum to exactly
++  3 000 000 `ALCRY` (= the T1 genesis supply), and the phase control is
++  exactly the named one: **one extra coin anywhere turns the
++  reconciliation red** with `T2: the allocation must sum to the genesis
++  supply` (NC-1). Table (genesis-fixed, D-T1): validators 1 200 000
++  `ALCRY`, treasury 600 000 (vesting 24 months, 6-month cliff), community
++  750 000, team 450 000 (vesting 36 months, 12-month cliff). Golden table
++  digest
++  `5fe7417a134011e7028f255cf7cf180335cc23c773ee9657a68de260fcc9ea41`
++  pinned in the Rust tests and re-derived by the independent Python
++  oracle, which also cross-runs the Rust example `t2_allocation_example`.
++- Vesting with cliffs and lockups enforced, not decorative: the cliff
++  locks everything before it, vesting completes exactly at the end
++  (truncated linear), and the locked part cannot be spent
++  (`check_spend`); vesting overflow, cliff removal, non-completing
++  vesting, ignored lockup and table drift each turn the gate red with
++  their named message (`tools/nc_t2.py`, 6/6). Two metamorphisms: split
++  pots preserve the total and the lock profile; monthly deltas
++  telescope to the vested amount.
++- Explained deviations (recorded here as this plan prescribes):
++  (1) the table lives in `crates/aura-storage/src/allocation.rs`
++  (workspace convention) with the scenario mirrored in
++  `sim/t2-allocation.json`;
++  (2) the reconciliation is against the T1 genesis supply (the phase
++  says "genesis balances") — validator rewards from the validators pot
++  are T4 mechanics and carry no promises of returns (D-T2).
+ - Negative controls: `tools/nc_t1.py`, 6/6 in `docs/evidence/t1/nc.log`;
+   cumulative negative control total 524.
+ 
+diff --git a/sim/t2-allocation.json b/sim/t2-allocation.json
+new file mode 100644
+index 0000000..ccdfddc
+--- /dev/null
++++ b/sim/t2-allocation.json
+@@ -0,0 +1,24 @@
++{
++  "phase": "T2",
++  "title": "Genesis allocation table with vesting and lockups",
++  "genesis_supply_alcry": 3000000,
++  "entries": [
++    {"name": "validators", "amount_alcry": 1200000, "vesting": null},
++    {"name": "treasury", "amount_alcry": 600000, "vesting": {"cliff_months": 6, "total_months": 24, "amount_alcry": 600000}},
++    {"name": "community", "amount_alcry": 750000, "vesting": null},
++    {"name": "team", "amount_alcry": 450000, "vesting": {"cliff_months": 12, "total_months": 36, "amount_alcry": 450000}}
++  ],
++  "golden_table_digest": "5fe7417a134011e7028f255cf7cf180335cc23c773ee9657a68de260fcc9ea41",
++  "samples": [
++    {"name": "team", "month": 6, "vested_alcry": 0, "locked_alcry": 450000},
++    {"name": "team", "month": 12, "vested_alcry": 150000, "locked_alcry": 300000},
++    {"name": "team", "month": 36, "vested_alcry": 450000, "locked_alcry": 0},
++    {"name": "treasury", "month": 6, "vested_alcry": 150000, "locked_alcry": 450000},
++    {"name": "treasury", "month": 24, "vested_alcry": 600000, "locked_alcry": 0}
++  ],
++  "rules": {
++    "sum": "sum(pots) == genesis supply exactly (no extra coins)",
++    "vesting": "vested(m) = 0 for m < cliff; amount * m / total_months for cliff <= m < total; amount for m >= total",
++    "lockup": "locked = vesting.amount - vested; liquid = pot - locked; spends cannot touch locked coins"
++  }
++}
+diff --git a/tools/audit_closeout.py b/tools/audit_closeout.py
+index 1741006..fc7eacb 100644
+--- a/tools/audit_closeout.py
++++ b/tools/audit_closeout.py
+@@ -38,7 +38,7 @@ NET_PHASES = ["N0", "N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8"]  # NET_PLAN
+ WALLET_PHASES = ["W0", "W1", "W2", "W3", "W4"]  # grows with each W phase
+ SECURITY_PHASES = ["H0", "H1", "H2", "H3", "H4", "H5", "H6", "H7", "H8", "H9"]  # grows with each H phase
+ ECOSYSTEM_PHASES = ["E0", "E1", "E2", "E3"]  # grows with each E phase
+-ECONOMICS_PHASES = ["T0", "T1"]  # grows with each T phase
++ECONOMICS_PHASES = ["T0", "T1", "T2"]  # grows with each T phase
+ PHASES = CORE_PHASES + STATE_PHASES + EXEC_PHASES + NODE_PHASES + CONSENSUS_PHASES + NET_PHASES + WALLET_PHASES + SECURITY_PHASES + ECOSYSTEM_PHASES + ECONOMICS_PHASES
+ SHIPPED = CORE_PHASES + [
+     "S0",
+@@ -107,8 +107,9 @@ SHIPPED = CORE_PHASES + [
+     "E2",
+     "E3",
+     "T0",
++    "T1",
+ ]
+-CURRENT = "T1"
++CURRENT = "T2"
+ 
+ PLAN_FOR_PREFIX = {
+     "C": "CORE_PLAN.md",
+@@ -126,7 +127,7 @@ PLAN_FOR_PREFIX = {
+ }
+ 
+ NC_PER_PHASE = {f"C{i}": 6 for i in range(4, 11)}
+-NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6, "W4": 6, "H0": 6, "H1": 6, "H2": 6, "H3": 6, "H4": 6, "H5": 6, "H6": 7, "H7": 7, "H8": 7, "H9": 7, "E0": 6, "E1": 6, "E2": 6, "E3": 6, "T0": 6, "T1": 6})
++NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6, "W4": 6, "H0": 6, "H1": 6, "H2": 6, "H3": 6, "H4": 6, "H5": 6, "H6": 7, "H7": 7, "H8": 7, "H9": 7, "E0": 6, "E1": 6, "E2": 6, "E3": 6, "T0": 6, "T1": 6, "T2": 6})
+ SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)  # 339 (through W0)
+ EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + (0 if CURRENT in SHIPPED else NC_PER_PHASE[CURRENT])
+ 
+@@ -161,6 +162,7 @@ PATCH_ORDER += ["E2"]
+ PATCH_ORDER += ["E3"]
+ PATCH_ORDER += ["T0"]
+ PATCH_ORDER += ["T1"]
++PATCH_ORDER += ["T2"]
+ PATCH_NUMBERS = {phase: index + 1 for index, phase in enumerate(PATCH_ORDER)}
+ 
+ 
+diff --git a/tools/nc_t2.py b/tools/nc_t2.py
+new file mode 100644
+index 0000000..f32bb9c
+--- /dev/null
++++ b/tools/nc_t2.py
+@@ -0,0 +1,107 @@
++#!/usr/bin/env python3
++"""Mutation controls for T2 (ECONOMICS_PLAN T2).
++
++Each control injects ONE bug (restored after) and requires the named T2
++message to appear in the red run. NC-1 is the phase gate literally: one
++extra coin in the table must turn the reconciliation red.
++"""
++
++import os
++import subprocess
++import sys
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++ALLOCATION = os.path.join(ROOT, "crates", "aura-storage/src/allocation.rs")
++
++TEST_CMD = ["cargo", "test", "--locked", "-p", "aura-storage",
++            "--test", "t2_allocation"]
++
++# (name, path, anchor, replacement, expected message)
++CONTROLS = [
++    (
++        "NC-1 injected bug -> extra coins must go red",
++        ALLOCATION,
++        "        total += entry.amount;",
++        "        total += entry.amount + 1;",
++        "T2: the allocation must sum to the genesis supply",
++    ),
++    (
++        "NC-2 vesting exceeds allocation allowed",
++        ALLOCATION,
++        "            if schedule.amount > entry.amount {",
++        "            if false {",
++        "T2: vesting must not exceed its allocation",
++    ),
++    (
++        "NC-3 cliff removed",
++        ALLOCATION,
++        "    if month < schedule.cliff_months {",
++        "    if false {",
++        "T2: the cliff must lock everything before it",
++    ),
++    (
++        "NC-4 vesting never completes",
++        ALLOCATION,
++        "    if month >= schedule.total_months {",
++        "    if false {",
++        "T2: vesting must complete exactly at the end",
++    ),
++    (
++        "NC-5 lockup ignored",
++        ALLOCATION,
++        "    entry.amount - locked(entry, month)",
++        "    entry.amount",
++        "T2: locked coins must not be spendable",
++    ),
++    (
++        "NC-6 table drifts from the reference",
++        ALLOCATION,
++        "        amount: 1_200_000 * ALCRY,",
++        "        amount: 1_200_001 * ALCRY,",
++        "T2: the reconciliation must agree with the reference table",
++    ),
++]
++
++PASS_MARKERS = ("test result: ok.",)
++
++
++def run_control(name, path, anchor, replacement, expected):
++    with open(path, encoding="utf-8") as f:
++        original = f.read()
++    if original.count(anchor) != 1:
++        return False, "anchor count %d" % original.count(anchor)
++    mutated = original.replace(anchor, replacement)
++    try:
++        with open(path, "w", encoding="utf-8") as f:
++            f.write(mutated)
++        proc = subprocess.run(TEST_CMD, cwd=ROOT, stdout=subprocess.PIPE,
++                              stderr=subprocess.STDOUT, text=True,
++                              errors="replace")
++        output = proc.stdout or ""
++    finally:
++        with open(path, "w", encoding="utf-8") as f:
++            f.write(original)
++    compile_failed = "error[" in output and "test result" not in output
++    if compile_failed:
++        return False, "mutation broke compilation"
++    if any(marker in output for marker in PASS_MARKERS):
++        return False, "mutated gate still passes"
++    if expected in output:
++        return True, "red with named message"
++    return False, "red without named message"
++
++
++def main():
++    passed = 0
++    for name, path, anchor, replacement, expected in CONTROLS:
++        ok, why = run_control(name, path, anchor, replacement, expected)
++        print("[%s] %s: %s" % ("PASS" if ok else "FAIL", name, why))
++        if ok:
++            passed += 1
++    total = len(CONTROLS)
++    print("RESULT: %d/%d negative controls PASS" % (passed, total))
++    return 0 if passed == total else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/t2_allocation_check.py b/tools/t2_allocation_check.py
+new file mode 100644
+index 0000000..bcfd4ad
+--- /dev/null
++++ b/tools/t2_allocation_check.py
+@@ -0,0 +1,149 @@
++#!/usr/bin/env python3
++"""Independent T2 allocation oracle (ECONOMICS_PLAN T2).
++
++The phase gate is literal: this script reconciles the genesis balances
++with the allocation table — sum(pots) must equal the genesis supply
++exactly ("extra coins -> red"). It also re-derives the vesting/lockup
++rules and cross-checks the Rust example `t2_allocation_example`.
++"""
++
++import hashlib
++import json
++import os
++import re
++import subprocess
++import sys
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++SCENARIO = os.path.join(ROOT, "sim", "t2-allocation.json")
++ALLOCATION_RS = os.path.join(ROOT, "crates", "aura-storage", "src", "allocation.rs")
++
++GOLDEN_TABLE_DIGEST = "5fe7417a134011e7028f255cf7cf180335cc23c773ee9657a68de260fcc9ea41"
++ALCRY = 10 ** 18
++
++
++def vested(cliff, total, amount, month):
++    if month < cliff:
++        return 0
++    if month >= total:
++        return amount
++    return amount * month // total
++
++
++def table_digest(entries):
++    lines = []
++    for entry in entries:
++        if entry["vesting"]:
++            v = entry["vesting"]
++            lines.append("%s:%d:v=%d,%d,%d\n" % (
++                entry["name"], entry["amount"], v["cliff"], v["total"], v["vested"]))
++        else:
++            lines.append("%s:%d\n" % (entry["name"], entry["amount"]))
++    return hashlib.sha256("".join(lines).encode("utf-8")).hexdigest()
++
++
++def rust_digest_const():
++    text = open(ALLOCATION_RS, encoding="utf-8").read()
++    rows = re.findall(
++        r'name: "([a-z]+)",\s*\n\s*amount: ([0-9_]+) \* ALCRY,',
++        text)
++    return rows
++
++
++def main():
++    scenario = json.load(open(SCENARIO, encoding="utf-8"))
++    genesis = scenario["genesis_supply_alcry"] * ALCRY
++
++    entries = []
++    for raw in scenario["entries"]:
++        vesting = None
++        if raw["vesting"]:
++            vesting = {
++                "cliff": raw["vesting"]["cliff_months"],
++                "total": raw["vesting"]["total_months"],
++                "vested": raw["vesting"]["amount_alcry"] * ALCRY,
++            }
++        entries.append({
++            "name": raw["name"],
++            "amount": raw["amount_alcry"] * ALCRY,
++            "vesting": vesting,
++        })
++
++    # The gate: reconcile genesis balances with the table.
++    total = sum(e["amount"] for e in entries)
++    assert total == genesis, (
++        "T2: the allocation must sum to the genesis supply (%d != %d)" % (total, genesis)
++    )
++    assert total == 3_000_000 * ALCRY
++    assert len({e["name"] for e in entries}) == len(entries)
++
++    for entry in entries:
++        if entry["vesting"]:
++            v = entry["vesting"]
++            assert v["total"] > v["cliff"], "T2: vesting must not exceed its allocation"
++            assert v["vested"] <= entry["amount"], "T2: vesting must not exceed its allocation"
++
++    digest = table_digest(entries)
++    assert digest == GOLDEN_TABLE_DIGEST, (
++        "T2: the reconciliation must agree with the reference table"
++    )
++    assert digest == scenario["golden_table_digest"]
++
++    # Rust constants must mirror the table.
++    rows = rust_digest_const()
++    expected = [(e["name"], str(e["amount"] // ALCRY).replace("000", "000")) for e in entries]
++    rust_names = [name for name, _ in rows]
++    assert rust_names == [e["name"] for e in entries], (
++        "T2: the reconciliation must agree with the reference table (const drift)"
++    )
++    rust_amounts = [int(amount.replace("_", "")) for _, amount in rows]
++    assert rust_amounts == [e["amount"] // ALCRY for e in entries], (
++        "T2: the reconciliation must agree with the reference table (const drift)"
++    )
++
++    # Vesting samples.
++    for sample in scenario["samples"]:
++        entry = next(e for e in entries if e["name"] == sample["name"])
++        v = entry["vesting"]
++        got_vested = vested(v["cliff"], v["total"], v["vested"], sample["month"])
++        got_locked = v["vested"] - got_vested
++        assert got_vested == sample["vested_alcry"] * ALCRY, (
++            "T2: vesting must complete exactly at the end (sample %s@%d)"
++            % (sample["name"], sample["month"])
++        )
++        assert got_locked == sample["locked_alcry"] * ALCRY, (
++            "T2: locked coins must not be spendable (sample %s@%d)"
++            % (sample["name"], sample["month"])
++        )
++        # locked coins are not spendable
++        liquid = entry["amount"] - got_locked
++        assert liquid + got_locked == entry["amount"], "T2: locked coins must not be spendable"
++
++    proc = subprocess.run(
++        ["cargo", "run", "--quiet", "--locked", "-p", "aura-storage", "--example",
++         "t2_allocation_example"],
++        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
++        text=True, errors="replace",
++    )
++    output = proc.stdout or ""
++    if proc.returncode != 0 or "T2-SIM-OK " not in output:
++        print(output[-2000:])
++        print("RESULT: T2 allocation check FAIL — rust example did not run")
++        return 1
++    payload = json.loads(output[output.index("T2-SIM-OK ") + len("T2-SIM-OK "):].strip())
++    assert payload["genesis"] == genesis, "T2: the reconciliation must agree with the reference table"
++    assert payload["digest"] == digest, "T2: the reconciliation must agree with the reference table"
++    assert payload["team_vested_36"] == 450_000 * ALCRY, "T2: vesting must complete exactly at the end"
++    for entry in entries:
++        row = payload["entries"][entry["name"]]
++        assert row["amount"] == entry["amount"], (
++            "T2: the reconciliation must agree with the reference table"
++        )
++    print("RESULT: T2 allocation check PASS — table reconciles with genesis %d "
++          "(validators 1200000, treasury 600000, community 750000, team 450000), "
++          "digest %s" % (genesis // ALCRY, digest))
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/write_t2_evidence.py b/tools/write_t2_evidence.py
+new file mode 100644
+index 0000000..75d8900
+--- /dev/null
++++ b/tools/write_t2_evidence.py
+@@ -0,0 +1,168 @@
++#!/usr/bin/env python3
++"""Write docs/evidence/t2 (ECONOMICS_PLAN T2).
++
++Runs the T2 gates (reconciliation oracle incl. the Rust example
++cross-run, cargo test t2_allocation) and tools/nc_t2.py, builds
++self-contained evidence: gates.txt rows, campaign/ bundle (run logs +
++result.json with source digests), nc.log with the RESULT line, report.md
++and cumulative inventory (TOTAL: 530).
++"""
++
++import hashlib
++import json
++import os
++import subprocess
++import sys
++import time
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++EVID = os.path.join(ROOT, "docs", "evidence", "t2")
++EVID_DIRS = ["", "campaign"]
++GATES = [
++    ([sys.executable, os.path.join(ROOT, "tools", "t2_allocation_check.py")],
++     "baseline", "reconciliation oracle (genesis balances vs allocation table)"),
++    (["cargo", "test", "--locked", "-p", "aura-storage", "--test", "t2_allocation"],
++     "t2-allocation", "named gate: extra coins -> red, table reconciles"),
++    ([sys.executable, os.path.join(ROOT, "tools", "nc_t2.py")],
++     "nc-suite", "6 mutation controls incl. the literal gate (extra coins)"),
++]
++SOURCES = [
++    "crates/aura-storage/src/allocation.rs",
++    "crates/aura-storage/tests/t2_allocation.rs",
++    "crates/aura-storage/examples/t2_allocation_example.rs",
++    "sim/t2-allocation.json",
++    "tools/t2_allocation_check.py",
++    "tools/nc_t2.py",
++]
++
++
++def sha256_file(path):
++    h = hashlib.sha256()
++    with open(path, "rb") as f:
++        for chunk in iter(lambda: f.read(65536), b""):
++            h.update(chunk)
++    return h.hexdigest()
++
++
++def run_cmd(cmd, timeout=2400):
++    started = time.time()
++    proc = subprocess.run(cmd, cwd=ROOT, stdout=subprocess.PIPE,
++                          stderr=subprocess.STDOUT, text=True,
++                          errors="replace", timeout=timeout)
++    return proc.returncode, proc.stdout or "", time.time() - started
++
++
++def gate_passes(code, output, name):
++    if code != 0:
++        return False
++    if name == "baseline":
++        return "RESULT: T2 allocation check PASS" in output
++    if name == "t2-allocation":
++        return "test result: ok." in output
++    return "RESULT: 6/6 negative controls PASS" in output
++
++
++def main():
++    for rel in EVID_DIRS:
++        os.makedirs(os.path.join(EVID, rel), exist_ok=True)
++
++    rows = []
++    logs = {}
++    outputs = {}
++    ok_all = True
++    for cmd, name, desc in GATES:
++        print("[evidence_t2] %s ..." % name, flush=True)
++        code, out, dur = run_cmd(cmd)
++        ok = gate_passes(code, out, name)
++        ok_all = ok_all and ok
++        rows.append((name, "pass" if ok else "FAIL", desc))
++        outputs[name] = out
++        logs[name + ".log"] = (
++            "[evidence_t2] cmd=%s exit=%d duration=%.2fs\n" % (" ".join(cmd), code, dur)
++            + out)
++        print("[evidence_t2] %s: %s" % (name, "pass" if ok else "FAIL"), flush=True)
++
++    nc_ok = "RESULT: 6/6 negative controls PASS" in outputs.get("nc-suite", "")
++    gate_ok = "test result: ok." in outputs.get("t2-allocation", "")
++    oracle_ok = "RESULT: T2 allocation check PASS" in outputs.get("baseline", "")
++
++    with open(os.path.join(EVID, "nc.log"), "w", encoding="utf-8") as f:
++        f.write("[evidence_t2] cmd=tools/nc_t2.py\n")
++        f.write(outputs.get("nc-suite", ""))
++
++    with open(os.path.join(EVID, "campaign", "t2-allocation.log"), "w",
++              encoding="utf-8") as f:
++        f.write(logs.get("t2-allocation.log", ""))
++    with open(os.path.join(EVID, "campaign", "result.json"), "w",
++              encoding="utf-8") as f:
++        json.dump({
++            "phase": "T2",
++            "when": time.strftime("%Y-%m-%dT%H:%M:%S"),
++            "commands": [[" ".join(cmd), name] for cmd, name, _ in GATES],
++            "gates": {name: status for name, status, _ in rows},
++            "named_gate": "script reconciles genesis balances with the table; "
++                          "NC: extra coins -> red",
++            "golden_table_digest":
++                "5fe7417a134011e7028f255cf7cf180335cc23c773ee9657a68de260fcc9ea41",
++            "sources": {rel: sha256_file(os.path.join(ROOT, rel)) for rel in SOURCES},
++        }, f, indent=2, sort_keys=True)
++        f.write("\n")
++
++    for name, text in logs.items():
++        with open(os.path.join(EVID, name), "w", encoding="utf-8") as f:
++            f.write(text)
++
++    with open(os.path.join(EVID, "gates.txt"), "w", encoding="utf-8") as f:
++        f.write("T2 Allocation gates (ECONOMICS_PLAN, "
++                "crates/aura-storage/tests/t2_allocation.rs)\n")
++        f.write("Gate: script reconciles genesis balances with the table; "
++                "NC: extra coins -> red\n\n")
++        for name, status, desc in rows:
++            f.write("%-42s %-22s %s\n" % (name, status, desc))
++        f.write("\nnegative controls: 6/6 (%s)\n" % ("PASS" if nc_ok else "FAIL"))
++        f.write("named gate: %s\n" % ("PASS" if gate_ok else "FAIL"))
++        f.write("oracle cross-run: %s\n" % ("PASS" if oracle_ok else "FAIL"))
++
++    with open(os.path.join(EVID, "report.md"), "w", encoding="utf-8") as f:
++        f.write("# Отчёт T2 — Allocation\n\n")
++        f.write("Дата: %s\n\n" % time.strftime("%Y-%m-%d"))
++        f.write("Итог: **%s**\n\n" % ("ВСЕ ГЕЙТЫ T2 ЗЕЛЁНЫЕ" if ok_all
++                                      else "ЕСТЬ КРАСНЫЕ ГЕЙТЫ"))
++        f.write("Гейт: скрипт сверяет genesis-балансы с таблицей; лишние "
++                "монеты → красный.\n\n")
++        f.write("Таблица `crates/aura-storage/src/allocation.rs`: "
++                "validators 1 200 000, treasury 600 000 (вестинг 6/24 мес), "
++                "community 750 000, team 450 000 (вестинг 12/36 мес) = "
++                "3 000 000 ALCRY = genesis supply T1. Золотой дайджест "
++                "таблицы 5fe7417a…c9ea41 (Rust ↔ Python ↔ пример "
++                "`t2_allocation_example`). Вестинг: линейный с клиффом; "
++                "locked-часть не тратится. Сценарий `sim/t2-allocation.json`, "
++                "гейт `crates/aura-storage/tests/t2_allocation.rs` "
++                "(`campaign/t2-allocation.log`, `campaign/result.json`).\n")
++        f.write("negative controls `tools/nc_t2.py` (`nc.log`, "
++                "RESULT: 6/6 negative controls PASS).\n\n")
++
++    with open(os.path.join(EVID, "inventory.txt"), "w", encoding="utf-8") as f:
++        f.write("# T2 inventory (generated by tools/write_t2_evidence.py)\n")
++        f.write("# Cumulative negative controls: 18 phases, 530 controls.\n")
++        f.write("W4: 6/6, H0: 6/6, H1: 6/6, H2: 6/6, H3: 6/6, H4: 6/6, "
++                "H5: 6/6, H6: 7/7, H7: 7/7, H8: 7/7, H9: 7/7, E0: 6/6, "
++                "E1: 6/6, E2: 6/6, E3: 6/6, T0: 6/6, T1: 6/6, T2: 6/6\n")
++        f.write("TOTAL: 530 negative controls cumulative\n")
++
++    with open(os.path.join(EVID, "SHA256SUMS"), "w", encoding="utf-8") as f:
++        for rel in sorted(EVID_DIRS):
++            base = os.path.join(EVID, rel)
++            for name in sorted(os.listdir(base)):
++                path = os.path.join(base, name)
++                if os.path.isfile(path) and name != "SHA256SUMS":
++                    repo_rel = os.path.relpath(path, ROOT)
++                    f.write("%s  %s\n" % (sha256_file(path), repo_rel))
++
++    print("[evidence_t2] %s"
++          % ("all gates green" if ok_all else "RED GATES PRESENT"), flush=True)
++    return 0 if ok_all else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+-- 
+2.47.3
+

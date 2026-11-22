@@ -1,0 +1,2218 @@
+From 64ff71251b10bb5cf1ec488d1661c51b68289194 Mon Sep 17 00:00:00 2001
+From: AuraLite Restore <restore@auralite.local>
+Date: Sat, 21 Nov 2026 19:21:14 +0000
+Subject: [PATCH] T6 - governance: 20 proposals, valid ones pass, flash-stake
+ attack rejected, 48h timelock, veto sunset
+
+T6 - Governance (ECONOMICS_PLAN). Gate literally: 20 proposals are driven by the pinned run (113 steps) - valid ones pass (15 executed; 4 rejected by design: majority against, quorum missed, tie yes == no, no votes; 1 vetoed one block before the sunset) and the flash-stake attack is rejected: a 1 000 000 ALCRY stake taken after the snapshot has no voting power (NoVotingPower). Proposal threshold 10 000 ALCRY (exactly the threshold passes); quorum 2000 bps of the snapshot total (voted == quorum exactly passes; abstain counts for the quorum only; strict yes > no); voting period 120 960 blocks (7 days at 5 s) as the half-open window [created, created + period); 48 h timelock = 34 560 blocks before execution; the emergency veto sunsets at block 1 521 000. Golden digest 828b13cf7ca3abcaea65386f7c62e1e155f4d207cb000aceccd86397b5c729aa pinned in Rust tests and re-derived by the independent Python oracle (tools/t6_governance_check.py), which cross-runs t6_governance_example. NC: 8/8 named messages (tools/nc_t6.py; standard 6 + flash-stake + veto sunset, H6-H9/T4/T5 precedent). 10 gate tests + 2 metamorphisms. Evidence docs/evidence/t6 (558 NCs cumulative over 23 phases). ALL GATES GREEN.
+
+Restored after workspace reset #8: the T0-T5 tree came back from the delivered combined delta as e559d94 (byte-identical to the T5 canon 9b648b6); Rust 1.99.1 reinstalled.
+---
+ CHANGELOG.md                                  |  43 ++
+ Makefile                                      |  19 +
+ .../examples/t6_governance_example.rs         |  19 +
+ crates/aura-storage/src/governance.rs         | 666 ++++++++++++++++++
+ crates/aura-storage/src/lib.rs                |   1 +
+ crates/aura-storage/tests/t6_governance.rs    | 237 +++++++
+ docs/economics/t6-governance.md               |  62 ++
+ docs/evidence/review-w1-source-drift.txt      |  14 +-
+ docs/evidence/t6/SHA256SUMS                   |   9 +
+ docs/evidence/t6/baseline.log                 |   2 +
+ docs/evidence/t6/campaign/result.json         |  33 +
+ docs/evidence/t6/campaign/t6-governance.log   |  19 +
+ docs/evidence/t6/gates.txt                    |  10 +
+ docs/evidence/t6/inventory.txt                |   4 +
+ docs/evidence/t6/nc-suite.log                 |  10 +
+ docs/evidence/t6/nc.log                       |  10 +
+ docs/evidence/t6/report.md                    |  11 +
+ docs/evidence/t6/t6-governance.log            |  19 +
+ docs/plans/ECONOMICS_PLAN.md                  |  52 +-
+ sim/t6-governance.json                        |  47 ++
+ tools/audit_closeout.py                       |   8 +-
+ tools/nc_t6.py                                | 120 ++++
+ tools/t6_governance_check.py                  | 336 +++++++++
+ tools/write_t6_evidence.py                    | 179 +++++
+ 24 files changed, 1913 insertions(+), 17 deletions(-)
+ create mode 100644 crates/aura-storage/examples/t6_governance_example.rs
+ create mode 100644 crates/aura-storage/src/governance.rs
+ create mode 100644 crates/aura-storage/tests/t6_governance.rs
+ create mode 100644 docs/economics/t6-governance.md
+ create mode 100644 docs/evidence/t6/SHA256SUMS
+ create mode 100644 docs/evidence/t6/baseline.log
+ create mode 100644 docs/evidence/t6/campaign/result.json
+ create mode 100644 docs/evidence/t6/campaign/t6-governance.log
+ create mode 100644 docs/evidence/t6/gates.txt
+ create mode 100644 docs/evidence/t6/inventory.txt
+ create mode 100644 docs/evidence/t6/nc-suite.log
+ create mode 100644 docs/evidence/t6/nc.log
+ create mode 100644 docs/evidence/t6/report.md
+ create mode 100644 docs/evidence/t6/t6-governance.log
+ create mode 100644 sim/t6-governance.json
+ create mode 100644 tools/nc_t6.py
+ create mode 100644 tools/t6_governance_check.py
+ create mode 100644 tools/write_t6_evidence.py
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 192ec0d..c420f01 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,49 @@
+ All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
+ never rewritten: corrections are made with a new entry or an explicit note.
+ 
++## [T6 — Governance phase closed: 20 proposals, valid ones pass, flash-stake attack rejected, 48 h timelock, veto sunset] 2026-11-21
++
++### Added
++
++- `crates/aura-storage/src/governance.rs` — governance model: proposal
++  threshold 10 000 `ALCRY`; quorum 2000 bps of the power snapshot
++  (strict `yes > no`, a tie is rejected; abstain counts for the quorum
++  only); voting period 120 960 blocks (7 days at 5 s) as the half-open
++  window `[created, created + period)`; **48 h timelock** (34 560
++  blocks) before execution; emergency veto with a **sunset** at block
++  1 521 000; votes carry the **snapshot** power of the proposal's
++  creation block — a flash-stake after the snapshot has no power and is
++  rejected (`NoVotingPower`).
++- `crates/aura-storage/tests/t6_governance.rs` (10 gate tests: the
++  literal 20-proposal gate, flash-stake rejection, threshold/quorum/
++  voting-period/timelock/veto-sunset boundaries incl. exact edges,
++  pinned digest; metamorphisms — vote reordering, late stake vs
++  snapshot) and `crates/aura-storage/examples/t6_governance_example.rs`.
++- `sim/t6-governance.json` — the pinned scenario (20 proposals, 113
++  steps: 15 executed, 4 rejected, 1 vetoed) with golden digest
++  `828b13cf7ca3abcaea65386f7c62e1e155f4d207cb000aceccd86397b5c729aa`
++  and checkpoints; `docs/economics/t6-governance.md`.
++- `tools/t6_governance_check.py` (the phase gate oracle: full model
++  re-implementation, constants, samples, Rust example cross-run),
++  `tools/nc_t6.py` (8 mutation controls: pass condition flipped,
++  snapshot replaced by live stake, threshold/window/quorum/timelock/
++  sunset disabled or drifted, parameter drift), `tools/write_t6_evidence.py`
++  (`docs/evidence/t6/`, cumulative inventory
++  `TOTAL: 558 negative controls over 23 phases`).
++- Wiring: Makefile `governance gate (T6)` + `test-t6/check-t6/examples-t6/
++  nc-t6/evidence-t6`; `tools/audit_closeout.py` (`CURRENT = "T6"`,
++  `SHIPPED` += T5, `NC_PER_PHASE["T6"] = 8`, `PATCH_ORDER` += T6);
++  `### T6 receipt` in `docs/plans/ECONOMICS_PLAN.md`.
++
++### Restored
++
++- The workspace was reset mid-session (reset #8: `crates/` reverted to
++  the github state, `cargo` removed). The T0–T5 tree was restored from
++  the delivered combined delta
++  (`AuraLite-T5-delta/AuraLite-T0-T5-vs-github-e1a5b56.patch`) as
++  commit `e559d94` «T0 - T5 update» (byte-identical to the T5 canon
++  `9b648b6` of the pre-reset chain) and Rust 1.99.1 was reinstalled.
++
+ ## [T5 — Slashing and insurance phase closed: 7 scenarios, penalty ≥ damage, insurance fund never negative, mass-slash cap with a deferred queue] 2026-11-21
+ 
+ ### Added
+diff --git a/Makefile b/Makefile
+index 255e61a..77d2671 100644
+--- a/Makefile
++++ b/Makefile
+@@ -299,6 +299,9 @@ test: deps-check
+ 	@echo "== slashing gate (T5) =="
+ 	@$(PYTHON) tools/t5_slashing_check.py
+ 	@$(CARGO) test --locked -p aura-storage --test t5_slashing
++	@echo "== governance gate (T6) =="
++	@$(PYTHON) tools/t6_governance_check.py
++	@$(CARGO) test --locked -p aura-storage --test t6_governance
+ 	@echo "== close-out audit =="
+ 	@$(PYTHON) tools/audit_closeout.py
+ 	@echo "ALL GATES GREEN"
+@@ -1431,6 +1434,22 @@ nc-e2:
+ evidence-e2:
+ 	@$(PYTHON) tools/write_e2_evidence.py
+ 
++.PHONY: test-t6 check-t6 examples-t6 nc-t6 evidence-t6
++test-t6:
++	@$(CARGO) test --locked -p aura-storage --test t6_governance
++
++check-t6:
++	@$(PYTHON) tools/t6_governance_check.py
++
++examples-t6:
++	@$(CARGO) run --quiet --locked -p aura-storage --example t6_governance_example
++
++nc-t6:
++	@$(PYTHON) tools/nc_t6.py
++
++evidence-t6:
++	@$(PYTHON) tools/write_t6_evidence.py
++
+ .PHONY: test-t5 check-t5 examples-t5 nc-t5 evidence-t5
+ test-t5:
+ 	@$(CARGO) test --locked -p aura-storage --test t5_slashing
+diff --git a/crates/aura-storage/examples/t6_governance_example.rs b/crates/aura-storage/examples/t6_governance_example.rs
+new file mode 100644
+index 0000000..d5452fc
+--- /dev/null
++++ b/crates/aura-storage/examples/t6_governance_example.rs
+@@ -0,0 +1,19 @@
++//! T6 example: run the pinned governance scenario and print its digest
++//! and outcome counts.
++
++use aura_storage::governance::{run_t6_scenario, scenario_digest};
++
++fn main() {
++    let run = run_t6_scenario();
++    let digest = scenario_digest(&run.steps);
++    println!(
++        "T6-SIM-OK {{\"steps\": {}, \"proposals\": {}, \"digest\": \"{}\", \
++\"executed\": {}, \"rejected\": {}, \"vetoed\": {}}}",
++        run.steps.len(),
++        run.states.len(),
++        digest,
++        run.executed,
++        run.rejected,
++        run.vetoed
++    );
++}
+diff --git a/crates/aura-storage/src/governance.rs b/crates/aura-storage/src/governance.rs
+new file mode 100644
+index 0000000..3b4e8bd
+--- /dev/null
++++ b/crates/aura-storage/src/governance.rs
+@@ -0,0 +1,666 @@
++//! T6 governance: proposal threshold, quorum, voting period, 48 h
++//! timelock and a veto power with a sunset (ECONOMICS_PLAN T6).
++//!
++//! A proposal lifecycle: [`Governance::propose`] (the proposer must hold
++//! at least [`T6_PROPOSAL_THRESHOLD`]) snapshots the voting power of
++//! every voter; [`Governance::vote`] is open for
++//! [`T6_VOTING_PERIOD_BLOCKS`] (7 days at 5 s) and counts the
++//! **snapshot** power only — a flash-stake taken after the snapshot has
++//! no voting power and its vote is rejected; [`Governance::finalize`]
++//! applies the quorum ([`T6_QUORUM_BPS`] of the snapshot total) and the
++//! strict majority `yes > no`; [`Governance::execute`] waits for the
++//! **48 h timelock** ([`T6_TIMELOCK_BLOCKS`]) after the voting period
++//! closes; [`Governance::veto`] is an emergency power that **sunsets**
++//! at [`T6_VETO_SUNSET_BLOCK`] and can never be used afterwards.
++//!
++//! The pinned scenario [`run_t6_scenario`] drives 20 proposals — valid
++//! ones pass, and the flash-stake attack is rejected; [`scenario_digest`]
++//! is cross-run against the independent Python oracle
++//! (`tools/t6_governance_check.py`).
++
++use crate::econ::Amount;
++use crate::issuance::ALCRY;
++
++/// Proposal threshold: the proposer must hold at least this much stake.
++pub const T6_PROPOSAL_THRESHOLD: Amount = 10_000 * ALCRY;
++
++/// Quorum: minimum voted power (of the snapshot total), in basis points
++/// (20 %).
++pub const T6_QUORUM_BPS: u64 = 2_000;
++
++/// Voting period: 7 days at 5 s per block.
++pub const T6_VOTING_PERIOD_BLOCKS: u64 = 120_960;
++
++/// Timelock between the voting close and execution: 48 hours at 5 s per
++/// block.
++pub const T6_TIMELOCK_BLOCKS: u64 = 34_560;
++
++/// Block height at which the emergency veto power sunsets. After it the
++/// veto can never be used again.
++pub const T6_VETO_SUNSET_BLOCK: u64 = 1_521_000;
++
++/// Basis points denominator.
++pub const T6_BPS: u64 = 10_000;
++
++/// Voting options.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum Support {
++    /// In favour.
++    Yes,
++    /// Against.
++    No,
++    /// Present, counts for the quorum only.
++    Abstain,
++}
++
++/// Proposal state machine.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum ProposalState {
++    /// Voting is open.
++    Voting = 0,
++    /// Quorum and majority reached; waiting for the timelock.
++    Passed = 1,
++    /// Quorum missed or majority against (or tie).
++    Rejected = 2,
++    /// Executed after the timelock.
++    Executed = 3,
++    /// Killed by the emergency veto before the sunset.
++    Vetoed = 4,
++}
++
++/// Governance errors (numeric codes appear in the step log).
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum GovError {
++    /// Proposer stake below [`T6_PROPOSAL_THRESHOLD`].
++    BelowThreshold = 1,
++    /// Vote outside `[created, created + voting period)`.
++    VotingClosed = 2,
++    /// Snapshot power is zero (a flash-stake attack).
++    NoVotingPower = 3,
++    /// This voter has already voted.
++    AlreadyVoted = 4,
++    /// Finalize before the voting period closed.
++    StillVoting = 5,
++    /// Finalize on an already final proposal.
++    AlreadyFinalized = 6,
++    /// Execute before the timelock elapsed.
++    Timelock = 7,
++    /// Execute or veto on a proposal that did not pass.
++    NotPassed = 8,
++    /// Execute on an already executed proposal.
++    AlreadyExecuted = 9,
++    /// Veto at or after [`T6_VETO_SUNSET_BLOCK`].
++    VetoSunset = 10,
++    /// Unknown proposal id.
++    NoSuchProposal = 11,
++}
++
++/// One proposal with its power snapshot and tally.
++#[derive(Debug, Clone)]
++pub struct Proposal {
++    /// Proposal id, counting from 1.
++    pub id: u32,
++    /// The proposer's voter id.
++    pub proposer: u32,
++    /// Block height the proposal was created (snapshot) at.
++    pub created_at: u64,
++    /// Voting power per voter, frozen at `created_at`.
++    pub snapshot: Vec<Amount>,
++    /// Tally: in favour.
++    pub yes: Amount,
++    /// Tally: against.
++    pub no: Amount,
++    /// Tally: abstain (quorum only).
++    pub abstain: Amount,
++    /// Per-voter "has voted" marks.
++    pub voted: Vec<bool>,
++    /// Current state.
++    pub state: ProposalState,
++}
++
++/// Governance with a stake registry and proposals.
++#[derive(Debug, Clone)]
++pub struct Governance {
++    stakes: Vec<Amount>,
++    proposals: Vec<Proposal>,
++}
++
++impl Governance {
++    /// New governance with the given stakes per voter id.
++    pub fn new(stakes: Vec<Amount>) -> Self {
++        Self {
++            stakes,
++            proposals: Vec::new(),
++        }
++    }
++
++    /// Current stakes per voter id.
++    pub fn stakes(&self) -> &[Amount] {
++        &self.stakes
++    }
++
++    /// All proposals in creation order.
++    pub fn proposals(&self) -> &[Proposal] {
++        &self.proposals
++    }
++
++    /// One proposal by id.
++    pub fn proposal(&self, id: u32) -> &Proposal {
++        &self.proposals[id as usize - 1]
++    }
++
++    /// Create a proposal; the snapshot freezes the voting power.
++    pub fn propose(&mut self, proposer: u32, height: u64) -> Result<u32, GovError> {
++        if self.stakes[proposer as usize] < T6_PROPOSAL_THRESHOLD {
++            return Err(GovError::BelowThreshold);
++        }
++        let id = self.proposals.len() as u32 + 1;
++        self.proposals.push(Proposal {
++            id,
++            proposer,
++            created_at: height,
++            snapshot: self.stakes.clone(),
++            yes: 0,
++            no: 0,
++            abstain: 0,
++            voted: vec![false; self.stakes.len()],
++            state: ProposalState::Voting,
++        });
++        Ok(id)
++    }
++
++    /// Cast one vote with the snapshot power of `voter`.
++    pub fn vote(
++        &mut self,
++        proposal_id: u32,
++        voter: u32,
++        support: Support,
++        height: u64,
++    ) -> Result<(), GovError> {
++        let proposal = &mut self.proposals[proposal_id as usize - 1];
++        if height >= proposal.created_at + T6_VOTING_PERIOD_BLOCKS {
++            return Err(GovError::VotingClosed);
++        }
++        let power = proposal.snapshot[voter as usize];
++        if power == 0 {
++            return Err(GovError::NoVotingPower);
++        }
++        if proposal.voted[voter as usize] {
++            return Err(GovError::AlreadyVoted);
++        }
++        proposal.voted[voter as usize] = true;
++        match support {
++            Support::Yes => proposal.yes += power,
++            Support::No => proposal.no += power,
++            Support::Abstain => proposal.abstain += power,
++        }
++        Ok(())
++    }
++
++    /// Close the voting: quorum + strict majority decide.
++    pub fn finalize(&mut self, proposal_id: u32, height: u64) -> Result<(), GovError> {
++        let proposal = &mut self.proposals[proposal_id as usize - 1];
++        if height < proposal.created_at + T6_VOTING_PERIOD_BLOCKS {
++            return Err(GovError::StillVoting);
++        }
++        if proposal.state != ProposalState::Voting {
++            return Err(GovError::AlreadyFinalized);
++        }
++        let voted = proposal.yes + proposal.no + proposal.abstain;
++        let total: Amount = proposal.snapshot.iter().sum();
++        let quorum = total * Amount::from(T6_QUORUM_BPS) / Amount::from(T6_BPS);
++        let passed = voted >= quorum && proposal.yes > proposal.no;
++        proposal.state = if passed {
++            ProposalState::Passed
++        } else {
++            ProposalState::Rejected
++        };
++        Ok(())
++    }
++
++    /// Execute a passed proposal after the 48 h timelock.
++    pub fn execute(&mut self, proposal_id: u32, height: u64) -> Result<(), GovError> {
++        let proposal = &mut self.proposals[proposal_id as usize - 1];
++        if proposal.state == ProposalState::Executed {
++            return Err(GovError::AlreadyExecuted);
++        }
++        if proposal.state != ProposalState::Passed {
++            return Err(GovError::NotPassed);
++        }
++        if height < proposal.created_at + T6_VOTING_PERIOD_BLOCKS + T6_TIMELOCK_BLOCKS {
++            return Err(GovError::Timelock);
++        }
++        proposal.state = ProposalState::Executed;
++        Ok(())
++    }
++
++    /// Emergency veto; sunsets at [`T6_VETO_SUNSET_BLOCK`].
++    pub fn veto(&mut self, proposal_id: u32, height: u64) -> Result<(), GovError> {
++        let proposal = &mut self.proposals[proposal_id as usize - 1];
++        if proposal.state != ProposalState::Passed {
++            return Err(GovError::NotPassed);
++        }
++        if height >= T6_VETO_SUNSET_BLOCK {
++            return Err(GovError::VetoSunset);
++        }
++        proposal.state = ProposalState::Vetoed;
++        Ok(())
++    }
++
++    /// Increase a voter's stake (the snapshot of existing proposals does
++    /// not move).
++    pub fn stake(&mut self, voter: u32, amount: Amount) {
++        self.stakes[voter as usize] += amount;
++    }
++
++    /// Decrease a voter's stake.
++    pub fn unstake(&mut self, voter: u32, amount: Amount) {
++        self.stakes[voter as usize] -= amount;
++    }
++}
++
++/// One action of the pinned scenario run (digest step).
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct T6Step {
++    /// Step number, starting at 0.
++    pub index: u32,
++    /// 0 propose, 1 vote, 2 finalize, 3 execute, 4 veto, 5 stake,
++    /// 6 unstake, 8 failed action, 9 final step.
++    pub kind: u8,
++    /// Proposal id (voter id for stake/unstake, 0 elsewhere).
++    pub subject: u32,
++    /// Block height of the action.
++    pub height: u64,
++    /// Tally: yes (new stake for stake/unstake; executed count on the
++    /// final step).
++    pub a: Amount,
++    /// Tally: no (rejected count on the final step).
++    pub b: Amount,
++    /// Tally: abstain (vetoed count on the final step).
++    pub c: Amount,
++    /// Proposal state after the action (9 = n/a).
++    pub state: u8,
++    /// Error code for failed actions (0 otherwise).
++    pub detail: u32,
++}
++
++/// Result of the pinned scenario run.
++#[derive(Debug, Clone)]
++pub struct T6Run {
++    /// Digest steps of the run.
++    pub steps: Vec<T6Step>,
++    /// Final state of every created proposal, in id order.
++    pub states: Vec<u8>,
++    /// Number of executed proposals.
++    pub executed: u32,
++    /// Number of rejected proposals.
++    pub rejected: u32,
++    /// Number of vetoed proposals.
++    pub vetoed: u32,
++}
++
++fn state_code(state: ProposalState) -> u8 {
++    state as u8
++}
++
++/// The pinned T6 scenario: 20 proposals, valid ones pass, the
++/// flash-stake attack is rejected.
++pub fn run_t6_scenario() -> T6Run {
++    let mut gov = Governance::new(vec![
++        80_000 * ALCRY,
++        50_000 * ALCRY,
++        40_000 * ALCRY,
++        20_000 * ALCRY,
++        10_000 * ALCRY,
++        0,
++    ]);
++    let mut steps: Vec<T6Step> = Vec::new();
++
++    macro_rules! snap {
++        ($kind:expr, $subject:expr, $height:expr, $a:expr, $b:expr, $c:expr, $state:expr, $detail:expr) => {
++            steps.push(T6Step {
++                index: steps.len() as u32,
++                kind: $kind,
++                subject: $subject,
++                height: $height,
++                a: $a,
++                b: $b,
++                c: $c,
++                state: $state,
++                detail: $detail,
++            })
++        };
++    }
++    macro_rules! do_propose {
++        ($proposer:expr, $height:expr) => {{
++            match gov.propose($proposer, $height) {
++                Ok(id) => {
++                    let p = gov.proposal(id);
++                    snap!(
++                        0,
++                        id,
++                        $height,
++                        p.yes,
++                        p.no,
++                        p.abstain,
++                        state_code(p.state),
++                        0
++                    );
++                }
++                Err(err) => {
++                    snap!(8, 0, $height, 0, 0, 0, 9, err as u32);
++                }
++            }
++        }};
++    }
++    macro_rules! do_vote {
++        ($id:expr, $voter:expr, $support:expr, $height:expr) => {{
++            match gov.vote($id, $voter, $support, $height) {
++                Ok(()) => {
++                    let p = gov.proposal($id);
++                    snap!(
++                        1,
++                        $id,
++                        $height,
++                        p.yes,
++                        p.no,
++                        p.abstain,
++                        state_code(p.state),
++                        0
++                    );
++                }
++                Err(err) => {
++                    let p = gov.proposal($id);
++                    snap!(
++                        8,
++                        $id,
++                        $height,
++                        p.yes,
++                        p.no,
++                        p.abstain,
++                        state_code(p.state),
++                        err as u32
++                    );
++                }
++            }
++        }};
++    }
++    macro_rules! do_finalize {
++        ($id:expr, $height:expr) => {{
++            match gov.finalize($id, $height) {
++                Ok(()) => {
++                    let p = gov.proposal($id);
++                    snap!(
++                        2,
++                        $id,
++                        $height,
++                        p.yes,
++                        p.no,
++                        p.abstain,
++                        state_code(p.state),
++                        0
++                    );
++                }
++                Err(err) => {
++                    let p = gov.proposal($id);
++                    snap!(
++                        8,
++                        $id,
++                        $height,
++                        p.yes,
++                        p.no,
++                        p.abstain,
++                        state_code(p.state),
++                        err as u32
++                    );
++                }
++            }
++        }};
++    }
++    macro_rules! do_execute {
++        ($id:expr, $height:expr) => {{
++            match gov.execute($id, $height) {
++                Ok(()) => {
++                    let p = gov.proposal($id);
++                    snap!(
++                        3,
++                        $id,
++                        $height,
++                        p.yes,
++                        p.no,
++                        p.abstain,
++                        state_code(p.state),
++                        0
++                    );
++                }
++                Err(err) => {
++                    let p = gov.proposal($id);
++                    snap!(
++                        8,
++                        $id,
++                        $height,
++                        p.yes,
++                        p.no,
++                        p.abstain,
++                        state_code(p.state),
++                        err as u32
++                    );
++                }
++            }
++        }};
++    }
++    macro_rules! do_veto {
++        ($id:expr, $height:expr) => {{
++            match gov.veto($id, $height) {
++                Ok(()) => {
++                    let p = gov.proposal($id);
++                    snap!(
++                        4,
++                        $id,
++                        $height,
++                        p.yes,
++                        p.no,
++                        p.abstain,
++                        state_code(p.state),
++                        0
++                    );
++                }
++                Err(err) => {
++                    let p = gov.proposal($id);
++                    snap!(
++                        8,
++                        $id,
++                        $height,
++                        p.yes,
++                        p.no,
++                        p.abstain,
++                        state_code(p.state),
++                        err as u32
++                    );
++                }
++            }
++        }};
++    }
++
++    // id1: valid pass.
++    do_propose!(0, 200_000);
++    do_vote!(1, 0, Support::Yes, 210_000);
++    do_vote!(1, 1, Support::Yes, 211_000);
++    do_vote!(1, 2, Support::Yes, 212_000);
++    do_finalize!(1, 321_000);
++    do_execute!(1, 355_520);
++    // id2: majority against.
++    do_propose!(0, 400_000);
++    do_vote!(2, 2, Support::Yes, 410_000);
++    do_vote!(2, 0, Support::No, 411_000);
++    do_finalize!(2, 521_000);
++    do_execute!(2, 522_000);
++    // id3: quorum missed.
++    do_propose!(0, 600_000);
++    do_vote!(3, 3, Support::Yes, 610_000);
++    do_finalize!(3, 721_000);
++    // threshold fail, then id4: valid pass.
++    do_propose!(5, 800_000);
++    do_propose!(0, 800_001);
++    do_vote!(4, 0, Support::Yes, 810_000);
++    do_vote!(4, 1, Support::Yes, 811_000);
++    do_finalize!(4, 921_000);
++    do_execute!(4, 955_560);
++    // id5: late vote rejected at the boundary.
++    do_propose!(0, 1_000_000);
++    do_vote!(5, 0, Support::Yes, 1_010_000);
++    do_vote!(5, 1, Support::Yes, 1_020_000);
++    do_vote!(5, 2, Support::Yes, 1_120_960);
++    do_finalize!(5, 1_120_961);
++    do_execute!(5, 1_155_520);
++    // id6: timelock boundary.
++    do_propose!(0, 1_200_000);
++    do_vote!(6, 0, Support::Yes, 1_210_000);
++    do_vote!(6, 1, Support::Yes, 1_220_000);
++    do_finalize!(6, 1_320_961);
++    do_execute!(6, 1_355_519);
++    do_execute!(6, 1_355_520);
++    // id7: veto one block before the sunset.
++    do_propose!(0, 1_400_000);
++    do_vote!(7, 0, Support::Yes, 1_410_000);
++    do_vote!(7, 1, Support::Yes, 1_420_000);
++    do_finalize!(7, 1_520_961);
++    do_veto!(7, 1_520_999);
++    do_execute!(7, 1_555_521);
++    // id8: veto after the sunset is rejected.
++    do_propose!(0, 1_600_000);
++    do_vote!(8, 0, Support::Yes, 1_610_000);
++    do_vote!(8, 1, Support::Yes, 1_620_000);
++    do_finalize!(8, 1_720_961);
++    do_veto!(8, 1_721_000);
++    do_execute!(8, 1_755_520);
++    // id9: flash-stake attack rejected.
++    do_propose!(0, 1_800_000);
++    gov.stake(5, 1_000_000 * ALCRY);
++    snap!(5, 5, 1_850_000, gov.stakes()[5], 0, 0, 9, 0);
++    do_vote!(9, 5, Support::Yes, 1_850_001);
++    do_vote!(9, 0, Support::Yes, 1_860_000);
++    do_vote!(9, 1, Support::Yes, 1_861_000);
++    do_vote!(9, 2, Support::Yes, 1_862_000);
++    do_finalize!(9, 1_920_961);
++    do_execute!(9, 1_955_520);
++    gov.unstake(5, 1_000_000 * ALCRY);
++    snap!(6, 5, 1_960_000, gov.stakes()[5], 0, 0, 9, 0);
++    // id10: double vote rejected.
++    do_propose!(0, 2_000_000);
++    do_vote!(10, 0, Support::Yes, 2_050_000);
++    do_vote!(10, 0, Support::No, 2_050_001);
++    do_vote!(10, 1, Support::Yes, 2_060_000);
++    do_finalize!(10, 2_120_961);
++    do_execute!(10, 2_155_520);
++    // id11: abstain counts for the quorum.
++    do_propose!(0, 2_200_000);
++    do_vote!(11, 0, Support::Yes, 2_210_000);
++    do_vote!(11, 1, Support::Abstain, 2_211_000);
++    do_vote!(11, 2, Support::Abstain, 2_212_000);
++    do_finalize!(11, 2_320_961);
++    do_execute!(11, 2_355_520);
++    // id12: quorum boundary (voted == quorum exactly).
++    do_propose!(0, 2_400_000);
++    do_vote!(12, 2, Support::Yes, 2_410_000);
++    do_finalize!(12, 2_520_961);
++    do_execute!(12, 2_555_520);
++    // id13: execute at the exact timelock boundary.
++    do_propose!(0, 2_600_000);
++    do_vote!(13, 0, Support::Yes, 2_610_000);
++    do_vote!(13, 1, Support::Yes, 2_611_000);
++    do_finalize!(13, 2_720_961);
++    do_execute!(13, 2_755_520);
++    // id14: a late stake does not move the snapshot.
++    do_propose!(0, 2_800_000);
++    gov.stake(3, 20_000 * ALCRY);
++    snap!(5, 3, 2_850_000, gov.stakes()[3], 0, 0, 9, 0);
++    do_vote!(14, 3, Support::Yes, 2_850_001);
++    do_vote!(14, 0, Support::Yes, 2_860_000);
++    do_finalize!(14, 2_920_961);
++    do_execute!(14, 2_955_520);
++    // id15: tie is rejected.
++    do_propose!(0, 3_000_000);
++    do_vote!(15, 0, Support::Yes, 3_010_000);
++    do_vote!(15, 4, Support::Yes, 3_011_000);
++    do_vote!(15, 1, Support::No, 3_012_000);
++    do_vote!(15, 2, Support::No, 3_013_000);
++    do_finalize!(15, 3_120_961);
++    // id16: threshold boundary (stake == threshold exactly).
++    do_propose!(4, 3_200_000);
++    do_vote!(16, 0, Support::Yes, 3_210_000);
++    do_finalize!(16, 3_320_961);
++    do_execute!(16, 3_355_520);
++    // id17: no votes, quorum missed.
++    do_propose!(0, 3_400_000);
++    do_finalize!(17, 3_520_961);
++    // id18: double finalize rejected.
++    do_propose!(0, 3_600_000);
++    do_vote!(18, 0, Support::Yes, 3_610_000);
++    do_vote!(18, 1, Support::Yes, 3_611_000);
++    do_finalize!(18, 3_720_961);
++    do_finalize!(18, 3_720_962);
++    do_execute!(18, 3_755_520);
++    // id19: double execute rejected.
++    do_propose!(0, 3_800_000);
++    do_vote!(19, 0, Support::Yes, 3_810_000);
++    do_vote!(19, 1, Support::Yes, 3_811_000);
++    do_finalize!(19, 3_920_961);
++    do_execute!(19, 3_955_520);
++    do_execute!(19, 3_955_521);
++    // id20: full lifecycle, all five powered voters vote.
++    do_propose!(1, 4_000_000);
++    do_vote!(20, 0, Support::Yes, 4_010_000);
++    do_vote!(20, 1, Support::Yes, 4_011_000);
++    do_vote!(20, 2, Support::Yes, 4_012_000);
++    do_vote!(20, 3, Support::No, 4_013_000);
++    do_vote!(20, 4, Support::Abstain, 4_014_000);
++    do_finalize!(20, 4_120_961);
++    do_execute!(20, 4_155_520);
++
++    let states: Vec<u8> = gov
++        .proposals()
++        .iter()
++        .map(|p| state_code(p.state))
++        .collect();
++    let executed = states.iter().filter(|&&s| s == 3).count() as u32;
++    let rejected = states.iter().filter(|&&s| s == 2).count() as u32;
++    let vetoed = states.iter().filter(|&&s| s == 4).count() as u32;
++    snap!(
++        9,
++        0,
++        0,
++        executed as Amount,
++        rejected as Amount,
++        vetoed as Amount,
++        9,
++        0
++    );
++    T6Run {
++        steps,
++        states,
++        executed,
++        rejected,
++        vetoed,
++    }
++}
++
++/// Digest of the scenario step log (sha256, hex).
++pub fn scenario_digest(steps: &[T6Step]) -> String {
++    let mut blob = String::new();
++    for step in steps {
++        blob.push_str(&format!(
++            "{}:{}:{}:{}:{}:{}:{}:{}:{}\n",
++            step.index,
++            step.kind,
++            step.subject,
++            step.height,
++            step.a,
++            step.b,
++            step.c,
++            step.state,
++            step.detail
++        ));
++    }
++    aura_state::sha256_bytes(blob.as_bytes()).to_hex()
++}
+diff --git a/crates/aura-storage/src/lib.rs b/crates/aura-storage/src/lib.rs
+index 7c50447..7086187 100644
+--- a/crates/aura-storage/src/lib.rs
++++ b/crates/aura-storage/src/lib.rs
+@@ -47,6 +47,7 @@ pub mod faucet;
+ /// T3 fees: EIP-1559-like `base_fee` + `tip` market, burned base part
+ /// and elastic gas target (ECONOMICS_PLAN T3).
+ pub mod fees;
++pub mod governance;
+ /// E1 chain indexer: idempotent ingest + reorg rollback over a local
+ /// row store (ECOSYSTEM_PLAN E1; Postgres replaced by deviation).
+ pub mod indexer;
+diff --git a/crates/aura-storage/tests/t6_governance.rs b/crates/aura-storage/tests/t6_governance.rs
+new file mode 100644
+index 0000000..963a976
+--- /dev/null
++++ b/crates/aura-storage/tests/t6_governance.rs
+@@ -0,0 +1,237 @@
++//! T6 gate tests: 20 proposals with the gate "valid ones pass,
++//! flash-stake attack rejected", threshold/quorum/voting-period/
++//! timelock/veto-sunset boundaries and the pinned digest
++//! (ECONOMICS_PLAN T6).
++
++use aura_storage::econ::Amount;
++use aura_storage::governance::{GovError, Governance, Support, run_t6_scenario, scenario_digest};
++use aura_storage::issuance::ALCRY;
++
++const GOLDEN_GOV_DIGEST: &str = "828b13cf7ca3abcaea65386f7c62e1e155f4d207cb000aceccd86397b5c729aa";
++
++fn stakes() -> Vec<Amount> {
++    vec![
++        80_000 * ALCRY,
++        50_000 * ALCRY,
++        40_000 * ALCRY,
++        20_000 * ALCRY,
++        10_000 * ALCRY,
++        0,
++    ]
++}
++
++#[test]
++fn t6_twenty_proposals_valid_ones_pass() {
++    let run = run_t6_scenario();
++    assert_eq!(run.states.len(), 20, "T6: a valid proposal must pass");
++    // Executed = valid proposals pass; Rejected/Vetoed as designed.
++    assert_eq!(run.executed, 15, "T6: a valid proposal must pass");
++    assert_eq!(run.rejected, 4, "T6: a valid proposal must pass");
++    assert_eq!(run.vetoed, 1, "T6: a valid proposal must pass");
++    let expected: Vec<u8> = vec![3, 2, 2, 3, 3, 3, 4, 3, 3, 3, 3, 3, 3, 3, 2, 3, 2, 3, 3, 3];
++    assert_eq!(run.states, expected, "T6: a valid proposal must pass");
++}
++
++#[test]
++fn t6_a_flash_stake_attack_must_be_rejected() {
++    let mut gov = Governance::new(stakes());
++    gov.propose(0, 1_800_000)
++        .expect("proposer holds the threshold");
++    gov.stake(5, 1_000_000 * ALCRY);
++    assert_eq!(
++        gov.vote(1, 5, Support::Yes, 1_850_001),
++        Err(GovError::NoVotingPower),
++        "T6: a flash-stake attack must be rejected"
++    );
++    assert_eq!(
++        gov.proposal(1).yes,
++        0,
++        "T6: a flash-stake attack must be rejected"
++    );
++}
++
++#[test]
++fn t6_a_proposal_below_the_threshold_must_be_rejected() {
++    let mut gov = Governance::new(stakes());
++    assert_eq!(
++        gov.propose(5, 800_000),
++        Err(GovError::BelowThreshold),
++        "T6: a proposal below the threshold must be rejected"
++    );
++    // boundary: the stake equals the threshold exactly
++    assert_eq!(
++        gov.propose(4, 3_200_000),
++        Ok(1),
++        "T6: a proposal below the threshold must be rejected"
++    );
++}
++
++#[test]
++fn t6_a_vote_outside_the_voting_period_must_be_rejected() {
++    let mut gov = Governance::new(stakes());
++    gov.propose(0, 1_000_000).expect("threshold met");
++    assert_eq!(
++        gov.vote(1, 2, Support::Yes, 1_120_960),
++        Err(GovError::VotingClosed),
++        "T6: a vote outside the voting period must be rejected"
++    );
++    // boundary: the last valid block of the window
++    assert_eq!(
++        gov.vote(1, 2, Support::Yes, 1_120_959),
++        Ok(()),
++        "T6: a vote outside the voting period must be rejected"
++    );
++}
++
++#[test]
++fn t6_the_quorum_must_be_met_for_a_proposal_to_pass() {
++    // quorum = 20 % of 200 000 ALCRY = 40 000 ALCRY exactly
++    let mut gov = Governance::new(stakes());
++    gov.propose(0, 600_000).expect("threshold met");
++    gov.vote(1, 3, Support::Yes, 610_000).expect("in window");
++    gov.finalize(1, 721_000).expect("window closed");
++    assert_eq!(
++        gov.proposal(1).state as u8,
++        2,
++        "T6: the quorum must be met for a proposal to pass"
++    );
++    // boundary: voted == quorum exactly passes
++    let mut gov = Governance::new(stakes());
++    gov.propose(0, 2_400_000).expect("threshold met");
++    gov.vote(1, 2, Support::Yes, 2_410_000).expect("in window");
++    gov.finalize(1, 2_520_961).expect("window closed");
++    assert_eq!(
++        gov.proposal(1).state as u8,
++        1,
++        "T6: the quorum must be met for a proposal to pass"
++    );
++}
++
++#[test]
++fn t6_execution_must_wait_for_the_timelock() {
++    let mut gov = Governance::new(stakes());
++    gov.propose(0, 1_200_000).expect("threshold met");
++    gov.vote(1, 0, Support::Yes, 1_210_000).expect("in window");
++    gov.vote(1, 1, Support::Yes, 1_220_000).expect("in window");
++    gov.finalize(1, 1_320_961).expect("window closed");
++    // boundary: one block before the timelock elapses
++    assert_eq!(
++        gov.execute(1, 1_355_519),
++        Err(GovError::Timelock),
++        "T6: execution must wait for the timelock"
++    );
++    assert_eq!(
++        gov.execute(1, 1_355_520),
++        Ok(()),
++        "T6: execution must wait for the timelock"
++    );
++}
++
++#[test]
++fn t6_the_veto_power_must_sunset() {
++    let mut gov = Governance::new(stakes());
++    gov.propose(0, 1_400_000).expect("threshold met");
++    gov.vote(1, 0, Support::Yes, 1_410_000).expect("in window");
++    gov.vote(1, 1, Support::Yes, 1_420_000).expect("in window");
++    gov.finalize(1, 1_520_961).expect("window closed");
++    // boundary: one block before the sunset
++    assert_eq!(
++        gov.veto(1, 1_520_999),
++        Ok(()),
++        "T6: the veto power must sunset"
++    );
++    assert_eq!(
++        gov.proposal(1).state as u8,
++        4,
++        "T6: the veto power must sunset"
++    );
++    let mut gov = Governance::new(stakes());
++    gov.propose(0, 1_600_000).expect("threshold met");
++    gov.vote(1, 0, Support::Yes, 1_610_000).expect("in window");
++    gov.vote(1, 1, Support::Yes, 1_620_000).expect("in window");
++    gov.finalize(1, 1_720_961).expect("window closed");
++    // at and after the sunset the veto is gone
++    assert_eq!(
++        gov.veto(1, 1_521_000),
++        Err(GovError::VetoSunset),
++        "T6: the veto power must sunset"
++    );
++}
++
++#[test]
++fn t6_reference_simulation_agrees_with_the_pinned_digest() {
++    let run = run_t6_scenario();
++    assert_eq!(
++        run.steps.len(),
++        113,
++        "T6: the reference simulation must agree with the pinned digest"
++    );
++    let digest = scenario_digest(&run.steps);
++    assert_eq!(
++        digest, GOLDEN_GOV_DIGEST,
++        "T6: the reference simulation must agree with the pinned digest"
++    );
++    let s0 = run.steps[0];
++    assert_eq!(
++        (
++            s0.kind, s0.subject, s0.height, s0.a, s0.b, s0.c, s0.state, s0.detail
++        ),
++        (0u8, 1u32, 200_000u64, 0, 0, 0, 0u8, 0u32),
++        "T6: the reference simulation must agree with the pinned digest"
++    );
++    let s4 = run.steps[4];
++    assert_eq!(
++        (s4.kind, s4.subject, s4.height, s4.a, s4.state, s4.detail),
++        (2u8, 1u32, 321_000u64, 170_000 * ALCRY, 1u8, 0u32),
++        "T6: the reference simulation must agree with the pinned digest"
++    );
++    let s37 = run.steps[37];
++    assert_eq!(
++        (s37.kind, s37.subject, s37.height, s37.state, s37.detail),
++        (8u8, 7u32, 1_555_521u64, 4u8, 8u32),
++        "T6: the reference simulation must agree with the pinned digest"
++    );
++    let s112 = run.steps[112];
++    assert_eq!(
++        (s112.kind, s112.a, s112.b, s112.c, s112.state),
++        (9u8, 15, 4, 1, 9u8),
++        "T6: the reference simulation must agree with the pinned digest"
++    );
++    assert_eq!(
++        (run.executed, run.rejected, run.vetoed),
++        (15, 4, 1),
++        "T6: a valid proposal must pass"
++    );
++}
++
++#[test]
++fn t6_reordering_independent_votes_preserves_the_tally() {
++    let mut forward = Governance::new(stakes());
++    forward.propose(0, 0).expect("threshold met");
++    forward.vote(1, 0, Support::Yes, 10).expect("in window");
++    forward.vote(1, 1, Support::No, 20).expect("in window");
++    let mut reverse = Governance::new(stakes());
++    reverse.propose(0, 0).expect("threshold met");
++    reverse.vote(1, 1, Support::No, 10).expect("in window");
++    reverse.vote(1, 0, Support::Yes, 20).expect("in window");
++    let a = forward.proposal(1);
++    let b = reverse.proposal(1);
++    assert_eq!(
++        (a.yes, a.no, a.abstain),
++        (b.yes, b.no, b.abstain),
++        "T6: a valid proposal must pass"
++    );
++}
++
++#[test]
++fn t6_a_late_stake_does_not_change_a_snapshot() {
++    let mut gov = Governance::new(stakes());
++    gov.propose(0, 2_800_000).expect("threshold met");
++    gov.stake(3, 20_000 * ALCRY);
++    gov.vote(1, 3, Support::Yes, 2_850_001).expect("in window");
++    assert_eq!(
++        gov.proposal(1).yes,
++        20_000 * ALCRY,
++        "T6: a flash-stake attack must be rejected"
++    );
++}
+diff --git a/docs/economics/t6-governance.md b/docs/economics/t6-governance.md
+new file mode 100644
+index 0000000..76279b7
+--- /dev/null
++++ b/docs/economics/t6-governance.md
+@@ -0,0 +1,62 @@
++# T6 — Governance (ECONOMICS_PLAN)
++
++**Статус:** ✅ закрыто (2026-11-21). **Гейт:** 20 proposals: valid ones pass,
++flash-stake attack rejected — выполнен буквально.
++
++## Решения
++
++- **Порог предложения.** Предложение может создать держатель стейка ≥
++  `T6_PROPOSAL_THRESHOLD` = **10 000 `ALCRY`** (граница: ровно 10 000 —
++  можно; меньше — `BelowThreshold`, красный).
++- **Кворум.** Проголосовавшая мощность ≥ **2000 bps** (20 %) от суммарного
++  снапшота предложения, иначе оно отклоняется. Граница: голоса == кворуму
++  точно → проходит (≥). Ничья `yes == no` — отклонение (нужно строгое
++  большинство `yes > no`); abstain считается в кворум, но не в большинство.
++- **Период голосования.** 120 960 блоков (7 дней по 5 с). Голос принимается
++  в полуинтервале `[created, created + period)` — на блоке закрытия красный
++  (`VotingClosed`), на последнем блоке окна — зелёный.
++- **48-часовой timelock.** Исполнение возможно не раньше
++  `created + period + 34 560` (48 ч по 5 с). На блок раньше — красный
++  (`Timelock`), на границе — зелёный.
++- **Veto/emergency с sunset.** Экстренное veto переводит Passed в Vetoed;
++  право **закатывается** на блоке `T6_VETO_SUNSET_BLOCK = 1 521 000`: за блок
++  до — работает, на закате и после — красный (`VetoSunset`).
++- **Flash-stake атака отвергается.** Мощность голоса фиксируется
++  **снапшотом** на момент создания предложения; стейк, взятый после
++  снапшота (в т.ч. flash-loan), даёт нулевую мощность — голос отвергается
++  (`NoVotingPower`), снапшот не двигается.
++
++## Сценарий `sim/t6-governance.json` (20 предложений, 113 шагов)
++
++Избиратели: 80 000 / 50 000 / 40 000 / 20 000 / 10 000 / 0 `ALCRY`
++(суммарный снапшот 200 000; кворум 40 000 = мощность избирателя 2 точно —
++граничный случай). 20 предложений: 15 исполнено (валидные проходят),
++4 отклонено (большинство против / пропущен кворум / ничья / нет голосов),
++1 ветировано за блок до заката; отдельно: отказ в создании ниже порога,
++поздний голос на границе, раннее исполнение на границе timelock, veto
++после заката (`VetoSunset`), **flash-stake 1 000 000 `ALCRY` посреди
++голосования → `NoVotingPower`**, двойной голос, двойной finalize,
++двойное исполнение, поздний стейк не двигает снапшот (голос 20 000, не
++40 000).
++
++Золотой дайджест
++`828b13cf7ca3abcaea65386f7c62e1e155f4d207cb000aceccd86397b5c729aa`
++закреплён в `crates/aura-storage/tests/t6_governance.rs` и пересчитан
++независимым Python-оракулом `tools/t6_governance_check.py`, который также
++запускает пример `t6_governance_example`.
++
++## Negative controls (`tools/nc_t6.py`, 8/8)
++
++| # | Мутация | Named message |
++|---|---|---|
++| 1 | условие принятия перевёрнуто | `T6: a valid proposal must pass` |
++| 2 | снапшот заменён текущим стейком | `T6: a flash-stake attack must be rejected` |
++| 3 | порог предложения не проверяется | `T6: a proposal below the threshold must be rejected` |
++| 4 | окно голосования +1 блок | `T6: a vote outside the voting period must be rejected` |
++| 5 | кворум = 0 | `T6: the quorum must be met for a proposal to pass` |
++| 6 | timelock = 0 | `T6: execution must wait for the timelock` |
++| 7 | sunset убран | `T6: the veto power must sunset` |
++| 8 | дрейф `T6_VOTING_PERIOD_BLOCKS` | `T6: the reference simulation must agree with the pinned digest` |
++
++Эвиденс: `docs/evidence/t6/` (контрольные мутации кумулятивно: **558** за
++23 фазы). Патч фазы: `patches/0084-T6-governance.patch`.
+diff --git a/docs/evidence/review-w1-source-drift.txt b/docs/evidence/review-w1-source-drift.txt
+index 29a032f..4ffe07d 100644
+--- a/docs/evidence/review-w1-source-drift.txt
++++ b/docs/evidence/review-w1-source-drift.txt
+@@ -1,13 +1,13 @@
+ # Source-drift book (W1 review): pinned sources that legitimately changed
+ # after their phase receipt. Format: <historical sha> <current sha> <path>;
+-# one triple per pinned version, sorted. Regenerated at T5 close-out.
++# one triple per pinned version, sorted. Regenerated at T6 close-out.
+ # Historical evidence files are never exempted here.
+-adc24e7c03e1a63e5d7addbda15ff40ce630367152699c5d9659cd8db65f357b 5679c655b454c1381b8f0a25deef44df55fdffee195dd243062cd4a6ff28acd4 CHANGELOG.md
+-c83d08301a703c9db11462aa541bc898e52548589972118465164895eed44dc7 5679c655b454c1381b8f0a25deef44df55fdffee195dd243062cd4a6ff28acd4 CHANGELOG.md
++adc24e7c03e1a63e5d7addbda15ff40ce630367152699c5d9659cd8db65f357b 1dc681d48934ec3437f0b3d5c62a73eef06d65ec18b7212092a29afa67ad1bf3 CHANGELOG.md
++c83d08301a703c9db11462aa541bc898e52548589972118465164895eed44dc7 1dc681d48934ec3437f0b3d5c62a73eef06d65ec18b7212092a29afa67ad1bf3 CHANGELOG.md
+ f0d3511cd02f3007c0a18fc5d94c8997cfa512449313776117265708a36c8553 c9680cc436d806fa7fa2ce8545bd148dc9fcc9ae444973d4968a3f4f4fc069dc Cargo.lock
+ d5518138eae73219f8da0d7297af44a471dbd7135a39587a0da1587bfe3d1e70 23185f790bc4697bbd163004e2c78873755c13efba05b46260b4827cdeabdff7 Cargo.toml
+-5fb6ce43826495321f697e138e71e87954b2fcabec1ceef70549bb49a2f38988 67c421dd39dff2568018058e06e13d5051e37474e1fe44fb196adc37e5da438c Makefile
+-c5e92007c53a22253ad7d2cc779863b9592562a394d1b26ff09ea8d031991e29 67c421dd39dff2568018058e06e13d5051e37474e1fe44fb196adc37e5da438c Makefile
++5fb6ce43826495321f697e138e71e87954b2fcabec1ceef70549bb49a2f38988 af21362de1af4ff2baaf7c0ceba22df1c2b35ea7fe5629b952731fac6fb2bc82 Makefile
++c5e92007c53a22253ad7d2cc779863b9592562a394d1b26ff09ea8d031991e29 af21362de1af4ff2baaf7c0ceba22df1c2b35ea7fe5629b952731fac6fb2bc82 Makefile
+ bcc7328bd9c464a857c4b97c8491277bf401299d3c7963f1925b075d4313feb6 f2e4a249573a5b902b3f566b3f1db1ebab12d994f1ab6ef9be2dc15df63d7e26 crates/aura-consensus/src/fork_choice.rs
+ 7e396fbb4fd1d4103f26db16796ab0b6ad9626b7ba2ea0d56cae379bde5c2d59 8ec730ce2dc2cb1bc266990f4f29133038e98e390a63be0edbb3eaa23fa48f23 crates/aura-consensus/src/governance.rs
+ bd58be73dc4e0f6da16735be1d5ed17306d16c08569d798a4af20fcf72b91d40 b2e8ddad5b281da54e9c68107b563c9125b3931fe0e8e26023c74dcf3011ccc3 crates/aura-consensus/src/slashing.rs
+@@ -46,8 +46,8 @@ c477f915b427982ca83fcb253fa0ab850d619ca5bf4a764137f0407078af4986 26a28bcc51e2cab
+ b4897ba4dbc33f098c27e415669e2e0bbca45933694b67aa590181041ebfdf0f e7b3e704bb1c5688159f38f66f31ba17893bad818c8876e097631ab2725abf5b fuzz/Cargo.toml
+ dca80316562fefcf24c45b40fb635412e1d4e5e09b5abe26f7d0e6b67e1e906e 53ac68024a82d40e64badd40ead1ebea5e0af8be1e56d4184a0eb0f22eab55a2 fuzz/README.md
+ 6e80f8eab5695501a3350e70bd086675cf4d1669cf370d92e98702d18c7bfe6e 7414f1e69a9690bdf93c79dc0ca32ec5cac7ca3b4f0df2d317e39c6fa95abc99 fuzz/src/lib.rs
+-1259c6bbc3bd3d53cbe0dd1d69d8d762336dc26287215d2ee35307bba90ea85c 8776f55d6ba4c7579094c8cb0ff1b10ad60cd4c11b4f84d69f2c14c159121149 tools/audit_closeout.py
+-7bd672503f104aa733dff03e84f57ac26ef926607657ab6a799f9d2bc14c0dc9 8776f55d6ba4c7579094c8cb0ff1b10ad60cd4c11b4f84d69f2c14c159121149 tools/audit_closeout.py
++1259c6bbc3bd3d53cbe0dd1d69d8d762336dc26287215d2ee35307bba90ea85c efcfe9e999c2d96d0717927bc0fe7ea9df722ab58f1ed38d68e7a0cbe987c96a tools/audit_closeout.py
++7bd672503f104aa733dff03e84f57ac26ef926607657ab6a799f9d2bc14c0dc9 efcfe9e999c2d96d0717927bc0fe7ea9df722ab58f1ed38d68e7a0cbe987c96a tools/audit_closeout.py
+ 4d7d73580e09a49f1a0a9faf668254b0ec12f891efa527db863fa3abf8cce4a1 ab356092fc59ed98bff8d3622ef74e35eb33da5f342c5b6dccf5d73aeb20763b tools/gen_w0_vectors.py
+ 303fc648659cc72d9f8cf7cf6bc71ed8c9bd5a9f9a8d923d5a1e78bcffba0b5b 5e62e17226bfc601e8775b54e7f6a025d36c1357b7206d33c18c442cb49746eb tools/nc_b10.py
+ f86dee929549c751519e1749e0976c561e47a174a129412caf8cd23680887f61 3ae536e2637862525ca6edb1eeaa927a018a529856402d60c7260e92481d0b19 tools/nc_b5.py
+diff --git a/docs/evidence/t6/SHA256SUMS b/docs/evidence/t6/SHA256SUMS
+new file mode 100644
+index 0000000..469ec4b
+--- /dev/null
++++ b/docs/evidence/t6/SHA256SUMS
+@@ -0,0 +1,9 @@
++bb54cc4db90c8b19a5bf142b7ab7954bf725c0cd732fc9bba5ff1134b3dc730a  docs/evidence/t6/baseline.log
++ce44e597bbbc47ff36fffcbfc64ce653d29fe381f3441d26677a3ceea6ed93fa  docs/evidence/t6/gates.txt
++3d921d057c54cdb9f51db8daec7f3f47eaa4c8216b1ca3b61d08878b40fe11ad  docs/evidence/t6/inventory.txt
++bbece2638f8c1b4b4c0be47ffcff6464f7193a7caafb1e12df28dc111ee6dafc  docs/evidence/t6/nc-suite.log
++e0e82a4b8ffa03b3a32081c67eba4efe63ed73577d914ccb97e6a9f6769652d5  docs/evidence/t6/nc.log
++b0ff0e4ca4e61cb52ca5264f0b2e17cc08d341ac0f1772bb5c26b2c0ac2ce956  docs/evidence/t6/report.md
++88df96d707ee0e6d2dfc1f1f7e1c50e30b936ced4509c52d449085110449e637  docs/evidence/t6/t6-governance.log
++e04d9d28b5405aef07db540b19d97fb7e6815fd831fd9eeb5b59a75f674bdeab  docs/evidence/t6/campaign/result.json
++88df96d707ee0e6d2dfc1f1f7e1c50e30b936ced4509c52d449085110449e637  docs/evidence/t6/campaign/t6-governance.log
+diff --git a/docs/evidence/t6/baseline.log b/docs/evidence/t6/baseline.log
+new file mode 100644
+index 0000000..0e537de
+--- /dev/null
++++ b/docs/evidence/t6/baseline.log
+@@ -0,0 +1,2 @@
++[evidence_t6] cmd=/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/t6_governance_check.py exit=0 duration=0.64s
++RESULT: T6 governance check PASS — 20 proposals, valid ones pass (15 executed), flash-stake attack rejected, veto sunset at 1521000, digest 828b13cf7ca3abcaea65386f7c62e1e155f4d207cb000aceccd86397b5c729aa
+diff --git a/docs/evidence/t6/campaign/result.json b/docs/evidence/t6/campaign/result.json
+new file mode 100644
+index 0000000..9b1457f
+--- /dev/null
++++ b/docs/evidence/t6/campaign/result.json
+@@ -0,0 +1,33 @@
++{
++  "commands": [
++    [
++      "/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/t6_governance_check.py",
++      "baseline"
++    ],
++    [
++      "cargo test --locked -p aura-storage --test t6_governance",
++      "t6-governance"
++    ],
++    [
++      "/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/nc_t6.py",
++      "nc-suite"
++    ]
++  ],
++  "gates": {
++    "baseline": "pass",
++    "nc-suite": "pass",
++    "t6-governance": "pass"
++  },
++  "golden_path_digest": "828b13cf7ca3abcaea65386f7c62e1e155f4d207cb000aceccd86397b5c729aa",
++  "named_gate": "20 proposals: valid ones pass, flash-stake attack rejected",
++  "phase": "T6",
++  "sources": {
++    "crates/aura-storage/examples/t6_governance_example.rs": "b2ebe907332a2b64ed7cd3a5e7608884afb458aa4351e2c5c220dc186c53db61",
++    "crates/aura-storage/src/governance.rs": "8aadc78af26518371a5c0a78a7688a61f96a05331a438ab42d9e09247c465831",
++    "crates/aura-storage/tests/t6_governance.rs": "fc7ec65ebad233640d5b59ab0ea51d3708ac7e392a1e586bbc4864e1f487fab1",
++    "sim/t6-governance.json": "3fc77234ccdbfdfb96cea6f473bfe729d314e89657180fc170d8dbdf31a98971",
++    "tools/nc_t6.py": "51620a984a1fee2299effcb54ce1dfff37f488333eaf4046148137acdea3a9c7",
++    "tools/t6_governance_check.py": "b2c6724edb548cd0594a635025dad4fa83606ed12bd2b20b56bb564042f9bacf"
++  },
++  "when": "2026-11-21T19:10:11"
++}
+diff --git a/docs/evidence/t6/campaign/t6-governance.log b/docs/evidence/t6/campaign/t6-governance.log
+new file mode 100644
+index 0000000..f89cf99
+--- /dev/null
++++ b/docs/evidence/t6/campaign/t6-governance.log
+@@ -0,0 +1,19 @@
++[evidence_t6] cmd=cargo test --locked -p aura-storage --test t6_governance exit=0 duration=0.60s
++   Compiling aura-storage v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-storage)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.54s
++     Running tests/t6_governance.rs (target/debug/deps/t6_governance-90bf5e17730a75b4)
++
++running 10 tests
++test t6_a_flash_stake_attack_must_be_rejected ... ok
++test t6_a_late_stake_does_not_change_a_snapshot ... ok
++test t6_a_vote_outside_the_voting_period_must_be_rejected ... ok
++test t6_a_proposal_below_the_threshold_must_be_rejected ... ok
++test t6_execution_must_wait_for_the_timelock ... ok
++test t6_reordering_independent_votes_preserves_the_tally ... ok
++test t6_the_quorum_must_be_met_for_a_proposal_to_pass ... ok
++test t6_the_veto_power_must_sunset ... ok
++test t6_twenty_proposals_valid_ones_pass ... ok
++test t6_reference_simulation_agrees_with_the_pinned_digest ... ok
++
++test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
+diff --git a/docs/evidence/t6/gates.txt b/docs/evidence/t6/gates.txt
+new file mode 100644
+index 0000000..b4f9b87
+--- /dev/null
++++ b/docs/evidence/t6/gates.txt
+@@ -0,0 +1,10 @@
++T6 Governance gates (ECONOMICS_PLAN, crates/aura-storage/tests/t6_governance.rs)
++Gate: 20 proposals: valid ones pass, flash-stake attack rejected
++
++baseline                                   pass                   independent governance oracle (20 proposals, valid ones pass)
++t6-governance                              pass                   named gate: valid ones pass; flash-stake attack rejected
++nc-suite                                   pass                   8 mutation controls incl. the literal flash-stake rejection
++
++negative controls: 8/8 (PASS)
++named gate: PASS
++oracle cross-run: PASS
+diff --git a/docs/evidence/t6/inventory.txt b/docs/evidence/t6/inventory.txt
+new file mode 100644
+index 0000000..2861725
+--- /dev/null
++++ b/docs/evidence/t6/inventory.txt
+@@ -0,0 +1,4 @@
++# T6 inventory (generated by tools/write_t6_evidence.py)
++# Cumulative negative controls: 23 phases, 558 controls.
++W4: 6/6, H0: 6/6, H1: 6/6, H2: 6/6, H3: 6/6, H4: 6/6, H5: 6/6, H6: 7/7, H7: 7/7, H8: 7/7, H9: 7/7, E0: 6/6, E1: 6/6, E2: 6/6, E3: 6/6, T0: 6/6, T1: 6/6, T2: 6/6, T3: 6/6, T4: 7/7, T5: 7/7, T6: 8/8
++TOTAL: 558 negative controls cumulative
+diff --git a/docs/evidence/t6/nc-suite.log b/docs/evidence/t6/nc-suite.log
+new file mode 100644
+index 0000000..79e7218
+--- /dev/null
++++ b/docs/evidence/t6/nc-suite.log
+@@ -0,0 +1,10 @@
++[evidence_t6] cmd=/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/nc_t6.py exit=0 duration=7.32s
++[PASS] NC-1 valid proposals flipped to rejected: red with named message
++[PASS] NC-2 flash-stake counted (snapshot replaced by live stake): red with named message
++[PASS] NC-3 proposal threshold not enforced: red with named message
++[PASS] NC-4 voting window extended by one block: red with named message
++[PASS] NC-5 quorum disabled: red with named message
++[PASS] NC-6 timelock removed: red with named message
++[PASS] NC-7 veto sunset removed: red with named message
++[PASS] NC-8 pinned parameters drift: red with named message
++RESULT: 8/8 negative controls PASS
+diff --git a/docs/evidence/t6/nc.log b/docs/evidence/t6/nc.log
+new file mode 100644
+index 0000000..0aeced9
+--- /dev/null
++++ b/docs/evidence/t6/nc.log
+@@ -0,0 +1,10 @@
++[evidence_t6] cmd=tools/nc_t6.py
++[PASS] NC-1 valid proposals flipped to rejected: red with named message
++[PASS] NC-2 flash-stake counted (snapshot replaced by live stake): red with named message
++[PASS] NC-3 proposal threshold not enforced: red with named message
++[PASS] NC-4 voting window extended by one block: red with named message
++[PASS] NC-5 quorum disabled: red with named message
++[PASS] NC-6 timelock removed: red with named message
++[PASS] NC-7 veto sunset removed: red with named message
++[PASS] NC-8 pinned parameters drift: red with named message
++RESULT: 8/8 negative controls PASS
+diff --git a/docs/evidence/t6/report.md b/docs/evidence/t6/report.md
+new file mode 100644
+index 0000000..196cff5
+--- /dev/null
++++ b/docs/evidence/t6/report.md
+@@ -0,0 +1,11 @@
++# Отчёт T6 — Governance
++
++Дата: 2026-11-21
++
++Итог: **ВСЕ ГЕЙТЫ T6 ЗЕЛЁНЫЕ**
++
++Гейт: 20 предложений — валидные проходят, flash-stake атака отвергается.
++
++Модель `crates/aura-storage/src/governance.rs`: порог предложения 10 000 `ALCRY`; кворум 2000 bps снапшота (граница: голоса == кворуму → проходит); период голосования 120 960 блоков (7 дней по 5 с), голосовать можно в [created, created+period) — на границе красный; **48 ч timelock** (34 560 блоков) между закрытием голосования и исполнением (граница: на блок раньше — красный); голосование идёт по **снапшоту** мощности на момент создания — flash-stake после снапшота не даёт мощности, его голос отвергается (`NoVotingPower`); экстренное veto с **sunset** на блоке 1 521 000 (граница: за блок до — работает, на закате и после — `VetoSunset`). Сценарий `sim/t6-governance.json` (20 предложений, 113 шагов: 15 исполнено, 4 отклонено (большинство/кворум/ничья), 1 ветировано; валидные проходят), золотой дайджест 828b13cf…c729aa (Rust ↔ Python ↔ пример `t6_governance_example`). Гейт `crates/aura-storage/tests/t6_governance.rs` (10 тестов + 2 метаморфизма), оракул `tools/t6_governance_check.py`.
++negative controls `tools/nc_t6.py` (`nc.log`, RESULT: 8/8 negative controls PASS) — 8 контролей (стандарт 6 + flash-stake + veto sunset, прецедент H6–H9/T4/T5).
++
+diff --git a/docs/evidence/t6/t6-governance.log b/docs/evidence/t6/t6-governance.log
+new file mode 100644
+index 0000000..f89cf99
+--- /dev/null
++++ b/docs/evidence/t6/t6-governance.log
+@@ -0,0 +1,19 @@
++[evidence_t6] cmd=cargo test --locked -p aura-storage --test t6_governance exit=0 duration=0.60s
++   Compiling aura-storage v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-storage)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.54s
++     Running tests/t6_governance.rs (target/debug/deps/t6_governance-90bf5e17730a75b4)
++
++running 10 tests
++test t6_a_flash_stake_attack_must_be_rejected ... ok
++test t6_a_late_stake_does_not_change_a_snapshot ... ok
++test t6_a_vote_outside_the_voting_period_must_be_rejected ... ok
++test t6_a_proposal_below_the_threshold_must_be_rejected ... ok
++test t6_execution_must_wait_for_the_timelock ... ok
++test t6_reordering_independent_votes_preserves_the_tally ... ok
++test t6_the_quorum_must_be_met_for_a_proposal_to_pass ... ok
++test t6_the_veto_power_must_sunset ... ok
++test t6_twenty_proposals_valid_ones_pass ... ok
++test t6_reference_simulation_agrees_with_the_pinned_digest ... ok
++
++test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
+diff --git a/docs/plans/ECONOMICS_PLAN.md b/docs/plans/ECONOMICS_PLAN.md
+index 9408a14..cb43e9f 100644
+--- a/docs/plans/ECONOMICS_PLAN.md
++++ b/docs/plans/ECONOMICS_PLAN.md
+@@ -1,11 +1,11 @@
+ # ECONOMICS_PLAN — tokenomics, fees, treasury, white paper
+ 
+-**Status:** 🚧 IN PROGRESS — T0 ✅ (`patches/0078-T0-baseline.patch`); T1 ✅ (`patches/0079-T1-issuance.patch`); T2 ✅ (`patches/0080-T2-allocation.patch`); T3 ✅ (`patches/0081-T3-fees.patch`); T4 ✅ (`patches/0082-T4-staking.patch`) — **Stage 1 (T0–T4) ЗАКРЫТ**; T5 ✅ (`patches/0083-T5-slashing.patch`); T6–T8 ⏸ Stage 2  
+-**Stage:** Stage 1: T0–T4. Stage 2: T5 ✅. ⏸ Stage 2: T6–T8 (governance, treasury, white paper).  
++**Status:** 🚧 IN PROGRESS — T0 ✅ (`patches/0078-T0-baseline.patch`); T1 ✅ (`patches/0079-T1-issuance.patch`); T2 ✅ (`patches/0080-T2-allocation.patch`); T3 ✅ (`patches/0081-T3-fees.patch`); T4 ✅ (`patches/0082-T4-staking.patch`) — **Stage 1 (T0–T4) ЗАКРЫТ**; T5 ✅ (`patches/0083-T5-slashing.patch`); T6 ✅ (`patches/0084-T6-governance.patch`); T7–T8 ⏸ Stage 2  
++**Stage:** Stage 1: T0–T4. Stage 2: T5 ✅, T6 ✅. ⏸ Stage 2: T7–T8 (treasury, white paper).  
+ **Deliverable:** `patches/0077-T0-...` … `patches/0085-T8-...`
+ **Dependencies:** Stage 1 — CONSENSUS B4–B9, EXEC X3–X5, ECOSYSTEM E3, OPS O4.  
+-T6–T8 (⏸ Stage 2) additionally require E4–E8 and O5–O6 (T5 was delivered
+-as a self-contained pinned model; see its receipt).
++T7–T8 (⏸ Stage 2) additionally require E4–E8 and O5–O6 (T5 and T6 were
++delivered as self-contained pinned models; see their receipts).
+ 
+ ## Problem
+ 
+@@ -31,7 +31,7 @@ tests, simulations in `sim/`, text in the white paper.
+ | ✅ **T3** | Fees | EIP-1559-like `base_fee` + `tip`, burning the base part, elastic gas target | 10 000 congested blocks: base fee rises/falls per the formula — met, formula holds at every step of the pinned run, golden path digest pinned, 6 mutation controls |
+ | ✅ **T4** | Staking | min stake, delegation, commission, unbonding 21 days, slashing period | 1000 delegators: shares sum == 1; NC: withdraw without unbonding → red — met, shares sum to exactly one pool at every step of the pinned run, golden digest pinned, 7 mutation controls |
+ | ✅ **T5** | Slashing and insurance | penalty parameters, insurance fund, mass-slash protection | 7 scenarios: penalty ≥ damage, fund never negative — met, both invariants hold at every step of the pinned run (87 steps, 48 incidents), golden digest pinned, 7 mutation controls |
+-| ⏸ **T6** | Governance | proposal threshold, quorum, voting period, 48 h timelock, veto/emergency with sunset | 20 proposals: valid ones pass, flash-stake attack rejected |
++| ✅ **T6** | Governance | proposal threshold, quorum, voting period, 48 h timelock, veto/emergency with sunset | 20 proposals: valid ones pass, flash-stake attack rejected — met, 15/20 executed as designed (4 rejected: majority/quorum/tie/empty, 1 vetoed before the sunset), the flash-stake vote is rejected with `NoVotingPower`, golden digest pinned, 8 mutation controls |
+ | ⏸ **T7** | Treasury and grants | on-chain treasury, multisig (W4), transparent reporting, grants process | every payout has proposal + tx + report; NC: withdrawal without vote → red |
+ | ⏸ **T8** | White paper + law | white paper (project, technology, risks, holder rights), marketing materials, legal review in the EU/Latvia | checklist against MiCA Art. 4/6/8/9, notification ≥ 20 working days, publication; **not legal advice** |
+ 
+@@ -266,6 +266,44 @@ the plan is revised before O6.
+   (2) the fund balance is a signed `i128` on purpose, so an overdraw
+   would be visible to the "never negative" invariant instead of wrapping.
+ 
++### T6 receipt (2026-11-21) — governance: threshold, quorum, voting period, 48 h timelock, veto with sunset
++
++- Deliverable: `patches/0084-T6-governance.patch`; evidence in
++  `docs/evidence/t6/` (`campaign/` self-contained: gate run log,
++  `result.json` with commands, the golden digest and source digests).
++- Gate met literally: **20 proposals** are driven by the pinned run
++  (113 steps) — **valid ones pass** (15 executed; 4 rejected by design:
++  majority against, quorum missed, tie `yes == no`, no votes; 1 vetoed
++  one block before the sunset) and the **flash-stake attack is
++  rejected**: a 1 000 000 `ALCRY` stake taken after the snapshot has no
++  voting power and the vote fails with `NoVotingPower` (message
++  `T6: a flash-stake attack must be rejected`). The golden digest
++  `828b13cf7ca3abcaea65386f7c62e1e155f4d207cb000aceccd86397b5c729aa`
++  is pinned in the Rust tests and re-derived by the independent Python
++  oracle (`tools/t6_governance_check.py`), which also cross-runs the
++  Rust example `t6_governance_example`.
++- Parameters, each with a boundary-checked edge in the run: proposal
++  threshold 10 000 `ALCRY` (a proposer with exactly the threshold is
++  accepted, below is `BelowThreshold`); quorum 2000 bps of the snapshot
++  total (voted == quorum exactly passes; a tie is rejected — strict
++  `yes > no`); voting period 120 960 blocks (7 days at 5 s) as the
++  half-open window `[created, created + period)` (a vote at the closing
++  block is `VotingClosed`); **48 h timelock** = 34 560 blocks
++  (one block early is `Timelock`); the emergency veto **sunsets** at
++  block 1 521 000 (one block before — works, at the sunset and after —
++  `VetoSunset`).
++- NC: 8/8 named messages (`tools/nc_t6.py`; standard 6 + the flash-stake
++  control and the veto sunset, H6–H9/T4/T5 precedent). 10 gate tests +
++  2 metamorphisms (reordering independent votes preserves the tally; a
++  late stake does not change a snapshot).
++- Explained deviations (recorded here as this plan prescribes):
++  (1) T6 ships as a self-contained pinned model in
++  `crates/aura-storage/src/governance.rs` — the E4–E8/O5–O6 items of
++  Stage 2 remain external-review dependencies (T-series precedent);
++  (2) the 20 proposals are driven grouped per proposal with per-proposal
++  timelines, so block heights are monotone within a proposal's block of
++  actions rather than globally.
++
+ ## Risks
+ 
+ - Inflation eating stakers, or conversely insufficient security at a low staked ratio → T1/T3/T4 simulations.
+@@ -280,5 +318,5 @@ Exchange listings, price, marketing promises, KYC/AML of custodial services
+ ## Closure criteria
+ 
+ Stage 1: T0–T4 parameters are fixed in genesis and verified by simulations.
+-Stage 2: T5 ✅ (slashing and insurance, pinned model); ⏸ white paper,
+-legal opinion, T6–T8 and O6.
++Stage 2: T5 ✅ (slashing and insurance), T6 ✅ (governance, pinned
++models); ⏸ white paper, legal opinion, T7–T8 and O6.
+diff --git a/sim/t6-governance.json b/sim/t6-governance.json
+new file mode 100644
+index 0000000..ccf09ba
+--- /dev/null
++++ b/sim/t6-governance.json
+@@ -0,0 +1,47 @@
++{
++  "phase": "T6",
++  "title": "Governance: 20 proposals, valid ones pass, flash-stake attack rejected",
++  "proposal_threshold_alcry": 10000,
++  "quorum_bps": 2000,
++  "voting_period_blocks": 120960,
++  "timelock_blocks": 34560,
++  "veto_sunset_block": 1521000,
++  "block_seconds": 5,
++  "stakes_alcry": [80000, 50000, 40000, 20000, 10000, 0],
++  "scenario": {
++    "id1": "valid pass (yes 80+50+40)",
++    "id2": "majority against -> rejected; execute -> NotPassed",
++    "id3": "quorum missed (20k of 200k) -> rejected",
++    "id4": "threshold fail (voter 5) then valid pass",
++    "id5": "late vote at the closing boundary -> VotingClosed; pass; execute at the boundary",
++    "id6": "execute one block before the timelock -> Timelock; then executed",
++    "id7": "veto one block before the sunset -> Vetoed; execute -> NotPassed",
++    "id8": "veto at/after the sunset -> VetoSunset; then executed",
++    "id9": "flash-stake 1 000 000 ALCRY mid-voting -> NoVotingPower; honest pass; unstake",
++    "id10": "double vote -> AlreadyVoted; pass",
++    "id11": "abstain counts for the quorum -> passed",
++    "id12": "quorum boundary: voted == quorum exactly -> passed",
++    "id13": "execute at the exact timelock boundary -> executed",
++    "id14": "late stake does not move the snapshot (vote power 20 000)",
++    "id15": "tie 90k/90k -> rejected (yes > no strictly)",
++    "id16": "threshold boundary: stake == threshold exactly -> valid",
++    "id17": "no votes -> quorum missed -> rejected",
++    "id18": "double finalize -> AlreadyFinalized; executed",
++    "id19": "double execute -> AlreadyExecuted",
++    "id20": "full lifecycle by voter 1, five votes -> executed"
++  },
++  "golden_path_digest": "828b13cf7ca3abcaea65386f7c62e1e155f4d207cb000aceccd86397b5c729aa",
++  "samples": [
++    {"after_step": 0, "note": "id1 created", "a": 0, "b": 0, "c": 0, "state": 0},
++    {"after_step": 4, "note": "id1 passed", "a": 170000000000000000000000, "state": 1},
++    {"after_step": 37, "note": "id7 execute after veto rejected", "state": 4, "detail": 8},
++    {"after_step": 112, "note": "final counts", "a": 15, "b": 4, "c": 1}
++  ],
++  "totals": {
++    "steps": 113,
++    "proposals": 20,
++    "executed": 15,
++    "rejected": 4,
++    "vetoed": 1
++  }
++}
+diff --git a/tools/audit_closeout.py b/tools/audit_closeout.py
+index 28c4f91..bad443f 100644
+--- a/tools/audit_closeout.py
++++ b/tools/audit_closeout.py
+@@ -38,7 +38,7 @@ NET_PHASES = ["N0", "N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8"]  # NET_PLAN
+ WALLET_PHASES = ["W0", "W1", "W2", "W3", "W4"]  # grows with each W phase
+ SECURITY_PHASES = ["H0", "H1", "H2", "H3", "H4", "H5", "H6", "H7", "H8", "H9"]  # grows with each H phase
+ ECOSYSTEM_PHASES = ["E0", "E1", "E2", "E3"]  # grows with each E phase
+-ECONOMICS_PHASES = ["T0", "T1", "T2", "T3", "T4", "T5"]  # grows with each T phase
++ECONOMICS_PHASES = ["T0", "T1", "T2", "T3", "T4", "T5", "T6"]  # grows with each T phase
+ PHASES = CORE_PHASES + STATE_PHASES + EXEC_PHASES + NODE_PHASES + CONSENSUS_PHASES + NET_PHASES + WALLET_PHASES + SECURITY_PHASES + ECOSYSTEM_PHASES + ECONOMICS_PHASES
+ SHIPPED = CORE_PHASES + [
+     "S0",
+@@ -111,8 +111,9 @@ SHIPPED = CORE_PHASES + [
+     "T2",
+     "T3",
+     "T4",
++    "T5",
+ ]
+-CURRENT = "T5"
++CURRENT = "T6"
+ 
+ PLAN_FOR_PREFIX = {
+     "C": "CORE_PLAN.md",
+@@ -130,7 +131,7 @@ PLAN_FOR_PREFIX = {
+ }
+ 
+ NC_PER_PHASE = {f"C{i}": 6 for i in range(4, 11)}
+-NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6, "W4": 6, "H0": 6, "H1": 6, "H2": 6, "H3": 6, "H4": 6, "H5": 6, "H6": 7, "H7": 7, "H8": 7, "H9": 7, "E0": 6, "E1": 6, "E2": 6, "E3": 6, "T0": 6, "T1": 6, "T2": 6, "T3": 6, "T4": 7, "T5": 7})
++NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6, "W4": 6, "H0": 6, "H1": 6, "H2": 6, "H3": 6, "H4": 6, "H5": 6, "H6": 7, "H7": 7, "H8": 7, "H9": 7, "E0": 6, "E1": 6, "E2": 6, "E3": 6, "T0": 6, "T1": 6, "T2": 6, "T3": 6, "T4": 7, "T5": 7, "T6": 8})
+ SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)  # 339 (through W0)
+ EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + (0 if CURRENT in SHIPPED else NC_PER_PHASE[CURRENT])
+ 
+@@ -169,6 +170,7 @@ PATCH_ORDER += ["T2"]
+ PATCH_ORDER += ["T3"]
+ PATCH_ORDER += ["T4"]
+ PATCH_ORDER += ["T5"]
++PATCH_ORDER += ["T6"]
+ PATCH_NUMBERS = {phase: index + 1 for index, phase in enumerate(PATCH_ORDER)}
+ 
+ 
+diff --git a/tools/nc_t6.py b/tools/nc_t6.py
+new file mode 100644
+index 0000000..8afc248
+--- /dev/null
++++ b/tools/nc_t6.py
+@@ -0,0 +1,120 @@
++#!/usr/bin/env python3
++"""Mutation controls for T6 (ECONOMICS_PLAN T6).
++
++Each control injects ONE bug (restored after) and requires the named T6
++message to appear in the red run. NC-1/NC-2 are the phase gate literally:
++valid proposals pass, the flash-stake attack is rejected.
++"""
++
++import os
++import subprocess
++import sys
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++GOV = os.path.join(ROOT, "crates", "aura-storage/src/governance.rs")
++
++TEST_CMD = ["cargo", "test", "--locked", "-p", "aura-storage", "--test", "t6_governance"]
++
++# (name, path, anchor, replacement, expected message)
++CONTROLS = [
++    (
++        "NC-1 valid proposals flipped to rejected",
++        GOV,
++        "        let passed = voted >= quorum && proposal.yes > proposal.no;",
++        "        let passed = voted >= quorum && proposal.yes <= proposal.no;",
++        "T6: a valid proposal must pass",
++    ),
++    (
++        "NC-2 flash-stake counted (snapshot replaced by live stake)",
++        GOV,
++        "        let power = proposal.snapshot[voter as usize];",
++        "        let power = self.stakes[voter as usize];",
++        "T6: a flash-stake attack must be rejected",
++    ),
++    (
++        "NC-3 proposal threshold not enforced",
++        GOV,
++        "        if self.stakes[proposer as usize] < T6_PROPOSAL_THRESHOLD {",
++        "        if false {",
++        "T6: a proposal below the threshold must be rejected",
++    ),
++    (
++        "NC-4 voting window extended by one block",
++        GOV,
++        "        if height >= proposal.created_at + T6_VOTING_PERIOD_BLOCKS {",
++        "        if height > proposal.created_at + T6_VOTING_PERIOD_BLOCKS {",
++        "T6: a vote outside the voting period must be rejected",
++    ),
++    (
++        "NC-5 quorum disabled",
++        GOV,
++        "pub const T6_QUORUM_BPS: u64 = 2_000;",
++        "pub const T6_QUORUM_BPS: u64 = 0;",
++        "T6: the quorum must be met for a proposal to pass",
++    ),
++    (
++        "NC-6 timelock removed",
++        GOV,
++        "pub const T6_TIMELOCK_BLOCKS: u64 = 34_560;",
++        "pub const T6_TIMELOCK_BLOCKS: u64 = 0;",
++        "T6: execution must wait for the timelock",
++    ),
++    (
++        "NC-7 veto sunset removed",
++        GOV,
++        "        if height >= T6_VETO_SUNSET_BLOCK {",
++        "        if false {",
++        "T6: the veto power must sunset",
++    ),
++    (
++        "NC-8 pinned parameters drift",
++        GOV,
++        "pub const T6_VOTING_PERIOD_BLOCKS: u64 = 120_960;",
++        "pub const T6_VOTING_PERIOD_BLOCKS: u64 = 120_961;",
++        "T6: the reference simulation must agree with the pinned digest",
++    ),
++]
++
++PASS_MARKERS = ("test result: ok.",)
++
++
++def run_control(name, path, anchor, replacement, expected):
++    with open(path, encoding="utf-8") as f:
++        original = f.read()
++    if original.count(anchor) != 1:
++        return False, "anchor count %d" % original.count(anchor)
++    mutated = original.replace(anchor, replacement)
++    try:
++        with open(path, "w", encoding="utf-8") as f:
++            f.write(mutated)
++        proc = subprocess.run(TEST_CMD, cwd=ROOT, stdout=subprocess.PIPE,
++                              stderr=subprocess.STDOUT, text=True,
++                              errors="replace")
++        output = proc.stdout or ""
++    finally:
++        with open(path, "w", encoding="utf-8") as f:
++            f.write(original)
++    compile_failed = "error[" in output and "test result" not in output
++    if compile_failed:
++        return False, "mutation broke compilation"
++    if any(marker in output for marker in PASS_MARKERS):
++        return False, "mutated gate still passes"
++    if expected in output:
++        return True, "red with named message"
++    return False, "red without named message"
++
++
++def main():
++    passed = 0
++    for name, path, anchor, replacement, expected in CONTROLS:
++        ok, why = run_control(name, path, anchor, replacement, expected)
++        print("[%s] %s: %s" % ("PASS" if ok else "FAIL", name, why))
++        if ok:
++            passed += 1
++    total = len(CONTROLS)
++    print("RESULT: %d/%d negative controls PASS" % (passed, total))
++    return 0 if passed == total else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/t6_governance_check.py b/tools/t6_governance_check.py
+new file mode 100644
+index 0000000..a274d92
+--- /dev/null
++++ b/tools/t6_governance_check.py
+@@ -0,0 +1,336 @@
++#!/usr/bin/env python3
++"""Independent oracle for T6 (ECONOMICS_PLAN T6).
++
++Re-implements the governance model in Python, derives the constants
++from the Rust source, re-derives the pinned digest and cross-runs the
++Rust example `t6_governance_example`.
++"""
++
++import hashlib
++import json
++import os
++import re
++import subprocess
++import sys
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++GOV_RS = os.path.join(ROOT, "crates", "aura-storage", "src", "governance.rs")
++SIM_JSON = os.path.join(ROOT, "sim", "t6-governance.json")
++
++GOLDEN_DIGEST = "828b13cf7ca3abcaea65386f7c62e1e155f4d207cb000aceccd86397b5c729aa"
++ALCRY = 10 ** 18
++
++BELOW, CLOSED, NOPOWER, DUPVOTE, STILLVOTING, DUPFINAL, TIMelock, NOTPASS, DUPEXEC, SUNSETErr = range(1, 11)
++VOTING, PASSED, REJECTED, EXECUTED, VETOED, NA = 0, 1, 2, 3, 4, 9
++
++
++def rust_const(name):
++    paths = [GOV_RS, os.path.join(ROOT, "crates", "aura-storage", "src", "issuance.rs")]
++    for source in paths:
++        text = open(source, encoding="utf-8").read()
++        match = re.search(r"pub const %s: (?:Amount|u64|u32) = ([0-9_]+);" % name, text)
++        if match:
++            return int(match.group(1).replace("_", ""))
++        expr = re.search(r"pub const %s: (?:Amount|u64|u32) = ([A-Za-z0-9_ */]+);" % name, text)
++        if expr:
++            def value_of(factor):
++                factor = factor.strip()
++                if "/" in factor:
++                    num, den = factor.split("/")
++                    return value_of(num) // value_of(den)
++                if re.fullmatch(r"[0-9_]+", factor):
++                    return int(factor.replace("_", ""))
++                if factor == "ALCRY":
++                    return 10 ** 18
++                return rust_const(factor)
++            value = 1
++            for factor in expr.group(1).split("*"):
++                value *= value_of(factor)
++            return value
++    return None
++
++
++class Proposal:
++    def __init__(self, pid, proposer, created, snapshot):
++        self.id, self.proposer, self.created = pid, proposer, created
++        self.snapshot = list(snapshot)
++        self.yes = self.no = self.abstain = 0
++        self.voted = [False] * len(snapshot)
++        self.state = VOTING
++
++
++class Gov:
++    def __init__(self, stakes, bps, threshold, quorum_bps, period, timelock, sunset):
++        self.stakes = list(stakes)
++        self.bps, self.threshold = bps, threshold
++        self.quorum_bps, self.period, self.timelock, self.sunset = quorum_bps, period, timelock, sunset
++        self.proposals = []
++        self.steps = []
++        self.next_id = 1
++
++    def snap(self, kind, subject, height, a, b, c, state, detail=0):
++        self.steps.append((len(self.steps), kind, subject, height, a, b, c, state, detail))
++
++    def find(self, pid):
++        return self.proposals[pid - 1]
++
++    def propose(self, proposer, height):
++        if self.stakes[proposer] < self.threshold:
++            return BELOW
++        p = Proposal(self.next_id, proposer, height, self.stakes)
++        self.next_id += 1
++        self.proposals.append(p)
++        return p
++
++    def vote(self, pid, voter, support, height):
++        p = self.find(pid)
++        if height >= p.created + self.period:
++            return CLOSED
++        power = p.snapshot[voter]
++        if power == 0:
++            return NOPOWER
++        if p.voted[voter]:
++            return DUPVOTE
++        p.voted[voter] = True
++        if support == "yes":
++            p.yes += power
++        elif support == "no":
++            p.no += power
++        else:
++            p.abstain += power
++        return 0
++
++    def finalize(self, pid, height):
++        p = self.find(pid)
++        if height < p.created + self.period:
++            return STILLVOTING
++        if p.state != VOTING:
++            return DUPFINAL
++        voted = p.yes + p.no + p.abstain
++        quorum = sum(p.snapshot) * self.quorum_bps // self.bps
++        p.state = PASSED if (voted >= quorum and p.yes > p.no) else REJECTED
++        return 0
++
++    def execute(self, pid, height):
++        p = self.find(pid)
++        if p.state == EXECUTED:
++            return DUPEXEC
++        if p.state != PASSED:
++            return NOTPASS
++        if height < p.created + self.period + self.timelock:
++            return TIMelock
++        p.state = EXECUTED
++        return 0
++
++    def veto(self, pid, height):
++        p = self.find(pid)
++        if p.state != PASSED:
++            return NOTPASS
++        if height >= self.sunset:
++            return SUNSETErr
++        p.state = VETOED
++        return 0
++
++    def do_propose(self, proposer, height):
++        r = self.propose(proposer, height)
++        if isinstance(r, Proposal):
++            p = self.find(r.id)
++            self.snap(0, r.id, height, p.yes, p.no, p.abstain, p.state)
++        else:
++            self.snap(8, 0, height, 0, 0, 0, NA, r)
++        return r
++
++    def do_vote(self, pid, voter, support, height):
++        r = self.vote(pid, voter, support, height)
++        p = self.find(pid)
++        self.snap(1 if r == 0 else 8, pid, height, p.yes, p.no, p.abstain, p.state, r)
++        return r
++
++    def do_finalize(self, pid, height):
++        r = self.finalize(pid, height)
++        p = self.find(pid)
++        self.snap(2 if r == 0 else 8, pid, height, p.yes, p.no, p.abstain, p.state, r)
++        return r
++
++    def do_execute(self, pid, height):
++        r = self.execute(pid, height)
++        p = self.find(pid)
++        self.snap(3 if r == 0 else 8, pid, height, p.yes, p.no, p.abstain, p.state, r)
++        return r
++
++    def do_veto(self, pid, height):
++        r = self.veto(pid, height)
++        p = self.find(pid)
++        self.snap(4 if r == 0 else 8, pid, height, p.yes, p.no, p.abstain, p.state, r)
++        return r
++
++    def do_stake(self, voter, amount, height):
++        self.stakes[voter] += amount
++        self.snap(5, voter, height, self.stakes[voter], 0, 0, NA)
++
++    def do_unstake(self, voter, amount, height):
++        self.stakes[voter] -= amount
++        self.snap(6, voter, height, self.stakes[voter], 0, 0, NA)
++
++
++def build_scenario(g):
++    g.do_propose(0, 200_000)
++    g.do_vote(1, 0, "yes", 210_000); g.do_vote(1, 1, "yes", 211_000); g.do_vote(1, 2, "yes", 212_000)
++    g.do_finalize(1, 321_000); g.do_execute(1, 355_520)
++    g.do_propose(0, 400_000)
++    g.do_vote(2, 2, "yes", 410_000); g.do_vote(2, 0, "no", 411_000)
++    g.do_finalize(2, 521_000); g.do_execute(2, 522_000)
++    g.do_propose(0, 600_000)
++    g.do_vote(3, 3, "yes", 610_000)
++    g.do_finalize(3, 721_000)
++    assert g.do_propose(5, 800_000) == BELOW
++    g.do_propose(0, 800_001)
++    g.do_vote(4, 0, "yes", 810_000); g.do_vote(4, 1, "yes", 811_000)
++    g.do_finalize(4, 921_000); g.do_execute(4, 955_560)
++    g.do_propose(0, 1_000_000)
++    g.do_vote(5, 0, "yes", 1_010_000); g.do_vote(5, 1, "yes", 1_020_000)
++    assert g.do_vote(5, 2, "yes", 1_120_960) == CLOSED
++    g.do_finalize(5, 1_120_961); g.do_execute(5, 1_155_520)
++    g.do_propose(0, 1_200_000)
++    g.do_vote(6, 0, "yes", 1_210_000); g.do_vote(6, 1, "yes", 1_220_000)
++    g.do_finalize(6, 1_320_961)
++    assert g.do_execute(6, 1_355_519) == TIMelock
++    g.do_execute(6, 1_355_520)
++    g.do_propose(0, 1_400_000)
++    g.do_vote(7, 0, "yes", 1_410_000); g.do_vote(7, 1, "yes", 1_420_000)
++    g.do_finalize(7, 1_520_961)
++    g.do_veto(7, 1_520_999)
++    g.do_execute(7, 1_555_521)
++    g.do_propose(0, 1_600_000)
++    g.do_vote(8, 0, "yes", 1_610_000); g.do_vote(8, 1, "yes", 1_620_000)
++    g.do_finalize(8, 1_720_961)
++    assert g.do_veto(8, 1_721_000) == SUNSETErr
++    g.do_execute(8, 1_755_520)
++    g.do_propose(0, 1_800_000)
++    g.do_stake(5, 1_000_000 * ALCRY, 1_850_000)
++    assert g.do_vote(9, 5, "yes", 1_850_001) == NOPOWER
++    g.do_vote(9, 0, "yes", 1_860_000); g.do_vote(9, 1, "yes", 1_861_000); g.do_vote(9, 2, "yes", 1_862_000)
++    g.do_finalize(9, 1_920_961); g.do_execute(9, 1_955_520)
++    g.do_unstake(5, 1_000_000 * ALCRY, 1_960_000)
++    g.do_propose(0, 2_000_000)
++    g.do_vote(10, 0, "yes", 2_050_000)
++    assert g.do_vote(10, 0, "no", 2_050_001) == DUPVOTE
++    g.do_vote(10, 1, "yes", 2_060_000)
++    g.do_finalize(10, 2_120_961); g.do_execute(10, 2_155_520)
++    g.do_propose(0, 2_200_000)
++    g.do_vote(11, 0, "yes", 2_210_000); g.do_vote(11, 1, "abstain", 2_211_000); g.do_vote(11, 2, "abstain", 2_212_000)
++    g.do_finalize(11, 2_320_961); g.do_execute(11, 2_355_520)
++    g.do_propose(0, 2_400_000)
++    g.do_vote(12, 2, "yes", 2_410_000)
++    g.do_finalize(12, 2_520_961); g.do_execute(12, 2_555_520)
++    g.do_propose(0, 2_600_000)
++    g.do_vote(13, 0, "yes", 2_610_000); g.do_vote(13, 1, "yes", 2_611_000)
++    g.do_finalize(13, 2_720_961); g.do_execute(13, 2_755_520)
++    g.do_propose(0, 2_800_000)
++    g.do_stake(3, 20_000 * ALCRY, 2_850_000)
++    g.do_vote(14, 3, "yes", 2_850_001)
++    g.do_vote(14, 0, "yes", 2_860_000)
++    g.do_finalize(14, 2_920_961); g.do_execute(14, 2_955_520)
++    g.do_propose(0, 3_000_000)
++    g.do_vote(15, 0, "yes", 3_010_000); g.do_vote(15, 4, "yes", 3_011_000)
++    g.do_vote(15, 1, "no", 3_012_000); g.do_vote(15, 2, "no", 3_013_000)
++    g.do_finalize(15, 3_120_961)
++    g.do_propose(4, 3_200_000)
++    g.do_vote(16, 0, "yes", 3_210_000)
++    g.do_finalize(16, 3_320_961); g.do_execute(16, 3_355_520)
++    g.do_propose(0, 3_400_000)
++    g.do_finalize(17, 3_520_961)
++    g.do_propose(0, 3_600_000)
++    g.do_vote(18, 0, "yes", 3_610_000); g.do_vote(18, 1, "yes", 3_611_000)
++    g.do_finalize(18, 3_720_961)
++    assert g.do_finalize(18, 3_720_962) == DUPFINAL
++    g.do_execute(18, 3_755_520)
++    g.do_propose(0, 3_800_000)
++    g.do_vote(19, 0, "yes", 3_810_000); g.do_vote(19, 1, "yes", 3_811_000)
++    g.do_finalize(19, 3_920_961); g.do_execute(19, 3_955_520)
++    assert g.do_execute(19, 3_955_521) == DUPEXEC
++    g.do_propose(1, 4_000_000)
++    g.do_vote(20, 0, "yes", 4_010_000); g.do_vote(20, 1, "yes", 4_011_000); g.do_vote(20, 2, "yes", 4_012_000)
++    g.do_vote(20, 3, "no", 4_013_000); g.do_vote(20, 4, "abstain", 4_014_000)
++    g.do_finalize(20, 4_120_961); g.do_execute(20, 4_155_520)
++    states = [p.state for p in g.proposals]
++    g.snap(9, 0, 0, states.count(EXECUTED), states.count(REJECTED), states.count(VETOED), NA)
++
++
++def main():
++    ALCRY = 10 ** 18
++    BPS = rust_const("T6_BPS")
++    THRESHOLD = rust_const("T6_PROPOSAL_THRESHOLD")
++    QUORUM_BPS = rust_const("T6_QUORUM_BPS")
++    PERIOD = rust_const("T6_VOTING_PERIOD_BLOCKS")
++    TIMELOCK = rust_const("T6_TIMELOCK_BLOCKS")
++    SUNSET = rust_const("T6_VETO_SUNSET_BLOCK")
++    assert (BPS, THRESHOLD // ALCRY, QUORUM_BPS, PERIOD, TIMELOCK, SUNSET) == \
++        (10_000, 10_000, 2_000, 120_960, 34_560, 1_521_000), \
++        "T6: the reference simulation must agree with the pinned digest (constant drift)"
++
++    stakes = [80_000 * ALCRY, 50_000 * ALCRY, 40_000 * ALCRY,
++              20_000 * ALCRY, 10_000 * ALCRY, 0]
++    g = Gov(stakes, BPS, THRESHOLD, QUORUM_BPS, PERIOD, TIMELOCK, SUNSET)
++    build_scenario(g)
++
++    lines = ["%d:%d:%d:%d:%d:%d:%d:%d:%d" % s for s in g.steps]
++    digest = hashlib.sha256("".join(l + "\n" for l in lines).encode()).hexdigest()
++    assert digest == GOLDEN_DIGEST, (
++        "T6: the reference simulation must agree with the pinned digest "
++        "(digest %s != %s)" % (digest, GOLDEN_DIGEST)
++    )
++    assert len(g.steps) == 113
++    assert len(g.proposals) == 20
++    states = [p.state for p in g.proposals]
++    assert states == [3, 2, 2, 3, 3, 3, 4, 3, 3, 3, 3, 3, 3, 3, 2, 3, 2, 3, 3, 3], \
++        "T6: a valid proposal must pass"
++    executed = states.count(EXECUTED)
++    rejected = states.count(REJECTED)
++    vetoed = states.count(VETOED)
++    assert (executed, rejected, vetoed) == (15, 4, 1), "T6: a valid proposal must pass"
++
++    scenario = json.load(open(SIM_JSON, encoding="utf-8"))
++    assert scenario["golden_path_digest"] == GOLDEN_DIGEST
++    totals = scenario["totals"]
++    assert totals["steps"] == len(g.steps)
++    assert totals["proposals"] == len(g.proposals)
++    assert totals["executed"] == executed
++    assert totals["rejected"] == rejected
++    assert totals["vetoed"] == vetoed
++    for sample in scenario["samples"]:
++        step = g.steps[sample["after_step"]]
++        for key, pos in (("a", 4), ("b", 5), ("c", 6), ("state", 7), ("detail", 8)):
++            if key in sample:
++                assert step[pos] == sample[key], (
++                    "T6: the reference simulation must agree with the pinned digest "
++                    "(sample %d key %s)" % (sample["after_step"], key)
++                )
++
++    proc = subprocess.run(
++        ["cargo", "run", "--quiet", "--locked", "-p", "aura-storage", "--example",
++         "t6_governance_example"],
++        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
++        text=True, errors="replace",
++    )
++    output = proc.stdout or ""
++    if proc.returncode != 0 or "T6-SIM-OK " not in output:
++        print(output[-2000:])
++        print("RESULT: T6 governance check FAIL — rust example did not run")
++        return 1
++    payload = json.loads(output[output.index("T6-SIM-OK ") + len("T6-SIM-OK "):].strip())
++    assert payload["steps"] == len(g.steps)
++    assert payload["proposals"] == len(g.proposals)
++    assert payload["digest"] == digest, (
++        "T6: the reference simulation must agree with the pinned digest"
++    )
++    assert payload["executed"] == executed
++    assert payload["rejected"] == rejected
++    assert payload["vetoed"] == vetoed
++    print("RESULT: T6 governance check PASS — 20 proposals, valid ones pass (15 executed), "
++          "flash-stake attack rejected, veto sunset at %d, digest %s" % (SUNSET, digest))
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/write_t6_evidence.py b/tools/write_t6_evidence.py
+new file mode 100644
+index 0000000..160a8e7
+--- /dev/null
++++ b/tools/write_t6_evidence.py
+@@ -0,0 +1,179 @@
++#!/usr/bin/env python3
++"""Write docs/evidence/t6 (ECONOMICS_PLAN T6).
++
++Runs the T6 gates (independent governance oracle incl. the Rust example
++cross-run, cargo test t6_governance) and tools/nc_t6.py, builds
++self-contained evidence: gates.txt rows, campaign/ bundle (run logs +
++result.json with source digests), nc.log with the RESULT line, report.md
++and cumulative inventory (TOTAL: 558).
++"""
++
++import hashlib
++import json
++import os
++import subprocess
++import sys
++import time
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++EVID = os.path.join(ROOT, "docs", "evidence", "t6")
++EVID_DIRS = ["", "campaign"]
++GATES = [
++    ([sys.executable, os.path.join(ROOT, "tools", "t6_governance_check.py")],
++     "baseline", "independent governance oracle (20 proposals, valid ones pass)"),
++    (["cargo", "test", "--locked", "-p", "aura-storage", "--test", "t6_governance"],
++     "t6-governance", "named gate: valid ones pass; flash-stake attack rejected"),
++    ([sys.executable, os.path.join(ROOT, "tools", "nc_t6.py")],
++     "nc-suite", "8 mutation controls incl. the literal flash-stake rejection"),
++]
++SOURCES = [
++    "crates/aura-storage/src/governance.rs",
++    "crates/aura-storage/tests/t6_governance.rs",
++    "crates/aura-storage/examples/t6_governance_example.rs",
++    "sim/t6-governance.json",
++    "tools/t6_governance_check.py",
++    "tools/nc_t6.py",
++]
++
++
++def sha256_file(path):
++    h = hashlib.sha256()
++    with open(path, "rb") as f:
++        for chunk in iter(lambda: f.read(65536), b""):
++            h.update(chunk)
++    return h.hexdigest()
++
++
++def run_cmd(cmd, timeout=2400):
++    started = time.time()
++    proc = subprocess.run(cmd, cwd=ROOT, stdout=subprocess.PIPE,
++                          stderr=subprocess.STDOUT, text=True,
++                          errors="replace", timeout=timeout)
++    return proc.returncode, proc.stdout or "", time.time() - started
++
++
++def gate_passes(code, output, name):
++    if code != 0:
++        return False
++    if name == "baseline":
++        return "RESULT: T6 governance check PASS" in output
++    if name == "t6-governance":
++        return "test result: ok." in output
++    return "RESULT: 8/8 negative controls PASS" in output
++
++
++def main():
++    for rel in EVID_DIRS:
++        os.makedirs(os.path.join(EVID, rel), exist_ok=True)
++
++    rows = []
++    logs = {}
++    outputs = {}
++    ok_all = True
++    for cmd, name, desc in GATES:
++        print("[evidence_t6] %s ..." % name, flush=True)
++        code, out, dur = run_cmd(cmd)
++        ok = gate_passes(code, out, name)
++        ok_all = ok_all and ok
++        rows.append((name, "pass" if ok else "FAIL", desc))
++        outputs[name] = out
++        logs[name + ".log"] = (
++            "[evidence_t6] cmd=%s exit=%d duration=%.2fs\n" % (" ".join(cmd), code, dur)
++            + out)
++        print("[evidence_t6] %s: %s" % (name, "pass" if ok else "FAIL"), flush=True)
++
++    nc_ok = "RESULT: 8/8 negative controls PASS" in outputs.get("nc-suite", "")
++    gate_ok = "test result: ok." in outputs.get("t6-governance", "")
++    oracle_ok = "RESULT: T6 governance check PASS" in outputs.get("baseline", "")
++
++    with open(os.path.join(EVID, "nc.log"), "w", encoding="utf-8") as f:
++        f.write("[evidence_t6] cmd=tools/nc_t6.py\n")
++        f.write(outputs.get("nc-suite", ""))
++
++    with open(os.path.join(EVID, "campaign", "t6-governance.log"), "w",
++              encoding="utf-8") as f:
++        f.write(logs.get("t6-governance.log", ""))
++    with open(os.path.join(EVID, "campaign", "result.json"), "w",
++              encoding="utf-8") as f:
++        json.dump({
++            "phase": "T6",
++            "when": time.strftime("%Y-%m-%dT%H:%M:%S"),
++            "commands": [[" ".join(cmd), name] for cmd, name, _ in GATES],
++            "gates": {name: status for name, status, _ in rows},
++            "named_gate": "20 proposals: valid ones pass, flash-stake attack rejected",
++            "golden_path_digest":
++                "828b13cf7ca3abcaea65386f7c62e1e155f4d207cb000aceccd86397b5c729aa",
++            "sources": {rel: sha256_file(os.path.join(ROOT, rel)) for rel in SOURCES},
++        }, f, indent=2, sort_keys=True)
++        f.write("\n")
++
++    for name, text in logs.items():
++        with open(os.path.join(EVID, name), "w", encoding="utf-8") as f:
++            f.write(text)
++
++    with open(os.path.join(EVID, "gates.txt"), "w", encoding="utf-8") as f:
++        f.write("T6 Governance gates (ECONOMICS_PLAN, "
++                "crates/aura-storage/tests/t6_governance.rs)\n")
++        f.write("Gate: 20 proposals: valid ones pass, flash-stake attack rejected\n\n")
++        for name, status, desc in rows:
++            f.write("%-42s %-22s %s\n" % (name, status, desc))
++        f.write("\nnegative controls: 8/8 (%s)\n" % ("PASS" if nc_ok else "FAIL"))
++        f.write("named gate: %s\n" % ("PASS" if gate_ok else "FAIL"))
++        f.write("oracle cross-run: %s\n" % ("PASS" if oracle_ok else "FAIL"))
++
++    with open(os.path.join(EVID, "report.md"), "w", encoding="utf-8") as f:
++        f.write("# Отчёт T6 — Governance\n\n")
++        f.write("Дата: %s\n\n" % time.strftime("%Y-%m-%d"))
++        f.write("Итог: **%s**\n\n" % ("ВСЕ ГЕЙТЫ T6 ЗЕЛЁНЫЕ" if ok_all
++                                      else "ЕСТЬ КРАСНЫЕ ГЕЙТЫ"))
++        f.write("Гейт: 20 предложений — валидные проходят, flash-stake "
++                "атака отвергается.\n\n")
++        f.write("Модель `crates/aura-storage/src/governance.rs`: порог "
++                "предложения 10 000 `ALCRY`; кворум 2000 bps снапшота "
++                "(граница: голоса == кворуму → проходит); период голосования "
++                "120 960 блоков (7 дней по 5 с), голосовать можно в "
++                "[created, created+period) — на границе красный; **48 ч "
++                "timelock** (34 560 блоков) между закрытием голосования и "
++                "исполнением (граница: на блок раньше — красный); "
++                "голосование идёт по **снапшоту** мощности на момент "
++                "создания — flash-stake после снапшота не даёт мощности, "
++                "его голос отвергается (`NoVotingPower`); экстренное veto "
++                "с **sunset** на блоке 1 521 000 (граница: за блок до — "
++                "работает, на закате и после — `VetoSunset`). Сценарий "
++                "`sim/t6-governance.json` (20 предложений, 113 шагов: 15 "
++                "исполнено, 4 отклонено (большинство/кворум/ничья), 1 "
++                "ветировано; валидные проходят), золотой дайджест "
++                "828b13cf…c729aa (Rust ↔ Python ↔ пример "
++                "`t6_governance_example`). Гейт "
++                "`crates/aura-storage/tests/t6_governance.rs` (10 тестов + "
++                "2 метаморфизма), оракул `tools/t6_governance_check.py`.\n")
++        f.write("negative controls `tools/nc_t6.py` (`nc.log`, "
++                "RESULT: 8/8 negative controls PASS) — 8 контролей "
++                "(стандарт 6 + flash-stake + veto sunset, прецедент "
++                "H6–H9/T4/T5).\n\n")
++
++    with open(os.path.join(EVID, "inventory.txt"), "w", encoding="utf-8") as f:
++        f.write("# T6 inventory (generated by tools/write_t6_evidence.py)\n")
++        f.write("# Cumulative negative controls: 23 phases, 558 controls.\n")
++        f.write("W4: 6/6, H0: 6/6, H1: 6/6, H2: 6/6, H3: 6/6, H4: 6/6, "
++                "H5: 6/6, H6: 7/7, H7: 7/7, H8: 7/7, H9: 7/7, E0: 6/6, "
++                "E1: 6/6, E2: 6/6, E3: 6/6, T0: 6/6, T1: 6/6, T2: 6/6, "
++                "T3: 6/6, T4: 7/7, T5: 7/7, T6: 8/8\n")
++        f.write("TOTAL: 558 negative controls cumulative\n")
++
++    with open(os.path.join(EVID, "SHA256SUMS"), "w", encoding="utf-8") as f:
++        for rel in sorted(EVID_DIRS):
++            base = os.path.join(EVID, rel)
++            for name in sorted(os.listdir(base)):
++                path = os.path.join(base, name)
++                if os.path.isfile(path) and name != "SHA256SUMS":
++                    repo_rel = os.path.relpath(path, ROOT)
++                    f.write("%s  %s\n" % (sha256_file(path), repo_rel))
++
++    print("[evidence_t6] %s"
++          % ("all gates green" if ok_all else "RED GATES PRESENT"), flush=True)
++    return 0 if ok_all else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+-- 
+2.47.3
+

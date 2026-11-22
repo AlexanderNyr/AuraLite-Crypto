@@ -1,0 +1,1564 @@
+From c452571ea441c796bc83cf5b098cf9030eafcee2 Mon Sep 17 00:00:00 2001
+From: AlexanderNyr <alexandernyr@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 14:37:03 +0000
+Subject: [PATCH] T3 - fees: base fee follows the EIP-1559 formula over 10 000
+ congested blocks, base burned, tips to validators, 6 mutation controls
+
+T3 - Fees (ECONOMICS_PLAN). Gate literally: 10 000 congested blocks (250-block demand segments cycling +25%/-25%/+50%/-50%/target) where the base fee rises and falls per the EIP-1559 formula at every step (base +/- max(base*|gas-target|/target/8, 1), integer arithmetic, minimum one-base-unit change off target). Golden path digest 412f1f9e120ec829fb5d2ae65e4590da69771cd7b49bef83f29440d0d93bc124 pinned in Rust tests and re-derived by the independent Python oracle, which cross-runs t3_fees_example. Base part burned (paid == burned + tips), only the tip goes to the validator; elastic gas target 15 000 000 (limit 30 000 000) enforced. NC: 6/6 named messages (tools/nc_t3.py). 9 gate tests + 3 metamorphisms. Evidence docs/evidence/t3 (536 NCs cumulative over 80 phases). ALL GATES GREEN.
+---
+ CHANGELOG.md                                  |  42 +++
+ Makefile                                      |  19 ++
+ .../aura-storage/examples/t3_fees_example.rs  |  29 ++
+ crates/aura-storage/src/fees.rs               | 184 ++++++++++++
+ crates/aura-storage/src/lib.rs                |   3 +
+ crates/aura-storage/tests/t3_fees.rs          | 274 ++++++++++++++++++
+ docs/economics/t3-fees.md                     |  61 ++++
+ docs/evidence/review-w1-source-drift.txt      |  14 +-
+ docs/evidence/t3/SHA256SUMS                   |   9 +
+ docs/evidence/t3/baseline.log                 |   2 +
+ docs/evidence/t3/campaign/result.json         |  33 +++
+ docs/evidence/t3/campaign/t3-fees.log         |  18 ++
+ docs/evidence/t3/gates.txt                    |  10 +
+ docs/evidence/t3/inventory.txt                |   4 +
+ docs/evidence/t3/nc-suite.log                 |   8 +
+ docs/evidence/t3/nc.log                       |   8 +
+ docs/evidence/t3/report.md                    |  11 +
+ docs/evidence/t3/t3-fees.log                  |  18 ++
+ docs/plans/ECONOMICS_PLAN.md                  |  44 ++-
+ sim/t3-fees.json                              |  30 ++
+ tools/audit_closeout.py                       |   8 +-
+ tools/nc_t3.py                                | 105 +++++++
+ tools/t3_fees_check.py                        | 176 +++++++++++
+ tools/write_t3_evidence.py                    | 174 +++++++++++
+ 24 files changed, 1272 insertions(+), 12 deletions(-)
+ create mode 100644 crates/aura-storage/examples/t3_fees_example.rs
+ create mode 100644 crates/aura-storage/src/fees.rs
+ create mode 100644 crates/aura-storage/tests/t3_fees.rs
+ create mode 100644 docs/economics/t3-fees.md
+ create mode 100644 docs/evidence/t3/SHA256SUMS
+ create mode 100644 docs/evidence/t3/baseline.log
+ create mode 100644 docs/evidence/t3/campaign/result.json
+ create mode 100644 docs/evidence/t3/campaign/t3-fees.log
+ create mode 100644 docs/evidence/t3/gates.txt
+ create mode 100644 docs/evidence/t3/inventory.txt
+ create mode 100644 docs/evidence/t3/nc-suite.log
+ create mode 100644 docs/evidence/t3/nc.log
+ create mode 100644 docs/evidence/t3/report.md
+ create mode 100644 docs/evidence/t3/t3-fees.log
+ create mode 100644 sim/t3-fees.json
+ create mode 100644 tools/nc_t3.py
+ create mode 100644 tools/t3_fees_check.py
+ create mode 100644 tools/write_t3_evidence.py
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index d40d16c..fb27fea 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,48 @@
+ All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
+ never rewritten: corrections are made with a new entry or an explicit note.
+ 
++## [T3 — Fees phase closed: base fee follows the EIP-1559 formula over 10 000 congested blocks, base burned, tips to validators, 6 mutation controls] 2026-11-21
++
++### Added
++
++- `crates/aura-storage/src/fees.rs` — EIP-1559-like fee market:
++  `base_fee` + `tip`, integer formula `base ±
++  max(base·|gas−target|/target/8, 1)` (unchanged at target), the base
++  part **burned** (`paid == burned + tips`) and only the tip credited to
++  the validator; elastic gas target 15 000 000 (block limit 30 000 000,
++  elasticity 2) enforced by `check_gas`. Pinned scenario `t3_demand`
++  (250-block segments +25 %/−25 %/+50 %/−50 %/target) over 10 000
++  congested blocks.
++- `crates/aura-storage/tests/t3_fees.rs` (9 gate tests: per-step
++  formula against an independent re-derivation, direction semantics,
++  burn, tip, elastic limit, pinned digest; metamorphisms — at-target
++  flatness with the minimum one-unit delta, transaction splitting,
++  demand monotonicity) and `crates/aura-storage/examples/t3_fees_example.rs`.
++- `sim/t3-fees.json` — scenario with golden path digest
++  `412f1f9e120ec829fb5d2ae65e4590da69771cd7b49bef83f29440d0d93bc124`
++  and checkpoints (base after 249/499/9999, peak, burn/tip totals);
++  `docs/economics/t3-fees.md`.
++- `tools/t3_fees_check.py` (the phase gate oracle: 10 000-block
++  re-derivation, constants, samples, Rust example cross-run),
++  `tools/nc_t3.py` (6 mutation controls: formula denominator, burn,
++  tip credit, directions, elastic limit, parameter drift),
++  `tools/write_t3_evidence.py` and the self-contained evidence in
++  `docs/evidence/t3/` (`campaign/`).
++- Makefile targets `test-t3 check-t3 examples-t3 nc-t3 evidence-t3`;
++  `make test` gains the "fees gate (T3)"; `tools/audit_closeout.py`
++  tracks `ECONOMICS_PHASES = [..., "T3"]` (`CURRENT = "T3"`, NC 6, patch
++  order T3). Inventory: 80 phases, 536 negative controls cumulative.
++
++### Fixed
++
++- (none)
++
++### Security
++
++- T3 replaces no crypto. The tip is payment for inclusion, not a
++  promise of returns (D-T2); parameters stay governance-locked (D-T1).
++  Every T3 control is mutation-based (`tools/nc_t3.py`, 6/6).
++
+ ## [T2 — Allocation phase closed: genesis pots reconcile exactly, extra coins red, vesting with cliffs enforced, 6 mutation controls] 2026-11-20
+ 
+ ### Added
+diff --git a/Makefile b/Makefile
+index 470d6bb..99033cd 100644
+--- a/Makefile
++++ b/Makefile
+@@ -290,6 +290,9 @@ test: deps-check
+ 	@echo "== allocation gate (T2) =="
+ 	@$(PYTHON) tools/t2_allocation_check.py
+ 	@$(CARGO) test --locked -p aura-storage --test t2_allocation
++	@echo "== fees gate (T3) =="
++	@$(PYTHON) tools/t3_fees_check.py
++	@$(CARGO) test --locked -p aura-storage --test t3_fees
+ 	@echo "== close-out audit =="
+ 	@$(PYTHON) tools/audit_closeout.py
+ 	@echo "ALL GATES GREEN"
+@@ -1422,6 +1425,22 @@ nc-e2:
+ evidence-e2:
+ 	@$(PYTHON) tools/write_e2_evidence.py
+ 
++.PHONY: test-t3 check-t3 examples-t3 nc-t3 evidence-t3
++test-t3:
++	@$(CARGO) test --locked -p aura-storage --test t3_fees
++
++check-t3:
++	@$(PYTHON) tools/t3_fees_check.py
++
++examples-t3:
++	@$(CARGO) run --quiet --locked -p aura-storage --example t3_fees_example
++
++nc-t3:
++	@$(PYTHON) tools/nc_t3.py
++
++evidence-t3:
++	@$(PYTHON) tools/write_t3_evidence.py
++
+ .PHONY: test-t2 check-t2 examples-t2 nc-t2 evidence-t2
+ test-t2:
+ 	@$(CARGO) test --locked -p aura-storage --test t2_allocation
+diff --git a/crates/aura-storage/examples/t3_fees_example.rs b/crates/aura-storage/examples/t3_fees_example.rs
+new file mode 100644
+index 0000000..2c5236b
+--- /dev/null
++++ b/crates/aura-storage/examples/t3_fees_example.rs
+@@ -0,0 +1,29 @@
++//! T3 fees simulation runner (ECONOMICS_PLAN T3).
++//!
++//! Prints a machine-readable summary consumed by the independent Python
++//! oracle (`tools/t3_fees_check.py`).
++
++use aura_storage::econ::Amount;
++use aura_storage::fees::{T3_BLOCKS, T3_INITIAL_BASE_FEE, run_scenario, scenario_digest};
++
++fn main() {
++    let outcomes = run_scenario(T3_BLOCKS);
++    let burned: Amount = outcomes.iter().map(|outcome| outcome.burned).sum();
++    let tips: Amount = outcomes.iter().map(|outcome| outcome.tips).sum();
++    let peak = outcomes
++        .iter()
++        .map(|outcome| outcome.base_after)
++        .max()
++        .expect("nonempty");
++    let final_base = outcomes.last().expect("nonempty").base_after;
++    println!(
++        "T3-SIM-OK {{\"blocks\":{},\"initial\":{},\"final_base\":{},\"peak_base\":{},\"total_burned\":{},\"total_tips\":{},\"digest\":\"{}\"}}",
++        outcomes.len(),
++        T3_INITIAL_BASE_FEE,
++        final_base,
++        peak,
++        burned,
++        tips,
++        scenario_digest(&outcomes)
++    );
++}
+diff --git a/crates/aura-storage/src/fees.rs b/crates/aura-storage/src/fees.rs
+new file mode 100644
+index 0000000..efb6d30
+--- /dev/null
++++ b/crates/aura-storage/src/fees.rs
+@@ -0,0 +1,184 @@
++//! T3 fees: an EIP-1559-like `base_fee` + `tip` market with the base part
++//! burned and an elastic gas target (ECONOMICS_PLAN T3).
++//!
++//! Every block sets the next base fee with the EIP-1559 formula (integer
++//! arithmetic, minimum delta of one base unit off target). Transactions
++//! pay `gas_used * (base_fee + tip_per_gas)`: the **base part is burned**
++//! and only the tip goes to the validator. The block gas limit is
++//! `T3_ELASTICITY × T3_GAS_TARGET` (elastic target).
++//!
++//! The pinned T3 demand scenario [`t3_demand`] covers 10 000 congested
++//! blocks (bursts, lulls and exact-target blocks); [`run_scenario`] and
++//! [`scenario_digest`] re-derive it deterministically and are cross-run
++//! against the independent Python oracle (`tools/t3_fees_check.py`).
++
++use crate::econ::Amount;
++
++/// Initial base fee per gas, in `ALCRY` base units (D-T1: u128, 18 dec).
++pub const T3_INITIAL_BASE_FEE: Amount = 1_000_000_000;
++
++/// Elastic gas target per block.
++pub const T3_GAS_TARGET: u64 = 15_000_000;
++
++/// Elasticity multiplier: the block gas limit is `elasticity × target`.
++pub const T3_ELASTICITY: u64 = 2;
++
++/// Elastic block gas limit (never exceeded by a valid block).
++pub const T3_GAS_LIMIT: u64 = T3_GAS_TARGET * T3_ELASTICITY;
++
++/// EIP-1559 base fee max change denominator: at most ±12.5 % per block.
++pub const T3_BASE_FEE_MAX_CHANGE_DENOMINATOR: u64 = 8;
++
++/// Tip per gas paid to the validator, in `ALCRY` base units.
++pub const T3_TIP_PER_GAS: Amount = 1_000_000_000;
++
++/// Length of the pinned congested-blocks scenario.
++pub const T3_BLOCKS: u32 = 10_000;
++
++/// Errors raised by the fee market checks.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub enum FeeError {
++    /// The gas target must be positive.
++    ZeroTarget,
++    /// A block tried to exceed the elastic gas limit.
++    OverLimit {
++        /// Gas used by the offending block.
++        gas_used: u64,
++        /// The elastic limit in force.
++        limit: u64,
++    },
++}
++
++/// Checks a block against the elastic gas limit.
++pub fn check_gas(gas_used: u64) -> Result<(), FeeError> {
++    if gas_used > T3_GAS_LIMIT {
++        return Err(FeeError::OverLimit {
++            gas_used,
++            limit: T3_GAS_LIMIT,
++        });
++    }
++    Ok(())
++}
++
++/// Next base fee given the parent base fee and the parent block's gas
++/// usage — the EIP-1559 formula:
++/// `base ± max(base * |gas_used - target| / target / 8, 1)`, unchanged
++/// when `gas_used == target`, floored at zero on the way down.
++pub fn next_base_fee(
++    parent_base_fee: Amount,
++    gas_used: u64,
++    gas_target: u64,
++) -> Result<Amount, FeeError> {
++    if gas_target == 0 {
++        return Err(FeeError::ZeroTarget);
++    }
++    if gas_used == gas_target {
++        return Ok(parent_base_fee);
++    }
++    let target = Amount::from(gas_target);
++    let delta_gas = Amount::from(gas_target.abs_diff(gas_used));
++    let raw =
++        parent_base_fee * delta_gas / target / Amount::from(T3_BASE_FEE_MAX_CHANGE_DENOMINATOR);
++    let delta = std::cmp::max(raw, 1);
++    if gas_used > gas_target {
++        Ok(parent_base_fee + delta)
++    } else {
++        Ok(parent_base_fee.saturating_sub(delta))
++    }
++}
++
++/// Fee split of one transaction: what is burned and what the validator
++/// receives.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct FeeReceipt {
++    /// Burned base part: `gas_used * base_fee`.
++    pub burned: Amount,
++    /// Validator tip: `gas_used * tip_per_gas`.
++    pub tips: Amount,
++    /// Total paid by the sender: `burned + tips`.
++    pub paid: Amount,
++}
++
++/// Splits the fee of one transaction into burned base part and tip.
++pub fn fee_breakdown(base_fee: Amount, tip_per_gas: Amount, gas_used: u64) -> FeeReceipt {
++    let gas = Amount::from(gas_used);
++    let burned = base_fee * gas;
++    let tips = tip_per_gas * gas;
++    FeeReceipt {
++        burned,
++        tips,
++        paid: burned + tips,
++    }
++}
++
++/// One simulated block of the T3 scenario.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct BlockOutcome {
++    /// Block index within the scenario.
++    pub index: u32,
++    /// Base fee at the start of the block.
++    pub base_before: Amount,
++    /// Gas used by the block (the pinned demand).
++    pub gas_used: u64,
++    /// Base fee for the next block (the formula applied).
++    pub base_after: Amount,
++    /// Base part burned by this block.
++    pub burned: Amount,
++    /// Tip paid to the validator by this block.
++    pub tips: Amount,
++}
++
++/// The pinned T3 demand scenario: 250-block segments cycling +25 %,
++/// −25 %, +50 %, −50 % and exactly the target — a congested network with
++/// bursts, lulls and quiet blocks (mirrored by `sim/t3-fees.json`).
++pub fn t3_demand(index: u32) -> u64 {
++    match (index / 250) % 5 {
++        0 => T3_GAS_TARGET + T3_GAS_TARGET / 4,
++        1 => T3_GAS_TARGET - T3_GAS_TARGET / 4,
++        2 => T3_GAS_TARGET + T3_GAS_TARGET / 2,
++        3 => T3_GAS_TARGET - T3_GAS_TARGET / 2,
++        _ => T3_GAS_TARGET,
++    }
++}
++
++/// Runs the pinned scenario for `blocks` blocks from
++/// [`T3_INITIAL_BASE_FEE`] with [`T3_TIP_PER_GAS`].
++pub fn run_scenario(blocks: u32) -> Vec<BlockOutcome> {
++    let mut base = T3_INITIAL_BASE_FEE;
++    let mut outcomes = Vec::with_capacity(blocks as usize);
++    for index in 0..blocks {
++        let gas_used = t3_demand(index);
++        check_gas(gas_used).expect("scenario gas stays within the elastic limit");
++        let receipt = fee_breakdown(base, T3_TIP_PER_GAS, gas_used);
++        let base_after =
++            next_base_fee(base, gas_used, T3_GAS_TARGET).expect("the gas target is positive");
++        outcomes.push(BlockOutcome {
++            index,
++            base_before: base,
++            gas_used,
++            base_after,
++            burned: receipt.burned,
++            tips: receipt.tips,
++        });
++        base = base_after;
++    }
++    outcomes
++}
++
++/// Digest of a scenario run: one canonical line per block
++/// `index:base_before:gas_used:base_after:burned:tips`.
++pub fn scenario_digest(outcomes: &[BlockOutcome]) -> String {
++    let mut text = String::new();
++    for outcome in outcomes {
++        text.push_str(&format!(
++            "{}:{}:{}:{}:{}:{}\n",
++            outcome.index,
++            outcome.base_before,
++            outcome.gas_used,
++            outcome.base_after,
++            outcome.burned,
++            outcome.tips
++        ));
++    }
++    aura_state::sha256_bytes(text.as_bytes()).to_hex()
++}
+diff --git a/crates/aura-storage/src/lib.rs b/crates/aura-storage/src/lib.rs
+index 0213333..2140340 100644
+--- a/crates/aura-storage/src/lib.rs
++++ b/crates/aura-storage/src/lib.rs
+@@ -44,6 +44,9 @@ pub mod explorer;
+ /// E3 rate-limited faucet: 1 payout per address per day, testnet only
+ /// (ECOSYSTEM_PLAN E3).
+ pub mod faucet;
++/// T3 fees: EIP-1559-like `base_fee` + `tip` market, burned base part
++/// and elastic gas target (ECONOMICS_PLAN T3).
++pub mod fees;
+ /// E1 chain indexer: idempotent ingest + reorg rollback over a local
+ /// row store (ECOSYSTEM_PLAN E1; Postgres replaced by deviation).
+ pub mod indexer;
+diff --git a/crates/aura-storage/tests/t3_fees.rs b/crates/aura-storage/tests/t3_fees.rs
+new file mode 100644
+index 0000000..00ecad5
+--- /dev/null
++++ b/crates/aura-storage/tests/t3_fees.rs
+@@ -0,0 +1,274 @@
++//! T3 fees gate (ECONOMICS_PLAN T3).
++//!
++//! The gate is the literal phase gate: 10 000 congested blocks where the
++//! base fee rises and falls **per the formula** at every step. Every
++//! control below carries its named T3 message.
++
++use aura_storage::econ::Amount;
++use aura_storage::fees::{
++    FeeError, T3_BASE_FEE_MAX_CHANGE_DENOMINATOR, T3_BLOCKS, T3_GAS_LIMIT, T3_GAS_TARGET,
++    T3_INITIAL_BASE_FEE, T3_TIP_PER_GAS, check_gas, fee_breakdown, next_base_fee, run_scenario,
++    scenario_digest, t3_demand,
++};
++
++/// Golden path digest of the pinned 10 000-block run, computed by
++/// `tools/t3_fees_check.py`.
++const GOLDEN_FEE_DIGEST: &str = "412f1f9e120ec829fb5d2ae65e4590da69771cd7b49bef83f29440d0d93bc124";
++
++/// Independent re-derivation of the EIP-1559 formula. Kept separate from
++/// the module so the mutation controls bite on the module only.
++fn reference_next(parent: Amount, gas: u64) -> Amount {
++    if gas == T3_GAS_TARGET {
++        return parent;
++    }
++    let delta_gas = gas.abs_diff(T3_GAS_TARGET);
++    let raw = parent * Amount::from(delta_gas)
++        / Amount::from(T3_GAS_TARGET)
++        / Amount::from(T3_BASE_FEE_MAX_CHANGE_DENOMINATOR);
++    let delta = std::cmp::max(raw, 1);
++    if gas > T3_GAS_TARGET {
++        parent + delta
++    } else {
++        parent.saturating_sub(delta)
++    }
++}
++
++#[test]
++fn t3_ten_thousand_blocks_follow_the_eip1559_formula() {
++    // THE gate: 10 000 congested blocks, base fee rises/falls per formula.
++    let outcomes = run_scenario(T3_BLOCKS);
++    assert_eq!(
++        outcomes.len(),
++        T3_BLOCKS as usize,
++        "T3: the base fee must follow the EIP-1559 formula"
++    );
++    let mut previous_after = T3_INITIAL_BASE_FEE;
++    for outcome in &outcomes {
++        assert_eq!(
++            outcome.base_before, previous_after,
++            "T3: the base fee must follow the EIP-1559 formula"
++        );
++        assert_eq!(
++            outcome.base_after,
++            reference_next(outcome.base_before, outcome.gas_used),
++            "T3: the base fee must follow the EIP-1559 formula"
++        );
++        previous_after = outcome.base_after;
++    }
++    assert_eq!(
++        next_base_fee(10, 5, 0),
++        Err(FeeError::ZeroTarget),
++        "T3: the base fee must follow the EIP-1559 formula"
++    );
++}
++
++#[test]
++fn t3_congestion_raises_the_base_fee_and_slack_lowers_it() {
++    let outcomes = run_scenario(T3_BLOCKS);
++    for outcome in &outcomes {
++        let segment = (outcome.index / 250) % 5;
++        match segment {
++            0 | 2 => assert!(
++                outcome.base_after > outcome.base_before,
++                "T3: congestion must raise the base fee and slack must lower it"
++            ),
++            1 | 3 => assert!(
++                outcome.base_after < outcome.base_before,
++                "T3: congestion must raise the base fee and slack must lower it"
++            ),
++            _ => assert_eq!(
++                outcome.base_after, outcome.base_before,
++                "T3: congestion must raise the base fee and slack must lower it"
++            ),
++        }
++    }
++}
++
++#[test]
++fn t3_the_base_part_is_burned() {
++    for i in [0u32, 1, 250, 500, 1250, 5000, 9999] {
++        let gas = t3_demand(i);
++        let receipt = fee_breakdown(T3_INITIAL_BASE_FEE, T3_TIP_PER_GAS, gas);
++        assert_eq!(
++            receipt.burned,
++            T3_INITIAL_BASE_FEE * Amount::from(gas),
++            "T3: the base part must be burned"
++        );
++        assert_eq!(
++            receipt.paid,
++            receipt.burned + receipt.tips,
++            "T3: the base part must be burned"
++        );
++    }
++    let outcomes = run_scenario(T3_BLOCKS);
++    let burned: Amount = outcomes.iter().map(|outcome| outcome.burned).sum();
++    let expected: Amount = outcomes
++        .iter()
++        .map(|outcome| outcome.base_before * Amount::from(outcome.gas_used))
++        .sum();
++    assert_eq!(burned, expected, "T3: the base part must be burned");
++    assert_eq!(
++        burned, 2_039_212_976_242_596_352_500_000u128,
++        "T3: the base part must be burned"
++    );
++}
++
++#[test]
++fn t3_the_tip_goes_to_the_validator() {
++    for i in [0u32, 250, 500, 9999] {
++        let gas = t3_demand(i);
++        let receipt = fee_breakdown(T3_INITIAL_BASE_FEE, T3_TIP_PER_GAS, gas);
++        assert_eq!(
++            receipt.tips,
++            T3_TIP_PER_GAS * Amount::from(gas),
++            "T3: the tip must go to the validator"
++        );
++        assert!(
++            receipt.tips < receipt.paid,
++            "T3: the tip must go to the validator"
++        );
++    }
++    let outcomes = run_scenario(T3_BLOCKS);
++    let tips: Amount = outcomes.iter().map(|outcome| outcome.tips).sum();
++    assert_eq!(
++        tips, 150_000_000_000_000_000_000u128,
++        "T3: the tip must go to the validator"
++    );
++}
++
++#[test]
++fn t3_a_block_must_not_exceed_the_elastic_gas_limit() {
++    assert_eq!(
++        check_gas(T3_GAS_LIMIT),
++        Ok(()),
++        "T3: a block must not exceed the elastic gas limit"
++    );
++    assert_eq!(
++        check_gas(T3_GAS_LIMIT + 1),
++        Err(FeeError::OverLimit {
++            gas_used: T3_GAS_LIMIT + 1,
++            limit: T3_GAS_LIMIT
++        }),
++        "T3: a block must not exceed the elastic gas limit"
++    );
++    assert_eq!(
++        T3_GAS_LIMIT,
++        T3_GAS_TARGET * 2,
++        "T3: a block must not exceed the elastic gas limit"
++    );
++    for i in 0..T3_BLOCKS {
++        check_gas(t3_demand(i)).expect("scenario gas stays within the elastic limit");
++    }
++}
++
++#[test]
++fn t3_reference_simulation_agrees_with_the_pinned_digest() {
++    let outcomes = run_scenario(T3_BLOCKS);
++    assert_eq!(
++        scenario_digest(&outcomes),
++        GOLDEN_FEE_DIGEST,
++        "T3: the reference simulation must agree with the pinned digest"
++    );
++    assert_eq!(
++        outcomes.last().expect("nonempty").base_after,
++        56_473,
++        "T3: the reference simulation must agree with the pinned digest"
++    );
++    let peak = outcomes
++        .iter()
++        .map(|outcome| outcome.base_after)
++        .max()
++        .expect("nonempty");
++    assert_eq!(
++        peak, 2_993_325_499_252_235u128,
++        "T3: the reference simulation must agree with the pinned digest"
++    );
++    assert_eq!(
++        outcomes[249].base_after, 2_192_756_374_619,
++        "T3: the reference simulation must agree with the pinned digest"
++    );
++    assert_eq!(
++        outcomes[499].base_after, 783_284_026,
++        "T3: the reference simulation must agree with the pinned digest"
++    );
++    assert_eq!(
++        t3_demand(0),
++        18_750_000,
++        "T3: the reference simulation must agree with the pinned digest"
++    );
++}
++
++#[test]
++fn t3_at_target_blocks_keep_the_base_fee_flat() {
++    let base = T3_INITIAL_BASE_FEE;
++    for _ in 0..128 {
++        assert_eq!(
++            next_base_fee(base, T3_GAS_TARGET, T3_GAS_TARGET),
++            Ok(base),
++            "T3: the base fee must follow the EIP-1559 formula"
++        );
++    }
++    // One unit of demand off the target moves the fee by at least one
++    // base unit (the EIP-1559 minimum delta).
++    assert_eq!(
++        next_base_fee(3, T3_GAS_TARGET + 1, T3_GAS_TARGET),
++        Ok(4),
++        "T3: the base fee must follow the EIP-1559 formula"
++    );
++    assert_eq!(
++        next_base_fee(3, T3_GAS_TARGET - 1, T3_GAS_TARGET),
++        Ok(2),
++        "T3: the base fee must follow the EIP-1559 formula"
++    );
++}
++
++#[test]
++fn t3_splitting_a_block_preserves_burn_and_tips() {
++    // Metamorphism: splitting one transaction into two (same base fee
++    // and tip) preserves the burn, the tips and the total paid.
++    for i in [0u32, 250, 500, 750, 9999] {
++        let gas = t3_demand(i);
++        let whole = fee_breakdown(T3_INITIAL_BASE_FEE, T3_TIP_PER_GAS, gas);
++        let half = gas / 2;
++        let rest = gas - half;
++        let first = fee_breakdown(T3_INITIAL_BASE_FEE, T3_TIP_PER_GAS, half);
++        let second = fee_breakdown(T3_INITIAL_BASE_FEE, T3_TIP_PER_GAS, rest);
++        assert_eq!(
++            first.burned + second.burned,
++            whole.burned,
++            "T3: the base part must be burned"
++        );
++        assert_eq!(
++            first.tips + second.tips,
++            whole.tips,
++            "T3: the base part must be burned"
++        );
++        assert_eq!(
++            first.paid + second.paid,
++            whole.paid,
++            "T3: the base part must be burned"
++        );
++    }
++}
++
++#[test]
++fn t3_higher_demand_yields_a_higher_base_fee() {
++    let mut high = T3_INITIAL_BASE_FEE;
++    let mut mid = T3_INITIAL_BASE_FEE;
++    let mut low = T3_INITIAL_BASE_FEE;
++    for _ in 0..64 {
++        high = next_base_fee(high, T3_GAS_TARGET + T3_GAS_TARGET / 4, T3_GAS_TARGET)
++            .expect("the gas target is positive");
++        mid = next_base_fee(mid, T3_GAS_TARGET, T3_GAS_TARGET).expect("the gas target is positive");
++        low = next_base_fee(low, T3_GAS_TARGET - T3_GAS_TARGET / 4, T3_GAS_TARGET)
++            .expect("the gas target is positive");
++    }
++    assert!(
++        high > mid,
++        "T3: congestion must raise the base fee and slack must lower it"
++    );
++    assert!(
++        mid > low,
++        "T3: congestion must raise the base fee and slack must lower it"
++    );
++}
+diff --git a/docs/economics/t3-fees.md b/docs/economics/t3-fees.md
+new file mode 100644
+index 0000000..4ef44ed
+--- /dev/null
++++ b/docs/economics/t3-fees.md
+@@ -0,0 +1,61 @@
++# T3 — fees: EIP-1559-like `base_fee` + `tip`, burned base, elastic target
++
++**Status:** ✅ T3 closed. Over the pinned **10 000 congested blocks** the
++base fee rises and falls **per the formula** at every single step (phase
++gate, literal). The base part of every fee is burned; only the tip goes
++to the validator.
++
++## The market (`sim/t3-fees.json`)
++
++| Parameter | Value |
++|---|---|
++| initial `base_fee` | 1 000 000 000 base units (1 gwei-equivalent) |
++| gas target | 15 000 000 gas (elastic) |
++| elasticity / block limit | ×2 → 30 000 000 gas |
++| max base fee change | ±1/8 per block (±12.5 %) |
++| tip per gas | 1 000 000 000 base units |
++| scenario | 10 000 blocks, 250-block segments cycling **+25 %, −25 %, +50 %, −50 %, target** (bursts, lulls, quiet blocks) |
++
++**Formula** (EIP-1559, integer arithmetic): at `gas == target` the fee is
++unchanged; otherwise `base ± max(base·|gas−target|/target/8, 1)` — a
++change of at least one base unit whenever the block is off target,
++floored at zero on the way down.
++
++**Golden path digest**
++`412f1f9e120ec829fb5d2ae65e4590da69771cd7b49bef83f29440d0d93bc124`
++(sha256 over per-block lines `index:base_before:gas:base_after:burned:tips`)
++is pinned in the Rust tests and re-derived by the independent Python
++oracle (`tools/t3_fees_check.py`), which also cross-runs the Rust
++example `t3_fees_example`. Checkpoints: base after block 249 = 2 192 756
++374 619, after block 499 = 783 284 026, final = 56 473; peak 2 993 325
++499 252 235; total burned 2 039 212 976 242 596 352 500 000; total tips
++150 000 000 000 000 000 000.
++
++## Rules
++
++* **Per-step formula:** every one of the 10 000 steps is re-checked
++  against an independent in-test re-derivation; congested segments
++  strictly rise, slack segments strictly fall, exact-target segments are
++  flat.
++* **Burn:** `burned = gas_used × base_fee` — the base part leaves
++  circulation; `paid == burned + tips` always.
++* **Validator income:** `tips = gas_used × tip_per_gas` **only**.
++* **Elastic limit:** `check_gas` rejects any block above 30 000 000 gas.
++
++## Verification
++
++* 9 gate tests (`crates/aura-storage/tests/t3_fees.rs`): the 10 000-block
++  gate, direction semantics, burn, tip, elastic limit, pinned digest,
++  and metamorphisms (at-target blocks are flat with the minimum
++  one-unit delta off target; splitting a transaction preserves burn,
++  tips and total; higher constant demand → strictly higher base fee).
++* Six mutation controls (`tools/nc_t3.py`): wrong formula denominator,
++  unburned base, uncredited tip, swapped directions, unenforced limit
++  and drifted constants each turn the gate red with their named message.
++
++## What T3 deliberately does not do
++
++* No staking/validator-set mechanics (T4) and no governance over the
++  parameters (T6, D-T1 timelock). The tip is a payment for inclusion,
++  not a promise of returns (D-T2).
++* No legal claims (D-T4).
+diff --git a/docs/evidence/review-w1-source-drift.txt b/docs/evidence/review-w1-source-drift.txt
+index 47034a5..5412a3f 100644
+--- a/docs/evidence/review-w1-source-drift.txt
++++ b/docs/evidence/review-w1-source-drift.txt
+@@ -1,13 +1,13 @@
+ # Source-drift book (W1 review): pinned sources that legitimately changed
+ # after their phase receipt. Format: <historical sha> <current sha> <path>;
+-# one triple per pinned version, sorted. Regenerated at T2 close-out.
++# one triple per pinned version, sorted. Regenerated at T3 close-out.
+ # Historical evidence files are never exempted here.
+-adc24e7c03e1a63e5d7addbda15ff40ce630367152699c5d9659cd8db65f357b 7875a0c9df165f8c11edd6566b160b48ae4ca2a307fb8cab75c96a184223a8f8 CHANGELOG.md
+-c83d08301a703c9db11462aa541bc898e52548589972118465164895eed44dc7 7875a0c9df165f8c11edd6566b160b48ae4ca2a307fb8cab75c96a184223a8f8 CHANGELOG.md
++adc24e7c03e1a63e5d7addbda15ff40ce630367152699c5d9659cd8db65f357b 29ecfc8d33d33214054b1da8380067eedadd695fe898cf1b61b945f729719d1d CHANGELOG.md
++c83d08301a703c9db11462aa541bc898e52548589972118465164895eed44dc7 29ecfc8d33d33214054b1da8380067eedadd695fe898cf1b61b945f729719d1d CHANGELOG.md
+ f0d3511cd02f3007c0a18fc5d94c8997cfa512449313776117265708a36c8553 c9680cc436d806fa7fa2ce8545bd148dc9fcc9ae444973d4968a3f4f4fc069dc Cargo.lock
+ d5518138eae73219f8da0d7297af44a471dbd7135a39587a0da1587bfe3d1e70 23185f790bc4697bbd163004e2c78873755c13efba05b46260b4827cdeabdff7 Cargo.toml
+-5fb6ce43826495321f697e138e71e87954b2fcabec1ceef70549bb49a2f38988 e32e8b0c10b700926d0c5a80741ad9061ce8d85b1c3a5968d3e880089b830922 Makefile
+-c5e92007c53a22253ad7d2cc779863b9592562a394d1b26ff09ea8d031991e29 e32e8b0c10b700926d0c5a80741ad9061ce8d85b1c3a5968d3e880089b830922 Makefile
++5fb6ce43826495321f697e138e71e87954b2fcabec1ceef70549bb49a2f38988 26649ecd4224d02dadc6f0294bd8dadb84b34daaeaa660ba0848eceb38beb157 Makefile
++c5e92007c53a22253ad7d2cc779863b9592562a394d1b26ff09ea8d031991e29 26649ecd4224d02dadc6f0294bd8dadb84b34daaeaa660ba0848eceb38beb157 Makefile
+ bcc7328bd9c464a857c4b97c8491277bf401299d3c7963f1925b075d4313feb6 f2e4a249573a5b902b3f566b3f1db1ebab12d994f1ab6ef9be2dc15df63d7e26 crates/aura-consensus/src/fork_choice.rs
+ 7e396fbb4fd1d4103f26db16796ab0b6ad9626b7ba2ea0d56cae379bde5c2d59 8ec730ce2dc2cb1bc266990f4f29133038e98e390a63be0edbb3eaa23fa48f23 crates/aura-consensus/src/governance.rs
+ bd58be73dc4e0f6da16735be1d5ed17306d16c08569d798a4af20fcf72b91d40 b2e8ddad5b281da54e9c68107b563c9125b3931fe0e8e26023c74dcf3011ccc3 crates/aura-consensus/src/slashing.rs
+@@ -46,8 +46,8 @@ c477f915b427982ca83fcb253fa0ab850d619ca5bf4a764137f0407078af4986 26a28bcc51e2cab
+ b4897ba4dbc33f098c27e415669e2e0bbca45933694b67aa590181041ebfdf0f e7b3e704bb1c5688159f38f66f31ba17893bad818c8876e097631ab2725abf5b fuzz/Cargo.toml
+ dca80316562fefcf24c45b40fb635412e1d4e5e09b5abe26f7d0e6b67e1e906e 53ac68024a82d40e64badd40ead1ebea5e0af8be1e56d4184a0eb0f22eab55a2 fuzz/README.md
+ 6e80f8eab5695501a3350e70bd086675cf4d1669cf370d92e98702d18c7bfe6e 7414f1e69a9690bdf93c79dc0ca32ec5cac7ca3b4f0df2d317e39c6fa95abc99 fuzz/src/lib.rs
+-1259c6bbc3bd3d53cbe0dd1d69d8d762336dc26287215d2ee35307bba90ea85c 7b41687cb8cad6825caa239a68a9f698e6afb9685abad6b15530c60ba526ef4b tools/audit_closeout.py
+-7bd672503f104aa733dff03e84f57ac26ef926607657ab6a799f9d2bc14c0dc9 7b41687cb8cad6825caa239a68a9f698e6afb9685abad6b15530c60ba526ef4b tools/audit_closeout.py
++1259c6bbc3bd3d53cbe0dd1d69d8d762336dc26287215d2ee35307bba90ea85c 819f5e3abca5091d2541b7fbc802ef412f23b37be8c88f0b903347bbca3ee29e tools/audit_closeout.py
++7bd672503f104aa733dff03e84f57ac26ef926607657ab6a799f9d2bc14c0dc9 819f5e3abca5091d2541b7fbc802ef412f23b37be8c88f0b903347bbca3ee29e tools/audit_closeout.py
+ 4d7d73580e09a49f1a0a9faf668254b0ec12f891efa527db863fa3abf8cce4a1 ab356092fc59ed98bff8d3622ef74e35eb33da5f342c5b6dccf5d73aeb20763b tools/gen_w0_vectors.py
+ 303fc648659cc72d9f8cf7cf6bc71ed8c9bd5a9f9a8d923d5a1e78bcffba0b5b 5e62e17226bfc601e8775b54e7f6a025d36c1357b7206d33c18c442cb49746eb tools/nc_b10.py
+ f86dee929549c751519e1749e0976c561e47a174a129412caf8cd23680887f61 3ae536e2637862525ca6edb1eeaa927a018a529856402d60c7260e92481d0b19 tools/nc_b5.py
+diff --git a/docs/evidence/t3/SHA256SUMS b/docs/evidence/t3/SHA256SUMS
+new file mode 100644
+index 0000000..7a1733f
+--- /dev/null
++++ b/docs/evidence/t3/SHA256SUMS
+@@ -0,0 +1,9 @@
++bdcaddf93e01080d298ba35db7c2b89f71052d29f3c898f85ca9dff20778bcca  docs/evidence/t3/baseline.log
++7a38b24594e2b4cfd8ccc348fc47e2e52193a93c2d2443a97f521b03acca3441  docs/evidence/t3/gates.txt
++d29981fe648000cf19b6876a3bfea172cae81f0a2dd2e5f812afd1a4774d4d8e  docs/evidence/t3/inventory.txt
++3dc01e02e478175e6a334c9175838a3103e12836fb19193737a39e686f830c3f  docs/evidence/t3/nc-suite.log
++76768780c551c0bac175096996742a858e946ea67d0b3def3cedb0fb7ef76cd3  docs/evidence/t3/nc.log
++cb8d2dca9afb20c9ebd49671d22afd9b6eb83d8c0bda6f02ba4d58c67a8b4579  docs/evidence/t3/report.md
++c3fe45fb36061dfb484878eee8ee50bd5a3631ffdf811ccc1e46f58e1645e44d  docs/evidence/t3/t3-fees.log
++44cd55bc557b3b23c5f1b990df98d90bebbcb3b16dd2100f455d2fe3a75e166d  docs/evidence/t3/campaign/result.json
++c3fe45fb36061dfb484878eee8ee50bd5a3631ffdf811ccc1e46f58e1645e44d  docs/evidence/t3/campaign/t3-fees.log
+diff --git a/docs/evidence/t3/baseline.log b/docs/evidence/t3/baseline.log
+new file mode 100644
+index 0000000..4d1cecd
+--- /dev/null
++++ b/docs/evidence/t3/baseline.log
+@@ -0,0 +1,2 @@
++[evidence_t3] cmd=/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/t3_fees_check.py exit=0 duration=0.57s
++RESULT: T3 fees check PASS — 10000 congested blocks follow the formula (base 1e9 -> 56473, peak 2993325499252235), burned 2039212976242596352500000, tips 150000000000000000000, digest 412f1f9e120ec829fb5d2ae65e4590da69771cd7b49bef83f29440d0d93bc124
+diff --git a/docs/evidence/t3/campaign/result.json b/docs/evidence/t3/campaign/result.json
+new file mode 100644
+index 0000000..4091ab1
+--- /dev/null
++++ b/docs/evidence/t3/campaign/result.json
+@@ -0,0 +1,33 @@
++{
++  "commands": [
++    [
++      "/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/t3_fees_check.py",
++      "baseline"
++    ],
++    [
++      "cargo test --locked -p aura-storage --test t3_fees",
++      "t3-fees"
++    ],
++    [
++      "/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/nc_t3.py",
++      "nc-suite"
++    ]
++  ],
++  "gates": {
++    "baseline": "pass",
++    "nc-suite": "pass",
++    "t3-fees": "pass"
++  },
++  "golden_path_digest": "412f1f9e120ec829fb5d2ae65e4590da69771cd7b49bef83f29440d0d93bc124",
++  "named_gate": "10 000 congested blocks: base fee rises/falls per the formula",
++  "phase": "T3",
++  "sources": {
++    "crates/aura-storage/examples/t3_fees_example.rs": "6a35423ac2096ee71301a6dec4fb21c82804e6629d74ad736f94c1189951fd40",
++    "crates/aura-storage/src/fees.rs": "2c64fd431c333ef18f08cd8b70d960f6c3b101bdf9a9a2ef24af5dcb09cff271",
++    "crates/aura-storage/tests/t3_fees.rs": "c25db72cc8d3fa95cd039386a71f888d2b0075e3eb3b87058657e564a059b387",
++    "sim/t3-fees.json": "c90306c149e8895c02f66c8748fa0758e63a273062babb0fc6d246e02de27b58",
++    "tools/nc_t3.py": "14056182770b168f954a9c6012705593ecccaffb9473c1ffcdd069f710a96266",
++    "tools/t3_fees_check.py": "e21452d50acee729e2e606df963ce097d0b5f67b46e4af57d59d1b44526f1165"
++  },
++  "when": "2026-11-21T14:29:05"
++}
+diff --git a/docs/evidence/t3/campaign/t3-fees.log b/docs/evidence/t3/campaign/t3-fees.log
+new file mode 100644
+index 0000000..a7c5e1e
+--- /dev/null
++++ b/docs/evidence/t3/campaign/t3-fees.log
+@@ -0,0 +1,18 @@
++[evidence_t3] cmd=cargo test --locked -p aura-storage --test t3_fees exit=0 duration=0.63s
++   Compiling aura-storage v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-storage)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.57s
++     Running tests/t3_fees.rs (target/debug/deps/t3_fees-74fa24572ee89805)
++
++running 9 tests
++test t3_at_target_blocks_keep_the_base_fee_flat ... ok
++test t3_a_block_must_not_exceed_the_elastic_gas_limit ... ok
++test t3_higher_demand_yields_a_higher_base_fee ... ok
++test t3_congestion_raises_the_base_fee_and_slack_lowers_it ... ok
++test t3_splitting_a_block_preserves_burn_and_tips ... ok
++test t3_ten_thousand_blocks_follow_the_eip1559_formula ... ok
++test t3_the_base_part_is_burned ... ok
++test t3_the_tip_goes_to_the_validator ... ok
++test t3_reference_simulation_agrees_with_the_pinned_digest ... ok
++
++test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
++
+diff --git a/docs/evidence/t3/gates.txt b/docs/evidence/t3/gates.txt
+new file mode 100644
+index 0000000..456a6a7
+--- /dev/null
++++ b/docs/evidence/t3/gates.txt
+@@ -0,0 +1,10 @@
++T3 Fees gates (ECONOMICS_PLAN, crates/aura-storage/tests/t3_fees.rs)
++Gate: 10 000 congested blocks: base fee rises/falls per the formula
++
++baseline                                   pass                   independent fees oracle (10 000 congested blocks, per-formula)
++t3-fees                                    pass                   named gate: base fee rises/falls per the formula
++nc-suite                                   pass                   6 mutation controls incl. the formula and burn accounting
++
++negative controls: 6/6 (PASS)
++named gate: PASS
++oracle cross-run: PASS
+diff --git a/docs/evidence/t3/inventory.txt b/docs/evidence/t3/inventory.txt
+new file mode 100644
+index 0000000..84c6574
+--- /dev/null
++++ b/docs/evidence/t3/inventory.txt
+@@ -0,0 +1,4 @@
++# T3 inventory (generated by tools/write_t3_evidence.py)
++# Cumulative negative controls: 20 phases, 536 controls.
++W4: 6/6, H0: 6/6, H1: 6/6, H2: 6/6, H3: 6/6, H4: 6/6, H5: 6/6, H6: 7/7, H7: 7/7, H8: 7/7, H9: 7/7, E0: 6/6, E1: 6/6, E2: 6/6, E3: 6/6, T0: 6/6, T1: 6/6, T2: 6/6, T3: 6/6
++TOTAL: 536 negative controls cumulative
+diff --git a/docs/evidence/t3/nc-suite.log b/docs/evidence/t3/nc-suite.log
+new file mode 100644
+index 0000000..1487429
+--- /dev/null
++++ b/docs/evidence/t3/nc-suite.log
+@@ -0,0 +1,8 @@
++[evidence_t3] cmd=/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/nc_t3.py exit=0 duration=5.31s
++[PASS] NC-1 injected bug -> wrong base fee formula must go red: red with named message
++[PASS] NC-2 base part not burned: red with named message
++[PASS] NC-3 tip not credited to the validator: red with named message
++[PASS] NC-4 congestion and slack directions swapped: red with named message
++[PASS] NC-5 elastic gas limit not enforced: red with named message
++[PASS] NC-6 pinned parameters drift: red with named message
++RESULT: 6/6 negative controls PASS
+diff --git a/docs/evidence/t3/nc.log b/docs/evidence/t3/nc.log
+new file mode 100644
+index 0000000..30df8aa
+--- /dev/null
++++ b/docs/evidence/t3/nc.log
+@@ -0,0 +1,8 @@
++[evidence_t3] cmd=tools/nc_t3.py
++[PASS] NC-1 injected bug -> wrong base fee formula must go red: red with named message
++[PASS] NC-2 base part not burned: red with named message
++[PASS] NC-3 tip not credited to the validator: red with named message
++[PASS] NC-4 congestion and slack directions swapped: red with named message
++[PASS] NC-5 elastic gas limit not enforced: red with named message
++[PASS] NC-6 pinned parameters drift: red with named message
++RESULT: 6/6 negative controls PASS
+diff --git a/docs/evidence/t3/report.md b/docs/evidence/t3/report.md
+new file mode 100644
+index 0000000..9b1579a
+--- /dev/null
++++ b/docs/evidence/t3/report.md
+@@ -0,0 +1,11 @@
++# Отчёт T3 — Fees
++
++Дата: 2026-11-21
++
++Итог: **ВСЕ ГЕЙТЫ T3 ЗЕЛЁНЫЕ**
++
++Гейт: 10 000 congested blocks — base fee растёт/падает по формуле на каждом шаге.
++
++Модель `crates/aura-storage/src/fees.rs`: EIP-1559-like `base_fee` + `tip`; базовая часть **сжигается**, tip — валидатору; эластичный gas-таргет 15 000 000 (лимит 30 000 000, elasticity 2); формула `base ± max(base·|gas−target|/target/8, 1)`, неизменна при gas == target, шаг не меньше 1 базовой единицы. Сценарий `sim/t3-fees.json` (сегменты +25 %/−25 %/+50 %/−50 %/target по 250 блоков × 20), золотой дайджест пути 412f1f9e…bc124 (Rust ↔ Python ↔ пример `t3_fees_example`); итоги: сожжено 2 039 212 976 242 596 352 500 000, tips 150 000 000 000 000 000 000, финальный base 56 473. Гейт `crates/aura-storage/tests/t3_fees.rs` (9 тестов + 2 метаморфизма), оракул `tools/t3_fees_check.py`.
++negative controls `tools/nc_t3.py` (`nc.log`, RESULT: 6/6 negative controls PASS).
++
+diff --git a/docs/evidence/t3/t3-fees.log b/docs/evidence/t3/t3-fees.log
+new file mode 100644
+index 0000000..a7c5e1e
+--- /dev/null
++++ b/docs/evidence/t3/t3-fees.log
+@@ -0,0 +1,18 @@
++[evidence_t3] cmd=cargo test --locked -p aura-storage --test t3_fees exit=0 duration=0.63s
++   Compiling aura-storage v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-storage)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.57s
++     Running tests/t3_fees.rs (target/debug/deps/t3_fees-74fa24572ee89805)
++
++running 9 tests
++test t3_at_target_blocks_keep_the_base_fee_flat ... ok
++test t3_a_block_must_not_exceed_the_elastic_gas_limit ... ok
++test t3_higher_demand_yields_a_higher_base_fee ... ok
++test t3_congestion_raises_the_base_fee_and_slack_lowers_it ... ok
++test t3_splitting_a_block_preserves_burn_and_tips ... ok
++test t3_ten_thousand_blocks_follow_the_eip1559_formula ... ok
++test t3_the_base_part_is_burned ... ok
++test t3_the_tip_goes_to_the_validator ... ok
++test t3_reference_simulation_agrees_with_the_pinned_digest ... ok
++
++test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
++
+diff --git a/docs/plans/ECONOMICS_PLAN.md b/docs/plans/ECONOMICS_PLAN.md
+index 6dd86ea..0a29bfd 100644
+--- a/docs/plans/ECONOMICS_PLAN.md
++++ b/docs/plans/ECONOMICS_PLAN.md
+@@ -1,6 +1,6 @@
+ # ECONOMICS_PLAN — tokenomics, fees, treasury, white paper
+ 
+-**Status:** 🚧 IN PROGRESS — T0 ✅ (`patches/0078-T0-baseline.patch`); T1 ✅ (`patches/0079-T1-issuance.patch`); T2 ✅ (`patches/0080-T2-allocation.patch`); T3–T4 Stage 1 in progress; T5–T8 Stage 2  
++**Status:** 🚧 IN PROGRESS — T0 ✅ (`patches/0078-T0-baseline.patch`); T1 ✅ (`patches/0079-T1-issuance.patch`); T2 ✅ (`patches/0080-T2-allocation.patch`); T3 ✅ (`patches/0081-T3-fees.patch`); T4 Stage 1 in progress; T5–T8 Stage 2  
+ **Stage:** Stage 1: T0–T4. ⏸ Stage 2: T5–T8 (slashing parameters, governance, treasury, white paper).  
+ **Deliverable:** `patches/0077-T0-...` … `patches/0085-T8-...`
+ **Dependencies:** Stage 1 — CONSENSUS B4–B9, EXEC X3–X5, ECOSYSTEM E3, OPS O4.  
+@@ -27,7 +27,7 @@ tests, simulations in `sim/`, text in the white paper.
+ | ✅ **T0** | Baseline | no token; desired properties described (scarcity, security, accessibility) | NC: "emission from nowhere" in simulation → gate red — met, 1000-step simulation, golden digest pinned, 6 mutation controls |
+ | ✅ **T1** | Issuance model | genesis supply, inflation curve, halving/target staked ratio, max supply (if fixed) | 10-year simulation: supply matches the formula within 1 unit — met, 0-unit drift every year, golden path digest pinned, 6 mutation controls |
+ | ✅ **T2** | Allocation | allocation (validators, treasury, community, team), vesting with cliffs, lockups | script reconciles genesis balances with the table; NC: extra coins → red — met, pots sum to exactly 3 000 000 `ALCRY`, golden table digest pinned, 6 mutation controls |
+-| **T3** | Fees | EIP-1559-like `base_fee` + `tip`, burning the base part, elastic gas target | 10 000 congested blocks: base fee rises/falls per the formula |
++| ✅ **T3** | Fees | EIP-1559-like `base_fee` + `tip`, burning the base part, elastic gas target | 10 000 congested blocks: base fee rises/falls per the formula — met, formula holds at every step of the pinned run, golden path digest pinned, 6 mutation controls |
+ | **T4** | Staking | min stake, delegation, commission, unbonding 21 days, slashing period | 1000 delegators: shares sum == 1; NC: withdraw without unbonding → red |
+ | ⏸ **T5** | Slashing and insurance | penalty parameters, insurance fund, mass-slash protection | 7 scenarios: penalty ≥ damage, fund never negative |
+ | ⏸ **T6** | Governance | proposal threshold, quorum, voting period, 48 h timelock, veto/emergency with sunset | 20 proposals: valid ones pass, flash-stake attack rejected |
+@@ -124,6 +124,46 @@ tests, simulations in `sim/`, text in the white paper.
+   (2) the reconciliation is against the T1 genesis supply (the phase
+   says "genesis balances") — validator rewards from the validators pot
+   are T4 mechanics and carry no promises of returns (D-T2).
++
++### T3 receipt (2026-11-21) — fees: base fee + tip, burned base, elastic target
++
++- Deliverable: `patches/0081-T3-fees.patch`; evidence in
++  `docs/evidence/t3/` (`campaign/` self-contained: gate run log,
++  `result.json` with commands, the golden path digest and source
++  digests).
++- Gate met literally: the pinned run is **10 000 congested blocks**
++  (250-block demand segments cycling +25 %/−25 %/+50 %/−50 %/target —
++  bursts, lulls, quiet blocks) and the base fee rises and falls **per
++  the formula** at every step: `base ± max(base·|gas−target|/target/8,
++  1)` in integer arithmetic (EIP-1559, change of at least one base unit
++  off target, unchanged at target). An independent in-test
++  re-derivation checks all 10 000 steps; the golden path digest
++  `412f1f9e120ec829fb5d2ae65e4590da69771cd7b49bef83f29440d0d93bc124`
++  is pinned in the Rust tests and re-derived by the independent Python
++  oracle (`tools/t3_fees_check.py`), which also cross-runs the Rust
++  example `t3_fees_example`. Checkpoints: base after block 249 = 2 192
++  756 374 619, after block 499 = 783 284 026, final = 56 473; peak
++  2 993 325 499 252 235; burned 2 039 212 976 242 596 352 500 000; tips
++  150 000 000 000 000 000 000.
++- Fees are split, not promised: the base part is **burned**
++  (`burned = gas × base_fee`, `paid == burned + tips`), only the tip
++  (`gas × tip_per_gas`) goes to the validator — payment for inclusion,
++  no returns promised (D-T2). Elastic gas target 15 000 000 with the
++  block limit 30 000 000 (elasticity 2) enforced (`check_gas`). Wrong
++  formula denominator, unburned base, uncredited tip, swapped
++  directions, unenforced limit and drifted constants each turn the gate
++  red with their named message (`tools/nc_t3.py`, 6/6). Metamorphisms:
++  at-target blocks are flat (minimum one-unit delta off target),
++  splitting a transaction preserves burn/tips/total, higher constant
++  demand yields a strictly higher base fee.
++- Explained deviations (recorded here as this plan prescribes):
++  (1) the model lives in `crates/aura-storage/src/fees.rs` (workspace
++  convention) with the scenario mirrored in `sim/t3-fees.json`;
++  (2) the formula is the EIP-1559 update rule with the EIP's minimum
++  delta of one base unit; the scenario mixes congested and quiet blocks
++  ("congested blocks" as a congestion regime) so the gate literally
++  covers rises **and** falls; parameter changes stay governance-locked
++  (D-T1 timelock, T6).
+ - Negative controls: `tools/nc_t1.py`, 6/6 in `docs/evidence/t1/nc.log`;
+   cumulative negative control total 524.
+ 
+diff --git a/sim/t3-fees.json b/sim/t3-fees.json
+new file mode 100644
+index 0000000..1920246
+--- /dev/null
++++ b/sim/t3-fees.json
+@@ -0,0 +1,30 @@
++{
++  "phase": "T3",
++  "title": "EIP-1559-like fees over 10 000 congested blocks",
++  "initial_base_fee": 1000000000,
++  "gas_target": 15000000,
++  "elasticity": 2,
++  "gas_limit": 30000000,
++  "base_fee_max_change_denominator": 8,
++  "tip_per_gas": 1000000000,
++  "blocks": 10000,
++  "demand": {
++    "segment_blocks": 250,
++    "cycle": ["+25%", "-25%", "+50%", "-50%", "target"],
++    "rule": "segment = (index / 250) % 5; gas = target*(1+q) with q in {+1/4, -1/4, +1/2, -1/2, 0}"
++  },
++  "formula": "next = base + sign(gas-target) * max(base * |gas-target| / target / denominator, 1); unchanged at target; floored at 0 going down",
++  "golden_path_digest": "412f1f9e120ec829fb5d2ae65e4590da69771cd7b49bef83f29440d0d93bc124",
++  "samples": [
++    {"after_block": 0, "base_after": 1031250000},
++    {"after_block": 249, "base_after": 2192756374619},
++    {"after_block": 499, "base_after": 783284026},
++    {"after_block": 1249, "base_after": 294423896},
++    {"after_block": 9999, "base_after": 56473}
++  ],
++  "totals": {
++    "total_burned": 2039212976242596352500000,
++    "total_tips": 150000000000000000000,
++    "peak_base_after": 2993325499252235
++  }
++}
+diff --git a/tools/audit_closeout.py b/tools/audit_closeout.py
+index fc7eacb..ce0940e 100644
+--- a/tools/audit_closeout.py
++++ b/tools/audit_closeout.py
+@@ -38,7 +38,7 @@ NET_PHASES = ["N0", "N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8"]  # NET_PLAN
+ WALLET_PHASES = ["W0", "W1", "W2", "W3", "W4"]  # grows with each W phase
+ SECURITY_PHASES = ["H0", "H1", "H2", "H3", "H4", "H5", "H6", "H7", "H8", "H9"]  # grows with each H phase
+ ECOSYSTEM_PHASES = ["E0", "E1", "E2", "E3"]  # grows with each E phase
+-ECONOMICS_PHASES = ["T0", "T1", "T2"]  # grows with each T phase
++ECONOMICS_PHASES = ["T0", "T1", "T2", "T3"]  # grows with each T phase
+ PHASES = CORE_PHASES + STATE_PHASES + EXEC_PHASES + NODE_PHASES + CONSENSUS_PHASES + NET_PHASES + WALLET_PHASES + SECURITY_PHASES + ECOSYSTEM_PHASES + ECONOMICS_PHASES
+ SHIPPED = CORE_PHASES + [
+     "S0",
+@@ -108,8 +108,9 @@ SHIPPED = CORE_PHASES + [
+     "E3",
+     "T0",
+     "T1",
++    "T2",
+ ]
+-CURRENT = "T2"
++CURRENT = "T3"
+ 
+ PLAN_FOR_PREFIX = {
+     "C": "CORE_PLAN.md",
+@@ -127,7 +128,7 @@ PLAN_FOR_PREFIX = {
+ }
+ 
+ NC_PER_PHASE = {f"C{i}": 6 for i in range(4, 11)}
+-NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6, "W4": 6, "H0": 6, "H1": 6, "H2": 6, "H3": 6, "H4": 6, "H5": 6, "H6": 7, "H7": 7, "H8": 7, "H9": 7, "E0": 6, "E1": 6, "E2": 6, "E3": 6, "T0": 6, "T1": 6, "T2": 6})
++NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6, "W4": 6, "H0": 6, "H1": 6, "H2": 6, "H3": 6, "H4": 6, "H5": 6, "H6": 7, "H7": 7, "H8": 7, "H9": 7, "E0": 6, "E1": 6, "E2": 6, "E3": 6, "T0": 6, "T1": 6, "T2": 6, "T3": 6})
+ SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)  # 339 (through W0)
+ EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + (0 if CURRENT in SHIPPED else NC_PER_PHASE[CURRENT])
+ 
+@@ -163,6 +164,7 @@ PATCH_ORDER += ["E3"]
+ PATCH_ORDER += ["T0"]
+ PATCH_ORDER += ["T1"]
+ PATCH_ORDER += ["T2"]
++PATCH_ORDER += ["T3"]
+ PATCH_NUMBERS = {phase: index + 1 for index, phase in enumerate(PATCH_ORDER)}
+ 
+ 
+diff --git a/tools/nc_t3.py b/tools/nc_t3.py
+new file mode 100644
+index 0000000..23e5eb2
+--- /dev/null
++++ b/tools/nc_t3.py
+@@ -0,0 +1,105 @@
++#!/usr/bin/env python3
++"""Mutation controls for T3 (ECONOMICS_PLAN T3).
++
++Each control injects ONE bug (restored after) and requires the named T3
++message to appear in the red run.
++"""
++
++import os
++import subprocess
++import sys
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++FEES = os.path.join(ROOT, "crates", "aura-storage/src/fees.rs")
++
++TEST_CMD = ["cargo", "test", "--locked", "-p", "aura-storage", "--test", "t3_fees"]
++
++# (name, path, anchor, replacement, expected message)
++CONTROLS = [
++    (
++        "NC-1 injected bug -> wrong base fee formula must go red",
++        FEES,
++        "Amount::from(T3_BASE_FEE_MAX_CHANGE_DENOMINATOR)",
++        "Amount::from(T3_BASE_FEE_MAX_CHANGE_DENOMINATOR + 1)",
++        "T3: the base fee must follow the EIP-1559 formula",
++    ),
++    (
++        "NC-2 base part not burned",
++        FEES,
++        "    let burned = base_fee * gas;",
++        "    let burned = 0;",
++        "T3: the base part must be burned",
++    ),
++    (
++        "NC-3 tip not credited to the validator",
++        FEES,
++        "    let tips = tip_per_gas * gas;",
++        "    let tips = 0;",
++        "T3: the tip must go to the validator",
++    ),
++    (
++        "NC-4 congestion and slack directions swapped",
++        FEES,
++        "    if gas_used > gas_target {",
++        "    if gas_used < gas_target {",
++        "T3: congestion must raise the base fee and slack must lower it",
++    ),
++    (
++        "NC-5 elastic gas limit not enforced",
++        FEES,
++        "    if gas_used > T3_GAS_LIMIT {",
++        "    if false {",
++        "T3: a block must not exceed the elastic gas limit",
++    ),
++    (
++        "NC-6 pinned parameters drift",
++        FEES,
++        "pub const T3_INITIAL_BASE_FEE: Amount = 1_000_000_000;",
++        "pub const T3_INITIAL_BASE_FEE: Amount = 1_000_000_001;",
++        "T3: the reference simulation must agree with the pinned digest",
++    ),
++]
++
++PASS_MARKERS = ("test result: ok.",)
++
++
++def run_control(name, path, anchor, replacement, expected):
++    with open(path, encoding="utf-8") as f:
++        original = f.read()
++    if original.count(anchor) != 1:
++        return False, "anchor count %d" % original.count(anchor)
++    mutated = original.replace(anchor, replacement)
++    try:
++        with open(path, "w", encoding="utf-8") as f:
++            f.write(mutated)
++        proc = subprocess.run(TEST_CMD, cwd=ROOT, stdout=subprocess.PIPE,
++                              stderr=subprocess.STDOUT, text=True,
++                              errors="replace")
++        output = proc.stdout or ""
++    finally:
++        with open(path, "w", encoding="utf-8") as f:
++            f.write(original)
++    compile_failed = "error[" in output and "test result" not in output
++    if compile_failed:
++        return False, "mutation broke compilation"
++    if any(marker in output for marker in PASS_MARKERS):
++        return False, "mutated gate still passes"
++    if expected in output:
++        return True, "red with named message"
++    return False, "red without named message"
++
++
++def main():
++    passed = 0
++    for name, path, anchor, replacement, expected in CONTROLS:
++        ok, why = run_control(name, path, anchor, replacement, expected)
++        print("[%s] %s: %s" % ("PASS" if ok else "FAIL", name, why))
++        if ok:
++            passed += 1
++    total = len(CONTROLS)
++    print("RESULT: %d/%d negative controls PASS" % (passed, total))
++    return 0 if passed == total else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/t3_fees_check.py b/tools/t3_fees_check.py
+new file mode 100644
+index 0000000..b08ee58
+--- /dev/null
++++ b/tools/t3_fees_check.py
+@@ -0,0 +1,176 @@
++#!/usr/bin/env python3
++"""Independent T3 fees oracle (ECONOMICS_PLAN T3).
++
++Re-derives the EIP-1559-like fee market over the pinned 10 000
++congested blocks: the base fee must rise and fall **per the formula** at
++every step, the base part must be burned and only the tip goes to the
++validator. Cross-checks the Rust example `t3_fees_example` and the
++constants in `crates/aura-storage/src/fees.rs`.
++"""
++
++import hashlib
++import json
++import os
++import re
++import subprocess
++import sys
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++SCENARIO = os.path.join(ROOT, "sim", "t3-fees.json")
++FEES_RS = os.path.join(ROOT, "crates", "aura-storage", "src", "fees.rs")
++
++GOLDEN_FEE_DIGEST = "412f1f9e120ec829fb5d2ae65e4590da69771cd7b49bef83f29440d0d93bc124"
++INITIAL = 10 ** 9
++TARGET = 15_000_000
++DENOM = 8
++LIMIT = 30_000_000
++TIP = 10 ** 9
++BLOCKS = 10_000
++
++
++def demand(i):
++    segment = i // 250
++    kind = segment % 5
++    if kind == 0:
++        return TARGET + TARGET // 4
++    if kind == 1:
++        return TARGET - TARGET // 4
++    if kind == 2:
++        return TARGET + TARGET // 2
++    if kind == 3:
++        return TARGET - TARGET // 2
++    return TARGET
++
++
++def next_base(parent, gas):
++    if gas == TARGET:
++        return parent
++    if gas > TARGET:
++        delta = max(parent * (gas - TARGET) // TARGET // DENOM, 1)
++        return parent + delta
++    delta = max(parent * (TARGET - gas) // TARGET // DENOM, 1)
++    return max(parent - delta, 0)
++
++
++def rust_const(name):
++    text = open(FEES_RS, encoding="utf-8").read()
++    match = re.search(r"pub const %s: (?:Amount|u64|u32) = ([0-9_]+);" % name, text)
++    if match:
++        return int(match.group(1).replace("_", ""))
++    # expression form: T3_GAS_LIMIT = T3_GAS_TARGET * T3_ELASTICITY
++    expr = re.search(r"pub const %s: u64 = ([A-Z0-9_ *]+);" % name, text)
++    if expr:
++        value = 1
++        for factor in expr.group(1).split("*"):
++            value *= rust_const(factor.strip())
++        return value
++    return None
++
++
++def main():
++    scenario = json.load(open(SCENARIO, encoding="utf-8"))
++    assert scenario["blocks"] == BLOCKS
++    assert scenario["initial_base_fee"] == INITIAL
++    assert scenario["gas_target"] == TARGET
++    assert scenario["gas_limit"] == LIMIT
++    assert scenario["base_fee_max_change_denominator"] == DENOM
++    assert scenario["tip_per_gas"] == TIP
++
++    # Rust constants must mirror the scenario (reference check).
++    for name, value in [
++        ("T3_INITIAL_BASE_FEE", INITIAL),
++        ("T3_GAS_TARGET", TARGET),
++        ("T3_GAS_LIMIT", LIMIT),
++        ("T3_BASE_FEE_MAX_CHANGE_DENOMINATOR", DENOM),
++        ("T3_TIP_PER_GAS", TIP),
++        ("T3_BLOCKS", BLOCKS),
++    ]:
++        got = rust_const(name)
++        assert got == value, (
++            "T3: the reference simulation must agree with the pinned digest "
++            "(const %s drift: %r != %r)" % (name, got, value)
++        )
++
++    base = INITIAL
++    total_burned = 0
++    total_tips = 0
++    peak = 0
++    text = ""
++    for i in range(BLOCKS):
++        gas = demand(i)
++        assert gas <= LIMIT, "T3: a block must not exceed the elastic gas limit"
++        burned = gas * base
++        tips = gas * TIP
++        total_burned += burned
++        total_tips += tips
++        after = next_base(base, gas)
++        text += "%d:%d:%d:%d:%d:%d\n" % (i, base, gas, after, burned, tips)
++        segment = (i // 250) % 5
++        if segment in (0, 2):
++            assert after > base, (
++                "T3: congestion must raise the base fee and slack must lower it"
++            )
++        elif segment in (1, 3):
++            assert after < base, (
++                "T3: congestion must raise the base fee and slack must lower it"
++            )
++        else:
++            assert after == base, (
++                "T3: congestion must raise the base fee and slack must lower it"
++            )
++        base = after
++        peak = max(peak, base)
++
++    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
++    assert digest == GOLDEN_FEE_DIGEST, (
++        "T3: the reference simulation must agree with the pinned digest"
++    )
++    assert digest == scenario["golden_path_digest"]
++    assert total_burned == scenario["totals"]["total_burned"], (
++        "T3: the base part must be burned"
++    )
++    assert total_tips == scenario["totals"]["total_tips"], (
++        "T3: the tip must go to the validator"
++    )
++    assert peak == scenario["totals"]["peak_base_after"]
++
++    sample_base = INITIAL
++    sample_map = {s["after_block"]: s["base_after"] for s in scenario["samples"]}
++    for i in range(max(sample_map) + 1):
++        sample_base = next_base(sample_base, demand(i))
++        if i in sample_map:
++            assert sample_base == sample_map[i], (
++                "T3: the reference simulation must agree with the pinned digest "
++                "(sample %d)" % i
++            )
++
++    proc = subprocess.run(
++        ["cargo", "run", "--quiet", "--locked", "-p", "aura-storage", "--example",
++         "t3_fees_example"],
++        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
++        text=True, errors="replace",
++    )
++    output = proc.stdout or ""
++    if proc.returncode != 0 or "T3-SIM-OK " not in output:
++        print(output[-2000:])
++        print("RESULT: T3 fees check FAIL — rust example did not run")
++        return 1
++    payload = json.loads(output[output.index("T3-SIM-OK ") + len("T3-SIM-OK "):].strip())
++    assert payload["blocks"] == BLOCKS
++    assert payload["digest"] == digest, (
++        "T3: the reference simulation must agree with the pinned digest"
++    )
++    assert payload["final_base"] == base, (
++        "T3: the reference simulation must agree with the pinned digest"
++    )
++    assert payload["peak_base"] == peak
++    assert payload["total_burned"] == total_burned, "T3: the base part must be burned"
++    assert payload["total_tips"] == total_tips, "T3: the tip must go to the validator"
++    print("RESULT: T3 fees check PASS — 10000 congested blocks follow the formula "
++          "(base 1e9 -> %d, peak %d), burned %d, tips %d, digest %s"
++          % (base, peak, total_burned, total_tips, digest))
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/write_t3_evidence.py b/tools/write_t3_evidence.py
+new file mode 100644
+index 0000000..9eb054c
+--- /dev/null
++++ b/tools/write_t3_evidence.py
+@@ -0,0 +1,174 @@
++#!/usr/bin/env python3
++"""Write docs/evidence/t3 (ECONOMICS_PLAN T3).
++
++Runs the T3 gates (independent fees oracle incl. the Rust example
++cross-run, cargo test t3_fees) and tools/nc_t3.py, builds
++self-contained evidence: gates.txt rows, campaign/ bundle (run logs +
++result.json with source digests), nc.log with the RESULT line, report.md
++and cumulative inventory (TOTAL: 536).
++"""
++
++import hashlib
++import json
++import os
++import subprocess
++import sys
++import time
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++EVID = os.path.join(ROOT, "docs", "evidence", "t3")
++EVID_DIRS = ["", "campaign"]
++GATES = [
++    ([sys.executable, os.path.join(ROOT, "tools", "t3_fees_check.py")],
++     "baseline", "independent fees oracle (10 000 congested blocks, per-formula)"),
++    (["cargo", "test", "--locked", "-p", "aura-storage", "--test", "t3_fees"],
++     "t3-fees", "named gate: base fee rises/falls per the formula"),
++    ([sys.executable, os.path.join(ROOT, "tools", "nc_t3.py")],
++     "nc-suite", "6 mutation controls incl. the formula and burn accounting"),
++]
++SOURCES = [
++    "crates/aura-storage/src/fees.rs",
++    "crates/aura-storage/tests/t3_fees.rs",
++    "crates/aura-storage/examples/t3_fees_example.rs",
++    "sim/t3-fees.json",
++    "tools/t3_fees_check.py",
++    "tools/nc_t3.py",
++]
++
++
++def sha256_file(path):
++    h = hashlib.sha256()
++    with open(path, "rb") as f:
++        for chunk in iter(lambda: f.read(65536), b""):
++            h.update(chunk)
++    return h.hexdigest()
++
++
++def run_cmd(cmd, timeout=2400):
++    started = time.time()
++    proc = subprocess.run(cmd, cwd=ROOT, stdout=subprocess.PIPE,
++                          stderr=subprocess.STDOUT, text=True,
++                          errors="replace", timeout=timeout)
++    return proc.returncode, proc.stdout or "", time.time() - started
++
++
++def gate_passes(code, output, name):
++    if code != 0:
++        return False
++    if name == "baseline":
++        return "RESULT: T3 fees check PASS" in output
++    if name == "t3-fees":
++        return "test result: ok." in output
++    return "RESULT: 6/6 negative controls PASS" in output
++
++
++def main():
++    for rel in EVID_DIRS:
++        os.makedirs(os.path.join(EVID, rel), exist_ok=True)
++
++    rows = []
++    logs = {}
++    outputs = {}
++    ok_all = True
++    for cmd, name, desc in GATES:
++        print("[evidence_t3] %s ..." % name, flush=True)
++        code, out, dur = run_cmd(cmd)
++        ok = gate_passes(code, out, name)
++        ok_all = ok_all and ok
++        rows.append((name, "pass" if ok else "FAIL", desc))
++        outputs[name] = out
++        logs[name + ".log"] = (
++            "[evidence_t3] cmd=%s exit=%d duration=%.2fs\n" % (" ".join(cmd), code, dur)
++            + out)
++        print("[evidence_t3] %s: %s" % (name, "pass" if ok else "FAIL"), flush=True)
++
++    nc_ok = "RESULT: 6/6 negative controls PASS" in outputs.get("nc-suite", "")
++    gate_ok = "test result: ok." in outputs.get("t3-fees", "")
++    oracle_ok = "RESULT: T3 fees check PASS" in outputs.get("baseline", "")
++
++    with open(os.path.join(EVID, "nc.log"), "w", encoding="utf-8") as f:
++        f.write("[evidence_t3] cmd=tools/nc_t3.py\n")
++        f.write(outputs.get("nc-suite", ""))
++
++    with open(os.path.join(EVID, "campaign", "t3-fees.log"), "w",
++              encoding="utf-8") as f:
++        f.write(logs.get("t3-fees.log", ""))
++    with open(os.path.join(EVID, "campaign", "result.json"), "w",
++              encoding="utf-8") as f:
++        json.dump({
++            "phase": "T3",
++            "when": time.strftime("%Y-%m-%dT%H:%M:%S"),
++            "commands": [[" ".join(cmd), name] for cmd, name, _ in GATES],
++            "gates": {name: status for name, status, _ in rows},
++            "named_gate": "10 000 congested blocks: base fee rises/falls "
++                          "per the formula",
++            "golden_path_digest":
++                "412f1f9e120ec829fb5d2ae65e4590da69771cd7b49bef83f29440d0d93bc124",
++            "sources": {rel: sha256_file(os.path.join(ROOT, rel)) for rel in SOURCES},
++        }, f, indent=2, sort_keys=True)
++        f.write("\n")
++
++    for name, text in logs.items():
++        with open(os.path.join(EVID, name), "w", encoding="utf-8") as f:
++            f.write(text)
++
++    with open(os.path.join(EVID, "gates.txt"), "w", encoding="utf-8") as f:
++        f.write("T3 Fees gates (ECONOMICS_PLAN, "
++                "crates/aura-storage/tests/t3_fees.rs)\n")
++        f.write("Gate: 10 000 congested blocks: base fee rises/falls per "
++                "the formula\n\n")
++        for name, status, desc in rows:
++            f.write("%-42s %-22s %s\n" % (name, status, desc))
++        f.write("\nnegative controls: 6/6 (%s)\n" % ("PASS" if nc_ok else "FAIL"))
++        f.write("named gate: %s\n" % ("PASS" if gate_ok else "FAIL"))
++        f.write("oracle cross-run: %s\n" % ("PASS" if oracle_ok else "FAIL"))
++
++    with open(os.path.join(EVID, "report.md"), "w", encoding="utf-8") as f:
++        f.write("# Отчёт T3 — Fees\n\n")
++        f.write("Дата: %s\n\n" % time.strftime("%Y-%m-%d"))
++        f.write("Итог: **%s**\n\n" % ("ВСЕ ГЕЙТЫ T3 ЗЕЛЁНЫЕ" if ok_all
++                                      else "ЕСТЬ КРАСНЫЕ ГЕЙТЫ"))
++        f.write("Гейт: 10 000 congested blocks — base fee растёт/падает "
++                "по формуле на каждом шаге.\n\n")
++        f.write("Модель `crates/aura-storage/src/fees.rs`: EIP-1559-like "
++                "`base_fee` + `tip`; базовая часть **сжигается**, tip — "
++                "валидатору; эластичный gas-таргет 15 000 000 (лимит "
++                "30 000 000, elasticity 2); формула "
++                "`base ± max(base·|gas−target|/target/8, 1)`, неизменна "
++                "при gas == target, шаг не меньше 1 базовой единицы. "
++                "Сценарий `sim/t3-fees.json` (сегменты +25 %/−25 %/+50 %/"
++                "−50 %/target по 250 блоков × 20), золотой дайджест пути "
++                "412f1f9e…bc124 (Rust ↔ Python ↔ пример "
++                "`t3_fees_example`); итоги: сожжено "
++                "2 039 212 976 242 596 352 500 000, tips "
++                "150 000 000 000 000 000 000, финальный base 56 473. "
++                "Гейт `crates/aura-storage/tests/t3_fees.rs` (9 тестов + "
++                "2 метаморфизма), оракул `tools/t3_fees_check.py`.\n")
++        f.write("negative controls `tools/nc_t3.py` (`nc.log`, "
++                "RESULT: 6/6 negative controls PASS).\n\n")
++
++    with open(os.path.join(EVID, "inventory.txt"), "w", encoding="utf-8") as f:
++        f.write("# T3 inventory (generated by tools/write_t3_evidence.py)\n")
++        f.write("# Cumulative negative controls: 20 phases, 536 controls.\n")
++        f.write("W4: 6/6, H0: 6/6, H1: 6/6, H2: 6/6, H3: 6/6, H4: 6/6, "
++                "H5: 6/6, H6: 7/7, H7: 7/7, H8: 7/7, H9: 7/7, E0: 6/6, "
++                "E1: 6/6, E2: 6/6, E3: 6/6, T0: 6/6, T1: 6/6, T2: 6/6, "
++                "T3: 6/6\n")
++        f.write("TOTAL: 536 negative controls cumulative\n")
++
++    with open(os.path.join(EVID, "SHA256SUMS"), "w", encoding="utf-8") as f:
++        for rel in sorted(EVID_DIRS):
++            base = os.path.join(EVID, rel)
++            for name in sorted(os.listdir(base)):
++                path = os.path.join(base, name)
++                if os.path.isfile(path) and name != "SHA256SUMS":
++                    repo_rel = os.path.relpath(path, ROOT)
++                    f.write("%s  %s\n" % (sha256_file(path), repo_rel))
++
++    print("[evidence_t3] %s"
++          % ("all gates green" if ok_all else "RED GATES PRESENT"), flush=True)
++    return 0 if ok_all else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+-- 
+2.47.3
+

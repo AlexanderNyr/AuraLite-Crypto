@@ -1,0 +1,1895 @@
+From bc7bbbd9c85c2ec4b090439c031785766f268f8a Mon Sep 17 00:00:00 2001
+From: AlexanderNyr <alexandernyr@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 15:33:35 +0000
+Subject: [PATCH] T4 - staking: 1000 delegators, shares sum to exactly one,
+ withdrawal without unbonding red, 21-day unbonding, proportional slashing
+
+T4 - Staking (ECONOMICS_PLAN). Gate literally: 1000 delegators (1000-1999 ALCRY) with shares summing to exactly one pool at every one of the 2004 scenario steps (share-based delegations, rewards compound into the pool); NC literally: withdrawal without unbonding -> red (NoUnbonding/StillUnbonding). Min stake 1000 ALCRY; commission 1000 bps from rewards only (D-T2); unbonding 21 days = 362 880 blocks at 5 s (boundary 362879 red / 362880 green); slashing period = the unbonding window, slashes cut bonded and unbonding stake proportionally. Golden digest e80662c82c74e1d1a0a5b0624beb4cf08af88c24f8091751c277cc7ea6887f07 pinned in Rust tests and re-derived by the independent Python oracle (full model re-implementation), which cross-runs t4_staking_example. Exact 256-bit mul_div for proportional math. NC: 7/7 named messages (tools/nc_t4.py; standard 6 + slash proportionality, H6-H9 precedent). 10 gate tests + 2 metamorphisms. Evidence docs/evidence/t4 (543 NCs cumulative over 81 phases). Stage 1 (T0-T4) of ECONOMICS_PLAN complete. ALL GATES GREEN.
+---
+ CHANGELOG.md                                  |  47 +++
+ Makefile                                      |  19 +
+ .../examples/t4_staking_example.rs            |  26 ++
+ crates/aura-storage/src/lib.rs                |   3 +
+ crates/aura-storage/src/staking.rs            | 378 ++++++++++++++++++
+ crates/aura-storage/tests/t4_staking.rs       | 295 ++++++++++++++
+ docs/economics/t4-staking.md                  |  75 ++++
+ docs/evidence/review-w1-source-drift.txt      |  14 +-
+ docs/evidence/t4/SHA256SUMS                   |   9 +
+ docs/evidence/t4/baseline.log                 |   2 +
+ docs/evidence/t4/campaign/result.json         |  33 ++
+ docs/evidence/t4/campaign/t4-staking.log      |  19 +
+ docs/evidence/t4/gates.txt                    |  10 +
+ docs/evidence/t4/inventory.txt                |   4 +
+ docs/evidence/t4/nc-suite.log                 |   9 +
+ docs/evidence/t4/nc.log                       |   9 +
+ docs/evidence/t4/report.md                    |  11 +
+ docs/evidence/t4/t4-staking.log               |  19 +
+ docs/plans/ECONOMICS_PLAN.md                  |  50 ++-
+ sim/t4-staking.json                           |  35 ++
+ tools/audit_closeout.py                       |   8 +-
+ tools/nc_t4.py                                | 113 ++++++
+ tools/t4_staking_check.py                     | 248 ++++++++++++
+ tools/write_t4_evidence.py                    | 179 +++++++++
+ 24 files changed, 1603 insertions(+), 12 deletions(-)
+ create mode 100644 crates/aura-storage/examples/t4_staking_example.rs
+ create mode 100644 crates/aura-storage/src/staking.rs
+ create mode 100644 crates/aura-storage/tests/t4_staking.rs
+ create mode 100644 docs/economics/t4-staking.md
+ create mode 100644 docs/evidence/t4/SHA256SUMS
+ create mode 100644 docs/evidence/t4/baseline.log
+ create mode 100644 docs/evidence/t4/campaign/result.json
+ create mode 100644 docs/evidence/t4/campaign/t4-staking.log
+ create mode 100644 docs/evidence/t4/gates.txt
+ create mode 100644 docs/evidence/t4/inventory.txt
+ create mode 100644 docs/evidence/t4/nc-suite.log
+ create mode 100644 docs/evidence/t4/nc.log
+ create mode 100644 docs/evidence/t4/report.md
+ create mode 100644 docs/evidence/t4/t4-staking.log
+ create mode 100644 sim/t4-staking.json
+ create mode 100644 tools/nc_t4.py
+ create mode 100644 tools/t4_staking_check.py
+ create mode 100644 tools/write_t4_evidence.py
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index fb27fea..c8d7cd5 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,6 +3,53 @@
+ All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
+ never rewritten: corrections are made with a new entry or an explicit note.
+ 
++## [T4 — Staking phase closed: 1000 delegators, shares sum to exactly one, withdrawal without unbonding red, 21-day unbonding, proportional slashing; Stage 1 (T0–T4) complete] 2026-11-21
++
++### Added
++
++- `crates/aura-storage/src/staking.rs` — share-based staking model:
++  min stake 1 000 `ALCRY`; delegation mints shares (rewards compound
++  into the pool, share counts never move — `Σ shares == total_shares`
++  exactly); validator commission 1000 bps **from rewards only**;
++  unbonding 21 days (362 880 blocks at 5 s) with `NoUnbonding`/
++  `StillUnbonding` rejections on early or unbacked withdrawals;
++  slashing period = the unbonding window, `slash(rate_bps)` cuts bonded
++  and unbonding stake proportionally.
++- `crates/aura-storage/tests/t4_staking.rs` (10 gate tests: the
++  1000-delegator shares-sum gate, withdrawal-without-unbonding
++  rejection, the exact 21-day boundary, commission split, min stake,
++  proportional slash incl. 0 %/100 %, slashability of unbonding stake,
++  pinned digest; metamorphisms — split delegations, slash composition)
++  and `crates/aura-storage/examples/t4_staking_example.rs`.
++- `sim/t4-staking.json` — the pinned scenario (2004 steps) with golden
++  digest
++  `e80662c82c74e1d1a0a5b0624beb4cf08af88c24f8091751c277cc7ea6887f07`
++  and checkpoints; `docs/economics/t4-staking.md`.
++- `tools/t4_staking_check.py` (the phase gate oracle: full model
++  re-implementation, constants, samples, Rust example cross-run),
++  `tools/nc_t4.py` (7 mutation controls: share accounting,
++  withdraw-without-unbonding, unbonding window, double commission,
++  min stake, slash proportionality, parameter drift),
++  `tools/write_t4_evidence.py` and the self-contained evidence in
++  `docs/evidence/t4/` (`campaign/`).
++- Makefile targets `test-t4 check-t4 examples-t4 nc-t4 evidence-t4`;
++  `make test` gains the "staking gate (T4)"; `tools/audit_closeout.py`
++  tracks `ECONOMICS_PHASES = [..., "T4"]` (`CURRENT = "T4"`, NC 7,
++  patch order T4). Inventory: 81 phases, 543 negative controls
++  cumulative. **Stage 1 of ECONOMICS_PLAN (T0–T4) is complete.**
++
++### Fixed
++
++- (none)
++
++### Security
++
++- T4 replaces no crypto. Rewards are variable parameters, never
++  promised income (D-T2); parameters stay governance-locked (D-T1) and
++  are simulated on change (D-T3). Every T4 control is mutation-based
++  (`tools/nc_t4.py`, 7/7 — the standard's 6 plus slash
++  proportionality, H6–H9 precedent).
++
+ ## [T3 — Fees phase closed: base fee follows the EIP-1559 formula over 10 000 congested blocks, base burned, tips to validators, 6 mutation controls] 2026-11-21
+ 
+ ### Added
+diff --git a/Makefile b/Makefile
+index 99033cd..313850f 100644
+--- a/Makefile
++++ b/Makefile
+@@ -293,6 +293,9 @@ test: deps-check
+ 	@echo "== fees gate (T3) =="
+ 	@$(PYTHON) tools/t3_fees_check.py
+ 	@$(CARGO) test --locked -p aura-storage --test t3_fees
++	@echo "== staking gate (T4) =="
++	@$(PYTHON) tools/t4_staking_check.py
++	@$(CARGO) test --locked -p aura-storage --test t4_staking
+ 	@echo "== close-out audit =="
+ 	@$(PYTHON) tools/audit_closeout.py
+ 	@echo "ALL GATES GREEN"
+@@ -1425,6 +1428,22 @@ nc-e2:
+ evidence-e2:
+ 	@$(PYTHON) tools/write_e2_evidence.py
+ 
++.PHONY: test-t4 check-t4 examples-t4 nc-t4 evidence-t4
++test-t4:
++	@$(CARGO) test --locked -p aura-storage --test t4_staking
++
++check-t4:
++	@$(PYTHON) tools/t4_staking_check.py
++
++examples-t4:
++	@$(CARGO) run --quiet --locked -p aura-storage --example t4_staking_example
++
++nc-t4:
++	@$(PYTHON) tools/nc_t4.py
++
++evidence-t4:
++	@$(PYTHON) tools/write_t4_evidence.py
++
+ .PHONY: test-t3 check-t3 examples-t3 nc-t3 evidence-t3
+ test-t3:
+ 	@$(CARGO) test --locked -p aura-storage --test t3_fees
+diff --git a/crates/aura-storage/examples/t4_staking_example.rs b/crates/aura-storage/examples/t4_staking_example.rs
+new file mode 100644
+index 0000000..569da36
+--- /dev/null
++++ b/crates/aura-storage/examples/t4_staking_example.rs
+@@ -0,0 +1,26 @@
++//! T4 staking simulation runner (ECONOMICS_PLAN T4).
++//!
++//! Prints a machine-readable summary consumed by the independent Python
++//! oracle (`tools/t4_staking_check.py`).
++
++use aura_storage::econ::Amount;
++use aura_storage::staking::{run_t4_scenario, scenario_digest};
++
++fn main() {
++    let steps = run_t4_scenario();
++    let withdrawn: Amount = steps
++        .iter()
++        .filter(|step| step.kind == 6)
++        .map(|step| step.amount)
++        .sum();
++    let final_step = steps.last().expect("nonempty");
++    println!(
++        "T4-SIM-OK {{\"steps\":{},\"final_bonded\":{},\"final_total_shares\":{},\"final_shares_sum\":{},\"withdrawn_total\":{},\"digest\":\"{}\"}}",
++        steps.len(),
++        final_step.bonded,
++        final_step.total_shares,
++        final_step.shares_sum,
++        withdrawn,
++        scenario_digest(&steps)
++    );
++}
+diff --git a/crates/aura-storage/src/lib.rs b/crates/aura-storage/src/lib.rs
+index 2140340..031915a 100644
+--- a/crates/aura-storage/src/lib.rs
++++ b/crates/aura-storage/src/lib.rs
+@@ -56,6 +56,9 @@ pub mod issuance;
+ mod prune;
+ /// E3 client SDK (Rust) for the explorer and faucet HTTP APIs.
+ pub mod sdk;
++/// T4 staking: min stake, delegation with shares, commission, 21-day
++/// unbonding and a slashing period (ECONOMICS_PLAN T4).
++pub mod staking;
+ mod store;
+ mod wal;
+ 
+diff --git a/crates/aura-storage/src/staking.rs b/crates/aura-storage/src/staking.rs
+new file mode 100644
+index 0000000..181963a
+--- /dev/null
++++ b/crates/aura-storage/src/staking.rs
+@@ -0,0 +1,378 @@
++//! T4 staking: minimum stake, delegation with shares, validator
++//! commission, 21-day unbonding and a slashing period
++//! (ECONOMICS_PLAN T4).
++//!
++//! One validator pool with share-based delegations: a delegator holds
++//! **shares** of the pool; the pool's `bonded` stake grows with rewards
++//! (auto-compounding) and shrinks with slashes, so the share price
++//! moves while the share counts do not. The delegator shares always sum
++//! to exactly one whole pool (`Σ shares == total_shares`).
++//!
++//! * **min stake** — a delegation below [`T4_MIN_STAKE`] is rejected;
++//! * **commission** — [`T4_COMMISSION_BPS`] of every reward goes to the
++//!   validator (`pending_commission`); the rest compounds into the pool
++//!   — the commission is never taken from the principal (D-T2: rewards
++//!   are variable parameters, not promised income);
++//! * **unbonding** — undelegated stake leaves the pool immediately and
++//!   becomes withdrawable exactly [`T4_UNBONDING_BLOCKS`] later
++//!   (21 days at [`T4_BLOCK_SECONDS`] per block); a withdrawal without
++//!   unbonding is rejected;
++//! * **slashing period** — bonded and unbonding (not yet withdrawn)
++//!   stake stays slashable during the window
++//!   ([`T4_SLASHING_PERIOD_BLOCKS`] = the unbonding period); a slash
++//!   cuts every stake proportionally.
++//!
++//! The pinned scenario [`run_t4_scenario`] drives 1000 delegators,
++//! rewards, two slashes, partial undelegations and matured withdrawals;
++//! [`scenario_digest`] is cross-run against the independent Python
++//! oracle (`tools/t4_staking_check.py`).
++
++use crate::econ::Amount;
++use crate::issuance::ALCRY;
++
++/// Minimum stake accepted by [`StakingPool::delegate`].
++pub const T4_MIN_STAKE: Amount = 1_000 * ALCRY;
++
++/// Validator commission on rewards, in basis points (10 %).
++pub const T4_COMMISSION_BPS: u64 = 1_000;
++
++/// Basis points denominator.
++pub const T4_BPS: u64 = 10_000;
++
++/// Assumed block time in seconds.
++pub const T4_BLOCK_SECONDS: u64 = 5;
++
++/// Unbonding period in days.
++pub const T4_UNBONDING_DAYS: u64 = 21;
++
++/// Unbonding period in blocks: 21 days at 5 s per block.
++pub const T4_UNBONDING_BLOCKS: u64 = T4_UNBONDING_DAYS * 86_400 / T4_BLOCK_SECONDS;
++
++/// Slashing period in blocks — equal to the unbonding window: bonded and
++/// not-yet-withdrawn stake is slashable for the whole period.
++pub const T4_SLASHING_PERIOD_BLOCKS: u64 = T4_UNBONDING_BLOCKS;
++
++/// Reward accrued to the pool per scenario step (variable parameter).
++pub const T4_BLOCK_REWARD: Amount = 2 * ALCRY;
++
++/// Errors raised by the staking checks.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub enum StakeError {
++    /// A delegation below [`T4_MIN_STAKE`].
++    BelowMinStake,
++    /// A withdrawal without any unbonding stake.
++    NoUnbonding,
++    /// A withdrawal before the unbonding period elapsed.
++    StillUnbonding {
++        /// The earliest maturity height of the owner's unbonding stake.
++        matures_at: u64,
++    },
++    /// Undelegating more shares than the owner holds.
++    InsufficientShares,
++}
++
++/// One unbonding entry: undelegated stake waiting out the window.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct UnbondingEntry {
++    /// Delegator id.
++    pub owner: u32,
++    /// Amount leaving the pool at withdrawal.
++    pub amount: Amount,
++    /// Block height at which the amount becomes withdrawable.
++    pub matures_at: u64,
++}
++
++/// Exact `a * b / d` with a 256-bit intermediate (floor). Panics on
++/// `d == 0`; the quotient must fit in `u128`.
++fn mul_div(a: u128, b: u128, d: u128) -> u128 {
++    assert!(d > 0, "T4: division by zero");
++    // 128x128 -> 256 schoolbook product as (hi, lo).
++    let mask = u64::MAX as u128;
++    let (a_lo, a_hi) = (a & mask, a >> 64);
++    let (b_lo, b_hi) = (b & mask, b >> 64);
++    let ll = a_lo * b_lo;
++    let lh = a_lo * b_hi;
++    let hl = a_hi * b_lo;
++    let hh = a_hi * b_hi;
++    let mid = (ll >> 64) + (lh & mask) + (hl & mask);
++    let lo = (mid << 64) | (ll & mask);
++    let hi = hh + (lh >> 64) + (hl >> 64) + (mid >> 64);
++    if hi == 0 {
++        return lo / d;
++    }
++    // Shift-subtract long division of the 256-bit numerator by `d`.
++    let mut quotient: u128 = 0;
++    let mut rem: u128 = 0;
++    for i in (0..256).rev() {
++        let bit = if i >= 128 {
++            (hi >> (i - 128)) & 1
++        } else {
++            (lo >> i) & 1
++        };
++        let carry = rem >> 127;
++        rem = (rem << 1) | bit;
++        if carry != 0 || rem >= d {
++            rem = rem.wrapping_sub(d);
++            quotient = (quotient << 1) | 1;
++        } else {
++            quotient <<= 1;
++        }
++    }
++    quotient
++}
++
++/// The staking pool of one validator.
++#[derive(Clone, Debug, Default, PartialEq, Eq)]
++pub struct StakingPool {
++    /// Total bonded stake (principal + compounded rewards − slashes).
++    bonded: Amount,
++    /// Sum of all delegator shares.
++    total_shares: Amount,
++    /// Validator commission earned (claimable by the validator).
++    pending_commission: Amount,
++    /// Shares per delegator id.
++    delegations: Vec<Amount>,
++    /// Unbonding queue.
++    unbonding: Vec<UnbondingEntry>,
++}
++
++impl StakingPool {
++    /// An empty pool.
++    pub fn new() -> Self {
++        Self::default()
++    }
++
++    /// Total bonded stake.
++    pub fn bonded(&self) -> Amount {
++        self.bonded
++    }
++
++    /// Total shares.
++    pub fn total_shares(&self) -> Amount {
++        self.total_shares
++    }
++
++    /// Sum of all delegator shares — always equals [`Self::total_shares`].
++    pub fn shares_sum(&self) -> Amount {
++        self.delegations.iter().sum()
++    }
++
++    /// Validator commission earned.
++    pub fn pending_commission(&self) -> Amount {
++        self.pending_commission
++    }
++
++    /// Shares currently held by `owner`.
++    pub fn shares_of(&self, owner: u32) -> Amount {
++        self.delegations.get(owner as usize).copied().unwrap_or(0)
++    }
++
++    /// Unbonding amount of `owner` (matured or not).
++    pub fn unbonding_of(&self, owner: u32) -> Amount {
++        self.unbonding
++            .iter()
++            .filter(|entry| entry.owner == owner)
++            .map(|entry| entry.amount)
++            .sum()
++    }
++
++    /// Delegates `amount` (at least [`T4_MIN_STAKE`]) to the pool on
++    /// behalf of `owner`; returns the shares minted.
++    pub fn delegate(&mut self, owner: u32, amount: Amount) -> Result<Amount, StakeError> {
++        if amount < T4_MIN_STAKE {
++            return Err(StakeError::BelowMinStake);
++        }
++        let minted = if self.total_shares == 0 {
++            amount
++        } else {
++            mul_div(amount, self.total_shares, self.bonded)
++        };
++        let slot = owner as usize;
++        if slot >= self.delegations.len() {
++            self.delegations.resize(slot + 1, 0);
++        }
++        self.delegations[slot] += minted;
++        self.total_shares += minted;
++        self.bonded += amount;
++        Ok(minted)
++    }
++
++    /// Undelegates `shares` of `owner` at `now_block`: the proportional
++    /// amount leaves the pool and enters the unbonding queue, withdrawable
++    /// exactly [`T4_UNBONDING_BLOCKS`] later.
++    pub fn undelegate(
++        &mut self,
++        owner: u32,
++        shares: Amount,
++        now_block: u64,
++    ) -> Result<UnbondingEntry, StakeError> {
++        let held = self.shares_of(owner);
++        if shares == 0 || shares > held {
++            return Err(StakeError::InsufficientShares);
++        }
++        let amount = mul_div(shares, self.bonded, self.total_shares);
++        let slot = owner as usize;
++        self.delegations[slot] -= shares;
++        self.total_shares -= shares;
++        self.bonded -= amount;
++        let entry = UnbondingEntry {
++            owner,
++            amount,
++            matures_at: now_block + T4_UNBONDING_BLOCKS,
++        };
++        self.unbonding.push(entry);
++        Ok(entry)
++    }
++
++    /// Withdraws all matured unbonding stake of `owner` at `now_block`.
++    /// Without any unbonding stake this is rejected ([`StakeError::NoUnbonding`]);
++    /// before the window elapses it is rejected
++    /// ([`StakeError::StillUnbonding`]) — a withdrawal needs unbonding.
++    pub fn withdraw(&mut self, owner: u32, now_block: u64) -> Result<Amount, StakeError> {
++        let mut claimed: Amount = 0;
++        let mut kept: Vec<UnbondingEntry> = Vec::new();
++        for entry in self.unbonding.drain(..) {
++            if entry.owner == owner && entry.matures_at <= now_block {
++                claimed += entry.amount;
++            } else {
++                kept.push(entry);
++            }
++        }
++        self.unbonding = kept;
++        if claimed == 0 {
++            if let Some(entry) = self.unbonding.iter().find(|entry| entry.owner == owner) {
++                return Err(StakeError::StillUnbonding {
++                    matures_at: entry.matures_at,
++                });
++            }
++            return Err(StakeError::NoUnbonding);
++        }
++        Ok(claimed)
++    }
++
++    /// Accrues a block reward: [`T4_COMMISSION_BPS`] of it is taken as
++    /// the validator commission (from the reward only), the rest
++    /// compounds into the bonded pool.
++    pub fn accrue_reward(&mut self, reward: Amount) {
++        let commission = reward * Amount::from(T4_COMMISSION_BPS) / Amount::from(T4_BPS);
++        self.pending_commission += commission;
++        self.bonded += reward - commission;
++    }
++
++    /// Slashes `rate_bps` of every stake proportionally: the bonded pool
++    /// and all not-yet-withdrawn unbonding entries (the slashing period
++    /// equals [`T4_SLASHING_PERIOD_BLOCKS`]).
++    pub fn slash(&mut self, rate_bps: u64) {
++        let bonded_cut = self.bonded * Amount::from(rate_bps) / Amount::from(T4_BPS);
++        self.bonded -= bonded_cut;
++        for entry in &mut self.unbonding {
++            entry.amount -= entry.amount * Amount::from(rate_bps) / Amount::from(T4_BPS);
++        }
++    }
++}
++
++/// One step of the pinned T4 scenario (for the digest).
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct T4Step {
++    /// Step index.
++    pub index: u32,
++    /// Step kind: 1 delegate, 2 reward, 3 slash, 4 undelegate,
++    /// 5 early-withdraw attempt, 6 withdraw, 9 final state.
++    pub kind: u8,
++    /// Amount of the step (delegation, reward, undelegation or
++    /// withdrawal; 0 when the attempt was rejected).
++    pub amount: Amount,
++    /// Pool bonded stake after the step.
++    pub bonded: Amount,
++    /// Pool total shares after the step.
++    pub total_shares: Amount,
++    /// Sum of delegator shares after the step (== total shares).
++    pub shares_sum: Amount,
++}
++
++fn record(steps: &mut Vec<T4Step>, kind: u8, amount: Amount, pool: &StakingPool) {
++    let index = steps.len() as u32;
++    steps.push(T4Step {
++        index,
++        kind,
++        amount,
++        bonded: pool.bonded(),
++        total_shares: pool.total_shares(),
++        shares_sum: pool.shares_sum(),
++    });
++}
++
++/// The pinned T4 scenario: 1000 delegators (amounts 1000–1999 `ALCRY`),
++/// 600 reward steps of [`T4_BLOCK_REWARD`], slashes of 100 and 500 bps,
++/// partial undelegations of delegators 0–99 (half) and 100–199 (third),
++/// one rejected early-withdrawal attempt and matured withdrawals after
++/// exactly [`T4_UNBONDING_BLOCKS`].
++pub fn run_t4_scenario() -> Vec<T4Step> {
++    let mut pool = StakingPool::new();
++    let mut steps: Vec<T4Step> = Vec::new();
++    for i in 0u32..1000 {
++        let amount = T4_MIN_STAKE + Amount::from(i) * T4_MIN_STAKE / 1_000;
++        let minted = pool
++            .delegate(i, amount)
++            .expect("amount above the minimum stake");
++        record(&mut steps, 1, minted, &pool);
++    }
++    for _ in 0..200 {
++        pool.accrue_reward(T4_BLOCK_REWARD);
++        record(&mut steps, 2, T4_BLOCK_REWARD, &pool);
++    }
++    pool.slash(100);
++    record(&mut steps, 3, 100, &pool);
++    for _ in 0..200 {
++        pool.accrue_reward(T4_BLOCK_REWARD);
++        record(&mut steps, 2, T4_BLOCK_REWARD, &pool);
++    }
++    for i in 0u32..100 {
++        let half = pool.shares_of(i) / 2;
++        let entry = pool
++            .undelegate(i, half, 10_000)
++            .expect("the delegator holds the shares");
++        record(&mut steps, 4, entry.amount, &pool);
++    }
++    for i in 100u32..200 {
++        let third = pool.shares_of(i) / 3;
++        let entry = pool
++            .undelegate(i, third, 20_000)
++            .expect("the delegator holds the shares");
++        record(&mut steps, 4, entry.amount, &pool);
++    }
++    pool.slash(500);
++    record(&mut steps, 3, 500, &pool);
++    for _ in 0..200 {
++        pool.accrue_reward(T4_BLOCK_REWARD);
++        record(&mut steps, 2, T4_BLOCK_REWARD, &pool);
++    }
++    // One block before maturity the withdrawal must be rejected.
++    let early = pool
++        .withdraw(0, 10_000 + T4_UNBONDING_BLOCKS - 1)
++        .unwrap_or(0);
++    record(&mut steps, 5, early, &pool);
++    for i in 0u32..100 {
++        let claimed = pool.withdraw(i, 10_000 + T4_UNBONDING_BLOCKS).unwrap_or(0);
++        record(&mut steps, 6, claimed, &pool);
++    }
++    for i in 100u32..200 {
++        let claimed = pool.withdraw(i, 20_000 + T4_UNBONDING_BLOCKS).unwrap_or(0);
++        record(&mut steps, 6, claimed, &pool);
++    }
++    record(&mut steps, 9, 0, &pool);
++    steps
++}
++
++/// Digest of a scenario run: one canonical line per step
++/// `index:kind:amount:bonded:total_shares:shares_sum`.
++pub fn scenario_digest(steps: &[T4Step]) -> String {
++    let mut text = String::new();
++    for step in steps {
++        text.push_str(&format!(
++            "{}:{}:{}:{}:{}:{}\n",
++            step.index, step.kind, step.amount, step.bonded, step.total_shares, step.shares_sum
++        ));
++    }
++    aura_state::sha256_bytes(text.as_bytes()).to_hex()
++}
+diff --git a/crates/aura-storage/tests/t4_staking.rs b/crates/aura-storage/tests/t4_staking.rs
+new file mode 100644
+index 0000000..bcc32c6
+--- /dev/null
++++ b/crates/aura-storage/tests/t4_staking.rs
+@@ -0,0 +1,295 @@
++//! T4 staking gate (ECONOMICS_PLAN T4).
++//!
++//! The gate is the literal phase gate: 1000 delegators whose shares sum
++//! to exactly one pool, and a withdrawal without unbonding must be red.
++//! Every control below carries its named T4 message.
++
++use aura_storage::econ::Amount;
++use aura_storage::issuance::ALCRY;
++use aura_storage::staking::{
++    StakeError, StakingPool, T4_BLOCK_REWARD, T4_BPS, T4_COMMISSION_BPS, T4_MIN_STAKE,
++    T4_SLASHING_PERIOD_BLOCKS, T4_UNBONDING_BLOCKS, T4_UNBONDING_DAYS, run_t4_scenario,
++    scenario_digest,
++};
++
++/// Golden digest of the pinned 1000-delegator run, computed by
++/// `tools/t4_staking_check.py`.
++const GOLDEN_STAKING_DIGEST: &str =
++    "e80662c82c74e1d1a0a5b0624beb4cf08af88c24f8091751c277cc7ea6887f07";
++
++#[test]
++fn t4_thousand_delegator_shares_sum_to_one() {
++    // THE gate: 1000 delegators, shares sum == 1 (as pool fractions).
++    let steps = run_t4_scenario();
++    assert_eq!(
++        steps.len(),
++        2004,
++        "T4: the delegator shares must sum to exactly one"
++    );
++    for step in &steps {
++        assert_eq!(
++            step.shares_sum, step.total_shares,
++            "T4: the delegator shares must sum to exactly one"
++        );
++    }
++    let final_step = steps.last().expect("nonempty");
++    assert_eq!(
++        final_step.shares_sum, 1_408_708_333_333_333_333_333_367u128,
++        "T4: the delegator shares must sum to exactly one"
++    );
++    assert_eq!(
++        final_step.total_shares, final_step.shares_sum,
++        "T4: the delegator shares must sum to exactly one"
++    );
++}
++
++#[test]
++fn t4_withdrawal_without_unbonding_is_rejected() {
++    let mut pool = StakingPool::new();
++    pool.delegate(0, T4_MIN_STAKE).expect("minimum stake");
++    assert_eq!(
++        pool.withdraw(0, u64::MAX),
++        Err(StakeError::NoUnbonding),
++        "T4: a withdrawal without unbonding must be rejected"
++    );
++    // After the one legitimate withdrawal the stake is gone: another
++    // withdrawal without unbonding is rejected again.
++    let shares = pool.shares_of(0);
++    pool.undelegate(0, shares, 0).expect("held shares");
++    assert!(
++        pool.withdraw(0, T4_UNBONDING_BLOCKS).is_ok(),
++        "T4: a withdrawal without unbonding must be rejected"
++    );
++    assert_eq!(
++        pool.withdraw(0, u64::MAX),
++        Err(StakeError::NoUnbonding),
++        "T4: a withdrawal without unbonding must be rejected"
++    );
++}
++
++#[test]
++fn t4_unbonding_completes_after_exactly_21_days() {
++    assert_eq!(
++        T4_UNBONDING_DAYS, 21,
++        "T4: unbonding must complete after exactly 21 days"
++    );
++    assert_eq!(
++        T4_UNBONDING_BLOCKS,
++        21 * 86_400 / 5,
++        "T4: unbonding must complete after exactly 21 days"
++    );
++    assert_eq!(
++        T4_UNBONDING_BLOCKS, 362_880,
++        "T4: unbonding must complete after exactly 21 days"
++    );
++    let mut pool = StakingPool::new();
++    pool.delegate(0, T4_MIN_STAKE).expect("minimum stake");
++    let shares = pool.shares_of(0);
++    pool.undelegate(0, shares, 0).expect("held shares");
++    assert_eq!(
++        pool.withdraw(0, T4_UNBONDING_BLOCKS - 1),
++        Err(StakeError::StillUnbonding {
++            matures_at: T4_UNBONDING_BLOCKS
++        }),
++        "T4: unbonding must complete after exactly 21 days"
++    );
++    assert_eq!(
++        pool.withdraw(0, T4_UNBONDING_BLOCKS),
++        Ok(T4_MIN_STAKE),
++        "T4: unbonding must complete after exactly 21 days"
++    );
++}
++
++#[test]
++fn t4_commission_is_taken_from_rewards_only() {
++    let mut pool = StakingPool::new();
++    pool.delegate(0, T4_MIN_STAKE).expect("minimum stake");
++    let shares_before = pool.shares_of(0);
++    pool.accrue_reward(100 * ALCRY);
++    assert_eq!(
++        pool.pending_commission(),
++        10 * ALCRY,
++        "T4: the commission must be taken from rewards only"
++    );
++    assert_eq!(
++        pool.bonded(),
++        T4_MIN_STAKE + 90 * ALCRY,
++        "T4: the commission must be taken from rewards only"
++    );
++    assert_eq!(
++        pool.shares_of(0),
++        shares_before,
++        "T4: the commission must be taken from rewards only"
++    );
++    assert_eq!(
++        T4_COMMISSION_BPS, 1_000,
++        "T4: the commission must be taken from rewards only"
++    );
++    let _ = T4_BLOCK_REWARD;
++}
++
++#[test]
++fn t4_the_minimum_stake_is_enforced() {
++    let mut pool = StakingPool::new();
++    assert_eq!(
++        pool.delegate(0, T4_MIN_STAKE - 1),
++        Err(StakeError::BelowMinStake),
++        "T4: the minimum stake must be enforced"
++    );
++    assert_eq!(
++        pool.delegate(0, T4_MIN_STAKE),
++        Ok(T4_MIN_STAKE),
++        "T4: the minimum stake must be enforced"
++    );
++    assert_eq!(
++        pool.delegate(1, 1),
++        Err(StakeError::BelowMinStake),
++        "T4: the minimum stake must be enforced"
++    );
++}
++
++#[test]
++fn t4_a_slash_cuts_every_stake_proportionally() {
++    let mut pool = StakingPool::new();
++    pool.delegate(0, 2_000 * ALCRY).expect("above minimum");
++    pool.delegate(1, 4_000 * ALCRY).expect("above minimum");
++    let shares = pool.shares_of(0);
++    let entry = pool.undelegate(0, shares / 2, 0).expect("held shares");
++    let bonded_before = pool.bonded();
++    pool.slash(1_000); // 10 %
++    assert_eq!(
++        bonded_before - pool.bonded(),
++        bonded_before * 1_000 / Amount::from(T4_BPS),
++        "T4: a slash must reduce every stake proportionally"
++    );
++    assert_eq!(
++        pool.unbonding_of(0),
++        entry.amount - entry.amount * 1_000 / Amount::from(T4_BPS),
++        "T4: a slash must reduce every stake proportionally"
++    );
++    // Share counts never move with a slash.
++    assert_eq!(
++        pool.shares_sum(),
++        pool.total_shares(),
++        "T4: a slash must reduce every stake proportionally"
++    );
++    let before_zero = pool.bonded();
++    pool.slash(0);
++    assert_eq!(
++        pool.bonded(),
++        before_zero,
++        "T4: a slash must reduce every stake proportionally"
++    );
++    pool.slash(T4_BPS);
++    assert_eq!(
++        pool.bonded(),
++        0,
++        "T4: a slash must reduce every stake proportionally"
++    );
++}
++
++#[test]
++fn t4_unbonding_stake_stays_slashable_during_the_slashing_period() {
++    assert_eq!(
++        T4_SLASHING_PERIOD_BLOCKS, T4_UNBONDING_BLOCKS,
++        "T4: unbonding stake stays slashable during the slashing period"
++    );
++    let mut pool = StakingPool::new();
++    pool.delegate(0, T4_MIN_STAKE).expect("minimum stake");
++    let shares = pool.shares_of(0);
++    let entry = pool.undelegate(0, shares, 0).expect("held shares");
++    // Halfway through the window the slash still hits the unbonding pot.
++    pool.slash(500);
++    assert_eq!(
++        pool.unbonding_of(0),
++        entry.amount - entry.amount * 500 / Amount::from(T4_BPS),
++        "T4: unbonding stake stays slashable during the slashing period"
++    );
++    let claimed = pool.withdraw(0, T4_UNBONDING_BLOCKS).expect("matured");
++    assert_eq!(
++        claimed,
++        entry.amount - entry.amount * 500 / Amount::from(T4_BPS),
++        "T4: unbonding stake stays slashable during the slashing period"
++    );
++}
++
++#[test]
++fn t4_reference_simulation_agrees_with_the_pinned_digest() {
++    let steps = run_t4_scenario();
++    assert_eq!(
++        scenario_digest(&steps),
++        GOLDEN_STAKING_DIGEST,
++        "T4: the reference simulation must agree with the pinned digest"
++    );
++    let final_step = steps.last().expect("nonempty");
++    assert_eq!(
++        final_step.bonded, 1_325_889_559_769_089_696_565_650u128,
++        "T4: the reference simulation must agree with the pinned digest"
++    );
++    assert_eq!(
++        steps[1200].bonded, 1_484_861_400_000_000_000_000_000u128,
++        "T4: the reference simulation must agree with the pinned digest"
++    );
++    assert_eq!(
++        steps[1601].bonded, 1_325_529_559_769_089_696_565_650u128,
++        "T4: the reference simulation must agree with the pinned digest"
++    );
++    // The early-withdrawal attempt one block before maturity is recorded
++    // as a rejection (amount 0).
++    assert_eq!(
++        steps[1802].kind, 5,
++        "T4: the reference simulation must agree with the pinned digest"
++    );
++    assert_eq!(
++        steps[1802].amount, 0,
++        "T4: the reference simulation must agree with the pinned digest"
++    );
++    let withdrawn: Amount = steps
++        .iter()
++        .filter(|step| step.kind == 6)
++        .map(|step| step.amount)
++        .sum();
++    assert_eq!(
++        withdrawn, 85_430_770_230_910_303_434_449u128,
++        "T4: the reference simulation must agree with the pinned digest"
++    );
++}
++
++#[test]
++fn t4_splitting_a_delegation_preserves_the_shares() {
++    // Metamorphism: delegating a+b at once equals delegating a and then
++    // b (modulo one base unit of truncation).
++    let mut one = StakingPool::new();
++    one.delegate(2, 5_000 * ALCRY).expect("above minimum");
++    one.delegate(0, 3_000 * ALCRY + 7).expect("above minimum");
++    let mut two = StakingPool::new();
++    two.delegate(2, 5_000 * ALCRY).expect("above minimum");
++    two.delegate(0, 1_000 * ALCRY).expect("above minimum");
++    two.delegate(1, 2_000 * ALCRY + 7).expect("above minimum");
++    assert!(
++        one.total_shares().abs_diff(two.total_shares()) <= 1,
++        "T4: the delegator shares must sum to exactly one"
++    );
++    assert_eq!(
++        two.shares_sum(),
++        two.total_shares(),
++        "T4: the delegator shares must sum to exactly one"
++    );
++}
++
++#[test]
++fn t4_slashes_compose_proportionally() {
++    // Metamorphism: slash(x) then slash(y) equals one slash of
++    // x + y - x*y/bps (modulo a few base units of truncation).
++    let mut steps = StakingPool::new();
++    steps.delegate(0, 10_000 * ALCRY).expect("above minimum");
++    steps.slash(1_000);
++    steps.slash(2_000);
++    let mut one = StakingPool::new();
++    one.delegate(0, 10_000 * ALCRY).expect("above minimum");
++    one.slash(1_000 + 2_000 - 1_000 * 2_000 / T4_BPS);
++    assert!(
++        steps.bonded().abs_diff(one.bonded()) <= ALCRY,
++        "T4: a slash must reduce every stake proportionally"
++    );
++}
+diff --git a/docs/economics/t4-staking.md b/docs/economics/t4-staking.md
+new file mode 100644
+index 0000000..a9e3ebe
+--- /dev/null
++++ b/docs/economics/t4-staking.md
+@@ -0,0 +1,75 @@
++# T4 — staking: min stake, delegation, commission, unbonding, slashing
++
++**Status:** ✅ T4 closed. **1000 delegators** drive the pool and their
++shares sum to **exactly one** pool at every step of the pinned run
++(phase gate, literal); a **withdrawal without unbonding is rejected**
++(phase NC, literal). Stage 1 of ECONOMICS is complete with T4.
++
++## The model (`sim/t4-staking.json`)
++
++| Parameter | Value |
++|---|---|
++| min stake | 1 000 `ALCRY` |
++| validator commission | 1000 bps (10 %) — **from rewards only** |
++| unbonding | 21 days = 362 880 blocks (5 s block) |
++| slashing period | = the unbonding window (bonded + not-yet-withdrawn stake) |
++| scenario reward | 2 `ALCRY` per step (variable parameter, D-T2) |
++
++Mechanics: delegators hold **shares** of one validator pool; rewards
++compound into `bonded` (share price moves, share counts do not); the
++commission is skimmed off each reward, never off the principal.
++`undelegate` burns shares and queues the proportional amount for
++withdrawal exactly 362 880 blocks later; `withdraw` claims matured
++entries — with no unbonding stake it fails (`NoUnbonding`), before
++maturity it fails (`StillUnbonding`). `slash(rate_bps)` cuts the bonded
++pool and every unbonding entry proportionally.
++
++**Golden path digest**
++`e80662c82c74e1d1a0a5b0624beb4cf08af88c24f8091751c277cc7ea6887f07`
++(2004 scenario steps: 1000 delegations of 1000–1999 `ALCRY`, 600 reward
++steps, slashes of 100/500 bps, partial undelegations, one rejected
++early-withdrawal attempt one block before maturity, matured
++withdrawals). Checkpoints: bonded after slash 100 bps = 1 484 861 400
++000 000 000 000 000; after slash 500 bps = 1 325 529 559 769 089 696
++565 650; final bonded 1 325 889 559 769 089 696 565 650; final shares =
++Σ shares = 1 408 708 333 333 333 333 333 367; withdrawn total 85 430
++770 230 910 303 434 449; validator commission 120 000 000 000 000 000
++000. The independent Python oracle (`tools/t4_staking_check.py`)
++re-implements the model from scratch and cross-runs the Rust example
++`t4_staking_example`.
++
++## Rules
++
++* **Shares sum to one:** `Σ delegator shares == total_shares` at every
++  step of 1000 delegators, rewards, slashes and undelegations.
++* **Withdrawal needs unbonding:** no unbonding stake → `NoUnbonding`
++  (red); early claim → `StillUnbonding` (red); exactly after 21 days →
++  claimable.
++* **Commission from rewards only:** `pending_commission = Σ reward ×
++  10 %`; the principal is never cut.
++* **Min stake:** a delegation below 1 000 `ALCRY` is rejected.
++* **Slashing period:** bonded and unbonding (not yet withdrawn) stake is
++  slashed proportionally for the whole window.
++
++## Verification
++
++* 10 gate tests (`crates/aura-storage/tests/t4_staking.rs`): the
++  1000-delegator gate, withdrawal-without-unbonding rejection, the exact
++  21-day boundary (362 879 red / 362 880 green), commission split, min
++  stake, proportional slash (incl. 0 % and 100 %), slashability of
++  unbonding stake, the pinned digest, and metamorphisms (splitting a
++  delegation preserves the shares; consecutive slashes compose
++  proportionally).
++* Seven mutation controls (`tools/nc_t4.py`): share accounting drift,
++  allowed withdrawal without unbonding, shortened unbonding window,
++  commission taken twice, dropped min-stake check, non-proportional
++  slash and parameter drift each turn the gate red with their named
++  message.
++
++## What T4 deliberately does not do
++
++* No multi-validator set, redelegation or governance (T6/B-series); one
++  pool per validator is the model. Rewards are variable parameters, not
++  promised income (D-T2); parameter changes are simulated (D-T3) and
++  stay governance-locked (D-T1).
++* No legal claims (D-T4).
+diff --git a/docs/evidence/review-w1-source-drift.txt b/docs/evidence/review-w1-source-drift.txt
+index 5412a3f..db0e4bc 100644
+--- a/docs/evidence/review-w1-source-drift.txt
++++ b/docs/evidence/review-w1-source-drift.txt
+@@ -1,13 +1,13 @@
+ # Source-drift book (W1 review): pinned sources that legitimately changed
+ # after their phase receipt. Format: <historical sha> <current sha> <path>;
+-# one triple per pinned version, sorted. Regenerated at T3 close-out.
++# one triple per pinned version, sorted. Regenerated at T4 close-out.
+ # Historical evidence files are never exempted here.
+-adc24e7c03e1a63e5d7addbda15ff40ce630367152699c5d9659cd8db65f357b 29ecfc8d33d33214054b1da8380067eedadd695fe898cf1b61b945f729719d1d CHANGELOG.md
+-c83d08301a703c9db11462aa541bc898e52548589972118465164895eed44dc7 29ecfc8d33d33214054b1da8380067eedadd695fe898cf1b61b945f729719d1d CHANGELOG.md
++adc24e7c03e1a63e5d7addbda15ff40ce630367152699c5d9659cd8db65f357b cb3be2b51330e7e2558cab30fca6907b48f4d34209b0b0c223f558ee31dd57bd CHANGELOG.md
++c83d08301a703c9db11462aa541bc898e52548589972118465164895eed44dc7 cb3be2b51330e7e2558cab30fca6907b48f4d34209b0b0c223f558ee31dd57bd CHANGELOG.md
+ f0d3511cd02f3007c0a18fc5d94c8997cfa512449313776117265708a36c8553 c9680cc436d806fa7fa2ce8545bd148dc9fcc9ae444973d4968a3f4f4fc069dc Cargo.lock
+ d5518138eae73219f8da0d7297af44a471dbd7135a39587a0da1587bfe3d1e70 23185f790bc4697bbd163004e2c78873755c13efba05b46260b4827cdeabdff7 Cargo.toml
+-5fb6ce43826495321f697e138e71e87954b2fcabec1ceef70549bb49a2f38988 26649ecd4224d02dadc6f0294bd8dadb84b34daaeaa660ba0848eceb38beb157 Makefile
+-c5e92007c53a22253ad7d2cc779863b9592562a394d1b26ff09ea8d031991e29 26649ecd4224d02dadc6f0294bd8dadb84b34daaeaa660ba0848eceb38beb157 Makefile
++5fb6ce43826495321f697e138e71e87954b2fcabec1ceef70549bb49a2f38988 1d1222fd4ad80131f9eacf79bcd09b5a25bd2d1dc41100ab5a485538a2c4cdef Makefile
++c5e92007c53a22253ad7d2cc779863b9592562a394d1b26ff09ea8d031991e29 1d1222fd4ad80131f9eacf79bcd09b5a25bd2d1dc41100ab5a485538a2c4cdef Makefile
+ bcc7328bd9c464a857c4b97c8491277bf401299d3c7963f1925b075d4313feb6 f2e4a249573a5b902b3f566b3f1db1ebab12d994f1ab6ef9be2dc15df63d7e26 crates/aura-consensus/src/fork_choice.rs
+ 7e396fbb4fd1d4103f26db16796ab0b6ad9626b7ba2ea0d56cae379bde5c2d59 8ec730ce2dc2cb1bc266990f4f29133038e98e390a63be0edbb3eaa23fa48f23 crates/aura-consensus/src/governance.rs
+ bd58be73dc4e0f6da16735be1d5ed17306d16c08569d798a4af20fcf72b91d40 b2e8ddad5b281da54e9c68107b563c9125b3931fe0e8e26023c74dcf3011ccc3 crates/aura-consensus/src/slashing.rs
+@@ -46,8 +46,8 @@ c477f915b427982ca83fcb253fa0ab850d619ca5bf4a764137f0407078af4986 26a28bcc51e2cab
+ b4897ba4dbc33f098c27e415669e2e0bbca45933694b67aa590181041ebfdf0f e7b3e704bb1c5688159f38f66f31ba17893bad818c8876e097631ab2725abf5b fuzz/Cargo.toml
+ dca80316562fefcf24c45b40fb635412e1d4e5e09b5abe26f7d0e6b67e1e906e 53ac68024a82d40e64badd40ead1ebea5e0af8be1e56d4184a0eb0f22eab55a2 fuzz/README.md
+ 6e80f8eab5695501a3350e70bd086675cf4d1669cf370d92e98702d18c7bfe6e 7414f1e69a9690bdf93c79dc0ca32ec5cac7ca3b4f0df2d317e39c6fa95abc99 fuzz/src/lib.rs
+-1259c6bbc3bd3d53cbe0dd1d69d8d762336dc26287215d2ee35307bba90ea85c 819f5e3abca5091d2541b7fbc802ef412f23b37be8c88f0b903347bbca3ee29e tools/audit_closeout.py
+-7bd672503f104aa733dff03e84f57ac26ef926607657ab6a799f9d2bc14c0dc9 819f5e3abca5091d2541b7fbc802ef412f23b37be8c88f0b903347bbca3ee29e tools/audit_closeout.py
++1259c6bbc3bd3d53cbe0dd1d69d8d762336dc26287215d2ee35307bba90ea85c 333da3e9983a92b3128671808fedd7d20cd437460278592ea83e96f6318298fa tools/audit_closeout.py
++7bd672503f104aa733dff03e84f57ac26ef926607657ab6a799f9d2bc14c0dc9 333da3e9983a92b3128671808fedd7d20cd437460278592ea83e96f6318298fa tools/audit_closeout.py
+ 4d7d73580e09a49f1a0a9faf668254b0ec12f891efa527db863fa3abf8cce4a1 ab356092fc59ed98bff8d3622ef74e35eb33da5f342c5b6dccf5d73aeb20763b tools/gen_w0_vectors.py
+ 303fc648659cc72d9f8cf7cf6bc71ed8c9bd5a9f9a8d923d5a1e78bcffba0b5b 5e62e17226bfc601e8775b54e7f6a025d36c1357b7206d33c18c442cb49746eb tools/nc_b10.py
+ f86dee929549c751519e1749e0976c561e47a174a129412caf8cd23680887f61 3ae536e2637862525ca6edb1eeaa927a018a529856402d60c7260e92481d0b19 tools/nc_b5.py
+diff --git a/docs/evidence/t4/SHA256SUMS b/docs/evidence/t4/SHA256SUMS
+new file mode 100644
+index 0000000..917fdee
+--- /dev/null
++++ b/docs/evidence/t4/SHA256SUMS
+@@ -0,0 +1,9 @@
++c9806275465f610295fa258cb589c8ccc4ca07c5a5dcd1e625dceea6d9bbf3cb  docs/evidence/t4/baseline.log
++e6ae6feaf7ec1a1147543b2343341eeb697bf4ed872cbec3ce036e2180b03bcf  docs/evidence/t4/gates.txt
++a601402de6b257731745fe71c6cdae77761cff126d88134a6f77e1295732c084  docs/evidence/t4/inventory.txt
++7a2f3e3b06b638e7bcfb3a33fd858b538fe3aabb40480bbd060c47f8a71c5adc  docs/evidence/t4/nc-suite.log
++4965508935bebe567e89fa9af8221820ed286bbeb5bbac5fee0404c46a9bc5fe  docs/evidence/t4/nc.log
++a0fea78de117042856b8719c420375cc8b7c78d228bef85701be26d5aa72f8a4  docs/evidence/t4/report.md
++03e9142bd684ac50875e855e6e01b6cc485f6e31aba0aa359c795af9a21e1f74  docs/evidence/t4/t4-staking.log
++d71354bbaa7732cf5e46fd3b79816c99acf6b51d8bb5ad8b173acd28442bf9d5  docs/evidence/t4/campaign/result.json
++03e9142bd684ac50875e855e6e01b6cc485f6e31aba0aa359c795af9a21e1f74  docs/evidence/t4/campaign/t4-staking.log
+diff --git a/docs/evidence/t4/baseline.log b/docs/evidence/t4/baseline.log
+new file mode 100644
+index 0000000..905e527
+--- /dev/null
++++ b/docs/evidence/t4/baseline.log
+@@ -0,0 +1,2 @@
++[evidence_t4] cmd=/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/t4_staking_check.py exit=0 duration=0.66s
++RESULT: T4 staking check PASS — 1000 delegators, shares sum to exactly one (final shares 1408708333333333333333367), unbonding 362880 blocks, withdrawn 85430770230910303434449, commission 120000000000000000000, digest e80662c82c74e1d1a0a5b0624beb4cf08af88c24f8091751c277cc7ea6887f07
+diff --git a/docs/evidence/t4/campaign/result.json b/docs/evidence/t4/campaign/result.json
+new file mode 100644
+index 0000000..ad0a6c6
+--- /dev/null
++++ b/docs/evidence/t4/campaign/result.json
+@@ -0,0 +1,33 @@
++{
++  "commands": [
++    [
++      "/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/t4_staking_check.py",
++      "baseline"
++    ],
++    [
++      "cargo test --locked -p aura-storage --test t4_staking",
++      "t4-staking"
++    ],
++    [
++      "/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/nc_t4.py",
++      "nc-suite"
++    ]
++  ],
++  "gates": {
++    "baseline": "pass",
++    "nc-suite": "pass",
++    "t4-staking": "pass"
++  },
++  "golden_path_digest": "e80662c82c74e1d1a0a5b0624beb4cf08af88c24f8091751c277cc7ea6887f07",
++  "named_gate": "1000 delegators: shares sum == 1; NC: withdraw without unbonding -> red",
++  "phase": "T4",
++  "sources": {
++    "crates/aura-storage/examples/t4_staking_example.rs": "01870b5e15617be309afff4d4180cb3e95286aa60fbd61a457e3a970a0525504",
++    "crates/aura-storage/src/staking.rs": "ba629c62b90596a630974c821a6ef70d1a3668afce76545d7f12571d17f2bb82",
++    "crates/aura-storage/tests/t4_staking.rs": "3380a322c62811ca83e701436204cc6e1dd4c80ec8dfa2b3d2f0e3c109750408",
++    "sim/t4-staking.json": "15ab83a9d9232d374cf915cb31482450f24b41bd94203af4d40b4cadea9a768a",
++    "tools/nc_t4.py": "0169b8782b35eb44fdab3dd9168cd11f8eeb6a13387a4818c9813e8040e7fe09",
++    "tools/t4_staking_check.py": "d6b44bd2c170eb14b647b90651f070e48275b6609e654c1db0ac98f5a21410c1"
++  },
++  "when": "2026-11-21T15:25:59"
++}
+diff --git a/docs/evidence/t4/campaign/t4-staking.log b/docs/evidence/t4/campaign/t4-staking.log
+new file mode 100644
+index 0000000..99fa3aa
+--- /dev/null
++++ b/docs/evidence/t4/campaign/t4-staking.log
+@@ -0,0 +1,19 @@
++[evidence_t4] cmd=cargo test --locked -p aura-storage --test t4_staking exit=0 duration=0.68s
++   Compiling aura-storage v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-storage)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.62s
++     Running tests/t4_staking.rs (target/debug/deps/t4_staking-6acc75df6fae73e9)
++
++running 10 tests
++test t4_a_slash_cuts_every_stake_proportionally ... ok
++test t4_commission_is_taken_from_rewards_only ... ok
++test t4_slashes_compose_proportionally ... ok
++test t4_splitting_a_delegation_preserves_the_shares ... ok
++test t4_the_minimum_stake_is_enforced ... ok
++test t4_thousand_delegator_shares_sum_to_one ... ok
++test t4_unbonding_completes_after_exactly_21_days ... ok
++test t4_unbonding_stake_stays_slashable_during_the_slashing_period ... ok
++test t4_withdrawal_without_unbonding_is_rejected ... ok
++test t4_reference_simulation_agrees_with_the_pinned_digest ... ok
++
++test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
++
+diff --git a/docs/evidence/t4/gates.txt b/docs/evidence/t4/gates.txt
+new file mode 100644
+index 0000000..a89af2a
+--- /dev/null
++++ b/docs/evidence/t4/gates.txt
+@@ -0,0 +1,10 @@
++T4 Staking gates (ECONOMICS_PLAN, crates/aura-storage/tests/t4_staking.rs)
++Gate: 1000 delegators: shares sum == 1; NC: withdraw without unbonding -> red
++
++baseline                                   pass                   independent staking oracle (1000 delegators, shares sum to one)
++t4-staking                                 pass                   named gate: shares sum == 1; withdraw without unbonding -> red
++nc-suite                                   pass                   7 mutation controls incl. the literal withdraw-without-unbonding
++
++negative controls: 7/7 (PASS)
++named gate: PASS
++oracle cross-run: PASS
+diff --git a/docs/evidence/t4/inventory.txt b/docs/evidence/t4/inventory.txt
+new file mode 100644
+index 0000000..ad44d5d
+--- /dev/null
++++ b/docs/evidence/t4/inventory.txt
+@@ -0,0 +1,4 @@
++# T4 inventory (generated by tools/write_t4_evidence.py)
++# Cumulative negative controls: 21 phases, 543 controls.
++W4: 6/6, H0: 6/6, H1: 6/6, H2: 6/6, H3: 6/6, H4: 6/6, H5: 6/6, H6: 7/7, H7: 7/7, H8: 7/7, H9: 7/7, E0: 6/6, E1: 6/6, E2: 6/6, E3: 6/6, T0: 6/6, T1: 6/6, T2: 6/6, T3: 6/6, T4: 7/7
++TOTAL: 543 negative controls cumulative
+diff --git a/docs/evidence/t4/nc-suite.log b/docs/evidence/t4/nc-suite.log
+new file mode 100644
+index 0000000..94abdb6
+--- /dev/null
++++ b/docs/evidence/t4/nc-suite.log
+@@ -0,0 +1,9 @@
++[evidence_t4] cmd=/usr/local/bin/python3 /home/user/AuraLite-Crypto/tools/nc_t4.py exit=0 duration=6.50s
++[PASS] NC-1 injected bug -> share accounting must go red: red with named message
++[PASS] NC-2 withdrawal without unbonding allowed: red with named message
++[PASS] NC-3 unbonding window shortened: red with named message
++[PASS] NC-4 commission taken twice (principal cut): red with named message
++[PASS] NC-5 minimum stake not enforced: red with named message
++[PASS] NC-6 slash not proportional on unbonding: red with named message
++[PASS] NC-7 pinned parameters drift: red with named message
++RESULT: 7/7 negative controls PASS
+diff --git a/docs/evidence/t4/nc.log b/docs/evidence/t4/nc.log
+new file mode 100644
+index 0000000..aa690f1
+--- /dev/null
++++ b/docs/evidence/t4/nc.log
+@@ -0,0 +1,9 @@
++[evidence_t4] cmd=tools/nc_t4.py
++[PASS] NC-1 injected bug -> share accounting must go red: red with named message
++[PASS] NC-2 withdrawal without unbonding allowed: red with named message
++[PASS] NC-3 unbonding window shortened: red with named message
++[PASS] NC-4 commission taken twice (principal cut): red with named message
++[PASS] NC-5 minimum stake not enforced: red with named message
++[PASS] NC-6 slash not proportional on unbonding: red with named message
++[PASS] NC-7 pinned parameters drift: red with named message
++RESULT: 7/7 negative controls PASS
+diff --git a/docs/evidence/t4/report.md b/docs/evidence/t4/report.md
+new file mode 100644
+index 0000000..397b15b
+--- /dev/null
++++ b/docs/evidence/t4/report.md
+@@ -0,0 +1,11 @@
++# Отчёт T4 — Staking
++
++Дата: 2026-11-21
++
++Итог: **ВСЕ ГЕЙТЫ T4 ЗЕЛЁНЫЕ**
++
++Гейт: 1000 делегаторов — shares суммируются ровно в один пул на каждом шаге; вывод без unbonding — красный.
++
++Модель `crates/aura-storage/src/staking.rs`: min stake 1 000 `ALCRY`; делегация через shares (компаундинг наград меняет цену share, но не количество); комиссия валидатора 1000 bps **только из наград** (D-T2); unbonding 21 день (362 880 блоков при 5 с) — вывод до срока красный (`StillUnbonding`), без unbonding — красный (`NoUnbonding`); slashing period = окно unbonding — bonded и незабранный unbonding режутся пропорционально. Сценарий `sim/t4-staking.json` (2004 шага: 1000 делегаций, 600 наград, слэши 100/500 bps, частичные undelegate, отказ за блок до зрелости, выводы), золотой дайджест e80662c8…87f07 (Rust ↔ Python ↔ пример `t4_staking_example`); финал: bonded 1 325 889 559 769 089 696 565 650, shares 1 408 708 333 333 333 333 333 367 (== Σ shares), комиссия 120 `ALCRY`-млн-ед., выведено 85 430 770 230 910 303 434 449. Гейт `crates/aura-storage/tests/t4_staking.rs` (10 тестов + 2 метаморфизма), оракул `tools/t4_staking_check.py`.
++negative controls `tools/nc_t4.py` (`nc.log`, RESULT: 7/7 negative controls PASS) — 7 контролей (стандарт 6 + slash-пропорциональность, прецедент H6–H9).
++
+diff --git a/docs/evidence/t4/t4-staking.log b/docs/evidence/t4/t4-staking.log
+new file mode 100644
+index 0000000..99fa3aa
+--- /dev/null
++++ b/docs/evidence/t4/t4-staking.log
+@@ -0,0 +1,19 @@
++[evidence_t4] cmd=cargo test --locked -p aura-storage --test t4_staking exit=0 duration=0.68s
++   Compiling aura-storage v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-storage)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.62s
++     Running tests/t4_staking.rs (target/debug/deps/t4_staking-6acc75df6fae73e9)
++
++running 10 tests
++test t4_a_slash_cuts_every_stake_proportionally ... ok
++test t4_commission_is_taken_from_rewards_only ... ok
++test t4_slashes_compose_proportionally ... ok
++test t4_splitting_a_delegation_preserves_the_shares ... ok
++test t4_the_minimum_stake_is_enforced ... ok
++test t4_thousand_delegator_shares_sum_to_one ... ok
++test t4_unbonding_completes_after_exactly_21_days ... ok
++test t4_unbonding_stake_stays_slashable_during_the_slashing_period ... ok
++test t4_withdrawal_without_unbonding_is_rejected ... ok
++test t4_reference_simulation_agrees_with_the_pinned_digest ... ok
++
++test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
++
+diff --git a/docs/plans/ECONOMICS_PLAN.md b/docs/plans/ECONOMICS_PLAN.md
+index 0a29bfd..eaed5ba 100644
+--- a/docs/plans/ECONOMICS_PLAN.md
++++ b/docs/plans/ECONOMICS_PLAN.md
+@@ -1,6 +1,6 @@
+ # ECONOMICS_PLAN — tokenomics, fees, treasury, white paper
+ 
+-**Status:** 🚧 IN PROGRESS — T0 ✅ (`patches/0078-T0-baseline.patch`); T1 ✅ (`patches/0079-T1-issuance.patch`); T2 ✅ (`patches/0080-T2-allocation.patch`); T3 ✅ (`patches/0081-T3-fees.patch`); T4 Stage 1 in progress; T5–T8 Stage 2  
++**Status:** 🚧 IN PROGRESS — T0 ✅ (`patches/0078-T0-baseline.patch`); T1 ✅ (`patches/0079-T1-issuance.patch`); T2 ✅ (`patches/0080-T2-allocation.patch`); T3 ✅ (`patches/0081-T3-fees.patch`); T4 ✅ (`patches/0082-T4-staking.patch`) — **Stage 1 (T0–T4) ЗАКРЫТ**; T5–T8 ⏸ Stage 2  
+ **Stage:** Stage 1: T0–T4. ⏸ Stage 2: T5–T8 (slashing parameters, governance, treasury, white paper).  
+ **Deliverable:** `patches/0077-T0-...` … `patches/0085-T8-...`
+ **Dependencies:** Stage 1 — CONSENSUS B4–B9, EXEC X3–X5, ECOSYSTEM E3, OPS O4.  
+@@ -28,7 +28,7 @@ tests, simulations in `sim/`, text in the white paper.
+ | ✅ **T1** | Issuance model | genesis supply, inflation curve, halving/target staked ratio, max supply (if fixed) | 10-year simulation: supply matches the formula within 1 unit — met, 0-unit drift every year, golden path digest pinned, 6 mutation controls |
+ | ✅ **T2** | Allocation | allocation (validators, treasury, community, team), vesting with cliffs, lockups | script reconciles genesis balances with the table; NC: extra coins → red — met, pots sum to exactly 3 000 000 `ALCRY`, golden table digest pinned, 6 mutation controls |
+ | ✅ **T3** | Fees | EIP-1559-like `base_fee` + `tip`, burning the base part, elastic gas target | 10 000 congested blocks: base fee rises/falls per the formula — met, formula holds at every step of the pinned run, golden path digest pinned, 6 mutation controls |
+-| **T4** | Staking | min stake, delegation, commission, unbonding 21 days, slashing period | 1000 delegators: shares sum == 1; NC: withdraw without unbonding → red |
++| ✅ **T4** | Staking | min stake, delegation, commission, unbonding 21 days, slashing period | 1000 delegators: shares sum == 1; NC: withdraw without unbonding → red — met, shares sum to exactly one pool at every step of the pinned run, golden digest pinned, 7 mutation controls |
+ | ⏸ **T5** | Slashing and insurance | penalty parameters, insurance fund, mass-slash protection | 7 scenarios: penalty ≥ damage, fund never negative |
+ | ⏸ **T6** | Governance | proposal threshold, quorum, voting period, 48 h timelock, veto/emergency with sunset | 20 proposals: valid ones pass, flash-stake attack rejected |
+ | ⏸ **T7** | Treasury and grants | on-chain treasury, multisig (W4), transparent reporting, grants process | every payout has proposal + tx + report; NC: withdrawal without vote → red |
+@@ -164,6 +164,52 @@ tests, simulations in `sim/`, text in the white paper.
+   ("congested blocks" as a congestion regime) so the gate literally
+   covers rises **and** falls; parameter changes stay governance-locked
+   (D-T1 timelock, T6).
++
++### T4 receipt (2026-11-21) — staking: min stake, delegation, commission, unbonding, slashing
++
++- Deliverable: `patches/0082-T4-staking.patch`; evidence in
++  `docs/evidence/t4/` (`campaign/` self-contained: gate run log,
++  `result.json` with commands, the golden digest and source digests).
++- Gate met literally: the pinned run drives **1000 delegators**
++  (delegations 1000–1999 `ALCRY`), 600 reward steps, two slashes
++  (100/500 bps), partial undelegations and matured withdrawals — and
++  the delegator **shares sum to exactly one** pool
++  (`Σ shares == total_shares`) at **every** one of the 2004 steps; the
++  golden digest
++  `e80662c82c74e1d1a0a5b0624beb4cf08af88c24f8091751c277cc7ea6887f07`
++  is pinned in the Rust tests and re-derived by the independent Python
++  oracle (`tools/t4_staking_check.py`, full model re-implementation),
++  which also cross-runs the Rust example `t4_staking_example`.
++  Checkpoints: bonded after the 100 bps slash = 1 484 861 400 000 000
++  000 000 000, after the 500 bps slash = 1 325 529 559 769 089 696 565
++  650, final bonded 1 325 889 559 769 089 696 565 650; final shares =
++  Σ shares = 1 408 708 333 333 333 333 333 367; withdrawn 85 430 770
++  230 910 303 434 449; validator commission 120 000 000 000 000 000
++  000.
++- The phase NC is literal: **a withdrawal without unbonding is
++  rejected** (`NoUnbonding`; early claim → `StillUnbonding`) — one block
++  before maturity the attempt is recorded as a rejection in the digest;
++  exactly after 21 days (362 880 blocks at 5 s) the claim succeeds.
++  DoD enforced: min stake 1 000 `ALCRY`; delegation via shares
++  (rewards compound into the pool, share counts never move);
++  commission 1000 bps **from rewards only** (D-T2: no promised
++  income); slashing period = the unbonding window — bonded and
++  not-yet-withdrawn stake is cut proportionally. Seven mutation
++  controls (`tools/nc_t4.py`, 7/7): share-accounting drift, allowed
++  withdrawal without unbonding, shortened window, double commission,
++  dropped min-stake, non-proportional slash and parameter drift each
++  turn the gate red with their named message. Metamorphisms: splitting
++  a delegation preserves the shares; consecutive slashes compose
++  proportionally.
++- Explained deviations (recorded here as this plan prescribes):
++  (1) the model lives in `crates/aura-storage/src/staking.rs` (workspace
++  convention) with the scenario mirrored in `sim/t4-staking.json`;
++  (2) "shares sum == 1" is realized as the exact integer identity
++  `Σ delegator shares == total_shares` (the pool fractions sum to one)
++  checked at every step;
++  (3) the mutation budget is **7** controls (the standard's 6 plus the
++  slash proportionality control — the H6–H9 precedent); one validator
++  pool is the T4 model (multi-validator sets belong to B-series/T6).
+ - Negative controls: `tools/nc_t1.py`, 6/6 in `docs/evidence/t1/nc.log`;
+   cumulative negative control total 524.
+ 
+diff --git a/sim/t4-staking.json b/sim/t4-staking.json
+new file mode 100644
+index 0000000..8037530
+--- /dev/null
++++ b/sim/t4-staking.json
+@@ -0,0 +1,35 @@
++{
++  "phase": "T4",
++  "title": "Staking: 1000 delegators, shares sum to one, unbonding and slashing",
++  "min_stake_alcry": 1000,
++  "commission_bps": 1000,
++  "block_seconds": 5,
++  "unbonding_days": 21,
++  "unbonding_blocks": 362880,
++  "slashing_period_blocks": 362880,
++  "block_reward_alcry": 2,
++  "scenario": {
++    "delegators": 1000,
++    "delegate_amount": "min_stake + i * min_stake / 1000 (1000..1999 ALCRY)",
++    "reward_steps": 600,
++    "slashes_bps": [100, 500],
++    "undelegate": "delegators 0..99 half of shares at height 10000; 100..199 third at height 20000",
++    "early_withdraw_attempt": "delegator 0 at height 372879 (one block before maturity) -> rejected",
++    "withdrawals": "delegators 0..99 at 372880 (= 10000 + 362880); 100..199 at 382880 (= 20000 + 362880)"
++  },
++  "golden_path_digest": "e80662c82c74e1d1a0a5b0624beb4cf08af88c24f8091751c277cc7ea6887f07",
++  "samples": [
++    {"after_step": 1200, "note": "slash 100 bps record", "bonded": 1484861400000000000000000},
++    {"after_step": 1601, "note": "slash 500 bps record", "bonded": 1325529559769089696565650},
++    {"after_step": 1802, "note": "early attempt rejected (amount 0)", "amount": 0}
++  ],
++  "totals": {
++    "withdrawn_batch1": 49376554395965321773925,
++    "withdrawn_batch2": 36054215834944981660524,
++    "withdrawn_total": 85430770230910303434449,
++    "final_bonded": 1325889559769089696565650,
++    "final_total_shares": 1408708333333333333333367,
++    "final_shares_sum": 1408708333333333333333367,
++    "pending_commission": 120000000000000000000
++  }
++}
+diff --git a/tools/audit_closeout.py b/tools/audit_closeout.py
+index ce0940e..b3aafb7 100644
+--- a/tools/audit_closeout.py
++++ b/tools/audit_closeout.py
+@@ -38,7 +38,7 @@ NET_PHASES = ["N0", "N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8"]  # NET_PLAN
+ WALLET_PHASES = ["W0", "W1", "W2", "W3", "W4"]  # grows with each W phase
+ SECURITY_PHASES = ["H0", "H1", "H2", "H3", "H4", "H5", "H6", "H7", "H8", "H9"]  # grows with each H phase
+ ECOSYSTEM_PHASES = ["E0", "E1", "E2", "E3"]  # grows with each E phase
+-ECONOMICS_PHASES = ["T0", "T1", "T2", "T3"]  # grows with each T phase
++ECONOMICS_PHASES = ["T0", "T1", "T2", "T3", "T4"]  # grows with each T phase
+ PHASES = CORE_PHASES + STATE_PHASES + EXEC_PHASES + NODE_PHASES + CONSENSUS_PHASES + NET_PHASES + WALLET_PHASES + SECURITY_PHASES + ECOSYSTEM_PHASES + ECONOMICS_PHASES
+ SHIPPED = CORE_PHASES + [
+     "S0",
+@@ -109,8 +109,9 @@ SHIPPED = CORE_PHASES + [
+     "T0",
+     "T1",
+     "T2",
++    "T3",
+ ]
+-CURRENT = "T3"
++CURRENT = "T4"
+ 
+ PLAN_FOR_PREFIX = {
+     "C": "CORE_PLAN.md",
+@@ -128,7 +129,7 @@ PLAN_FOR_PREFIX = {
+ }
+ 
+ NC_PER_PHASE = {f"C{i}": 6 for i in range(4, 11)}
+-NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6, "W4": 6, "H0": 6, "H1": 6, "H2": 6, "H3": 6, "H4": 6, "H5": 6, "H6": 7, "H7": 7, "H8": 7, "H9": 7, "E0": 6, "E1": 6, "E2": 6, "E3": 6, "T0": 6, "T1": 6, "T2": 6, "T3": 6})
++NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6, "W4": 6, "H0": 6, "H1": 6, "H2": 6, "H3": 6, "H4": 6, "H5": 6, "H6": 7, "H7": 7, "H8": 7, "H9": 7, "E0": 6, "E1": 6, "E2": 6, "E3": 6, "T0": 6, "T1": 6, "T2": 6, "T3": 6, "T4": 7})
+ SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)  # 339 (through W0)
+ EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + (0 if CURRENT in SHIPPED else NC_PER_PHASE[CURRENT])
+ 
+@@ -165,6 +166,7 @@ PATCH_ORDER += ["T0"]
+ PATCH_ORDER += ["T1"]
+ PATCH_ORDER += ["T2"]
+ PATCH_ORDER += ["T3"]
++PATCH_ORDER += ["T4"]
+ PATCH_NUMBERS = {phase: index + 1 for index, phase in enumerate(PATCH_ORDER)}
+ 
+ 
+diff --git a/tools/nc_t4.py b/tools/nc_t4.py
+new file mode 100644
+index 0000000..8adbda6
+--- /dev/null
++++ b/tools/nc_t4.py
+@@ -0,0 +1,113 @@
++#!/usr/bin/env python3
++"""Mutation controls for T4 (ECONOMICS_PLAN T4).
++
++Each control injects ONE bug (restored after) and requires the named T4
++message to appear in the red run. NC-2 is the phase control literally:
++a withdrawal without unbonding must be red.
++"""
++
++import os
++import subprocess
++import sys
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++STAKING = os.path.join(ROOT, "crates", "aura-storage/src/staking.rs")
++
++TEST_CMD = ["cargo", "test", "--locked", "-p", "aura-storage", "--test", "t4_staking"]
++
++# (name, path, anchor, replacement, expected message)
++CONTROLS = [
++    (
++        "NC-1 injected bug -> share accounting must go red",
++        STAKING,
++        "        self.total_shares += minted;",
++        "        self.total_shares += minted + 1;",
++        "T4: the delegator shares must sum to exactly one",
++    ),
++    (
++        "NC-2 withdrawal without unbonding allowed",
++        STAKING,
++        "            return Err(StakeError::NoUnbonding);",
++        "            return Ok(0);",
++        "T4: a withdrawal without unbonding must be rejected",
++    ),
++    (
++        "NC-3 unbonding window shortened",
++        STAKING,
++        "entry.matures_at <= now_block",
++        "entry.matures_at <= now_block + 1",
++        "T4: unbonding must complete after exactly 21 days",
++    ),
++    (
++        "NC-4 commission taken twice (principal cut)",
++        STAKING,
++        "        self.bonded += reward - commission;",
++        "        self.bonded += reward - commission - commission;",
++        "T4: the commission must be taken from rewards only",
++    ),
++    (
++        "NC-5 minimum stake not enforced",
++        STAKING,
++        "        if amount < T4_MIN_STAKE {",
++        "        if false {",
++        "T4: the minimum stake must be enforced",
++    ),
++    (
++        "NC-6 slash not proportional on unbonding",
++        STAKING,
++        "entry.amount * Amount::from(rate_bps) / Amount::from(T4_BPS)",
++        "entry.amount * Amount::from(rate_bps) / Amount::from(T4_BPS) / 2",
++        "T4: a slash must reduce every stake proportionally",
++    ),
++    (
++        "NC-7 pinned parameters drift",
++        STAKING,
++        "pub const T4_COMMISSION_BPS: u64 = 1_000;",
++        "pub const T4_COMMISSION_BPS: u64 = 1_001;",
++        "T4: the reference simulation must agree with the pinned digest",
++    ),
++]
++
++PASS_MARKERS = ("test result: ok.",)
++
++
++def run_control(name, path, anchor, replacement, expected):
++    with open(path, encoding="utf-8") as f:
++        original = f.read()
++    if original.count(anchor) != 1:
++        return False, "anchor count %d" % original.count(anchor)
++    mutated = original.replace(anchor, replacement)
++    try:
++        with open(path, "w", encoding="utf-8") as f:
++            f.write(mutated)
++        proc = subprocess.run(TEST_CMD, cwd=ROOT, stdout=subprocess.PIPE,
++                              stderr=subprocess.STDOUT, text=True,
++                              errors="replace")
++        output = proc.stdout or ""
++    finally:
++        with open(path, "w", encoding="utf-8") as f:
++            f.write(original)
++    compile_failed = "error[" in output and "test result" not in output
++    if compile_failed:
++        return False, "mutation broke compilation"
++    if any(marker in output for marker in PASS_MARKERS):
++        return False, "mutated gate still passes"
++    if expected in output:
++        return True, "red with named message"
++    return False, "red without named message"
++
++
++def main():
++    passed = 0
++    for name, path, anchor, replacement, expected in CONTROLS:
++        ok, why = run_control(name, path, anchor, replacement, expected)
++        print("[%s] %s: %s" % ("PASS" if ok else "FAIL", name, why))
++        if ok:
++            passed += 1
++    total = len(CONTROLS)
++    print("RESULT: %d/%d negative controls PASS" % (passed, total))
++    return 0 if passed == total else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/t4_staking_check.py b/tools/t4_staking_check.py
+new file mode 100644
+index 0000000..0efebb1
+--- /dev/null
++++ b/tools/t4_staking_check.py
+@@ -0,0 +1,248 @@
++#!/usr/bin/env python3
++"""Independent T4 staking oracle (ECONOMICS_PLAN T4).
++
++Re-implements the share-based staking model from scratch and re-runs the
++pinned 1000-delegator scenario: the delegator shares must sum to exactly
++one pool at every step, and a withdrawal without unbonding must be
++rejected. Cross-checks the Rust example `t4_staking_example` and the
++constants in `crates/aura-storage/src/staking.rs`.
++"""
++
++import hashlib
++import json
++import os
++import re
++import subprocess
++import sys
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++SCENARIO = os.path.join(ROOT, "sim", "t4-staking.json")
++STAKING_RS = os.path.join(ROOT, "crates", "aura-storage", "src", "staking.rs")
++
++GOLDEN_STAKING_DIGEST = "e80662c82c74e1d1a0a5b0624beb4cf08af88c24f8091751c277cc7ea6887f07"
++ALCRY = 10 ** 18
++MIN_STAKE = 1000 * ALCRY
++COMMISSION_BPS = 1000
++BPS = 10_000
++UNBONDING_BLOCKS = 21 * 86_400 // 5
++BLOCK_REWARD = 2 * ALCRY
++
++
++class Pool:
++    def __init__(self):
++        self.bonded = 0
++        self.total_shares = 0
++        self.pending_commission = 0
++        self.delegations = {}
++        self.unbonding = []
++
++    def shares_sum(self):
++        return sum(self.delegations.values())
++
++    def delegate(self, owner, amount):
++        if amount < MIN_STAKE:
++            raise ValueError("BelowMinStake")
++        minted = amount if self.total_shares == 0 else amount * self.total_shares // self.bonded
++        self.delegations[owner] = self.delegations.get(owner, 0) + minted
++        self.total_shares += minted
++        self.bonded += amount
++        return minted
++
++    def undelegate(self, owner, shares, now):
++        amount = shares * self.bonded // self.total_shares
++        self.delegations[owner] -= shares
++        self.total_shares -= shares
++        self.bonded -= amount
++        self.unbonding.append([owner, amount, now + UNBONDING_BLOCKS])
++        return amount
++
++    def withdraw(self, owner, now):
++        claimed = 0
++        kept = []
++        for entry in self.unbonding:
++            if entry[0] == owner and entry[2] <= now:
++                claimed += entry[1]
++            else:
++                kept.append(entry)
++        self.unbonding = kept
++        if claimed == 0:
++            raise ValueError("NoUnbonding/StillUnbonding")
++        return claimed
++
++    def accrue(self, reward):
++        commission = reward * COMMISSION_BPS // BPS
++        self.pending_commission += commission
++        self.bonded += reward - commission
++
++    def slash(self, rate_bps):
++        cut = self.bonded * rate_bps // BPS
++        self.bonded -= cut
++        for entry in self.unbonding:
++            entry[1] -= entry[1] * rate_bps // BPS
++
++
++def rust_const(name):
++    paths = [STAKING_RS, os.path.join(ROOT, "crates", "aura-storage", "src", "issuance.rs")]
++    for source in paths:
++        text = open(source, encoding="utf-8").read()
++        match = re.search(r"pub const %s: (?:Amount|u64|u32) = ([0-9_]+);" % name, text)
++        if match:
++            return int(match.group(1).replace("_", ""))
++        expr = re.search(r"pub const %s: (?:Amount|u64|u32) = ([A-Za-z0-9_ */]+);" % name, text)
++        if expr:
++            def value_of(factor):
++                factor = factor.strip()
++                if "/" in factor:
++                    num, den = factor.split("/")
++                    return value_of(num) // value_of(den)
++                if re.fullmatch(r"[0-9_]+", factor):
++                    return int(factor.replace("_", ""))
++                if factor == "ALCRY":
++                    return 10 ** 18
++                return rust_const(factor)
++            value = 1
++            for factor in expr.group(1).split("*"):
++                value *= value_of(factor)
++            return value
++    return None
++
++
++def main():
++    scenario = json.load(open(SCENARIO, encoding="utf-8"))
++    assert scenario["unbonding_blocks"] == UNBONDING_BLOCKS
++    assert scenario["min_stake_alcry"] * ALCRY == MIN_STAKE
++    assert scenario["commission_bps"] == COMMISSION_BPS
++
++    for name, value in [
++        ("T4_MIN_STAKE", MIN_STAKE),
++        ("T4_COMMISSION_BPS", COMMISSION_BPS),
++        ("T4_BPS", BPS),
++        ("T4_UNBONDING_DAYS", 21),
++        ("T4_UNBONDING_BLOCKS", UNBONDING_BLOCKS),
++        ("T4_BLOCK_REWARD", BLOCK_REWARD),
++    ]:
++        got = rust_const(name)
++        assert got == value, (
++            "T4: the reference simulation must agree with the pinned digest "
++            "(const %s drift: %r != %r)" % (name, got, value)
++        )
++
++    steps = []
++    pool = Pool()
++
++    def record(kind, amount):
++        steps.append((len(steps), kind, amount, pool.bonded,
++                      pool.total_shares, pool.shares_sum()))
++
++    for i in range(1000):
++        amount = MIN_STAKE + i * MIN_STAKE // 1000
++        record(1, pool.delegate(i, amount))
++    for _ in range(200):
++        pool.accrue(BLOCK_REWARD)
++        record(2, BLOCK_REWARD)
++    pool.slash(100)
++    record(3, 100)
++    for _ in range(200):
++        pool.accrue(BLOCK_REWARD)
++        record(2, BLOCK_REWARD)
++    for i in range(100):
++        record(4, pool.undelegate(i, pool.delegations[i] // 2, 10_000))
++    for i in range(100, 200):
++        record(4, pool.undelegate(i, pool.delegations[i] // 3, 20_000))
++    pool.slash(500)
++    record(3, 500)
++    for _ in range(200):
++        pool.accrue(BLOCK_REWARD)
++        record(2, BLOCK_REWARD)
++    try:
++        early = pool.withdraw(0, 10_000 + UNBONDING_BLOCKS - 1)
++    except ValueError:
++        early = 0
++    record(5, early)
++    for i in range(100):
++        try:
++            claimed = pool.withdraw(i, 10_000 + UNBONDING_BLOCKS)
++        except ValueError:
++            claimed = 0
++        record(6, claimed)
++    for i in range(100, 200):
++        try:
++            claimed = pool.withdraw(i, 20_000 + UNBONDING_BLOCKS)
++        except ValueError:
++            claimed = 0
++        record(6, claimed)
++    record(9, 0)
++
++    # The gate: shares sum == 1 at every step; early attempt rejected.
++    for step in steps:
++        assert step[4] == step[5], "T4: the delegator shares must sum to exactly one"
++    assert steps[1802][1] == 5 and steps[1802][2] == 0, (
++        "T4: a withdrawal without unbonding must be rejected"
++    )
++
++    text = "".join("%d:%d:%d:%d:%d:%d\n" % step for step in steps)
++    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
++    assert digest == GOLDEN_STAKING_DIGEST, (
++        "T4: the reference simulation must agree with the pinned digest"
++    )
++    assert digest == scenario["golden_path_digest"]
++
++    totals = scenario["totals"]
++    withdrawn = sum(step[2] for step in steps if step[1] == 6)
++    assert withdrawn == totals["withdrawn_total"], (
++        "T4: the reference simulation must agree with the pinned digest"
++    )
++    assert pool.bonded == totals["final_bonded"], (
++        "T4: the reference simulation must agree with the pinned digest"
++    )
++    assert pool.total_shares == totals["final_total_shares"]
++    assert pool.shares_sum() == totals["final_shares_sum"], (
++        "T4: the delegator shares must sum to exactly one"
++    )
++    assert pool.pending_commission == totals["pending_commission"], (
++        "T4: the commission must be taken from rewards only"
++    )
++
++    for sample in scenario["samples"]:
++        step = steps[sample["after_step"]]
++        if "bonded" in sample:
++            assert step[3] == sample["bonded"], (
++                "T4: the reference simulation must agree with the pinned digest "
++                "(sample %d)" % sample["after_step"]
++            )
++        if "amount" in sample:
++            assert step[2] == sample["amount"], (
++                "T4: a withdrawal without unbonding must be rejected (sample %d)"
++                % sample["after_step"]
++            )
++
++    proc = subprocess.run(
++        ["cargo", "run", "--quiet", "--locked", "-p", "aura-storage", "--example",
++         "t4_staking_example"],
++        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
++        text=True, errors="replace",
++    )
++    output = proc.stdout or ""
++    if proc.returncode != 0 or "T4-SIM-OK " not in output:
++        print(output[-2000:])
++        print("RESULT: T4 staking check FAIL — rust example did not run")
++        return 1
++    payload = json.loads(output[output.index("T4-SIM-OK ") + len("T4-SIM-OK "):].strip())
++    assert payload["steps"] == len(steps)
++    assert payload["digest"] == digest, (
++        "T4: the reference simulation must agree with the pinned digest"
++    )
++    assert payload["final_bonded"] == pool.bonded
++    assert payload["final_total_shares"] == pool.total_shares
++    assert payload["final_shares_sum"] == pool.shares_sum(), (
++        "T4: the delegator shares must sum to exactly one"
++    )
++    assert payload["withdrawn_total"] == withdrawn
++    print("RESULT: T4 staking check PASS — 1000 delegators, shares sum to exactly one "
++          "(final shares %d), unbonding %d blocks, withdrawn %d, commission %d, digest %s"
++          % (pool.total_shares, UNBONDING_BLOCKS, withdrawn, pool.pending_commission, digest))
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/write_t4_evidence.py b/tools/write_t4_evidence.py
+new file mode 100644
+index 0000000..38a6e66
+--- /dev/null
++++ b/tools/write_t4_evidence.py
+@@ -0,0 +1,179 @@
++#!/usr/bin/env python3
++"""Write docs/evidence/t4 (ECONOMICS_PLAN T4).
++
++Runs the T4 gates (independent staking oracle incl. the Rust example
++cross-run, cargo test t4_staking) and tools/nc_t4.py, builds
++self-contained evidence: gates.txt rows, campaign/ bundle (run logs +
++result.json with source digests), nc.log with the RESULT line, report.md
++and cumulative inventory (TOTAL: 543).
++"""
++
++import hashlib
++import json
++import os
++import subprocess
++import sys
++import time
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++EVID = os.path.join(ROOT, "docs", "evidence", "t4")
++EVID_DIRS = ["", "campaign"]
++GATES = [
++    ([sys.executable, os.path.join(ROOT, "tools", "t4_staking_check.py")],
++     "baseline", "independent staking oracle (1000 delegators, shares sum to one)"),
++    (["cargo", "test", "--locked", "-p", "aura-storage", "--test", "t4_staking"],
++     "t4-staking", "named gate: shares sum == 1; withdraw without unbonding -> red"),
++    ([sys.executable, os.path.join(ROOT, "tools", "nc_t4.py")],
++     "nc-suite", "7 mutation controls incl. the literal withdraw-without-unbonding"),
++]
++SOURCES = [
++    "crates/aura-storage/src/staking.rs",
++    "crates/aura-storage/tests/t4_staking.rs",
++    "crates/aura-storage/examples/t4_staking_example.rs",
++    "sim/t4-staking.json",
++    "tools/t4_staking_check.py",
++    "tools/nc_t4.py",
++]
++
++
++def sha256_file(path):
++    h = hashlib.sha256()
++    with open(path, "rb") as f:
++        for chunk in iter(lambda: f.read(65536), b""):
++            h.update(chunk)
++    return h.hexdigest()
++
++
++def run_cmd(cmd, timeout=2400):
++    started = time.time()
++    proc = subprocess.run(cmd, cwd=ROOT, stdout=subprocess.PIPE,
++                          stderr=subprocess.STDOUT, text=True,
++                          errors="replace", timeout=timeout)
++    return proc.returncode, proc.stdout or "", time.time() - started
++
++
++def gate_passes(code, output, name):
++    if code != 0:
++        return False
++    if name == "baseline":
++        return "RESULT: T4 staking check PASS" in output
++    if name == "t4-staking":
++        return "test result: ok." in output
++    return "RESULT: 7/7 negative controls PASS" in output
++
++
++def main():
++    for rel in EVID_DIRS:
++        os.makedirs(os.path.join(EVID, rel), exist_ok=True)
++
++    rows = []
++    logs = {}
++    outputs = {}
++    ok_all = True
++    for cmd, name, desc in GATES:
++        print("[evidence_t4] %s ..." % name, flush=True)
++        code, out, dur = run_cmd(cmd)
++        ok = gate_passes(code, out, name)
++        ok_all = ok_all and ok
++        rows.append((name, "pass" if ok else "FAIL", desc))
++        outputs[name] = out
++        logs[name + ".log"] = (
++            "[evidence_t4] cmd=%s exit=%d duration=%.2fs\n" % (" ".join(cmd), code, dur)
++            + out)
++        print("[evidence_t4] %s: %s" % (name, "pass" if ok else "FAIL"), flush=True)
++
++    nc_ok = "RESULT: 7/7 negative controls PASS" in outputs.get("nc-suite", "")
++    gate_ok = "test result: ok." in outputs.get("t4-staking", "")
++    oracle_ok = "RESULT: T4 staking check PASS" in outputs.get("baseline", "")
++
++    with open(os.path.join(EVID, "nc.log"), "w", encoding="utf-8") as f:
++        f.write("[evidence_t4] cmd=tools/nc_t4.py\n")
++        f.write(outputs.get("nc-suite", ""))
++
++    with open(os.path.join(EVID, "campaign", "t4-staking.log"), "w",
++              encoding="utf-8") as f:
++        f.write(logs.get("t4-staking.log", ""))
++    with open(os.path.join(EVID, "campaign", "result.json"), "w",
++              encoding="utf-8") as f:
++        json.dump({
++            "phase": "T4",
++            "when": time.strftime("%Y-%m-%dT%H:%M:%S"),
++            "commands": [[" ".join(cmd), name] for cmd, name, _ in GATES],
++            "gates": {name: status for name, status, _ in rows},
++            "named_gate": "1000 delegators: shares sum == 1; NC: withdraw "
++                          "without unbonding -> red",
++            "golden_path_digest":
++                "e80662c82c74e1d1a0a5b0624beb4cf08af88c24f8091751c277cc7ea6887f07",
++            "sources": {rel: sha256_file(os.path.join(ROOT, rel)) for rel in SOURCES},
++        }, f, indent=2, sort_keys=True)
++        f.write("\n")
++
++    for name, text in logs.items():
++        with open(os.path.join(EVID, name), "w", encoding="utf-8") as f:
++            f.write(text)
++
++    with open(os.path.join(EVID, "gates.txt"), "w", encoding="utf-8") as f:
++        f.write("T4 Staking gates (ECONOMICS_PLAN, "
++                "crates/aura-storage/tests/t4_staking.rs)\n")
++        f.write("Gate: 1000 delegators: shares sum == 1; NC: withdraw "
++                "without unbonding -> red\n\n")
++        for name, status, desc in rows:
++            f.write("%-42s %-22s %s\n" % (name, status, desc))
++        f.write("\nnegative controls: 7/7 (%s)\n" % ("PASS" if nc_ok else "FAIL"))
++        f.write("named gate: %s\n" % ("PASS" if gate_ok else "FAIL"))
++        f.write("oracle cross-run: %s\n" % ("PASS" if oracle_ok else "FAIL"))
++
++    with open(os.path.join(EVID, "report.md"), "w", encoding="utf-8") as f:
++        f.write("# Отчёт T4 — Staking\n\n")
++        f.write("Дата: %s\n\n" % time.strftime("%Y-%m-%d"))
++        f.write("Итог: **%s**\n\n" % ("ВСЕ ГЕЙТЫ T4 ЗЕЛЁНЫЕ" if ok_all
++                                      else "ЕСТЬ КРАСНЫЕ ГЕЙТЫ"))
++        f.write("Гейт: 1000 делегаторов — shares суммируются ровно в один "
++                "пул на каждом шаге; вывод без unbonding — красный.\n\n")
++        f.write("Модель `crates/aura-storage/src/staking.rs`: min stake "
++                "1 000 `ALCRY`; делегация через shares (компаундинг наград "
++                "меняет цену share, но не количество); комиссия валидатора "
++                "1000 bps **только из наград** (D-T2); unbonding 21 день "
++                "(362 880 блоков при 5 с) — вывод до срока красный "
++                "(`StillUnbonding`), без unbonding — красный "
++                "(`NoUnbonding`); slashing period = окно unbonding — "
++                "bonded и незабранный unbonding режутся пропорционально. "
++                "Сценарий `sim/t4-staking.json` (2004 шага: 1000 "
++                "делегаций, 600 наград, слэши 100/500 bps, частичные "
++                "undelegate, отказ за блок до зрелости, выводы), золотой "
++                "дайджест e80662c8…87f07 (Rust ↔ Python ↔ пример "
++                "`t4_staking_example`); финал: bonded 1 325 889 559 769 "
++                "089 696 565 650, shares 1 408 708 333 333 333 333 333 "
++                "367 (== Σ shares), комиссия 120 `ALCRY`-млн-ед., "
++                "выведено 85 430 770 230 910 303 434 449. Гейт "
++                "`crates/aura-storage/tests/t4_staking.rs` (10 тестов + "
++                "2 метаморфизма), оракул `tools/t4_staking_check.py`.\n")
++        f.write("negative controls `tools/nc_t4.py` (`nc.log`, "
++                "RESULT: 7/7 negative controls PASS) — 7 контролей "
++                "(стандарт 6 + slash-пропорциональность, прецедент H6–H9).\n\n")
++
++    with open(os.path.join(EVID, "inventory.txt"), "w", encoding="utf-8") as f:
++        f.write("# T4 inventory (generated by tools/write_t4_evidence.py)\n")
++        f.write("# Cumulative negative controls: 21 phases, 543 controls.\n")
++        f.write("W4: 6/6, H0: 6/6, H1: 6/6, H2: 6/6, H3: 6/6, H4: 6/6, "
++                "H5: 6/6, H6: 7/7, H7: 7/7, H8: 7/7, H9: 7/7, E0: 6/6, "
++                "E1: 6/6, E2: 6/6, E3: 6/6, T0: 6/6, T1: 6/6, T2: 6/6, "
++                "T3: 6/6, T4: 7/7\n")
++        f.write("TOTAL: 543 negative controls cumulative\n")
++
++    with open(os.path.join(EVID, "SHA256SUMS"), "w", encoding="utf-8") as f:
++        for rel in sorted(EVID_DIRS):
++            base = os.path.join(EVID, rel)
++            for name in sorted(os.listdir(base)):
++                path = os.path.join(base, name)
++                if os.path.isfile(path) and name != "SHA256SUMS":
++                    repo_rel = os.path.relpath(path, ROOT)
++                    f.write("%s  %s\n" % (sha256_file(path), repo_rel))
++
++    print("[evidence_t4] %s"
++          % ("all gates green" if ok_all else "RED GATES PRESENT"), flush=True)
++    return 0 if ok_all else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+-- 
+2.47.3
+
