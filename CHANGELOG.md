@@ -3,6 +3,187 @@
 All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
 never rewritten: corrections are made with a new entry or an explicit note.
 
+## [E9 — Bridge + AuraLite OS phase closed: IBC-like light-client bridge, limits/pause; gate MITM forged header -> reject, OS client checks finalized checkpoint, emulator lane green] 2026-11-22
+
+### Added
+
+- `crates/aura-storage/src/bridge.rs` — E9 model (D-E4 protections):
+  IBC/Tendermint-shaped light client (header hash chain, ed25519 commits
+  via `aura_crypto` RFC 8032, strictly-more-than-2/3 quorum = 27/40,
+  **every** commit signature verified — unknown signer, bit-flipped
+  signature and duplicate votes are `E9: forged header signature (…)`,
+  no early stop), bridge protections (per-transaction limit 1000 /
+  daily velocity limit 1200 with day-window reset, guardian pause,
+  one-time message ids — Nomad replay lesson, reserve invariant
+  `locked == minted` with `withdraw exceeds reserve` — Wormhole lesson,
+  state-root binding of every message) and `OsClient`, the
+  finalized-checkpoint verification entry point for AuraLite OS
+  (`verify_checkpoint` / `accept` / `check_root`). 12 named messages
+  (`E9: …`).
+- `crates/aura-storage/tests/e9_bridge.rs` — 8 gate tests: the three
+  DoD criteria (4 MITM forgery shapes rejected; OS client finalized-
+  checkpoint rule incl. forged checkpoint; emulator lane scenario with
+  the pinned 25-step log), exact NC literals, remaining named messages,
+  metamorphic commit-order / limit-boundary / determinism / quorum
+  controls. `examples/e9_bridge_example.rs` ↔ `tools/e9_bridge_check.py`
+  (independent model, RFC 8032 via `cryptography`) — identical
+  `E9-STEPS-OK 25` / `E9-SIM-OK` output; `sim/e9-bridge.json`.
+- `tools/e9_emulator_lane.py` (`make emulator-lane`, registered in
+  CI `ci.yml`) — the `aurad` CI lane (E9-LANE-OK 4: `--version`,
+  `report --fixture`, startup refusal without `--chain-id`, bounded node
+  run + clean SIGTERM shutdown); in-repo stand-in for AuraLite-Emulator
+  (deviation recorded). `tools/nc_e9.py` (6 mutation controls),
+  `tools/write_e9_evidence.py`, evidence tier `docs/evidence/e9/`,
+  report `docs/ecosystem/e9-bridge-report.md` (sources: tendermint spec
+  verification_002_draft, chainscorelabs IBC light client,
+  docs.tendermint.com accountability, ipsa-contracts VerifyCommitLight;
+  nomoslabs Nomad/Wormhole post-mortems, dev.to/0xrivet, zealynx
+  checklist, blockchaindose). Decisions D-E9..D-E9c.
+
+## [E8 — NFT + names + DAO phase closed: ARC-721/1155, .aura name service, on-chain identity, governance UI; gate 50 standard vectors + first DAO vote through the UI] 2026-11-22
+
+### Added
+
+- `crates/aura-storage/src/nft.rs` — E8 model: ARC-721 (per the repo's
+  X5 `standards/arc721`; transfers clear approvals, burned ids may be
+  re-minted), ARC-1155 (per-id supply, operators via `set_operator`,
+  all-or-nothing batch transfers, URIs), the ENS-shaped `.aura` name
+  service (365-day term, 90-day grace, renewal by anyone, re-register
+  after expiry+grace, primary/reverse resolution) and on-chain identity
+  records (metadata digest bound to a live name). 25 named messages
+  (`E8: …`).
+- `crates/aura-storage/src/dao_ui.rs` — governance UI over the T6 DAO:
+  propose/vote/finalize/execute/veto through the controller, per-vote
+  `UiReceipt` action log, deterministic self-contained HTML page
+  (`docs/evidence/e8/governance-ui.html`), pinned scenario
+  `run_e8_scenario` (the first DAO vote cast through the UI).
+- `crates/aura-storage/tests/fixtures/e8-standards.txt` +
+  `tools/gen_e8_vectors.py` — **50 standard vectors** (golden fixture,
+  block format, exact error literals and post-state reads);
+  `crates/aura-storage/tests/e8_nft.rs` — 15 gate tests (vectors with
+  exact literals, digests, DAO scenario, UI page, DAO error messages,
+  metamorphic batch/order/determinism controls);
+  `examples/e8_nft_example.rs` ↔ `tools/e8_nft_check.py` — identical
+  `E8-VECTORS-OK 50` / `E8-UI-OK` / `E8-SIM-OK` output and byte-equal
+  governance page; `tools/nc_e8.py` (6 mutation controls),
+  `tools/write_e8_evidence.py`, evidence tier `docs/evidence/e8/`,
+  report `docs/ecosystem/e8-nft-report.md` (sources: rareskills.io
+  ERC-1155, eco.com, webopedia, metana; gate.com/chainscorelabs/
+  cryptoslate/docs.ens.domains ENS). Decisions D-E6..D-E8.
+
+## [E7 — Lending phase closed: markets, kinked interest rate model, collateral factor, liquidation engine; gate 30-day simulation collateral >= debt invariant] 2026-11-22
+
+### Added
+
+- `crates/aura-storage/src/lending.rs` — Aave/Compound-style lending
+  market: LTV 75% borrow cap, liquidation at health < 12500 bps
+  (LTV > 80%, buffer to LTV), 5% liquidation bonus, 50% close factor,
+  kinked utilization rate model (base 2% + slope1 10%·U/kink, kink
+  80%, slope2 30% above), daily floor interest accrual, 256-bit
+  `mul_div`/`mul_div_ceil` math. 12 named messages (`E7: …`).
+- `crates/aura-storage/tests/e7_lending.rs` — 14 gate tests: literal
+  gate (30-day simulation, `collateral_value >= debt` never breaks per
+  account across 5 price shocks and 16 liquidations); functional NC
+  (same path without liquidations breaks the invariant on day 18 —
+  "no liquidation -> red"); golden rate-model and capacity boundaries;
+  metamorphic supply split, borrow/repay round trip, interest
+  monotonicity, determinism.
+- `crates/aura-storage/examples/e7_lending_example.rs` +
+  `sim/e7-lending.json` — deterministic scenario (`E7-SIM-OK`),
+  independent Python model `tools/e7_lending_check.py` (`E7-MODEL-OK`),
+  aggregate digest f8fa28de…bea7dd.
+- `tools/nc_e7.py` — 6 negative-control mutations (one per targeted
+  named message; `bad-borrow-capacity` is the gate mutation),
+  `tools/write_e7_evidence.py`, evidence tier `docs/evidence/e7/`,
+  report `docs/ecosystem/e7-lending-report.md` (sources: blofin.com
+  Aave vs Compound, academy.redduck.io lending lecture, Medium DeFi
+  lending comparative, GitHub lending-protocol reference). Order D-E3
+  kept: after the oracle (E5), the H8 audit, the AMM (E4) and the CDP
+  (E6).
+
+## [E6 — Stablecoin CDP phase closed: over-collateralized vaults, liquidations, peg stress; gate 200% collateral at -40% price -> liquidation with no bad debt] 2026-11-22
+
+### Added
+
+- `crates/aura-storage/src/cdp.rs` — MakerDAO-style CDP engine:
+  min collateral ratio 150% (`E6_MIN_RATIO_BPS`, ETH-A liquidation
+  ratio), liquidation penalty 5% (`E6_LIQ_PENALTY_BPS`, USDC-A/Raft
+  precedent), 256-bit `mul_div` floor math, mint/withdraw keep the
+  ratio, `liquidate` seizes `debt·(1+penalty)` at the oracle price and
+  returns the excess to the owner, peg invariant
+  `bad_debt == 0 && backed_value >= stable_supply`. 12 named messages
+  (`E6: …`).
+- `crates/aura-storage/tests/e6_cdp.rs` — 14 gate tests: literal gate
+  (200% collateral at -40% price -> liquidation with no bad debt);
+  property peg backing never breaks across the stress sequence;
+  NC mint-ratio guard message weakened -> red; metamorphic deposit
+  split, mint/repay round trip, liquidation-order commutativity,
+  determinism; golden boundaries (max mint 133333333333333333333,
+  max withdraw 50e18, seized 233333333333333333333 at price 0.45).
+- `crates/aura-storage/examples/e6_cdp_example.rs` + `sim/e6-cdp.json` —
+  deterministic scenario (`E6-SIM-OK`), independent Python model
+  `tools/e6_cdp_check.py` (`E6-MODEL-OK`), aggregate digest
+  9b64b653…a499c95.
+- `tools/nc_e6.py` — 6 negative-control mutations (one per targeted
+  named message; `bad-mint-ratio` is the gate mutation),
+  `tools/write_e6_evidence.py`, evidence tier `docs/evidence/e6/`,
+  report `docs/ecosystem/e6-cdp-report.md` (sources: MakerDAO vaults
+  docs, chainscorelabs.com CDP engine architecture, MakerDAO
+  whitepaper explainer). Order D-E3 kept: after the oracle (E5), the
+  H8 audit and the AMM (E4).
+
+## [E4 — AMM DEX phase closed: constant-product pools, LP tokens, swap + slippage guard, routing; gate invariant k never decreases] 2026-11-22
+
+### Added
+
+- `crates/aura-storage/src/amm.rs` — constant-product AMM (x·y = k):
+  fee-on-input 30 bps (0.3%, Uniswap V2 model), floor rounding at every
+  division, 256-bit `wide_mul`/`mul_div` arithmetic, invariant
+  `k = reserve_a · reserve_b` tracked in 256-bit limbs, LP tokens
+  (initial mint `a + b` — explained deviation from `sqrt`; later mints
+  strictly proportional; burn pro-rata with exact round trip),
+  `swap_exact_in` with slippage guard, `swap_route` multi-hop routing.
+  9 named messages (`E4: …`).
+- `crates/aura-storage/tests/e4_amm.rs` — 21 gate tests: invariant `k`
+  never decreases across swaps and routes (the literal gate property);
+  NC slippage guard off -> red; metamorphic split ≤ single, route =
+  manual hops, LP burn round trip, determinism; golden values
+  (1 A→B out of (100/200) = 1974316068794122597, route = 5791186053878244695).
+- `crates/aura-storage/examples/e4_amm_example.rs` + `sim/e4-amm.json` —
+  deterministic scenario (`E4-SIM-OK`), independent Python model
+  `tools/e4_amm_check.py` (`E4-MODEL-OK`), aggregate digest
+  c1286a35…283865.
+- `tools/nc_e4.py` — 6 negative-control mutations (one per named
+  message; the slippage-guard mutation is the gate mutation),
+  `tools/write_e4_evidence.py`, evidence tier `docs/evidence/e4/`,
+  report `docs/ecosystem/e4-amm-report.md` (sources: Uniswap V2
+  whitepaper, dev.to/autheo/zealynx AMM articles). Order D-E3 kept:
+  DeFi after the oracle (E5) and the H8 audit.
+
+## [E5 — Oracle phase closed: signed feed network, median, quorum N/2+1, staleness 3600s; gate 5 providers / 2 malicious -> price unchanged] 2026-11-22
+
+### Added
+
+- `crates/aura-storage/src/oracle.rs` — decentralized price feed
+  network: ed25519-signed provider reports (canon
+  `feed16||price16BE||ts8BE`), strict admission with 7 named messages,
+  quorum N/2+1 (min 3), lower-median aggregation, ±500 bps outlier
+  band, staleness window 3600 s (constants `E5_MAX_STALENESS_SECS`,
+  `E5_MIN_QUORUM`, `E5_DEVIATION_BPS`, `E5_ONE` = 10^18, D-T1 u128).
+- `crates/aura-storage/tests/e5_oracle.rs` — 14 gate tests: 5 providers
+  / 2 malicious -> price unchanged; NC one provider -> red; bad
+  signature, stale, future, duplicate, foreign feed, unknown provider,
+  empty round, outlier rejection; metamorphic permutation/scale and
+  determinism.
+- `crates/aura-storage/examples/e5_oracle_example.rs` +
+  `sim/e5-oracle.json` — deterministic round simulation
+  (`E5-SIM-OK`), independent Python model `tools/e5_oracle_check.py`
+  (`E5-MODEL-OK`), aggregate digest aee332b6…dead24.
+- `tools/nc_e5.py` — 6 negative-control mutations (one per named
+  message), `tools/write_e5_evidence.py`, evidence tier
+  `docs/evidence/e5/`, report `docs/ecosystem/e5-oracle-report.md`
+  (sources: Chainlink DON/OCR, Pyth, UMA).
+
 ## [T8 — White paper and law phase closed: MiCA checklist Art. 4/6/8/9, notification >= 20 working days, publication; not legal advice] 2026-11-22
 
 ### Added

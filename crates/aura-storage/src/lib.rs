@@ -32,8 +32,19 @@
 /// T2 allocation: genesis split (validators/treasury/community/team) with
 /// vesting cliffs and lockups (ECONOMICS_PLAN T2).
 pub mod allocation;
+/// E4 AMM DEX: constant-product pools with LP shares, fee-on-input
+/// swaps, a slippage guard and multi-hop routing (ECOSYSTEM_PLAN E4,
+/// decision D-E3 order: after the oracle phase).
+pub mod amm;
 mod backend;
 mod backup;
+/// E9 bridge: an IBC-like light-client bridge with limits, pause and a
+/// finalized-checkpoint client for AuraLite OS (ECOSYSTEM_PLAN E9).
+pub mod bridge;
+pub mod cdp;
+/// E8 governance UI: the user-facing controller over the T6 DAO where
+/// the first vote is cast through the UI (ECOSYSTEM_PLAN E8).
+pub mod dao_ui;
 /// T0 economics baseline: deterministic supply simulation with invariants
 /// and no token (ECONOMICS_PLAN T0).
 pub mod econ;
@@ -54,6 +65,14 @@ pub mod indexer;
 /// T1 issuance model: genesis supply, halving curve, hard cap and target
 /// staked ratio for `ALCRY` (ECONOMICS_PLAN T1, decision D-T1).
 pub mod issuance;
+pub mod lending;
+/// E8 NFT + names + identity: ARC-721/1155 tokens, the `.aura` name
+/// service and on-chain identity records (ECOSYSTEM_PLAN E8).
+pub mod nft;
+/// E5 oracle: a decentralized price feed network with ed25519-signed
+/// provider reports, median aggregation, quorum, staleness and an outlier
+/// band (ECOSYSTEM_PLAN E5, decision D-E3 order: oracle before DeFi).
+pub mod oracle;
 mod prune;
 /// E3 client SDK (Rust) for the explorer and faucet HTTP APIs.
 pub mod sdk;

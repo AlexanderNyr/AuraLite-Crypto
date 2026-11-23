@@ -308,6 +308,25 @@ test: deps-check
 	@echo "== white paper gate (T8) =="
 	@$(PYTHON) tools/t8_whitepaper_check.py
 	@$(CARGO) test --locked -p aura-storage --test t8_whitepaper
+	@echo "== oracle gate (E5) =="
+	@$(PYTHON) tools/e5_oracle_check.py
+	@$(CARGO) test --locked -p aura-storage --test e5_oracle
+	@echo "== amm gate (E4) =="
+	@$(PYTHON) tools/e4_amm_check.py
+	@$(CARGO) test --locked -p aura-storage --test e4_amm
+	@echo "== stablecoin gate (E6) =="
+	@$(PYTHON) tools/e6_cdp_check.py
+	@$(CARGO) test --locked -p aura-storage --test e6_cdp
+	@echo "== lending gate (E7) =="
+	@$(PYTHON) tools/e7_lending_check.py
+	@$(CARGO) test --locked -p aura-storage --test e7_lending
+	@echo "== nft + dao gate (E8) =="
+	@$(PYTHON) tools/e8_nft_check.py
+	@$(CARGO) test --locked -p aura-storage --test e8_nft
+	@echo "== bridge gate (E9) =="
+	@$(PYTHON) tools/e9_bridge_check.py
+	@$(CARGO) test --locked -p aura-storage --test e9_bridge
+	@$(PYTHON) tools/e9_emulator_lane.py
 	@echo "== close-out audit =="
 	@$(PYTHON) tools/audit_closeout.py
 	@echo "ALL GATES GREEN"
@@ -1487,6 +1506,107 @@ nc-t8:
 
 evidence-t8:
 	@$(PYTHON) tools/write_t8_evidence.py
+
+.PHONY: test-e5 check-e5 examples-e5 nc-e5 evidence-e5
+test-e5:
+	@$(CARGO) test --locked -p aura-storage --test e5_oracle
+
+check-e5:
+	@$(PYTHON) tools/e5_oracle_check.py
+
+examples-e5:
+	@$(CARGO) run --quiet --locked -p aura-storage --example e5_oracle_example sim/e5-oracle.json
+
+nc-e5:
+	@$(PYTHON) tools/nc_e5.py
+
+evidence-e5:
+	@$(PYTHON) tools/write_e5_evidence.py
+
+.PHONY: test-e4 check-e4 examples-e4 nc-e4 evidence-e4
+test-e4:
+	@$(CARGO) test --locked -p aura-storage --test e4_amm
+
+check-e4:
+	@$(PYTHON) tools/e4_amm_check.py
+
+examples-e4:
+	@$(CARGO) run --quiet --locked -p aura-storage --example e4_amm_example sim/e4-amm.json
+
+nc-e4:
+	@$(PYTHON) tools/nc_e4.py
+
+evidence-e4:
+	@$(PYTHON) tools/write_e4_evidence.py
+
+.PHONY: test-e6 check-e6 examples-e6 nc-e6 evidence-e6
+test-e6:
+	@$(CARGO) test --locked -p aura-storage --test e6_cdp
+
+check-e6:
+	@$(PYTHON) tools/e6_cdp_check.py
+
+examples-e6:
+	@$(CARGO) run --quiet --locked -p aura-storage --example e6_cdp_example sim/e6-cdp.json
+
+nc-e6:
+	@$(PYTHON) tools/nc_e6.py
+
+evidence-e6:
+	@$(PYTHON) tools/write_e6_evidence.py
+
+.PHONY: test-e7 check-e7 examples-e7 nc-e7 evidence-e7
+test-e7:
+	@$(CARGO) test --locked -p aura-storage --test e7_lending
+
+check-e7:
+	@$(PYTHON) tools/e7_lending_check.py
+
+examples-e7:
+	@$(CARGO) run --quiet --locked -p aura-storage --example e7_lending_example sim/e7-lending.json
+
+nc-e7:
+	@$(PYTHON) tools/nc_e7.py
+
+evidence-e7:
+	@$(PYTHON) tools/write_e7_evidence.py
+
+.PHONY: test-e8 check-e8 examples-e8 nc-e8 evidence-e8
+test-e8:
+	@$(CARGO) test --locked -p aura-storage --test e8_nft
+
+check-e8:
+	@$(PYTHON) tools/e8_nft_check.py
+
+examples-e8:
+	@$(CARGO) run --quiet --locked -p aura-storage --example e8_nft_example
+
+nc-e8:
+	@$(PYTHON) tools/nc_e8.py
+
+evidence-e8:
+	@$(PYTHON) tools/write_e8_evidence.py
+
+.PHONY: test-e9 check-e9 examples-e9 nc-e9 evidence-e9 emulator-lane
+test-e9:
+	@$(CARGO) test --locked -p aura-storage --test e9_bridge
+
+check-e9:
+	@$(PYTHON) tools/e9_bridge_check.py
+
+examples-e9:
+	@$(CARGO) run --quiet --locked -p aura-storage --example e9_bridge_example
+
+nc-e9:
+	@$(PYTHON) tools/nc_e9.py
+
+evidence-e9:
+	@$(PYTHON) tools/write_e9_evidence.py
+
+# E9 emulator lane: a deterministic CI run of `aurad` (the AuraLite-Emulator
+# lane contract, in-repo harness).
+emulator-lane:
+	@$(PYTHON) tools/e9_emulator_lane.py
 
 .PHONY: test-t5 check-t5 examples-t5 nc-t5 evidence-t5
 test-t5:
