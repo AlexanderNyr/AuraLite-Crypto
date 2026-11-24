@@ -1,12 +1,12 @@
-# Отчёт H6 — экономические атаки
+# H6 Report — economic attacks
 
-Дата: 2026-11-17
+Date: 2026-11-17
 
-Итог: **ВСЕ ГЕЙТЫ H6 ЗЕЛЁНЫЕ**
+The result: **ALL H6 GATES GREEN**
 
-Гейт: simulations: damage bounded by limits/slashing; NC: no pause -> red.
+Gate: simulations: damage bounded by limits/slashing; NC: no pause -> red.
 
-Кампания `h6_economic_campaign.py --schedule full` (`campaign/result.json`, логи в `campaign/`);
+The campaign `h6_economic_campaign.py --schedule full` (`campaign/result.json`, logs in `campaign/`);
 negative controls `tools/nc_h6.py` (`nc.log`, RESULT: 7/7 negative controls PASS).
-Моделируемые поверхности (oracle/bridge) — см. план-док §3.
+The modeled surfaces (oracle/bridge) — see the plan doc §3.
 

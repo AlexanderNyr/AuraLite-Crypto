@@ -117,19 +117,19 @@ def main():
         f.write("named gate: %s\n" % ("PASS" if gate_ok else "FAIL"))
 
     with open(os.path.join(EVID, "report.md"), "w", encoding="utf-8") as f:
-        f.write("# Отчёт E2 — обозреватель цепи\n\n")
-        f.write("Дата: %s\n\n" % time.strftime("%Y-%m-%d"))
-        f.write("Итог: **%s**\n\n" % ("ВСЕ ГЕЙТЫ E2 ЗЕЛЁНЫЕ" if ok_all
-                                      else "ЕСТЬ КРАСНЫЕ ГЕЙТЫ"))
-        f.write("Гейт: 10 user scenarios green; reproducible contract build = "
+        f.write("# E2 Report — chain explorer\n\n")
+        f.write("Date: %s\n\n" % time.strftime("%Y-%m-%d"))
+        f.write("The result: **%s**\n\n" % ("ALL E2 GATES GREEN" if ok_all
+                                      else "THERE ARE RED GATES"))
+        f.write("Gate: 10 user scenarios green; reproducible contract build = "
                 "same code_hash.\n\n")
         f.write("Backend+web UI `crates/aura-storage/src/explorer.rs` "
-                "(stdlib HTTP, новых зависимостей нет), гейт "
+                "(stdlib HTTP, no new dependencies), the gate "
                 "`crates/aura-storage/tests/e2_explorer.rs` "
                 "(`campaign/e2-explorer.log`, `campaign/result.json`), "
-                "чек-лист `tools/fixtures/e2_explorer_scenarios.json` "
-                "(10/10 ready) с оракулом `tools/e2_explorer_check.py` "
-                "(`baseline.log`) и независимым Python-сборщиком контрактов "
+                "the checklist `tools/fixtures/e2_explorer_scenarios.json` "
+                "(10/10 ready) with the oracle `tools/e2_explorer_check.py` "
+                "(`baseline.log`) and the independent Python contract builder "
                 "(`tools/fixtures/e2_contracts.json`).\n")
         f.write("negative controls `tools/nc_e2.py` (`nc.log`, "
                 "RESULT: 6/6 negative controls PASS).\n\n")

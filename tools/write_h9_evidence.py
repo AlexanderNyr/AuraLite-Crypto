@@ -113,15 +113,15 @@ def main():
         f.write("named gate: %s\n" % ("PASS" if drill_ok else "FAIL"))
 
     with open(os.path.join(EVID, "report.md"), "w", encoding="utf-8") as f:
-        f.write("# Отчёт H9 — инцидентные дриллы\n\n")
-        f.write("Дата: %s\n\n" % time.strftime("%Y-%m-%d"))
-        f.write("Итог: **%s**\n\n" % ("ВСЕ ГЕЙТЫ H9 ЗЕЛЁНЫЕ" if ok_all
-                                      else "ЕСТЬ КРАСНЫЕ ГЕЙТЫ"))
-        f.write("Гейт: drill \"Byzantine validator + bridge bug\": "
+        f.write("# H9 Report — incident drills\n\n")
+        f.write("Date: %s\n\n" % time.strftime("%Y-%m-%d"))
+        f.write("The result: **%s**\n\n" % ("ALL H9 GATES GREEN" if ok_all
+                                      else "THERE ARE RED GATES"))
+        f.write("Gate: drill \"Byzantine validator + bridge bug\": "
                 "network halted/recovered within SLO.\n\n")
         f.write("Playbook `docs/incident/PLAYBOOK.md` (halt/pause/upgrade/"
-                "rollback, communication, post-mortem); дриллы "
-                "`tools/fixtures/h9_drills.json`, раннер `tools/h9_incident_drill.py` "
+                "rollback, communication, post-mortem); the drills "
+                "`tools/fixtures/h9_drills.json`, the runner `tools/h9_incident_drill.py` "
                 "(`campaign/result.json`, `campaign/drill.log`).\n")
         f.write("negative controls `tools/nc_h9.py` (`nc.log`, "
                 "RESULT: 7/7 negative controls PASS).\n\n")

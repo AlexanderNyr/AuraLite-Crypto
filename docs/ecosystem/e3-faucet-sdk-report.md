@@ -1,26 +1,26 @@
-# Отчёт E3 — Faucet + SDK (2026-11-19)
+# E3 report — Faucet + SDK (2026-11-19)
 
-Фаза **E3** по ECOSYSTEM_PLAN (строка «Faucet + SDK»): rate-limited
-faucet (testnet only), Rust/TS/Python SDK, docs site. Гейт фазы
-выполнен буквально: **1000 requests: 1 payout/address/day; SDK examples
+Phase **E3** per ECOSYSTEM_PLAN (the "Faucet + SDK" row): a rate-limited
+faucet (testnet only), a Rust/TS/Python SDK, a docs site. The phase gate
+is met literally: **1000 requests: 1 payout/address/day; SDK examples
 pass in CI**.
 
-## Гейт (детально)
+## The gate (in detail)
 
-- **1000 запросов → 1 выплата на адрес в день**: скрипт гейта —
-  250 адресов × 3 дня (750 первых запросов) + 250 повторных запросов
-  в тот же день = ровно 1000 запросов. Итог: **750 выплат, 250 отказов
-  по rate limit, ни одного ключа (адрес, день) не оплачен дважды**.
-  Независимая Python-модель (`tools/e3_faucet_check.py`) переигрывает
-  тот же скрипт и сходится по цифрам (`tools/fixtures/e3_faucet_script.json`).
-- **SDK examples pass in CI**: три примера (Rust/TS/Python) выполняются
-  `tools/e3_examples_check.py` против живого reference-крана и
-  печатают одинаковый `E3-EXAMPLE-OK`-саммари: выплаты 2, отказов по
-  rate limit 1, отказов по сети 1. **3/3 PASS.**
+- **1000 requests → 1 payout per address per day**: the gate script is
+  250 addresses × 3 days (750 first requests) + 250 repeat requests
+  on the same day = exactly 1000 requests. Result: **750 payouts, 250 rejections
+  on rate limit, no (address, day) key paid twice**.
+  The independent Python model (`tools/e3_faucet_check.py`) replays
+  the same script and matches the numbers (`tools/fixtures/e3_faucet_script.json`).
+- **SDK examples pass in CI**: three examples (Rust/TS/Python) run
+  `tools/e3_examples_check.py` against the live reference faucet and
+  print the same `E3-EXAMPLE-OK` summary: 2 payouts, 1 rejection on
+  rate limit, 1 network rejection. **3/3 PASS.**
 
-## Именованные сообщения гейта
+## Named messages of the gate
 
-- `E3: faucet must pay 1 payout per address per day` (литерал гейта)
+- `E3: faucet must pay 1 payout per address per day` (the gate literal)
 - `E3: faucet must refuse non-testnet requests`
 - `E3: faucet must stop when out of funds`
 - `E3: the daily window must roll over`
@@ -29,36 +29,36 @@ pass in CI**.
 
 ## Negative controls (6/6)
 
-| № | Внедрённый баг | Именованное сообщение |
+| # | Injected bug | Named message |
 |---|---|---|
-| NC-1 | убрана проверка повтора в тот же день (литерал гейта) | `E3: faucet must pay 1 payout per address per day` |
-| NC-2 | убран testnet-only guard | `E3: faucet must refuse non-testnet requests` |
-| NC-3 | убрана остановка при нулевом фонде | `E3: faucet must stop when out of funds` |
-| NC-4 | дневное окно не перекатывается | `E3: the daily window must roll over` |
-| NC-5 | HTTP-маршрут обходит политику | `E3: the faucet HTTP API must apply the same policy as the library` |
-| NC-6 | убрана валидация адресов | `E3: the faucet must validate addresses` |
+| NC-1 | the same-day repeat check removed (the gate literal) | `E3: faucet must pay 1 payout per address per day` |
+| NC-2 | the testnet-only guard removed | `E3: faucet must refuse non-testnet requests` |
+| NC-3 | the out-of-funds stop removed | `E3: faucet must stop when out of funds` |
+| NC-4 | the daily window does not roll over | `E3: the daily window must roll over` |
+| NC-5 | the HTTP route bypasses the policy | `E3: the faucet HTTP API must apply the same policy as the library` |
+| NC-6 | address validation removed | `E3: the faucet must validate addresses` |
 
-## Артефакты
+## Artifacts
 
-| Артефакт | Путь |
+| Artifact | Path |
 |---|---|
-| Faucet (детерминированная политика + stdlib HTTP) | `crates/aura-storage/src/faucet.rs` |
+| Faucet (deterministic policy + stdlib HTTP) | `crates/aura-storage/src/faucet.rs` |
 | Rust SDK | `crates/aura-storage/src/sdk.rs` |
 | TypeScript SDK | `sdk/ts/aura_lite.ts` (+ `sdk/ts/example.ts`) |
 | Python SDK | `sdk/python/aura_lite.py` (+ `sdk/python/example.py`) |
-| Гейт-тест | `crates/aura-storage/tests/e3_faucet.rs` (`make test-e3`) |
-| Оракул политики | `tools/e3_faucet_check.py` + `tools/fixtures/e3_faucet_script.json` |
-| Примеры SDK в CI | `tools/e3_examples_check.py` (`make examples-e3`) |
+| Gate test | `crates/aura-storage/tests/e3_faucet.rs` (`make test-e3`) |
+| Policy oracle | `tools/e3_faucet_check.py` + `tools/fixtures/e3_faucet_script.json` |
+| SDK examples in CI | `tools/e3_examples_check.py` (`make examples-e3`) |
 | Docs site | `docs/sdk/index.md` |
-| Эвиденс | `docs/evidence/e3/` (gates.txt, nc.log, campaign/result.json → `TOTAL: 512`) |
+| Evidence | `docs/evidence/e3/` (gates.txt, nc.log, campaign/result.json → `TOTAL: 512`) |
 
-## Отклонения от плана (зафиксированы правкой план-дока)
+## Deviations from the plan (pinned by a plan-doc edit)
 
-1. Выплата = запись в леджер крана со списанием фонда; ончейн-перевод
-   не выполняется, пока W1-FORMAT-v1 testnet freeze в силе.
-2. Демо-протокол HTTP несёт явный `now` (детерминизм CI).
-3. TS-пример выполняется в CI детерминированным type-strip + `node`
-   (TypeScript-тулчейн не пинен в CI).
-4. Docs site — статические страницы `docs/sdk/` без пайплайна публикации.
+1. A payout is a faucet-ledger entry with fund debiting; an on-chain transfer
+   is not performed while the W1-FORMAT-v1 testnet freeze is in force.
+2. The demo HTTP protocol carries an explicit `now` (CI determinism).
+3. The TS example runs in CI via deterministic type-strip + `node`
+   (the TypeScript toolchain is not pinned in CI).
+4. The docs site is static pages under `docs/sdk/` with no publishing pipeline.
 
-Итоговый счётчик: **512 negative controls cumulative** (506 + 6).
+The final counter: **512 negative controls cumulative** (506 + 6).

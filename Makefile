@@ -327,6 +327,15 @@ test: deps-check
 	@$(PYTHON) tools/e9_bridge_check.py
 	@$(CARGO) test --locked -p aura-storage --test e9_bridge
 	@$(PYTHON) tools/e9_emulator_lane.py
+	@echo "== baseline bench gate (P0) =="
+	@$(PYTHON) tools/p0_bench_check.py
+	@$(CARGO) test --locked -p aura-bench --test p0_bench
+	@echo "== codec/crypto gate (P1) =="
+	@$(PYTHON) tools/p1_crypto_check.py
+	@$(CARGO) test --locked -p aura-bench --test p1_crypto
+	@echo "== parallel execution gate (P2) =="
+	@$(PYTHON) tools/p2_parallel_check.py
+	@$(CARGO) test --locked -p aura-bench --test p2_parallel
 	@echo "== close-out audit =="
 	@$(PYTHON) tools/audit_closeout.py
 	@echo "ALL GATES GREEN"
@@ -1607,6 +1616,119 @@ evidence-e9:
 # lane contract, in-repo harness).
 emulator-lane:
 	@$(PYTHON) tools/e9_emulator_lane.py
+
+.PHONY: test-p0 check-p0 examples-p0 nc-p0 evidence-p0
+test-p0:
+	@$(CARGO) test --locked -p aura-bench --test p0_bench
+
+check-p0:
+	@$(PYTHON) tools/p0_bench_check.py
+
+examples-p0:
+	@$(CARGO) run --quiet --locked -p aura-bench --example p0_bench_example
+
+nc-p0:
+	@$(PYTHON) tools/nc_p0.py
+
+evidence-p0:
+	@$(PYTHON) tools/write_p0_evidence.py
+
+.PHONY: test-p1 check-p1 examples-p1 nc-p1 evidence-p1
+test-p1:
+	@$(CARGO) test --locked -p aura-bench --test p1_crypto
+
+check-p1:
+	@$(PYTHON) tools/p1_crypto_check.py
+
+examples-p1:
+	@$(CARGO) run --quiet --locked -p aura-bench --example p1_crypto_example
+
+nc-p1:
+	@$(PYTHON) tools/nc_p1.py
+
+evidence-p1:
+	@$(PYTHON) tools/write_p1_evidence.py
+
+.PHONY: test-p2 check-p2 examples-p2 nc-p2 evidence-p2
+test-p2:
+	@$(CARGO) test --locked -p aura-bench --test p2_parallel
+
+check-p2:
+	@$(PYTHON) tools/p2_parallel_check.py
+
+examples-p2:
+	@$(CARGO) run --quiet --locked -p aura-bench --example p2_parallel_example
+
+nc-p2:
+	@$(PYTHON) tools/nc_p2.py
+
+evidence-p2:
+	@$(PYTHON) tools/write_p2_evidence.py
+
+.PHONY: test-p3 check-p3 examples-p3 nc-p3 evidence-p3
+test-p3:
+	@$(CARGO) test --locked -p aura-bench --test p3_storage
+
+check-p3:
+	@$(PYTHON) tools/p3_storage_check.py
+
+examples-p3:
+	@$(CARGO) run --quiet --locked -p aura-bench --example p3_storage_example | diff - <$(PYTHON) tools/p3_storage_check.py
+
+nc-p3:
+	@$(PYTHON) tools/nc_p3.py
+
+evidence-p3:
+	@$(PYTHON) tools/write_p3_evidence.py
+
+.PHONY: test-p4 check-p4 examples-p4 nc-p4 evidence-p4
+test-p4:
+	@$(CARGO) test --locked -p aura-bench --test p4_network
+
+check-p4:
+	@$(PYTHON) tools/p4_network_check.py
+
+examples-p4:
+	@$(CARGO) run --quiet --locked -p aura-bench --example p4_network_example | diff - <$(PYTHON) tools/p4_network_check.py
+
+nc-p4:
+	@$(PYTHON) tools/nc_p4.py
+
+evidence-p4:
+	@$(PYTHON) tools/write_p4_evidence.py
+
+.PHONY: test-p5 check-p5 examples-p5 nc-p5 evidence-p5
+.PHONY: test-p6 check-p6 examples-p6 nc-p6 evidence-p6
+test-p5:
+	@$(CARGO) test --locked -p aura-bench --test p5_consensus
+
+check-p5:
+	@$(PYTHON) tools/p5_consensus_check.py
+
+examples-p5:
+	@$(CARGO) run --quiet --locked -p aura-bench --example p5_consensus_example | diff - <$(PYTHON) tools/p5_consensus_check.py
+
+nc-p5:
+	@$(PYTHON) tools/nc_p5.py
+
+evidence-p5:
+	@$(PYTHON) tools/write_p5_evidence.py
+
+nc-p6:
+	@$(PYTHON) tools/nc_p6.py
+
+test-p6:
+	@$(CARGO) test --locked -p aura-bench --test p6_slo
+
+check-p6:
+	@$(PYTHON) tools/p6_slo_check.py
+	@$(CARGO) run --quiet --locked -p aura-bench --example p6_slo_example | diff - <$(PYTHON) tools/p6_slo_check.py
+
+examples-p6:
+	@$(CARGO) run --quiet --locked -p aura-bench --example p6_slo_example
+
+evidence-p6:
+	@$(PYTHON) tools/write_p6_evidence.py
 
 .PHONY: test-t5 check-t5 examples-t5 nc-t5 evidence-t5
 test-t5:

@@ -110,13 +110,13 @@ def main():
         f.write("named gate: %s\n" % ("PASS" if baseline_ok else "FAIL"))
 
     with open(os.path.join(EVID, "report.md"), "w", encoding="utf-8") as f:
-        f.write("# Отчёт E0 — базовый уровень экосистемы\n\n")
-        f.write("Дата: %s\n\n" % time.strftime("%Y-%m-%d"))
-        f.write("Итог: **%s**\n\n" % ("ВСЕ ГЕЙТЫ E0 ЗЕЛЁНЫЕ" if ok_all
-                                      else "ЕСТЬ КРАСНЫЕ ГЕЙТЫ"))
-        f.write("Гейт: checklist of 10 user scenarios (0/10 so far).\n\n")
-        f.write("Отчёт `docs/ecosystem/e0-baseline-report.md`, реестр "
-                "`tools/fixtures/e0_user_scenarios.json`, оракул "
+        f.write("# E0 Report — ecosystem baseline\n\n")
+        f.write("Date: %s\n\n" % time.strftime("%Y-%m-%d"))
+        f.write("The result: **%s**\n\n" % ("ALL E0 GATES GREEN" if ok_all
+                                      else "THERE ARE RED GATES"))
+        f.write("Gate: checklist of 10 user scenarios (0/10 so far).\n\n")
+        f.write("The report `docs/ecosystem/e0-baseline-report.md`, the registry "
+                "`tools/fixtures/e0_user_scenarios.json`, the oracle "
                 "`tools/e0_baseline_check.py` (`campaign/result.json`, "
                 "`campaign/baseline.log`).\n")
         f.write("negative controls `tools/nc_e0.py` (`nc.log`, "

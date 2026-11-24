@@ -1,6 +1,6 @@
 # SECURITY_PLAN — threats, fuzzing, audit, incidents
 
-**Status:** 🚧 IN PROGRESS — H0 ✅ (`patches/0063-H0-threat-model.patch`); H1 ✅ (`patches/0064-H1-supply-chain.patch`); H4 ✅ (`patches/0068-H4-property.patch`); H5 ✅ (`patches/0069-H5-consensus.patch`); H6 ✅ (`patches/0070-H6-economic.patch`); H7 ✅ (`patches/0071-H7-opsec.patch`) — **Stage 1 (H0–H7) закрыт**; H8 ✅ (`patches/0072-H8-audit.patch`); H9 ✅ (`patches/0073-H9-incident.patch`) — **SECURITY_PLAN (H0–H9) закрыт**  
+**Status:** 🚧 IN PROGRESS — H0 ✅ (`patches/0063-H0-threat-model.patch`); H1 ✅ (`patches/0064-H1-supply-chain.patch`); H4 ✅ (`patches/0068-H4-property.patch`); H5 ✅ (`patches/0069-H5-consensus.patch`); H6 ✅ (`patches/0070-H6-economic.patch`); H7 ✅ (`patches/0071-H7-opsec.patch`) — **Stage 1 (H0–H7) closed**; H8 ✅ (`patches/0072-H8-audit.patch`); H9 ✅ (`patches/0073-H9-incident.patch`) — **SECURITY_PLAN (H0–H9) closed**  
 **Stage:** Stage 1: H0–H7. ⏸ Stage 2: H8–H9 (external audit, bug bounty, incident drills).  
 **Deliverable:** `patches/0086-H0-...` … `patches/0095-H9-...`
 **Dependencies:** runs in parallel with CORE (H0/H1 with C0). H0–H7 are mandatory

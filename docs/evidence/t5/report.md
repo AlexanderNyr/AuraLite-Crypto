@@ -1,11 +1,11 @@
-# Отчёт T5 — Slashing and insurance
+# T5 Report — Slashing and insurance
 
-Дата: 2026-11-21
+Date: 2026-11-21
 
-Итог: **ВСЕ ГЕЙТЫ T5 ЗЕЛЁНЫЕ**
+The result: **ALL T5 GATES GREEN**
 
-Гейт: 7 сценариев — penalty >= damage, фонд страхования никогда не уходит в минус.
+Gate: 7 scenarios — penalty >= damage, the insurance fund never goes negative.
 
-Модель `crates/aura-storage/src/slashing.rs`: инцидент причиняет `damage`; штраф обидчика = damage × 15000 bps (параметры штрафа, penalty >= damage всегда); пострадавшие покрываются из страхового фонда (`covered = min(damage, balance)`, остаток — `shortfall`); фонд пополняется на 5000 bps от применённого штрафа; mass-slash защита — окно не может уничтожить больше 500 bps зарегистрированного bonded (1 000 000 `ALCRY` = 50 000 `ALCRY`/окно), избыток штрафа ОТКЛАДЫВАЕТСЯ (не прощается) и собирается следующими окнами. Сценарий `sim/t5-slashing.json` (7 сценариев, 87 шагов, 48 инцидентов: единичный double-sign, повторный нарушитель, коррелированный mass-slash, истощение фонда, floor-края штрафа, cap по окнам, цепочка истощения и пополнения), золотой дайджест 4cc9ea03…7c9cef (Rust ↔ Python ↔ пример `t5_slashing_example`); финал: фонд 536 750 `ALCRY`, очередь отложенных пуста (total_applied == total_penalty == 1 790 402 999 999 999 999 999 999), покрыто 558 451 499 999 999 999 999 998, непокрыто 635 150 500 000 000 000 000 002. Гейт `crates/aura-storage/tests/t5_slashing.rs` (10 тестов + 2 метаморфизма), оракул `tools/t5_slashing_check.py`.
-negative controls `tools/nc_t5.py` (`nc.log`, RESULT: 7/7 negative controls PASS) — 7 контролей (стандарт 6 + mass-slash cap, прецедент H6–H9/T4).
+The `crates/aura-storage/src/slashing.rs` model: an incident causes `damage`; the offender's penalty = damage × 15000 bps (the penalty parameters, penalty >= damage always); victims are covered from the insurance fund (`covered = min(damage, balance)`, the remainder is `shortfall`); the fund is replenished by 5000 bps of the applied penalty; the mass-slash protection — no window can destroy more than 500 bps of registered bonded (1 000 000 `ALCRY` = 50 000 `ALCRY`/window), excess penalty is DEFERRED (never forgiven) and collected by the following windows. The scenario `sim/t5-slashing.json` (7 scenarios, 87 steps, 48 incidents: a single double-sign, a repeat offender, a correlated mass-slash, fund exhaustion, penalty floor edges, per-window caps, an exhaustion-and-replenishment chain), the golden digest 4cc9ea03…7c9cef (Rust ↔ Python ↔ the `t5_slashing_example` example); the finale: fund 536 750 `ALCRY`, the deferred queue is empty (total_applied == total_penalty == 1 790 402 999 999 999 999 999 999), covered 558 451 499 999 999 999 999 998, uncovered 635 150 500 000 000 000 000 002. The gate `crates/aura-storage/tests/t5_slashing.rs` (10 tests + 2 metamorphic properties), the oracle `tools/t5_slashing_check.py`.
+negative controls `tools/nc_t5.py` (`nc.log`, RESULT: 7/7 negative controls PASS) — 7 controls (the standard 6 + the mass-slash cap, precedent H6–H9/T4).
 

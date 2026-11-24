@@ -1,0 +1,45 @@
+P4 NETWORK EVIDENCE (PERF, Stage 2)
+===================================
+
+DoD (PERF_PLAN P4): vote batching, compression, gossipsub parameters,
+mesh tuning; 100 nodes: traffic/validator within budget (the budget is
+published with its methodology = D-P3). D-P7: the profile is a
+self-contained artifact (aura-bench::p4); aura-p2p parameter wiring is
+a follow-up. Fixture model: D-P1 (100 validators, 1 Gbit/s).
+
+model sha256           : 346ce3cc0f0d2f139fcdf4b4b753efb51807d4b0a5a727a3aa67c37611a3ef48
+workload_digest        : 3b105a693a17bddf29ae5fa2f583cdd0982131e5155bfa1078bddf6e598debf6
+machine_digest         : cc5b0e9e932a00ca5acc4dbec21c0f77f0a548c1f7fdc6a89fb742def1a6ab2d (D-P1: vcpu=8 mem_gib=32 storage=nvme validators=100 net_mbit=1000)
+report digest (bench)  : ab618903bda0b4dc15705a228a0cd9992e6f76ecf0c20bfe8bf8463281ce1108
+runs / spread          : 5 / 0% (deterministic)
+
+DETERMINISTIC MODEL (source of truth)
+-------------------------------------
+traffic/validator      : 334848 -> 86495 B/s (1 view/s; -74%)
+budget (D-P3)          : 125000 B/s (1 Mbit/s egress) -> PASS (baseline honestly FAILs)
+votes wire             : 19200 -> 13632 (batching k=8)
+proposal wire          : 8512 -> 592 (RLE on runs x32 fixture)
+gossip overhead        : 13952 -> 2883 (GossipFactor 25% -> 10%, 2 hops)
+mesh degree            : 8 -> 5 (D_low=3, D_high=8, heartbeat 700ms, mcache 5)
+sensitivity 2:1        : 108860 B/s (still within budget)
+formula                : degree * (msg + overhead); overhead = factor*msg*hops/100
+
+MEASURED LAYER (D-P9, evidence only — not a gate)
+-------------------------------------------------
+rle_encode_ns          : 7619 (8 KiB fixture)
+rle_decode_ns          : 1575
+batch_ns / raw_copy_ns : 2876 / 71
+Honesty: wall-clock codec speed is not the DoD metric; the DoD is the
+deterministic byte accounting above (D-P2 before/after + budget).
+
+REVERT -> RED (tools/nc_p4.py, six named messages)
+---------------------------------------------------
+bad-budget    : mesh D 5 -> 8 -> 'P4: traffic/validator exceeds budget'
+bad-batching  : k 8 -> 1 -> 'P4: vote batching win reverted'
+bad-compression: RLE loses a byte -> 'P4: compression roundtrip mismatch'
+bad-params    : D_high < D -> 'P4: gossip parameter set inconsistent'
+bad-mesh      : ring even/odd split -> 'P4: mesh disconnected at 100 nodes'
+bad-determinism: one run differs -> 'P4: determinism violated (run N)'
+2026-11-24: 6/6 mutations red; restore green (tools/nc_p4.py).
+
+See docs/perf/p4-network-report.md (RU) for the full methodology.

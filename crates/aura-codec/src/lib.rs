@@ -29,6 +29,9 @@ mod error;
 mod impls;
 mod record;
 
+/// P1 zero-copy transfer wire block (phase P1 codec/crypto).
+pub mod transfer;
+
 pub use codec::{
     Decode, Encode, Reader, Writer, decode_canonical, decode_from_slice, encode_to_bytes,
     read_varint, write_varint,

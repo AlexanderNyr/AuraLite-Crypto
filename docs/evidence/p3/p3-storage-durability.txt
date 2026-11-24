@@ -1,0 +1,47 @@
+P3 STORAGE EVIDENCE (PERF, Stage 1)
+===================================
+
+DoD (PERF_PLAN P3): RocksDB tuning, bloom filters, compaction, batch
+writes; p99 commit latency < SLO (published with methodology = D-P3);
+NC: fsync in the wrong place -> S7 red (the aura-storage commit
+contract: WAL append -> fsync -> publish). D-P7: the profile is a
+self-contained artifact (aura-bench::p3); RocksDB backend tuning is a
+follow-up. Fixture model: D-P1.
+
+model sha256           : d380a0939212b70c71dc28b856ab59854e3a78fbd49a84653717659d528c138b
+workload_digest        : 3bf6032aec4304a3301893b375990d9300e22e664db85a8e1d81a30881cc992b
+machine_digest         : cc5b0e9e932a00ca5acc4dbec21c0f77f0a548c1f7fdc6a89fb742def1a6ab2d (D-P1: vcpu=8 mem_gib=32 storage=nvme validators=100 net_mbit=1000)
+report digest (bench)  : b467c465fd824adb64f5689f2b5b216a640a038848e9ef8808f9c3fd8e6223e7
+runs / spread          : 5 / 0% (deterministic)
+
+DETERMINISTIC MODEL (source of truth)
+-------------------------------------
+block_cost_before      : 311000 (fsync per write: 1000*(wal 9 + fsync 300 + mem 2))
+block_cost_after       : 12300 (one WriteBatch: 1000*(9+2) + fsync 300 + compaction 1000*8/8)
+p50/p95/p99            : 12300/12300/12300 units
+SLO (D-P3)             : 15000 -> p99 PASS
+speedup_pct            : 2428 (honest integer model)
+bloom (10 bits, k=7)   : miss cost 40 -> 1; fp 0/200
+after formula          : writes*(wal+memtable) + fsync + writes*compact/every
+
+MEASURED LAYER (D-P9, evidence only — not a gate)
+-------------------------------------------------
+per_write_ns           : 402094 (250 x 8KiB, fsync each)
+batch_ns               : 372750 (one fsync per batch)
+speedup_pct            : 7 (sandbox fsync is cheap — honest)
+bloom_miss_ns          : 109 vs raw_miss_ns 20
+Honesty: the sandbox is overlay/tmpfs (near-free fsync) and the map is
+an in-memory SSTable proxy; the D-P1 NVMe profile is dominated by fsync
+per write. DoD numbers come from the deterministic model above.
+
+REVERT -> RED (tools/nc_p3.py, six named messages)
+---------------------------------------------------
+bad-slo      : batch write by write again -> 'P3: p99 commit exceeds SLO'
+bad-fsync    : fsync out of the commit path -> 'P3: fsync missing in commit path (batch N)' (S7 red)
+bad-bloom    : k-1 bits only -> 'P3: bloom false negative (key N)'
+bad-bloom-cost: probe costs an SSTable read -> 'P3: bloom miss cost regression'
+bad-compaction: drop run data on merge -> 'P3: compaction lost data'
+bad-determinism: one run differs -> 'P3: determinism violated (run N)'
+2026-11-24: 6/6 mutations red; restore green (tools/nc_p3.py).
+
+See docs/perf/p3-storage-report.md (RU) for the full methodology.

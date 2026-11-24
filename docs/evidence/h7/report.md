@@ -1,12 +1,12 @@
-# Отчёт H7 — OpSec / воспроизводимые сборки
+# H7 Report — OpSec / reproducible builds
 
-Дата: 2026-11-17
+Date: 2026-11-17
 
-Итог: **ВСЕ ГЕЙТЫ H7 ЗЕЛЁНЫЕ**
+The result: **ALL H7 GATES GREEN**
 
-Гейт: NC: secret in git -> CI red; two hosts build to the same sha256.
+Gate: NC: secret in git -> CI red; two hosts build to the same sha256.
 
-Кампания `h7_opsec_campaign.py --schedule full` (`campaign/result.json`, `campaign/repro-result.json`);
+The campaign `h7_opsec_campaign.py --schedule full` (`campaign/result.json`, `campaign/repro-result.json`);
 negative controls `tools/nc_h7.py` (`nc.log`, RESULT: 7/7 negative controls PASS).
-Stage 1 (H0–H7) закрывается этой фазой.
+Stage 1 (H0–H7) is closed by this phase.
 

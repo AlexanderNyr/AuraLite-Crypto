@@ -29,7 +29,9 @@ mod hash;
 mod secp;
 mod secret;
 
-pub use ed25519::{ed25519_public_key, sign, sign_raw, verify, verify_raw};
+pub use ed25519::{
+    BatchItem, ed25519_public_key, sign, sign_raw, verify, verify_batch_raw, verify_raw,
+};
 pub use error::CryptoError;
 pub use hash::{HASH_CONTEXT, blake3_hash, domain_message, hash_domain};
 pub use secp::{secp_public_key, sign_prehash_raw, verify_prehash_raw};

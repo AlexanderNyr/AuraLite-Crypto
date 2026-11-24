@@ -122,19 +122,19 @@ def main():
         f.write("oracle cross-run: %s\n" % ("PASS" if oracle_ok else "FAIL"))
 
     with open(os.path.join(EVID, "report.md"), "w", encoding="utf-8") as f:
-        f.write("# Отчёт T1 — Issuance model\n\n")
-        f.write("Дата: %s\n\n" % time.strftime("%Y-%m-%d"))
-        f.write("Итог: **%s**\n\n" % ("ВСЕ ГЕЙТЫ T1 ЗЕЛЁНЫЕ" if ok_all
-                                      else "ЕСТЬ КРАСНЫЕ ГЕЙТЫ"))
-        f.write("Гейт: 10-летняя симуляция — supply совпадает с формулой в "
-                "пределах 1 базовой единицы.\n\n")
-        f.write("Модель `crates/aura-storage/src/issuance.rs`: genesis "
-                "3 000 000 ALCRY, годовая эмиссия 300 000 ALCRY с халвингом "
-                "каждые 4 года, потолок 6 000 000 ALCRY, целевая доля "
-                "стейка 6000 bps. Траектория 10 лет: 3.0M→4.95M ALCRY; "
-                "золотой дайджест пути c2a46691…c1a35 (Rust ↔ Python "
-                "эталон ↔ пример `t1_issuance_example`). Сценарий "
-                "`sim/t1-issuance.json`, гейт "
+        f.write("# T1 Report — Issuance model\n\n")
+        f.write("Date: %s\n\n" % time.strftime("%Y-%m-%d"))
+        f.write("The result: **%s**\n\n" % ("ALL T1 GATES GREEN" if ok_all
+                                      else "THERE ARE RED GATES"))
+        f.write("Gate: a 10-year simulation — the supply matches the formula within "
+                "1 base unit.\n\n")
+        f.write("The `crates/aura-storage/src/issuance.rs` model: genesis "
+                "3 000 000 ALCRY, annual emission of 300 000 ALCRY with a halving "
+                "every 4 years, a cap of 6 000 000 ALCRY, target stake "
+                "share 6000 bps. The 10-year trajectory: 3.0M→4.95M ALCRY; "
+                "the golden path digest c2a46691…c1a35 (Rust ↔ Python "
+                "reference ↔ the `t1_issuance_example` example). The scenario "
+                "`sim/t1-issuance.json`, the gate "
                 "`crates/aura-storage/tests/t1_issuance.rs` "
                 "(`campaign/t1-issuance.log`, `campaign/result.json`).\n")
         f.write("negative controls `tools/nc_t1.py` (`nc.log`, "

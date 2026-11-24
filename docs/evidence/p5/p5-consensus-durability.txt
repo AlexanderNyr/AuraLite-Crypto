@@ -1,0 +1,50 @@
+P5 CONSENSUS EVIDENCE (PERF, Stage 2)
+=====================================
+
+DoD (PERF_PLAN P5): pipelining, QC cache, faster view change;
+p99 finality at 100 nodes < 2 s (the SLO is plan-fixed; the
+methodology is published = D-P3). D-P7: the profile is a
+self-contained artifact (aura-bench::p5); aura-consensus wiring is a
+follow-up. Fixture model: D-P1 (100 validators, 1 Gbit/s).
+
+model sha256           : 3bc5ea36ef15eb6b36052f1d1f00ba081b3ea1df3dff0a291a55ebfbcd402baf
+workload_digest        : 69579d3a72d7a526330684fd4b06ff5751fd00c8d7b617a57db5206918676764
+machine_digest         : cc5b0e9e932a00ca5acc4dbec21c0f77f0a548c1f7fdc6a89fb742def1a6ab2d (D-P1: vcpu=8 mem_gib=32 storage=nvme validators=100 net_mbit=1000)
+report digest (bench)  : 34dd71879cd2de0cbf3246a5403d1d6e13ef0e84fbaa7595aa92119a01fa4c43
+runs / spread          : 5 / 0% (deterministic)
+
+DETERMINISTIC MODEL (source of truth)
+-------------------------------------
+p99 finality           : 2476 -> 586 ms (SLO 2000 ms; baseline honestly FAILs)
+happy 3-chain          : 357 -> 189 ms (pipelining: 1 full + 2 incremental views)
+view-change stall      : 2119 -> 397 ms (timeout 2000 -> 300 ms; shipped DEFAULT_VIEW_TIMEOUT_MS)
+QC re-verify per view  : 24 -> 2 ms (per-signature -> O(1) cache)
+p50/p95                : 189/189 ms (happy share 970 permille: 0.99^3)
+sensitivity 2-view     : p99 586 ms (also within the SLO)
+formulas               : proposals*hop + tx + votes*hop + verify + form + qc_hops*qc_verify + commit; p99 = happy + one stall when (100-rate)^window permille < 990
+
+STRUCTURAL GATES (D-B1/D-B2 vocabulary)
+----------------------------------------
+3-chain rule: a block is final exactly with 3 linked descendants
+  (depth pinned at 3; a mutated depth cannot validate itself)
+quorum: QC forms at exactly 2f+1 = 67 of 100 votes (66 -> no QC)
+
+MEASURED LAYER (D-P9, evidence only — not a gate)
+-------------------------------------------------
+chain_ns               : 52 (5-block chain walk)
+qc_aggregate_ns        : 1416 (67 votes through QcAggregator)
+model_ns               : 33 (latency model evaluation)
+Honesty: wall-clock loop speed is not the DoD metric; the DoD is the
+deterministic millisecond accounting above (D-P2 pairs + SLO).
+
+REVERT -> RED (tools/nc_p5.py, six named messages)
+---------------------------------------------------
+bad-timeout   : 300 -> 2000 ms -> 'P5: p99 finality exceeds SLO'
+bad-pipeline  : overlap gone (full view again) -> 'P5: pipelining overlap missing'
+bad-qc-cache  : O(1) -> per-signature -> 'P5: QC cache win reverted'
+bad-chain     : depth 3 -> 2 -> 'P5: 3-chain rule violated'
+bad-quorum    : 2f+1 -> f+1 -> 'P5: quorum accounting corrupted'
+bad-determinism: one run differs -> 'P5: determinism violated (run N)'
+2026-11-24: 6/6 mutations red; restore green (tools/nc_p5.py).
+
+See docs/perf/p5-consensus-report.md (RU) for the full methodology.

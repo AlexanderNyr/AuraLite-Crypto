@@ -1,7 +1,202 @@
 # Changelog — AuraLite-Crypto
 
+## [P6 — Published SLOs (PERF Stage 2, finale): north-star registry 6/6 (spread 0, verify 22, parallel 15 543, commit 12 300, traffic 86 495, finality 586), tamper-evident run log (hash chain, tip `ac0f9067…e52a`), 6 methodologies + 4 honest "did not work" items, dashboards; NC: rigged run → log check red + 5 revert mutations] 2026-11-24
+
+**PERF PLAN COMPLETE (P0–P6).** The `aura-bench::p6` profile (D-P7):
+a registry of six north-star SLOs (the P0–P5 DoD values, pinned), a tamper-
+evident run log (hash chain `sha256(prev|"|"|line)`, tip
+`ac0f9067…e52a`; rigged run → `P6: rigged run detected (key=value)`),
+methodology (6 sections `pN-methodology`, D-P3), dashboards
+(`docs/perf/slo-dashboard.md`), honest "did not work" (4 items:
+`p2-measured-wall-clock`, `p3-measured-sandbox-fsync`,
+`p1-bls-model-only`, `p2-lcg-fixture`). 11 tests (DoD: north star
+6/6 confirmed; NC: rigged run → log check red); the twin
+`tools/p6_slo_check.py` (example ↔ python IDENTICAL; the measured layer
+D-P9: a 4096-entry chain — 7.8/6.9 ms); negative controls
+`tools/nc_p6.py` 6/6 (northstar/chain/**rigged**/methodology/honest/
+determinism) + green restore; `tools/write_p6_evidence.py`; audit:
+**98 phases, 650 NC** — PERF PLAN COMPLETE.
+
+## [P5 — Consensus phase closed (PERF Stage 2): pipelining (happy 3-chain 357→189 ms), QC cache (re-verify 24→2 ms), faster view change (stall 2119→397 ms, timeout 2000→300 ms); gate p99 finality 586 < 2000 ms at 100 nodes + 6 NC revert mutations] 2026-11-24
+
+- **`aura-bench::p5`** — a deterministic millisecond-accurate model of the
+  3-chain commit path (decision D-P7: a self-contained profiling artifact;
+  moving the tuning into `aura-consensus`/`aura-node` — follow-up per D-P6/D-P7):
+  100 validators (D-P1); proposal → vote round → BLS-QC (2f+1 = 67) →
+  the 3-chain rule (D-B1/D-B2) → view-change stall. The baseline is the actual
+  shipped path: per-signature QC re-verification (B2) + `DEFAULT_VIEW_TIMEOUT_MS
+  = 2000` from `aura-consensus::finality`.
+- **DoD (PERF_PLAN P5)** met: **p99 finality 586 ms < 2 000 ms at 100
+  nodes** (the SLO is plan-fixed; the methodology is published — D-P3:
+  `docs/perf/p5-consensus-report.md`); the baseline 2 476 ms honestly fails
+  the SLO. Three optimizations with before/after pairs (D-P2): **pipelining** happy 3-chain
+  357 → 189 ms (proposal overlapped with chain extension), **QC cache** 24 →
+  2 ms/view (O(1) instead of per-signature), **faster view change** stall
+  2 119 → 397 ms (timeout 2 000 → 300 ms). The pinned percentile rule:
+  1% view change per view in a 3-view window → happy share 970 permille → p50 = p95 =
+  189 ms, p99 = happy + one stall. The 2-view-window sensitivity (586 ms) also fits
+  the SLO. Structural gates: the 3-chain rule (depth pinned at 3) and quorum
+  (a QC at exactly 67 of 100 votes). **NC: revert → red** (`tools/nc_p5.py`,
+  6/6 + green restore; messages `P5: …` ×6). 13 tests in `tests/p5_consensus.rs`;
+  `tools/p5_consensus_check.py` — the model twin (writes `sim/p5-consensus.json`);
+  example ↔ python — IDENTICAL; the D-P9 measured layer, non-gate;
+  `make test-p5|check-p5|examples-p5|nc-p5|evidence-p5`.
+
+## [P4 — Network phase closed (PERF Stage 2): vote batching, RLE compression, gossipsub parameter tuning (GossipFactor 25%→10%), mesh tuning (D 8→5); gate 100 nodes traffic/validator 86 495 ≤ 125 000 B/s budget (−74% vs baseline) + 6 NC revert mutations] 2026-11-24
+
+- **`aura-bench::p4`** — a deterministic byte-accurate model of the consensus-gossip
+  path (decision D-P7: a self-contained profiling artifact; moving
+  the parameters into `aura-p2p` — follow-up per D-P6/D-P7): 100 validators × 1
+  view/s; votes + proposal + QC per view; IHAVE/IWANT advertisement overhead
+  (`GossipFactor` × 2 hops); validator egress = D × (messages + overhead).
+  The vocabulary is gossipsub v1.0 (D/D_low/D_high/heartbeat) + N2 (`vote`,
+  `proposal`, `QC`).
+- **DoD (PERF_PLAN P4)** met: **traffic/validator 86 495 B/s ≤ the budget
+  125 000 B/s (1 Mbit/s egress at 1 view/s)**; the budget is published with
+  its methodology (D-P3: `docs/perf/p4-network-report.md`); the baseline 334 848 B/s
+  honestly fails the budget ×2.7. Four optimizations with before/after pairs
+  (D-P2): vote batching k=8 (19 200 → 13 632), RLE compression of the proposal
+  (8 512 → 592, a lossless gate), gossipsub parameters (overhead 13 952 → 2 883,
+  D_low=3 ≤ D=5 ≤ D_high=8, heartbeat 700 ms, mcache 5), mesh tuning
+  (D 8 → 5, ring+chords connectivity on 100 nodes); the total −74%. The 2:1 sensitivity
+  (108 860 B/s) also fits the budget. **NC: revert → red** (`tools/nc_p4.py`, 6/6 +
+  green restore; messages `P4: …` ×6). 12 tests in `tests/p4_network.rs`;
+  `tools/p4_network_check.py` — the model twin (writes `sim/p4-network.json`);
+  example ↔ python — IDENTICAL; the D-P9 measured layer, non-gate;
+  `make test-p4|check-p4|examples-p4|nc-p4|evidence-p4`.
+
+## [P3 — Storage phase closed (PERF Stage 1): mini-LSM commit path with batch writes, bloom (10 bits/key, k=7), compaction; gate p99 12 300 < SLO 15 000 (+2428% vs fsync-per-write baseline) + NC fsync not in the commit path -> S7 red] 2026-11-24
+
+- **`aura-bench::p3`** — the storage-subsystem commit-path profile (decision D-P7:
+  a self-contained profiling artifact; tuning the `aura-storage` RocksDB backend
+  — follow-up per D-P6): a mini-LSM engine (WAL with fsync **before publishing** — the contract
+  S7 of `aura-storage`) + memtable + sorted runs + a Bloom filter (10 bits/key, k=7)
+  + compaction (merge, "last write wins") + crash recovery (replaying only the
+  synced tail — NC S7-6); a WriteBatch optimization of the commit path.
+- **DoD (PERF_PLAN P3)** met: the deterministic model — **p99 block
+  commit 12 300 units < SLO 15 000 units** (the fsync-per-write baseline: 311 000 —
+  honestly fails the SLO), +2428% (D-P2 before/after); bloom cuts lookup-miss
+  40 → 1 unit (fp 0/200 pinned). **NC: fsync in the wrong place → S7 red**
+  (`tools/nc_p3.py`, 6/6 mutations red + green restore; named
+  messages `P3: …` ×6, including `fsync missing in commit path (batch N)`). The SLO
+  is published with its methodology (D-P3): `docs/perf/p3-storage-report.md` + the note
+  `docs/evidence/p3/p3-storage-durability.txt` (model goldens + measured
+  the D-P9 layer is honestly marked non-gate). 11 tests in `tests/p3_storage.rs`;
+  `tools/p3_storage_check.py` — the model twin (writes `sim/p3-storage.json`);
+  example ↔ python — IDENTICAL; `make test-p3|check-p3|examples-p3|nc-p3|evidence-p3`.
+
 All notable changes. Dates are ISO 8601, Europe/Moscow. Historical entries are
 never rewritten: corrections are made with a new entry or an explicit note.
+
+## [P2 — Parallel execution phase closed (stretch): optimistic MVCC / Block-STM-like engine; gate 1000 txs parallel == sequential with honest rollback; +536% model, honest negative wall-clock] 2026-11-24
+
+### Added
+
+- `aura_bench::p2` — deterministic optimistic parallel executor
+  (P2, D-P6): chunk speculation over a write overlay (Block-STM
+  multi-version shape), read-set validation at commit, conflicts abort
+  → discard speculative writes (honest rollback) → re-execute in
+  serializable index order (Kung-Robinson OCC); pinned fixture of 1000
+  txs / 2096 accounts (936 independent transfers + 32 structural
+  cross-chunk conflicts); cost model seq 99 000 → par 15 543 units
+  (+536%, retry costs a full re-execution); `P2Report` (pinned digest
+  `96863c0b…65174`), `P2Error` (six named `P2: …` messages), gates
+  (`gate_parallel` with leak diagnosis, `gate_commit_order`,
+  `gate_fixture`), and the honest wall-clock layer `measure` with two
+  parallel numbers (cold spawn / steady-state worker pool; evidence
+  only — release: −49% / −5% on 1000-tiny-tx blocks, negative result
+  published, D-P9).
+- `crates/aura-bench/tests/p2_parallel.rs` (12 tests: DoD equality,
+  honest rollback with leak diagnosis, serializable order, structural
+  conflict accounting, engine determinism under real threads, 2000-tx
+  disjoint scale-out, balance conservation), example
+  `p2_parallel_example.rs`, `tools/p2_parallel_check.py` (independent
+  Python engine — byte-identical twin), `tools/nc_p2.py` (6/6 revert
+  mutations), evidence tier `docs/evidence/p2/` +
+  `tools/write_p2_evidence.py`, RU report
+  `docs/perf/p2-parallel-report.md`, `sim/p2-parallel.json`.
+- Makefile: `parallel execution gate (P2)` in `test` + targets
+  `test-p2`/`check-p2`/`examples-p2`/`nc-p2`/`evidence-p2`.
+
+### Changed
+
+- `docs/plans/PERF_PLAN.md`: P2 row met (DoD equality + honest
+  rollback + published negative wall-clock), `### P2 receipt`.
+  Cumulative negative controls: 626 (34 phases).
+
+## [P1 — Codec/crypto phase closed: batch signature verification, zero-copy decode, BLS cost model; gate +72% verify/s with the same determinism + NC revert -> red] 2026-11-24
+
+### Added
+
+- `aura_crypto::verify_batch_raw` / `BatchItem` — batch Ed25519
+  verification (one Merlin batch equation over `ed25519_dalek::
+  verify_batch`, feature `batch`; lockfile gains merlin 3.0.0) with the
+  strict single-verifier semantics kept: canonical-S pre-check per item
+  (H2 malleability) and first-failing-index diagnostics.
+- `aura_codec::transfer` — P1 zero-copy transfer wire block (canonical
+  350-byte form: version, from, to, amount, nonce, memo_len + zero
+  padding): `decode_zero_copy` (borrowed view, no allocations) and
+  `decode_copy` (copying baseline) as independent code paths plus
+  `encode`; `TransferError` case names drive the malformed-input gate.
+- `crates/aura-bench/src/p1.rs` — P1 cost model (D-P2 before/after:
+  verify 38 -> 22 units per signature at batch k=8 = **+72% verify/s**,
+  decode 25 -> 12, BLS FastAggregateVerify 60 vs 352 — MODEL ONLY,
+  decision D-P4), `P1Report` (pinned digest `340a884d…80241`),
+  `P1Error` (six named `P1: …` messages), functional gates
+  (`gate_batch` == sequential incl. S+L malleated twin, `gate_zero_copy`
+  field-by-field equality, `gate_malformed` joint rejection), and the
+  honest wall-clock layer `measure` (evidence only, D-P9: real
+  ed25519-dalek batch +29% verify/s at k=8 on the CI host).
+- `crates/aura-bench/tests/p1_crypto.rs` (12 tests incl. the literal
+  DoD +72% and "revert -> red" states), example
+  `p1_crypto_example.rs`, `tools/p1_crypto_check.py` (byte-identical
+  twin), `tools/nc_p1.py` (6/6 revert mutations), evidence tier
+  `docs/evidence/p1/` + `tools/write_p1_evidence.py`, RU report
+  `docs/perf/p1-crypto-report.md`, `sim/p1-crypto.json`.
+- Makefile: `codec/crypto gate (P1)` in `test` + targets
+  `test-p1`/`check-p1`/`examples-p1`/`nc-p1`/`evidence-p1`.
+
+### Changed
+
+- `Cargo.toml`: `ed25519-dalek` gains the `batch` feature (merlin 3.0.0
+  enters the lockfile; supply-chain lock pin updated accordingly).
+- `docs/plans/PERF_PLAN.md`: P1 row met (+72% verify/s, NC revert ->
+  red), `### P1 receipt`. Cumulative negative controls: 620 (33 phases).
+
+## [P0 — Baseline bench phase closed: criterion + harness, fixed hardware, first honest numbers; gate 5 repeat runs spread 0% < 5% + substituted-workload functional NC] 2026-11-23
+
+### Added
+
+- `crates/aura-bench` — new workspace crate (P0 baseline bench,
+  PERF_PLAN P0; decisions D-P1/D-P2/D-P3 + D-P9/D-P9b): `MachineProfile`
+  (D-P1 fixed hardware: 8 vCPU / 32 GiB / NVMe / 100 validators /
+  1 Gbit/s) and `Workload` (350-byte transfer, 1 input / 1 output) with
+  canonical-form digests; `CostModel::BASELINE` (decode 4+bytes/16,
+  verify 38/input, execute 10+15/output, commit 40 → 128 cost units per
+  run); nearest-rank `percentile` (p50/p95/p99) and integer `spread_pct`;
+  `BenchReport::build` pins the deterministic report (5 runs, spread 0,
+  total 640, digest `cfc46920…20ec`); `validate` — the P0 criterion
+  gate control in fixed order (repeat count → determinism → spread →
+  workload → machine → published metrics). 6 named messages
+  (`P0: …`). Honest measured layer `measure_pipeline_ns` (real 350-byte
+  sha256 + ed25519 verify, wall-clock ns/tx) — evidence only, never a
+  gate (D-P9).
+- `crates/aura-bench/tests/p0_bench.rs` — 8 gate tests: pinned golden
+  numbers (the literal DoD "5 repeat runs: spread < 5%"), the
+  functional negative control "substituted workload → different
+  numbers" (350B→128 vs 352B→129, digests differ, named message),
+  exact NC literals, validate-suite, metamorphic controls (pure
+  determinism, run scaling, percentiles, cost breakdown).
+  `examples/p0_bench_example.rs` ↔ `tools/p0_bench_check.py`
+  (independent Python model) — byte-identical `P0-RUNS-OK 5` /
+  `P0-BENCH-OK {…}`; `sim/p0-bench.json`.
+- `tools/nc_p0.py` (6 mutation controls), `tools/write_p0_evidence.py`,
+  evidence tier `docs/evidence/p0/`, report
+  `docs/perf/p0-baseline-report.md` (sources: criterion.rs measurement
+  protocol (warm-up → sample → statistics), consensus-benchmark
+  methodology (P50/P95/P99 inclusion latency), OpenChainBench
+  methodology (identical inputs, honest aggregates, auditable runs, no
+  cherry-picking)). Decisions D-P9/D-P9b.
 
 ## [E9 — Bridge + AuraLite OS phase closed: IBC-like light-client bridge, limits/pause; gate MITM forged header -> reject, OS client checks finalized checkpoint, emulator lane green] 2026-11-22
 

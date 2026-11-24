@@ -1,11 +1,11 @@
-# Отчёт H9 — инцидентные дриллы
+# H9 Report — incident drills
 
-Дата: 2026-11-18
+Date: 2026-11-18
 
-Итог: **ВСЕ ГЕЙТЫ H9 ЗЕЛЁНЫЕ**
+The result: **ALL H9 GATES GREEN**
 
-Гейт: drill "Byzantine validator + bridge bug": network halted/recovered within SLO.
+Gate: drill "Byzantine validator + bridge bug": network halted/recovered within SLO.
 
-Playbook `docs/incident/PLAYBOOK.md` (halt/pause/upgrade/rollback, communication, post-mortem); дриллы `tools/fixtures/h9_drills.json`, раннер `tools/h9_incident_drill.py` (`campaign/result.json`, `campaign/drill.log`).
+Playbook `docs/incident/PLAYBOOK.md` (halt/pause/upgrade/rollback, communication, post-mortem); the drills `tools/fixtures/h9_drills.json`, the runner `tools/h9_incident_drill.py` (`campaign/result.json`, `campaign/drill.log`).
 negative controls `tools/nc_h9.py` (`nc.log`, RESULT: 7/7 negative controls PASS).
 

@@ -123,3 +123,63 @@ mod tests {
         );
     }
 }
+
+/// One item of a verification batch: public key, message, signature.
+#[derive(Debug, Clone, Copy)]
+pub struct BatchItem<'a> {
+    /// The signer's 32-byte Ed25519 public key.
+    pub public: &'a [u8; 32],
+    /// The signed message bytes.
+    pub message: &'a [u8],
+    /// The 64-byte signature over `message`.
+    pub signature: &'a [u8; 64],
+}
+
+/// Verify a batch of pure Ed25519 signatures (P1 batch verification).
+///
+/// The batch keeps the strict single-signature semantics of
+/// [`verify_raw`] (per-item canonical-`S` guard first — H2 malleability,
+/// pinned as this crate's contract regardless of backend behaviour),
+/// then evaluates one batch equation over all items
+/// (`ed25519_dalek::verify_batch`: Merlin transcript + coefficients,
+/// complete and sound up to the standard 2^-128 batch soundness error).
+/// On rejection the items are re-checked one by one so the caller
+/// learns the first failing index (the batch diagnostic contract).
+///
+/// NC target (`tools/nc_p1.py`, `bad-batch`): reverting the per-item
+/// index in the fallback scan makes the batch blame item 0 while the
+/// sequential verifier reports the real culprit — the P1 equivalence
+/// gate must go red with `P1: batch verify mismatch (item {n})`.
+pub fn verify_batch_raw(items: &[BatchItem<'_>]) -> Result<(), (usize, CryptoError)> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    for (i, item) in items.iter().enumerate() {
+        if !s_is_canonical(item.signature) {
+            return Err((i, CryptoError::NonCanonicalSignature));
+        }
+        if VerifyingKey::from_bytes(item.public).is_err() {
+            return Err((i, CryptoError::InvalidPublicKey));
+        }
+    }
+    let messages: Vec<&[u8]> = items.iter().map(|i| i.message).collect();
+    let signatures: Vec<Signature> = items
+        .iter()
+        .map(|i| Signature::from_bytes(i.signature))
+        .collect();
+    let keys: Vec<VerifyingKey> = items
+        .iter()
+        .map(|i| VerifyingKey::from_bytes(i.public).expect("pre-checked above"))
+        .collect();
+    if ed25519_dalek::verify_batch(&messages, &signatures, &keys).is_ok() {
+        return Ok(());
+    }
+    for (i, item) in items.iter().enumerate() {
+        if let Err(e) = verify_raw(item.public, item.message, item.signature) {
+            return Err((i, e));
+        }
+    }
+    // The batch equation rejected a fully valid batch: report the first
+    // item (unreachable except for the 2^-128 batch soundness error).
+    Err((0, CryptoError::VerificationFailed))
+}
