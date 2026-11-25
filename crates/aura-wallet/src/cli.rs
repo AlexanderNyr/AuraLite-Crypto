@@ -36,6 +36,7 @@ use crate::multisig::{
 };
 use crate::offline::{self, OfflineError};
 use crate::secret::Password;
+use crate::web::{self, UiClaim, WebError};
 use aura_tx::{Tx, TxKind, TxParams, UnsignedTx, signer_address};
 use aura_types::{Address, Amount, ChainId, Domain, Gas, Height, Nonce};
 
@@ -1738,7 +1739,7 @@ fn cmd_hw_sign(args: &Args, out: &mut dyn std::io::Write) -> Result<(), CliError
     let rounds = args.need("human")?;
     if rounds == "blind" {
         return match device.exchange(DeviceCommand::BlindSign { body: &body }) {
-            DeviceResponse::Signed(tx) => finish_hw_sign(args, out, &tx),
+            DeviceResponse::Signed(tx) => write_signed_result(args, out, &tx),
             DeviceResponse::Refused(e) => Err(hardware_err(e)),
             _ => Err(CliError::Invalid("hardware: bad response".to_string())),
         };
@@ -1766,7 +1767,7 @@ fn cmd_hw_sign(args: &Args, out: &mut dyn std::io::Write) -> Result<(), CliError
             let _ = writeln!(out, "{line}");
         }
         match device.exchange(DeviceCommand::Decide { decision }) {
-            DeviceResponse::Signed(tx) => return finish_hw_sign(args, out, &tx),
+            DeviceResponse::Signed(tx) => return write_signed_result(args, out, &tx),
             DeviceResponse::Refused(HardwareError::DeniedByUser) if i + 1 < items.len() => (),
             DeviceResponse::Refused(e) => return Err(hardware_err(e)),
             _ => return Err(CliError::Invalid("hardware: bad response".to_string())),
@@ -1775,8 +1776,8 @@ fn cmd_hw_sign(args: &Args, out: &mut dyn std::io::Write) -> Result<(), CliError
     Err(hardware_err(HardwareError::DeniedByUser))
 }
 
-/// Write the hardware-produced signature and the optional signed envelope.
-fn finish_hw_sign(args: &Args, out: &mut dyn std::io::Write, tx: &Tx) -> Result<(), CliError> {
+/// Write the produced signature and the optional signed envelope.
+fn write_signed_result(args: &Args, out: &mut dyn std::io::Write, tx: &Tx) -> Result<(), CliError> {
     let signed = offline::encode_envelope(offline::KIND_SIGNED, &tx.to_bytes());
     if let Some(path) = args.opt("out") {
         std::fs::write(path, &signed).map_err(|e| CliError::Usage(format!("--out {path}: {e}")))?;
@@ -1793,6 +1794,95 @@ fn hardware_err(e: HardwareError) -> CliError {
             CliError::ForeignChainId { found, expected }
         }
         other => CliError::Invalid(format!("hardware: {other}")),
+    }
+}
+
+/// `web-sign` — drive the web wallet signing flow over a deep link or an
+/// unsigned envelope (W6).
+///
+/// The confirmation view is derived from the transaction bytes (D-W6-1);
+/// signing requires that view (D-W6-2) and the request origin must pass the
+/// phishing policy (D-W6-3).
+fn cmd_web_sign(args: &Args, out: &mut dyn std::io::Write) -> Result<(), CliError> {
+    args.only(&[
+        "in",
+        "deep-link",
+        "origin",
+        "keystore",
+        "password-file",
+        "account",
+        "chain",
+        "human",
+        "out",
+    ])?;
+    let chain = args.need("chain")?.to_owned();
+    let password = read_password_file(args.need("password-file")?)?;
+    let index = account_index(args)?;
+    let account = load_account(args.need("keystore")?, index, &password)?;
+    let _ = writeln!(out, "wallet={}", web::WEB_UI_VERSION);
+    web::check_origin(args.need("origin")?).map_err(web_err)?;
+    let (envelope, claim) = match (args.opt("deep-link"), args.opt("in")) {
+        (Some(uri), None) => {
+            let link = web::parse_deep_link(uri).map_err(web_err)?;
+            if let Some(link_chain) = &link.chain
+                && link_chain != &chain
+            {
+                return Err(CliError::ForeignChainId {
+                    found: link_chain.clone(),
+                    expected: chain.clone(),
+                });
+            }
+            (link.envelope, link.claim)
+        }
+        (None, Some(path)) => (read_artifact("--in", path)?, UiClaim::default()),
+        _ => {
+            return Err(CliError::Usage(
+                "exactly one of --in or --deep-link is required".to_string(),
+            ));
+        }
+    };
+    let secret = *account.secret.as_bytes();
+    let rounds = args.need("human")?;
+    if rounds == "blind" {
+        return match web::sign_without_view(&envelope, &secret) {
+            Ok(tx) => write_signed_result(args, out, &tx),
+            Err(e) => Err(web_err(e)),
+        };
+    }
+    let items: Vec<&str> = rounds.split(',').collect();
+    for (i, item) in items.iter().enumerate() {
+        let decision = match *item {
+            "confirm" => true,
+            "deny" => false,
+            _ => {
+                return Err(CliError::Usage(
+                    "--human must be confirm, deny or blind".to_string(),
+                ));
+            }
+        };
+        let view = web::derive_view(&envelope, &chain).map_err(web_err)?;
+        for line in &view.lines {
+            let _ = writeln!(out, "{line}");
+        }
+        view.bind(&claim).map_err(web_err)?;
+        if decision {
+            let tx = web::sign_confirmed(&view, &secret).map_err(web_err)?;
+            return write_signed_result(args, out, &tx);
+        }
+        if i + 1 == items.len() {
+            return Err(web_err(WebError::DeniedByUser));
+        }
+    }
+    Err(web_err(WebError::DeniedByUser))
+}
+
+/// Map a web wallet refusal to the fixed CLI error vocabulary.
+fn web_err(e: WebError) -> CliError {
+    match e {
+        WebError::ForeignChainId { found, expected } => {
+            CliError::ForeignChainId { found, expected }
+        }
+        other => CliError::Invalid(format!("web: {other}")),
     }
 }
 
@@ -2045,6 +2135,7 @@ pub fn run(args: &[String], out: &mut dyn std::io::Write, err: &mut dyn std::io:
             "qr-split" => cmd_qr_split(&parsed, out),
             "qr-join" => cmd_qr_join(&parsed, out),
             "hw-sign" => cmd_hw_sign(&parsed, out),
+            "web-sign" => cmd_web_sign(&parsed, out),
             "msig-init" => cmd_msig_init(&parsed, out),
             "msig-propose" => cmd_msig_propose(&parsed, out),
             "msig-approve" => cmd_msig_approve(&parsed, out),

@@ -1,5 +1,24 @@
 # Changelog — AuraLite-Crypto
 
+## [W6 — Web wallet phase closed (WALLET Stage 2): real-tx-field confirmation (`aura_wallet::web`, CLI `web-sign`), confirmation binding with doctored-view refusal (D-W6-2), phishing policy https-only + ASCII-host homoglyph gate (D-W6-3), strict `auralite://sign?…` schema (D-W6-4), reproducible `aura-keys` WASM build (8 exports, 0 imports) + untrusted extension glue (D-W6-5); gate 10 scenarios + NC: recipient substitution in UI -> red] 2026-11-25
+
+The confirmation view is derived exclusively from the transaction bytes; a
+page/deep-link claim is compared against the bytes and a disagreement is
+refused with the **real** fields still shown (`error: web: recipient
+substitution` / `amount substitution`). Signing requires the rendered view;
+blind requests are refused before any key use. The trusted core
+`crates/aura-wallet/src/web.rs` is compiled verbatim into the standalone
+`clients/aura-keys` crate (own lockfile, root `Cargo.lock` untouched), built
+for `wasm32-unknown-unknown` twice with remapped paths — byte-identical,
+pinned by `tools/build_aura_keys.py`; `clients/wallet-web/` is untrusted MV3
+glue. 10 scenarios (`tests/fixtures/w6_web_wallet_vectors.json`) from the
+independent oracle `tools/gen_w6_vectors.py`, asserted byte-for-byte by
+`tests/w6_web.rs` (11/11 with the count guard); named control
+`ui_recipient_substitution`. Mutation controls `tools/nc_w6.py` 6/6 (recipient
+comparison, amount comparison, homoglyph check, deep-link whitelist, blind
+acceptance, recipient render) + green restore; `tools/write_w6_evidence.py`;
+audit: **100 phases, 662 NC**.
+
 ## [W5 — Hardware keys phase closed (WALLET Stage 2): HID/CCID-like device protocol with on-screen confirmation (`aura_wallet::hardware`), display derived exclusively from the signed bytes (D-W5-1), showable-payloads-only + host-claim binding (D-W5-2), `Armed -> Confirm` binding with deny-retry (D-W5-3), plain `tx` domain signatures (D-W5-4); gate 10 confirmed/denied scenarios + NC: blind confirmation -> red] 2026-11-24
 
 The device is a deterministic secure-element simulation: `GetVersion` /

@@ -59,6 +59,7 @@ PYTHON ?= python3
         gen-w3-vectors test-w3 nc-w3 evidence-w3 \
         gen-w4-vectors test-w4 nc-w4 evidence-w4 \
         gen-w5-vectors test-w5 nc-w5 evidence-w5 \
+        gen-w6-vectors test-w6 nc-w6 evidence-w6 build-aura-keys \
         gen-h0-vectors check-h0 nc-h0 evidence-h0 \
         gen-h1-vectors gen-h1-sbom check-h1 nc-h1 evidence-h1 \
         gen-h2-vectors check-h2 nc-h2 evidence-h2 \
@@ -1307,6 +1308,25 @@ nc-w5:
 
 evidence-w5:
 	@$(PYTHON) tools/write_w5_evidence.py
+
+# W6: the 10 web wallet scenarios gate (tools/gen_w6_vectors.py oracle) and
+# the reproducible aura-keys WASM build (tools/build_aura_keys.py).
+.PHONY: gen-w6-vectors test-w6 nc-w6 evidence-w6 build-aura-keys
+
+gen-w6-vectors:
+	@$(PYTHON) tools/gen_w6_vectors.py
+
+test-w6:
+	@cargo test -p aura-wallet --features insecure-test-kdf --test w6_web
+
+nc-w6:
+	@$(PYTHON) tools/nc_w6.py
+
+evidence-w6:
+	@$(PYTHON) tools/write_w6_evidence.py
+
+build-aura-keys:
+	@$(PYTHON) tools/build_aura_keys.py
 
 # H0: the threat-model review gate (tools/check_threat_model.py).
 .PHONY: gen-h0-vectors check-h0 nc-h0 evidence-h0

@@ -18,3 +18,4 @@ pub mod keystore;
 pub mod multisig;
 pub mod offline;
 pub mod secret;
+pub mod web;
