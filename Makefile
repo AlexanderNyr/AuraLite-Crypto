@@ -58,6 +58,7 @@ PYTHON ?= python3
         gen-w2-vectors test-w2 nc-w2 evidence-w2 \
         gen-w3-vectors test-w3 nc-w3 evidence-w3 \
         gen-w4-vectors test-w4 nc-w4 evidence-w4 \
+        gen-w5-vectors test-w5 nc-w5 evidence-w5 \
         gen-h0-vectors check-h0 nc-h0 evidence-h0 \
         gen-h1-vectors gen-h1-sbom check-h1 nc-h1 evidence-h1 \
         gen-h2-vectors check-h2 nc-h2 evidence-h2 \
@@ -1291,6 +1292,21 @@ nc-w4:
 
 evidence-w4:
 	@$(PYTHON) tools/write_w4_evidence.py
+
+# W5: the 10 hardware scenarios gate (tools/gen_w5_vectors.py oracle).
+.PHONY: gen-w5-vectors test-w5 nc-w5 evidence-w5
+
+gen-w5-vectors:
+	@$(PYTHON) tools/gen_w5_vectors.py
+
+test-w5:
+	@cargo test -p aura-wallet --features insecure-test-kdf --test w5_hardware
+
+nc-w5:
+	@$(PYTHON) tools/nc_w5.py
+
+evidence-w5:
+	@$(PYTHON) tools/write_w5_evidence.py
 
 # H0: the threat-model review gate (tools/check_threat_model.py).
 .PHONY: gen-h0-vectors check-h0 nc-h0 evidence-h0

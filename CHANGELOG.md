@@ -1,5 +1,23 @@
 # Changelog — AuraLite-Crypto
 
+## [W5 — Hardware keys phase closed (WALLET Stage 2): HID/CCID-like device protocol with on-screen confirmation (`aura_wallet::hardware`), display derived exclusively from the signed bytes (D-W5-1), showable-payloads-only + host-claim binding (D-W5-2), `Armed -> Confirm` binding with deny-retry (D-W5-3), plain `tx` domain signatures (D-W5-4); gate 10 confirmed/denied scenarios + NC: blind confirmation -> red] 2026-11-24
+
+The device is a deterministic secure-element simulation: `GetVersion` /
+`BeginSign` / `Decide` / `BlindSign` frames in, `Version` / `Display` /
+`Signed` / `Refused` out (`crates/aura-wallet/src/hardware.rs`, CLI
+`hw-sign`). The screen shows the nine unsigned protocol fields plus the
+decoded intent; `transfer` payloads must be `recipient||amount` (28 bytes),
+`delegate`/`undelegate` the canonical stake payload — anything else is
+refused as `undecodable payload` (a device never signs bytes it cannot
+display). 10 human confirmed/denied scenarios
+(`tests/fixtures/w5_hardware_vectors.json`) from the independent oracle
+`tools/gen_w5_vectors.py`, asserted byte-for-byte by `tests/w5_hardware.rs`
+(11/11 with the count guard); named control `blind_confirmation_rejected`.
+Mutation controls `tools/nc_w5.py` 6/6 (blind acceptance, denial ignored,
+display binding dropped, chain check dropped, amount render altered, payload
+decode check dropped) + green restore; `tools/write_w5_evidence.py`; audit:
+**99 phases, 656 NC**.
+
 ## [P6 — Published SLOs (PERF Stage 2, finale): north-star registry 6/6 (spread 0, verify 22, parallel 15 543, commit 12 300, traffic 86 495, finality 586), tamper-evident run log (hash chain, tip `ac0f9067…e52a`), 6 methodologies + 4 honest "did not work" items, dashboards; NC: rigged run → log check red + 5 revert mutations] 2026-11-24
 
 **PERF PLAN COMPLETE (P0–P6).** The `aura-bench::p6` profile (D-P7):

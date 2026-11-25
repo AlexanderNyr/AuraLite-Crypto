@@ -28,7 +28,7 @@ procedure for generating genesis keys.
 | ✅ **W2** | `aura-wallet` CLI | `new/import/list/balance/transfer/sign/broadcast/stake/vote` | 40 CLI vectors, including rejection of a tx with a foreign chain-id |
 | ✅ **W3** | Offline signing | unsigned/signed tx format, QR/USB, verification on the online machine | air-gapped scenario end-to-end; NC: signature with a foreign domain → reject |
 | ✅ **W4** | Multisig | M-of-N contract, signature collection, timeouts, member rotation | 3-of-5: 3 collected → success, 2 → reject; NC: threshold bypass → red |
-| ⏸ **W5** | Hardware keys | HID/CCID-like device protocol, on-screen confirmation | 10 "human confirmed/denied" scenarios; NC: blind confirmation → red |
+| ✅ **W5** | Hardware keys | HID/CCID-like device protocol, on-screen confirmation | 10 "human confirmed/denied" scenarios; NC: blind confirmation → red |
 | ⏸ **W6** | Web/browser wallet | WASM build of `aura-keys`, extension, deep links, phishing protection | signing shows the human the **real** tx fields; NC: recipient substitution in UI → red |
 | ⏸ **W7** | Genesis ceremony | offline generation, Shamir sharing, witness logs, destruction of temporary media | O5: not one private key in the repository/CI; pubkey set matches genesis hash |
 
@@ -148,6 +148,34 @@ mainnet and ⏸ Stage 2.
 - Mutation controls (`tools/nc_w4.py`, 6): threshold bypassed, signature
   verification skipped, duplicate approvals accepted, membership dropped,
   expiry dropped, proposal binding dropped — 6/6 PASS.
+
+### W5 receipt (2026-11-24)
+
+- Deliverable: `patches/0100-W5-hardware-keys.patch` (complete W5-from-P6
+  phase patch).
+- Hardware-key device protocol, HID/CCID-like (`crates/aura-wallet/src/hardware.rs`
+  + CLI `hw-sign`): `GetVersion`/`BeginSign`/`Decide`/`BlindSign` frames with
+  `Version`/`Display`/`Signed`/`Refused` responses. The device screen is
+  derived exclusively from the canonical unsigned transaction bytes
+  (D-W5-1); only payloads that can be fully displayed are signable —
+  `recipient||amount` for `transfer`, the canonical stake payload for
+  `delegate`/`undelegate` — and host previews are bound to the derived
+  display (D-W5-2); nothing signs without `Armed -> Confirm`, a `Deny` never
+  latches (D-W5-3); signatures are ordinary AuraLite `tx` domain signatures
+  (D-W5-4).
+- Named control: `blind_confirmation_rejected` — a blind signing request is
+  refused (`error: hardware: blind confirmation rejected`, exit 65) before
+  any key use; mutation control NC-1 in `tools/nc_w5.py` makes the device
+  sign blind requests and requires that test to go red.
+- Test gate: 10 "human confirmed/denied" scenarios
+  (`tests/fixtures/w5_hardware_vectors.json`) from the independent oracle
+  `tools/gen_w5_vectors.py`, asserted byte-for-byte by `tests/w5_hardware.rs`
+  (11/11 with the count guard): 3 confirm, 2 deny, blind rejection, display
+  substitution (`error: hardware: display mismatch`), retry after a denied
+  round, undecodable payload, foreign chain-id.
+- Mutation controls (`tools/nc_w5.py`, 6): blind acceptance, denial ignored,
+  display binding dropped, chain check dropped, amount render altered, payload
+  decode check dropped — 6/6 PASS.
 
 ## Risks
 

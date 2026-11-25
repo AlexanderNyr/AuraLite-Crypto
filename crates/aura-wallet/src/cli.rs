@@ -27,6 +27,9 @@ use zeroize::Zeroizing;
 use crate::derivation::{
     self, Bip39NormalizationProfile, DerivedAccount, derive_account, generate_mnemonic,
 };
+use crate::hardware::{
+    DeviceCommand, DeviceResponse, HardwareDevice, HardwareError, HostClaim, HumanDecision,
+};
 use crate::keystore::{KdfParams, Keystore};
 use crate::multisig::{
     Approval, MsigError, MultisigDescriptor, MultisigProposal, ProposalAction, verify_approval,
@@ -1686,6 +1689,113 @@ fn load_proposal_file(flag: &str, path: &str) -> Result<MultisigProposal, CliErr
     proposal_from_text(&text).map_err(msig_err)
 }
 
+/// `hw-sign` — drive the hardware device protocol over one unsigned envelope.
+///
+/// The device screen is derived from the transaction bytes (D-W5-1) and the
+/// human's answer decides the outcome (D-W5-3): `confirm` signs, `deny`
+/// refuses (retry via `--human deny,confirm`), `blind` is always refused.
+fn cmd_hw_sign(args: &Args, out: &mut dyn std::io::Write) -> Result<(), CliError> {
+    args.only(&[
+        "in",
+        "keystore",
+        "password-file",
+        "account",
+        "chain",
+        "human",
+        "show-recipient",
+        "show-amount",
+        "out",
+    ])?;
+    let chain = args.need("chain")?.to_owned();
+    let password = read_password_file(args.need("password-file")?)?;
+    let index = account_index(args)?;
+    let account = load_account(args.need("keystore")?, index, &password)?;
+    let text = read_artifact("--in", args.need("in")?)?;
+    let (kind, body) = offline::parse_envelope(&text).map_err(offline_err)?;
+    if kind != offline::KIND_UNSIGNED {
+        return Err(CliError::Invalid("envelope: expected unsigned".to_string()));
+    }
+    let unsigned = UnsignedTx::from_canonical_bytes(&body)
+        .map_err(|_| CliError::Invalid("envelope: bad encoding".to_string()))?;
+    let claim = match (args.opt("show-recipient"), args.opt("show-amount")) {
+        (None, None) => None,
+        (recipient, amount) => Some(HostClaim {
+            recipient: recipient
+                .map(|v| {
+                    Address::from_bech32(v)
+                        .map_err(|_| CliError::Usage("--show-recipient must be bech32".to_string()))
+                })
+                .transpose()?,
+            amount: amount.map(|v| parse_u64(v, "show-amount")).transpose()?,
+        }),
+    };
+    let mut device = HardwareDevice::new(account.secret.clone(), chain);
+    let version = match device.exchange(DeviceCommand::GetVersion) {
+        DeviceResponse::Version(v) => v,
+        _ => return Err(CliError::Invalid("hardware: bad response".to_string())),
+    };
+    let _ = writeln!(out, "device={version}");
+    let rounds = args.need("human")?;
+    if rounds == "blind" {
+        return match device.exchange(DeviceCommand::BlindSign { body: &body }) {
+            DeviceResponse::Signed(tx) => finish_hw_sign(args, out, &tx),
+            DeviceResponse::Refused(e) => Err(hardware_err(e)),
+            _ => Err(CliError::Invalid("hardware: bad response".to_string())),
+        };
+    }
+    let items: Vec<&str> = rounds.split(',').collect();
+    for (i, item) in items.iter().enumerate() {
+        let decision = match *item {
+            "confirm" => HumanDecision::Confirm,
+            "deny" => HumanDecision::Deny,
+            _ => {
+                return Err(CliError::Usage(
+                    "--human must be confirm, deny or blind".to_string(),
+                ));
+            }
+        };
+        let frame = match device.exchange(DeviceCommand::BeginSign {
+            unsigned: &unsigned,
+            claim: claim.as_ref(),
+        }) {
+            DeviceResponse::Display(frame) => frame,
+            DeviceResponse::Refused(e) => return Err(hardware_err(e)),
+            _ => return Err(CliError::Invalid("hardware: bad response".to_string())),
+        };
+        for line in frame.render_lines() {
+            let _ = writeln!(out, "{line}");
+        }
+        match device.exchange(DeviceCommand::Decide { decision }) {
+            DeviceResponse::Signed(tx) => return finish_hw_sign(args, out, &tx),
+            DeviceResponse::Refused(HardwareError::DeniedByUser) if i + 1 < items.len() => (),
+            DeviceResponse::Refused(e) => return Err(hardware_err(e)),
+            _ => return Err(CliError::Invalid("hardware: bad response".to_string())),
+        }
+    }
+    Err(hardware_err(HardwareError::DeniedByUser))
+}
+
+/// Write the hardware-produced signature and the optional signed envelope.
+fn finish_hw_sign(args: &Args, out: &mut dyn std::io::Write, tx: &Tx) -> Result<(), CliError> {
+    let signed = offline::encode_envelope(offline::KIND_SIGNED, &tx.to_bytes());
+    if let Some(path) = args.opt("out") {
+        std::fs::write(path, &signed).map_err(|e| CliError::Usage(format!("--out {path}: {e}")))?;
+    }
+    let _ = writeln!(out, "status=signed");
+    let _ = writeln!(out, "sig={}", hex::encode(tx.sig.bytes));
+    Ok(())
+}
+
+/// Map a device refusal to the fixed CLI error vocabulary.
+fn hardware_err(e: HardwareError) -> CliError {
+    match e {
+        HardwareError::ForeignChainId { found, expected } => {
+            CliError::ForeignChainId { found, expected }
+        }
+        other => CliError::Invalid(format!("hardware: {other}")),
+    }
+}
+
 fn cmd_msig_init(args: &Args, out: &mut dyn std::io::Write) -> Result<(), CliError> {
     args.only(&["chain", "threshold", "members", "timeout", "out"])?;
     let chain = args.need("chain")?;
@@ -1934,6 +2044,7 @@ pub fn run(args: &[String], out: &mut dyn std::io::Write, err: &mut dyn std::io:
             "tx-verify" => cmd_tx_verify(&parsed, out),
             "qr-split" => cmd_qr_split(&parsed, out),
             "qr-join" => cmd_qr_join(&parsed, out),
+            "hw-sign" => cmd_hw_sign(&parsed, out),
             "msig-init" => cmd_msig_init(&parsed, out),
             "msig-propose" => cmd_msig_propose(&parsed, out),
             "msig-approve" => cmd_msig_approve(&parsed, out),
