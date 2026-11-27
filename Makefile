@@ -60,6 +60,8 @@ PYTHON ?= python3
         gen-w4-vectors test-w4 nc-w4 evidence-w4 \
         gen-w5-vectors test-w5 nc-w5 evidence-w5 \
         gen-w6-vectors test-w6 nc-w6 evidence-w6 build-aura-keys \
+        gen-w7-vectors test-w7 nc-w7 evidence-w7 \
+        gen-o0-vectors test-o0 nc-o0 evidence-o0 ci-check ci-sync ci-shard coverage \
         gen-h0-vectors check-h0 nc-h0 evidence-h0 \
         gen-h1-vectors gen-h1-sbom check-h1 nc-h1 evidence-h1 \
         gen-h2-vectors check-h2 nc-h2 evidence-h2 \
@@ -264,6 +266,8 @@ test: deps-check
 	@$(PYTHON) tools/count_vectors.py
 	@echo "== test rig wiring =="
 	@$(PYTHON) tools/check_rig.py
+	@echo "== CI shard registry (O0) =="
+	@$(CARGO) run -q -p aura-testkit --bin aura-ci -- check --workflow .github/workflows/ci.yml
 	@echo "== historical checksum policy tests =="
 	@$(PYTHON) tools/test_historical_drift.py
 	@echo "== opsec checks (H7) =="
@@ -1327,6 +1331,161 @@ evidence-w6:
 
 build-aura-keys:
 	@$(PYTHON) tools/build_aura_keys.py
+
+# W7: the 10 genesis-ceremony scenarios gate (tools/gen_w7_vectors.py oracle).
+.PHONY: gen-w7-vectors test-w7 nc-w7 evidence-w7
+
+gen-w7-vectors:
+	@$(PYTHON) tools/gen_w7_vectors.py
+
+test-w7:
+	@cargo test -p aura-genesis --test w7_ceremony
+
+nc-w7:
+	@$(PYTHON) tools/nc_w7.py
+
+evidence-w7:
+	@$(PYTHON) tools/write_w7_evidence.py
+
+# O0: the CI baseline — shard registry, target registry check, coverage.
+.PHONY: gen-o0-vectors test-o0 nc-o0 evidence-o0 ci-check ci-sync ci-shard coverage
+
+gen-o0-vectors:
+	@$(PYTHON) tools/gen_o0_vectors.py
+
+test-o0:
+	@$(CARGO) test -p aura-testkit --test o0_ci
+
+nc-o0:
+	@$(PYTHON) tools/nc_o0.py
+
+evidence-o0:
+	@$(PYTHON) tools/write_o0_evidence.py
+
+ci-check:
+	@$(CARGO) run -q -p aura-testkit --bin aura-ci -- check --workflow .github/workflows/ci.yml
+
+ci-sync:
+	@$(CARGO) run -q -p aura-testkit --bin aura-ci -- sync --registry ci/registry.txt
+
+ci-shard:
+	@$(CARGO) run -q -p aura-testkit --bin aura-ci -- run --registry ci/registry.txt --shard $(SHARD) --exec
+
+coverage:
+	@$(CARGO) run -q -p aura-testkit --bin aura-ci -- coverage | tee docs/coverage.txt
+
+# O1: the release pipeline — reproducible build, signed artifacts, SBOM.
+.PHONY: gen-o1-vectors test-o1 nc-o1 evidence-o1 sbom repro-check release-sync release-check release-demo
+
+gen-o1-vectors:
+	@$(PYTHON) tools/gen_o1_vectors.py
+
+test-o1:
+	@$(CARGO) test -p aura-testkit --test o1_release
+
+nc-o1:
+	@$(PYTHON) tools/nc_o1.py
+
+evidence-o1:
+	@$(PYTHON) tools/write_o1_evidence.py
+
+sbom:
+	@mkdir -p release && $(CARGO) run -q -p aura-testkit --bin aura-release -- sbom --workspace . --release release > release/SBOM.txt
+	@echo "sbom written: release/SBOM.txt"
+
+repro-check:
+	@$(PYTHON) tools/repro_check.py
+
+release-sync:
+	@$(CARGO) run -q -p aura-testkit --bin aura-release -- sync --workspace . --release release
+
+release-demo:
+	@mkdir -p release
+	@test -f release/aurad || (echo "run 'make repro-check' first (it places release/aurad)"; exit 1)
+	@$(PYTHON) tools/sign_release.py sign release/aurad
+	@$(CARGO) run -q -p aura-testkit --bin aura-release -- sync --workspace . --release release
+
+release-check:
+	@$(CARGO) run -q -p aura-testkit --bin aura-release -- check --workspace . --release release
+	@$(PYTHON) tools/sign_release.py verify release/aurad release/aurad.sig
+	@echo "signature verify (RFC 8032 demo key): ok"
+
+# O2: the M0/M1 gates — milestone receipts (ROADMAP §5 criteria).
+.PHONY: gen-o2-vectors test-o2 nc-o2 evidence-o2 milestone-receipts milestone-check
+
+gen-o2-vectors:
+	@$(PYTHON) tools/gen_o2_vectors.py
+
+test-o2:
+	@$(CARGO) test -p aura-testkit --test o2_milestones
+
+nc-o2:
+	@$(PYTHON) tools/nc_o2.py
+
+evidence-o2:
+	@$(PYTHON) tools/write_o2_evidence.py
+
+milestone-receipts:
+	@mkdir -p release
+	@$(CARGO) run -q -p aura-node --bin aurad-receipt -- --out release/milestone.txt
+
+milestone-check:
+	@$(CARGO) run -q -p aura-testkit --bin aura-milestone -- check --receipts release/milestone.txt
+
+# O3: the closed-testnet ops gate — uptime ledger + backup/restore drill.
+.PHONY: gen-o3-vectors test-o3 nc-o3 evidence-o3 testnet-ops-receipts testnet-ops-check
+
+gen-o3-vectors:
+	@$(PYTHON) tools/gen_o3_vectors.py
+
+test-o3:
+	@$(CARGO) test -p aura-testkit --test o3_testnet_ops
+
+nc-o3:
+	@$(PYTHON) tools/nc_o3.py
+
+evidence-o3:
+	@$(PYTHON) tools/write_o3_evidence.py
+
+testnet-ops-receipts:
+	@mkdir -p release
+	@$(CARGO) run -q -p aura-node --bin aurad-ops -- --ops-out release/testnet-ops.txt --ledger-out release/uptime-7d.txt
+
+testnet-ops-check:
+	@$(CARGO) run -q -p aura-testkit --bin aura-ops -- check --receipts release/testnet-ops.txt
+	@$(CARGO) run -q -p aura-testkit --bin aura-ops -- ledger --ledger release/uptime-7d.txt
+
+# O4: the public testnet (M2) gate — metrics ledger, triage journal,
+# ten-validator window and the public service surface.
+.PHONY: gen-o4-vectors test-o4 nc-o4 evidence-o4 testnet-receipts testnet-check testnet-public-surface
+
+gen-o4-vectors:
+	@$(PYTHON) tools/gen_o4_vectors.py
+
+test-o4:
+	@$(CARGO) test -p aura-testkit --test o4_testnet_public
+
+nc-o4:
+	@$(PYTHON) tools/nc_o4.py
+
+evidence-o4:
+	@$(PYTHON) tools/write_o4_evidence.py
+
+testnet-receipts:
+	@mkdir -p release
+	@$(CARGO) run -q -p aura-node --bin aurad-testnet -- --out release/testnet.txt --metrics-out release/metrics-30d.txt --triage release/triage.txt
+
+testnet-check:
+	@$(CARGO) run -q -p aura-testkit --bin aura-testnet -- check --receipts release/testnet.txt
+	@$(CARGO) run -q -p aura-testkit --bin aura-testnet -- metrics --ledger release/metrics-30d.txt
+	@$(CARGO) run -q -p aura-testkit --bin aura-testnet -- triage --ledger release/triage.txt
+
+testnet-public-surface:
+	@mkdir -p release
+	@ADDR=$$($(CARGO) run -q -p aura-node --bin aurad-faucet -- --address | cut -d' ' -f2) && printf '# sample public faucet requests\npayout '"$$ADDR"' 100 0\npayout '"$$ADDR"' 100 1\n' > release/faucet-requests.txt
+	@ADDR=$$($(CARGO) run -q -p aura-node --bin aurad-faucet -- --address | cut -d' ' -f2) && printf '# sample public explorer queries\nhead\nblock 1\ntx 0x0000000000000000000000000000000000000000000000000000000000000000\nbalance '"$$ADDR"'\n' > release/explorer-queries.txt
+	@$(CARGO) run -q -p aura-node --bin aurad-faucet -- --limit 1000 --requests release/faucet-requests.txt
+	@$(CARGO) run -q -p aura-node --bin aurad-explorer -- --queries release/explorer-queries.txt
 
 # H0: the threat-model review gate (tools/check_threat_model.py).
 .PHONY: gen-h0-vectors check-h0 nc-h0 evidence-h0

@@ -114,13 +114,13 @@ def main():
         f.write("re-audit named gate: %s\n" % ("PASS" if reaudit_ok else "FAIL"))
 
     with open(os.path.join(EVID, "report.md"), "w", encoding="utf-8") as f:
-        f.write("# H8 Report — external audit + bounty\n\n")
-        f.write("Date: %s\n\n" % time.strftime("%Y-%m-%d"))
-        f.write("The result: **%s**\n\n" % ("ALL H8 GATES GREEN" if ok_all
-                                      else "THERE ARE RED GATES"))
-        f.write("Gate: 0 unfixed critical/high; NC: re-audit finds an old bug -> red.\n\n")
-        f.write("The public report `docs/audit/h8-public-audit-report.md`, the policy "
-                "and bounty `SECURITY.md`; the oracle `tools/h8_reaudit.py` "
+        f.write("# Отчёт H8 — внешний аудит + баунти\n\n")
+        f.write("Дата: %s\n\n" % time.strftime("%Y-%m-%d"))
+        f.write("Итог: **%s**\n\n" % ("ВСЕ ГЕЙТЫ H8 ЗЕЛЁНЫЕ" if ok_all
+                                      else "ЕСТЬ КРАСНЫЕ ГЕЙТЫ"))
+        f.write("Гейт: 0 unfixed critical/high; NC: re-audit finds an old bug -> red.\n\n")
+        f.write("Публичный отчёт `docs/audit/h8-public-audit-report.md`, политика "
+                "и баунти `SECURITY.md`; оракул `tools/h8_reaudit.py` "
                 "(`campaign/result.json`, `campaign/reaudit.log`).\n")
         f.write("negative controls `tools/nc_h8.py` (`nc.log`, "
                 "RESULT: 7/7 negative controls PASS).\n\n")

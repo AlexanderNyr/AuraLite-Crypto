@@ -1,11 +1,11 @@
-# E0 Report — ecosystem baseline
+# Отчёт E0 — базовый уровень экосистемы
 
-Date: 2026-11-18
+Дата: 2026-11-18
 
-The result: **ALL E0 GATES GREEN**
+Итог: **ВСЕ ГЕЙТЫ E0 ЗЕЛЁНЫЕ**
 
-Gate: checklist of 10 user scenarios (0/10 so far).
+Гейт: checklist of 10 user scenarios (0/10 so far).
 
-The report `docs/ecosystem/e0-baseline-report.md`, the registry `tools/fixtures/e0_user_scenarios.json`, the oracle `tools/e0_baseline_check.py` (`campaign/result.json`, `campaign/baseline.log`).
+Отчёт `docs/ecosystem/e0-baseline-report.md`, реестр `tools/fixtures/e0_user_scenarios.json`, оракул `tools/e0_baseline_check.py` (`campaign/result.json`, `campaign/baseline.log`).
 negative controls `tools/nc_e0.py` (`nc.log`, RESULT: 6/6 negative controls PASS).
 

@@ -1,0 +1,2303 @@
+From a169d2e2b1a6af88f911f96b1a44e94d37c49ead Mon Sep 17 00:00:00 2001
+From: AlexanderNyr <131390634+AlexanderNyr@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 11:35:50 +0000
+Subject: [PATCH] W5 hardware keys: HID/CCID-like device protocol with
+ on-screen confirmation (GetVersion/BeginSign/Decide/BlindSign frames),
+ display derived exclusively from the signed bytes (D-W5-1),
+ showable-payloads-only + host-claim binding (D-W5-2), Armed->Confirm binding
+ with deny-retry (D-W5-3), plain tx domain signatures (D-W5-4); gate 10 human
+ confirmed/denied scenarios + named control blind_confirmation_rejected (NC:
+ blind confirmation -> red), 6 NC mutations (656 cumulative), docs + evidence
+
+---
+ CHANGELOG.md                                  |  18 +
+ Makefile                                      |  16 +
+ crates/aura-wallet/src/cli.rs                 | 111 ++++
+ crates/aura-wallet/src/hardware.rs            | 384 ++++++++++++
+ crates/aura-wallet/src/lib.rs                 |   1 +
+ .../tests/fixtures/w1_baseline.txt            |   8 +-
+ .../tests/fixtures/w5_hardware_vectors.json   | 571 ++++++++++++++++++
+ crates/aura-wallet/tests/w5_hardware.rs       | 157 +++++
+ docs/evidence/review-w1-source-drift.txt      |  24 +-
+ docs/evidence/w5/README.md                    |  19 +
+ docs/evidence/w5/SHA256SUMS                   |  10 +
+ docs/evidence/w5/gates.txt                    |   4 +
+ docs/evidence/w5/inventory.txt                |  19 +
+ docs/evidence/w5/nc.log                       |   9 +
+ docs/evidence/w5/report.md                    |  28 +
+ docs/evidence/w5/test-w5.log                  |  23 +
+ docs/plans/WALLET_PLAN.md                     |  30 +-
+ docs/w5-hardware-plan.md                      |  73 +++
+ tools/audit_closeout.py                       |  14 +-
+ tools/gen_w5_vectors.py                       | 222 +++++++
+ tools/nc_w5.py                                | 102 ++++
+ tools/write_p6_evidence.py                    |   3 +-
+ tools/write_w5_evidence.py                    | 145 +++++
+ 23 files changed, 1969 insertions(+), 22 deletions(-)
+ create mode 100644 crates/aura-wallet/src/hardware.rs
+ create mode 100644 crates/aura-wallet/tests/fixtures/w5_hardware_vectors.json
+ create mode 100644 crates/aura-wallet/tests/w5_hardware.rs
+ create mode 100644 docs/evidence/w5/README.md
+ create mode 100644 docs/evidence/w5/SHA256SUMS
+ create mode 100644 docs/evidence/w5/gates.txt
+ create mode 100644 docs/evidence/w5/inventory.txt
+ create mode 100644 docs/evidence/w5/nc.log
+ create mode 100644 docs/evidence/w5/report.md
+ create mode 100644 docs/evidence/w5/test-w5.log
+ create mode 100644 docs/w5-hardware-plan.md
+ create mode 100644 tools/gen_w5_vectors.py
+ create mode 100644 tools/nc_w5.py
+ create mode 100644 tools/write_w5_evidence.py
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index ccf4f91..029b31c 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,23 @@
+ # Changelog — AuraLite-Crypto
+ 
++## [W5 — Hardware keys phase closed (WALLET Stage 2): HID/CCID-like device protocol with on-screen confirmation (`aura_wallet::hardware`), display derived exclusively from the signed bytes (D-W5-1), showable-payloads-only + host-claim binding (D-W5-2), `Armed -> Confirm` binding with deny-retry (D-W5-3), plain `tx` domain signatures (D-W5-4); gate 10 confirmed/denied scenarios + NC: blind confirmation -> red] 2026-11-24
++
++The device is a deterministic secure-element simulation: `GetVersion` /
++`BeginSign` / `Decide` / `BlindSign` frames in, `Version` / `Display` /
++`Signed` / `Refused` out (`crates/aura-wallet/src/hardware.rs`, CLI
++`hw-sign`). The screen shows the nine unsigned protocol fields plus the
++decoded intent; `transfer` payloads must be `recipient||amount` (28 bytes),
++`delegate`/`undelegate` the canonical stake payload — anything else is
++refused as `undecodable payload` (a device never signs bytes it cannot
++display). 10 human confirmed/denied scenarios
++(`tests/fixtures/w5_hardware_vectors.json`) from the independent oracle
++`tools/gen_w5_vectors.py`, asserted byte-for-byte by `tests/w5_hardware.rs`
++(11/11 with the count guard); named control `blind_confirmation_rejected`.
++Mutation controls `tools/nc_w5.py` 6/6 (blind acceptance, denial ignored,
++display binding dropped, chain check dropped, amount render altered, payload
++decode check dropped) + green restore; `tools/write_w5_evidence.py`; audit:
++**99 phases, 656 NC**.
++
+ ## [P6 — Published SLOs (PERF Stage 2, finale): north-star registry 6/6 (spread 0, verify 22, parallel 15 543, commit 12 300, traffic 86 495, finality 586), tamper-evident run log (hash chain, tip `ac0f9067…e52a`), 6 methodologies + 4 honest "did not work" items, dashboards; NC: rigged run → log check red + 5 revert mutations] 2026-11-24
+ 
+ **PERF PLAN COMPLETE (P0–P6).** The `aura-bench::p6` profile (D-P7):
+diff --git a/Makefile b/Makefile
+index 2c03295..c901027 100644
+--- a/Makefile
++++ b/Makefile
+@@ -58,6 +58,7 @@ PYTHON ?= python3
+         gen-w2-vectors test-w2 nc-w2 evidence-w2 \
+         gen-w3-vectors test-w3 nc-w3 evidence-w3 \
+         gen-w4-vectors test-w4 nc-w4 evidence-w4 \
++        gen-w5-vectors test-w5 nc-w5 evidence-w5 \
+         gen-h0-vectors check-h0 nc-h0 evidence-h0 \
+         gen-h1-vectors gen-h1-sbom check-h1 nc-h1 evidence-h1 \
+         gen-h2-vectors check-h2 nc-h2 evidence-h2 \
+@@ -1292,6 +1293,21 @@ nc-w4:
+ evidence-w4:
+ 	@$(PYTHON) tools/write_w4_evidence.py
+ 
++# W5: the 10 hardware scenarios gate (tools/gen_w5_vectors.py oracle).
++.PHONY: gen-w5-vectors test-w5 nc-w5 evidence-w5
++
++gen-w5-vectors:
++	@$(PYTHON) tools/gen_w5_vectors.py
++
++test-w5:
++	@cargo test -p aura-wallet --features insecure-test-kdf --test w5_hardware
++
++nc-w5:
++	@$(PYTHON) tools/nc_w5.py
++
++evidence-w5:
++	@$(PYTHON) tools/write_w5_evidence.py
++
+ # H0: the threat-model review gate (tools/check_threat_model.py).
+ .PHONY: gen-h0-vectors check-h0 nc-h0 evidence-h0
+ 
+diff --git a/crates/aura-wallet/src/cli.rs b/crates/aura-wallet/src/cli.rs
+index 149ac21..7f3a5ed 100644
+--- a/crates/aura-wallet/src/cli.rs
++++ b/crates/aura-wallet/src/cli.rs
+@@ -27,6 +27,9 @@ use zeroize::Zeroizing;
+ use crate::derivation::{
+     self, Bip39NormalizationProfile, DerivedAccount, derive_account, generate_mnemonic,
+ };
++use crate::hardware::{
++    DeviceCommand, DeviceResponse, HardwareDevice, HardwareError, HostClaim, HumanDecision,
++};
+ use crate::keystore::{KdfParams, Keystore};
+ use crate::multisig::{
+     Approval, MsigError, MultisigDescriptor, MultisigProposal, ProposalAction, verify_approval,
+@@ -1686,6 +1689,113 @@ fn load_proposal_file(flag: &str, path: &str) -> Result<MultisigProposal, CliErr
+     proposal_from_text(&text).map_err(msig_err)
+ }
+ 
++/// `hw-sign` — drive the hardware device protocol over one unsigned envelope.
++///
++/// The device screen is derived from the transaction bytes (D-W5-1) and the
++/// human's answer decides the outcome (D-W5-3): `confirm` signs, `deny`
++/// refuses (retry via `--human deny,confirm`), `blind` is always refused.
++fn cmd_hw_sign(args: &Args, out: &mut dyn std::io::Write) -> Result<(), CliError> {
++    args.only(&[
++        "in",
++        "keystore",
++        "password-file",
++        "account",
++        "chain",
++        "human",
++        "show-recipient",
++        "show-amount",
++        "out",
++    ])?;
++    let chain = args.need("chain")?.to_owned();
++    let password = read_password_file(args.need("password-file")?)?;
++    let index = account_index(args)?;
++    let account = load_account(args.need("keystore")?, index, &password)?;
++    let text = read_artifact("--in", args.need("in")?)?;
++    let (kind, body) = offline::parse_envelope(&text).map_err(offline_err)?;
++    if kind != offline::KIND_UNSIGNED {
++        return Err(CliError::Invalid("envelope: expected unsigned".to_string()));
++    }
++    let unsigned = UnsignedTx::from_canonical_bytes(&body)
++        .map_err(|_| CliError::Invalid("envelope: bad encoding".to_string()))?;
++    let claim = match (args.opt("show-recipient"), args.opt("show-amount")) {
++        (None, None) => None,
++        (recipient, amount) => Some(HostClaim {
++            recipient: recipient
++                .map(|v| {
++                    Address::from_bech32(v)
++                        .map_err(|_| CliError::Usage("--show-recipient must be bech32".to_string()))
++                })
++                .transpose()?,
++            amount: amount.map(|v| parse_u64(v, "show-amount")).transpose()?,
++        }),
++    };
++    let mut device = HardwareDevice::new(account.secret.clone(), chain);
++    let version = match device.exchange(DeviceCommand::GetVersion) {
++        DeviceResponse::Version(v) => v,
++        _ => return Err(CliError::Invalid("hardware: bad response".to_string())),
++    };
++    let _ = writeln!(out, "device={version}");
++    let rounds = args.need("human")?;
++    if rounds == "blind" {
++        return match device.exchange(DeviceCommand::BlindSign { body: &body }) {
++            DeviceResponse::Signed(tx) => finish_hw_sign(args, out, &tx),
++            DeviceResponse::Refused(e) => Err(hardware_err(e)),
++            _ => Err(CliError::Invalid("hardware: bad response".to_string())),
++        };
++    }
++    let items: Vec<&str> = rounds.split(',').collect();
++    for (i, item) in items.iter().enumerate() {
++        let decision = match *item {
++            "confirm" => HumanDecision::Confirm,
++            "deny" => HumanDecision::Deny,
++            _ => {
++                return Err(CliError::Usage(
++                    "--human must be confirm, deny or blind".to_string(),
++                ));
++            }
++        };
++        let frame = match device.exchange(DeviceCommand::BeginSign {
++            unsigned: &unsigned,
++            claim: claim.as_ref(),
++        }) {
++            DeviceResponse::Display(frame) => frame,
++            DeviceResponse::Refused(e) => return Err(hardware_err(e)),
++            _ => return Err(CliError::Invalid("hardware: bad response".to_string())),
++        };
++        for line in frame.render_lines() {
++            let _ = writeln!(out, "{line}");
++        }
++        match device.exchange(DeviceCommand::Decide { decision }) {
++            DeviceResponse::Signed(tx) => return finish_hw_sign(args, out, &tx),
++            DeviceResponse::Refused(HardwareError::DeniedByUser) if i + 1 < items.len() => (),
++            DeviceResponse::Refused(e) => return Err(hardware_err(e)),
++            _ => return Err(CliError::Invalid("hardware: bad response".to_string())),
++        }
++    }
++    Err(hardware_err(HardwareError::DeniedByUser))
++}
++
++/// Write the hardware-produced signature and the optional signed envelope.
++fn finish_hw_sign(args: &Args, out: &mut dyn std::io::Write, tx: &Tx) -> Result<(), CliError> {
++    let signed = offline::encode_envelope(offline::KIND_SIGNED, &tx.to_bytes());
++    if let Some(path) = args.opt("out") {
++        std::fs::write(path, &signed).map_err(|e| CliError::Usage(format!("--out {path}: {e}")))?;
++    }
++    let _ = writeln!(out, "status=signed");
++    let _ = writeln!(out, "sig={}", hex::encode(tx.sig.bytes));
++    Ok(())
++}
++
++/// Map a device refusal to the fixed CLI error vocabulary.
++fn hardware_err(e: HardwareError) -> CliError {
++    match e {
++        HardwareError::ForeignChainId { found, expected } => {
++            CliError::ForeignChainId { found, expected }
++        }
++        other => CliError::Invalid(format!("hardware: {other}")),
++    }
++}
++
+ fn cmd_msig_init(args: &Args, out: &mut dyn std::io::Write) -> Result<(), CliError> {
+     args.only(&["chain", "threshold", "members", "timeout", "out"])?;
+     let chain = args.need("chain")?;
+@@ -1934,6 +2044,7 @@ pub fn run(args: &[String], out: &mut dyn std::io::Write, err: &mut dyn std::io:
+             "tx-verify" => cmd_tx_verify(&parsed, out),
+             "qr-split" => cmd_qr_split(&parsed, out),
+             "qr-join" => cmd_qr_join(&parsed, out),
++            "hw-sign" => cmd_hw_sign(&parsed, out),
+             "msig-init" => cmd_msig_init(&parsed, out),
+             "msig-propose" => cmd_msig_propose(&parsed, out),
+             "msig-approve" => cmd_msig_approve(&parsed, out),
+diff --git a/crates/aura-wallet/src/hardware.rs b/crates/aura-wallet/src/hardware.rs
+new file mode 100644
+index 0000000..f2278bf
+--- /dev/null
++++ b/crates/aura-wallet/src/hardware.rs
+@@ -0,0 +1,384 @@
++//! W5 — hardware-key device protocol (HID/CCID-like) with on-screen
++//! confirmation.
++//!
++//! A hardware key must never sign anything the human did not see on its own
++//! screen. This module is the deterministic simulation of such a device: a
++//! fixed frame protocol ([`DeviceCommand`] in, [`DeviceResponse`] out), a
++//! screen derived exclusively from the transaction bytes (D-W5-1) and a
++//! confirmation binding (D-W5-3) under which every path except
++//! `Armed -> Confirm` is refused as blind signing.
++//!
++//! Design of record: `docs/w5-hardware-plan.md` (D-W5-1..D-W5-4). Vectors:
++//! `tools/gen_w5_vectors.py` -> `tests/fixtures/w5_hardware_vectors.json`,
++//! asserted byte-for-byte by `tests/w5_hardware.rs`.
++//!
++//! NC targets (`tools/nc_w5.py`):
++//! 1. `sign_blind` acceptance -> `blind_confirmation_rejected` red;
++//! 2. `Deny` ignored -> `deny_transfer_basic` red;
++//! 3. display binding dropped -> `display_recipient_substitution` red;
++//! 4. chain check dropped -> `foreign_chain_refused` red;
++//! 5. amount render altered -> `confirm_transfer_high_value` red;
++//! 6. payload decode check dropped -> `undecodable_payload_refused` red.
++
++use std::fmt;
++
++use aura_tx::{Tx, TxKind, UnsignedTx};
++use aura_types::Address;
++
++use crate::cli::stake_payload;
++use crate::secret::SecretKey32;
++
++/// Device firmware identity reported for `GetVersion`.
++pub const DEVICE_VERSION: &str = "auralite-hw-1";
++
++/// What the device screen shows for one signing round (D-W5-1).
++///
++/// Every field is derived from the canonical unsigned transaction bytes the
++/// device is asked to sign — never from host-supplied strings.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct DisplayFrame {
++    /// Chain id the transaction is valid on.
++    pub chain: String,
++    /// Lowercase transaction kind (`transfer`, `delegate`, `undelegate`).
++    pub kind: String,
++    /// Signer address (bech32 in `render_lines`).
++    pub signer: Address,
++    /// Per-account sequence number.
++    pub nonce: u64,
++    /// Recipient shown for `transfer` payloads.
++    pub recipient: Option<Address>,
++    /// Validator shown for `delegate`/`undelegate` payloads.
++    pub validator: Option<Address>,
++    /// Amount shown for `transfer`/`delegate`/`undelegate` payloads.
++    pub amount: Option<u64>,
++    /// Maximum gas the sender buys.
++    pub gas: u64,
++    /// Maximum total fee the sender pays.
++    pub max_fee: u128,
++    /// Priority tip.
++    pub tip: u128,
++    /// Last height at which the transaction may be included.
++    pub expiry: u64,
++}
++
++impl DisplayFrame {
++    /// Render the screen as deterministic `display: key=value` lines.
++    ///
++    /// NC target: `tools/nc_w5.py` alters the `amount` line and requires
++    /// `confirm_transfer_high_value` to go red.
++    #[must_use]
++    pub fn render_lines(&self) -> Vec<String> {
++        let mut lines = vec![
++            format!("display: chain={}", self.chain),
++            format!("display: kind={}", self.kind),
++            format!("display: signer={}", self.signer.to_bech32()),
++            format!("display: nonce={}", self.nonce),
++        ];
++        if let Some(to) = self.recipient {
++            lines.push(format!("display: to={}", to.to_bech32()));
++        }
++        if let Some(validator) = self.validator {
++            lines.push(format!("display: validator={}", validator.to_bech32()));
++        }
++        if let Some(amount) = self.amount {
++            lines.push(format!("display: amount={amount}"));
++        }
++        lines.push(format!("display: gas={}", self.gas));
++        lines.push(format!("display: max_fee={}", self.max_fee));
++        lines.push(format!("display: tip={}", self.tip));
++        lines.push(format!("display: expiry={}", self.expiry));
++        lines
++    }
++
++    /// Derive the screen from the transaction the device will sign (D-W5-1).
++    ///
++    /// # Errors
++    ///
++    /// [`HardwareError::UndecodablePayload`] when the payload cannot be fully
++    /// decoded and displayed (D-W5-2) — the device never signs bytes it
++    /// cannot show.
++    pub fn derive(unsigned: &UnsignedTx) -> Result<Self, HardwareError> {
++        let kind = match unsigned.kind {
++            TxKind::Transfer => "transfer",
++            TxKind::Delegate => "delegate",
++            TxKind::Undelegate => "undelegate",
++            TxKind::Deploy | TxKind::Call => return Err(HardwareError::UndecodablePayload),
++        };
++        let (recipient, validator, amount) = match unsigned.kind {
++            TxKind::Transfer => {
++                if unsigned.payload.len() != 28 {
++                    return Err(HardwareError::UndecodablePayload);
++                }
++                let to = Address::from_bytes(unsigned.payload[0..20].try_into().expect("20 bytes"));
++                let amount =
++                    u64::from_le_bytes(unsigned.payload[20..28].try_into().expect("8 bytes"));
++                (Some(to), None, Some(amount))
++            }
++            TxKind::Delegate | TxKind::Undelegate => {
++                let (validator, amount) = decode_stake(&unsigned.payload, unsigned.kind)
++                    .ok_or(HardwareError::UndecodablePayload)?;
++                (None, Some(validator), Some(amount))
++            }
++            TxKind::Deploy | TxKind::Call => return Err(HardwareError::UndecodablePayload),
++        };
++        Ok(DisplayFrame {
++            chain: unsigned.chain_id.as_str().to_owned(),
++            kind: kind.to_owned(),
++            signer: unsigned.signer,
++            nonce: unsigned.nonce.value(),
++            recipient,
++            validator,
++            amount,
++            gas: unsigned.gas_limit.value(),
++            max_fee: unsigned.max_fee.units(),
++            tip: unsigned.tip.units(),
++            expiry: unsigned.expiry.value(),
++        })
++    }
++}
++
++/// Decode a canonical stake payload by re-encoding it (D-W5-2).
++///
++/// The trailing `validator (20) || amount (LE u64)` is re-encoded through the
++/// canonical `stake_payload` builder and must reproduce the payload exactly.
++fn decode_stake(payload: &[u8], kind: TxKind) -> Option<(Address, u64)> {
++    if payload.len() < 29 {
++        return None;
++    }
++    let amount = u64::from_le_bytes(payload[payload.len() - 8..].try_into().ok()?);
++    let validator = Address::from_bytes(
++        payload[payload.len() - 28..payload.len() - 8]
++            .try_into()
++            .ok()?,
++    );
++    let action = match kind {
++        TxKind::Delegate => crate::cli::StakeAction::Delegate,
++        TxKind::Undelegate => crate::cli::StakeAction::Undelegate,
++        _ => return None,
++    };
++    let canonical = stake_payload(action, &validator, amount);
++    if canonical == payload {
++        Some((validator, amount))
++    } else {
++        None
++    }
++}
++
++/// The host's preview of what the user is about to approve.
++///
++/// A preview that disagrees with the device-derived display is refused
++/// (`display mismatch`) before the human is asked (D-W5-2).
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
++pub struct HostClaim {
++    /// Recipient the host claims the user is sending to.
++    pub recipient: Option<Address>,
++    /// Amount the host claims the user is sending.
++    pub amount: Option<u64>,
++}
++
++impl HostClaim {
++    /// Whether every field the host claims agrees with the derived display.
++    #[must_use]
++    pub fn matches(&self, frame: &DisplayFrame) -> bool {
++        self.recipient.is_none_or(|r| Some(r) == frame.recipient)
++            && self.amount.is_none_or(|a| Some(a) == frame.amount)
++    }
++}
++
++/// The human's answer on the device screen (D-W5-3).
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum HumanDecision {
++    /// The human approved exactly the displayed fields.
++    Confirm,
++    /// The human rejected the request.
++    Deny,
++}
++
++/// Protocol-level refusals of the device.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum HardwareError {
++    /// The transaction targets a chain the device is not provisioned for.
++    ForeignChainId {
++        /// Chain id found in the transaction.
++        found: String,
++        /// Chain id the device is provisioned for.
++        expected: String,
++    },
++    /// The device refuses to sign a payload it cannot fully display.
++    UndecodablePayload,
++    /// The host preview disagrees with the device-derived display.
++    DisplayMismatch,
++    /// The human denied the request.
++    DeniedByUser,
++    /// A signing request that skipped the display/confirm round trip.
++    BlindConfirmationRejected,
++    /// The signing primitive failed.
++    SigningFailed,
++}
++
++impl fmt::Display for HardwareError {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::ForeignChainId { .. } => write!(f, "foreign chain-id"),
++            Self::UndecodablePayload => write!(f, "undecodable payload"),
++            Self::DisplayMismatch => write!(f, "display mismatch"),
++            Self::DeniedByUser => write!(f, "denied by user"),
++            Self::BlindConfirmationRejected => write!(f, "blind confirmation rejected"),
++            Self::SigningFailed => write!(f, "signing failed"),
++        }
++    }
++}
++
++/// A host -> device request frame (HID/CCID-like command set).
++#[derive(Debug)]
++pub enum DeviceCommand<'a> {
++    /// Ask for the firmware identity.
++    GetVersion,
++    /// Open a signing round: derive and display the screen (D-W5-1).
++    BeginSign {
++        /// The canonical unsigned transaction to display and sign.
++        unsigned: &'a UnsignedTx,
++        /// Optional host preview to bind against the derived display.
++        claim: Option<&'a HostClaim>,
++    },
++    /// Deliver the human's answer for the open round (D-W5-3).
++    Decide {
++        /// The answer shown on the device screen.
++        decision: HumanDecision,
++    },
++    /// Ask the device to sign unseen bytes — the blind-signing attack.
++    BlindSign {
++        /// Raw transaction bytes the host wants signed without display.
++        body: &'a [u8],
++    },
++}
++
++/// A device -> host response frame.
++#[derive(Debug)]
++pub enum DeviceResponse {
++    /// Firmware identity for `GetVersion`.
++    Version(&'static str),
++    /// The rendered screen for an opened round.
++    Display(DisplayFrame),
++    /// The signed transaction after an explicit `Confirm`.
++    Signed(Tx),
++    /// The device refused the request.
++    Refused(HardwareError),
++}
++
++/// Internal round state (D-W5-3: `Idle -> Armed -> Idle`).
++enum Phase {
++    /// No round is open; any `Decide` is a blind signing attempt.
++    Idle,
++    /// A round is open and displayed to the human.
++    Armed {
++        /// The transaction the round will sign on `Confirm`.
++        unsigned: UnsignedTx,
++    },
++}
++
++/// The simulated HID/CCID-like secure element.
++///
++/// Holds the signing key, the chain it is provisioned for and the round
++/// state. Nothing is signed without `Armed -> Confirm` (D-W5-3).
++pub struct HardwareDevice {
++    /// Ed25519 signing key held by the device (never leaves it).
++    secret: SecretKey32,
++    /// Chain the device is provisioned for.
++    expected_chain: String,
++    /// Round state.
++    phase: Phase,
++}
++
++impl HardwareDevice {
++    /// Provision the device with a key and its chain.
++    #[must_use]
++    pub fn new(secret: SecretKey32, expected_chain: impl Into<String>) -> Self {
++        Self {
++            secret,
++            expected_chain: expected_chain.into(),
++            phase: Phase::Idle,
++        }
++    }
++
++    /// Exchange one protocol frame.
++    ///
++    /// # Errors
++    ///
++    /// Never panics; refusals arrive as [`DeviceResponse::Refused`].
++    #[must_use]
++    pub fn exchange(&mut self, command: DeviceCommand<'_>) -> DeviceResponse {
++        match command {
++            DeviceCommand::GetVersion => DeviceResponse::Version(DEVICE_VERSION),
++            DeviceCommand::BeginSign { unsigned, claim } => {
++                match self.begin_sign(unsigned, claim) {
++                    Ok(frame) => DeviceResponse::Display(frame),
++                    Err(e) => DeviceResponse::Refused(e),
++                }
++            }
++            DeviceCommand::Decide { decision } => match self.decide(decision) {
++                Ok(tx) => DeviceResponse::Signed(tx),
++                Err(e) => DeviceResponse::Refused(e),
++            },
++            DeviceCommand::BlindSign { body } => match self.sign_blind(body) {
++                Ok(tx) => DeviceResponse::Signed(tx),
++                Err(e) => DeviceResponse::Refused(e),
++            },
++        }
++    }
++
++    /// Open a signing round: chain gate, display derivation, claim binding.
++    fn begin_sign(
++        &mut self,
++        unsigned: &UnsignedTx,
++        claim: Option<&HostClaim>,
++    ) -> Result<DisplayFrame, HardwareError> {
++        // The chain gate runs before anything is displayed (NC-4 target).
++        if unsigned.chain_id.as_str() != self.expected_chain {
++            return Err(HardwareError::ForeignChainId {
++                found: unsigned.chain_id.as_str().to_owned(),
++                expected: self.expected_chain.clone(),
++            });
++        }
++        let frame = DisplayFrame::derive(unsigned)?;
++        if let Some(claim) = claim {
++            // A host preview that disagrees with the derived display is
++            // refused before the human is asked (NC-3 target).
++            if !claim.matches(&frame) {
++                return Err(HardwareError::DisplayMismatch);
++            }
++        }
++        self.phase = Phase::Armed {
++            unsigned: unsigned.clone(),
++        };
++        Ok(frame)
++    }
++
++    /// Deliver the human's answer for the open round (D-W5-3).
++    fn decide(&mut self, decision: HumanDecision) -> Result<Tx, HardwareError> {
++        let Phase::Armed { unsigned } = std::mem::replace(&mut self.phase, Phase::Idle) else {
++            // A decision without a displayed round is a blind signing attempt.
++            return Err(HardwareError::BlindConfirmationRejected);
++        };
++        match decision {
++            HumanDecision::Confirm => self.finish_sign(&unsigned),
++            // A denial never signs and never latches the device (NC-2 target).
++            HumanDecision::Deny => Err(HardwareError::DeniedByUser),
++        }
++    }
++
++    /// The blind-signing attack surface: always refused (D-W5-3).
++    fn sign_blind(&mut self, body: &[u8]) -> Result<Tx, HardwareError> {
++        // Never sign unseen bytes — refused before any key use (NC-1 target).
++        let _ = body;
++        Err(HardwareError::BlindConfirmationRejected)
++    }
++
++    /// Sign the confirmed transaction under the fixed AuraLite `tx` domain
++    /// (D-W5-4), producing a [`Tx`] the W3 offline path verifies.
++    fn finish_sign(&self, unsigned: &UnsignedTx) -> Result<Tx, HardwareError> {
++        unsigned
++            .sign(self.secret.as_bytes())
++            .map_err(|_| HardwareError::SigningFailed)
++    }
++}
+diff --git a/crates/aura-wallet/src/lib.rs b/crates/aura-wallet/src/lib.rs
+index 7b91fec..44bbb6c 100644
+--- a/crates/aura-wallet/src/lib.rs
++++ b/crates/aura-wallet/src/lib.rs
+@@ -13,6 +13,7 @@
+ pub mod baseline;
+ pub mod cli;
+ pub mod derivation;
++pub mod hardware;
+ pub mod keystore;
+ pub mod multisig;
+ pub mod offline;
+diff --git a/crates/aura-wallet/tests/fixtures/w1_baseline.txt b/crates/aura-wallet/tests/fixtures/w1_baseline.txt
+index 81b9cb1..117eb9d 100644
+--- a/crates/aura-wallet/tests/fixtures/w1_baseline.txt
++++ b/crates/aura-wallet/tests/fixtures/w1_baseline.txt
+@@ -12,10 +12,10 @@ missing=0
+ exposure_surfaces=8
+ threat_notes=6
+ missing_capabilities=3
+-layer=keystore	W1	implemented	9	5610	168	BIP-39 and SLIP-0010 Ed25519 testnet derivation, encrypted keystore, zeroize
+-layer=wallet-cli	W2	implemented	9	5610	168	`aura-wallet` CLI: new/import/list/balance/transfer/sign/broadcast/stake/vote
+-layer=offline-signing	W3	placeholder	9	5610	168	air-gapped unsigned/signed tx format, QR/USB bundle, online verification
+-layer=multisig	W4	placeholder	9	5610	168	M-of-N multisig coordination, signature collection, timeouts, member rotation
++layer=keystore	W1	implemented	10	6106	182	BIP-39 and SLIP-0010 Ed25519 testnet derivation, encrypted keystore, zeroize
++layer=wallet-cli	W2	implemented	10	6106	182	`aura-wallet` CLI: new/import/list/balance/transfer/sign/broadcast/stake/vote
++layer=offline-signing	W3	placeholder	10	6106	182	air-gapped unsigned/signed tx format, QR/USB bundle, online verification
++layer=multisig	W4	placeholder	10	6106	182	M-of-N multisig coordination, signature collection, timeouts, member rotation
+ surface=logs-and-tracing	W0	CRITICAL	structured/plain daemon or test logs (`*.log`, `tracing`, `Debug`/`Display`)
+ surface=cli-argv-and-env	W1	CRITICAL	CLI flags (`--private-key`, `--mnemonic`) visible in `/proc/<pid>/cmdline` and shell history
+ surface=plaintext-disk-files	W1	CRITICAL	unencrypted key files, swap/temp files, or world-readable keystore permissions
+diff --git a/crates/aura-wallet/tests/fixtures/w5_hardware_vectors.json b/crates/aura-wallet/tests/fixtures/w5_hardware_vectors.json
+new file mode 100644
+index 0000000..0fd7630
+--- /dev/null
++++ b/crates/aura-wallet/tests/fixtures/w5_hardware_vectors.json
+@@ -0,0 +1,571 @@
++{
++  "gate": "10 \"human confirmed/denied\" scenarios; NC: blind confirmation -> red",
++  "notice": "PUBLIC TEST DATA ONLY - DO NOT USE FOR FUNDS",
++  "named_control": "blind_confirmation_rejected",
++  "cases": [
++    {
++      "name": "confirm_transfer_basic",
++      "argv": [
++        "hw-sign",
++        "--in",
++        "{sandbox}/u.env",
++        "--keystore",
++        "{sandbox}/ks",
++        "--password-file",
++        "{sandbox}/pw",
++        "--account",
++        "0",
++        "--chain",
++        "auralite-test-1",
++        "--human",
++        "confirm",
++        "--out",
++        "{sandbox}/s.env"
++      ],
++      "files": {
++        "pw": "test password for hardware vectors\n",
++        "ent00": "0000000000000000000000000000000000000000000000000000000000000000\n",
++        "u.env": "QXVyYUxpdGUtT0ZGTElORS1WMQB7AAAAAAAAAAEPYXVyYWxpdGUtdGVzdC0xvLX792LCtriS9y2Uf_Z-V1Xd_y4AAAAAAAAAAAAcx-17pj-nIjV2-Gv_DytNR6uPPKLoAwAAAAAAAAhSAAAAAAAAQEIPAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD__________2WbNlRTjYn2en4_LWXrvM9OPjJNSoCmFRFX61xoflhf\n"
++      },
++      "setup": [
++        [
++          "new",
++          "--keystore",
++          "{sandbox}/ks",
++          "--password-file",
++          "{sandbox}/pw",
++          "--chain",
++          "auralite-test-1",
++          "--entropy-file",
++          "{sandbox}/ent00",
++          "--kdf",
++          "testing",
++          "--account",
++          "0"
++        ]
++      ],
++      "expect_exit": 0,
++      "expect_stdout": [
++        "device=auralite-hw-1",
++        "display: chain=auralite-test-1",
++        "display: kind=transfer",
++        "display: signer=aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9",
++        "display: nonce=0",
++        "display: to=aura1qrr767ax87njydtklp4l7retf4r6hreu5gx0emda",
++        "display: amount=1000",
++        "display: gas=21000",
++        "display: max_fee=1000000",
++        "display: tip=0",
++        "display: expiry=18446744073709551615",
++        "status=signed",
++        "sig=692fd45733c4a9e4414c7322c1b5897169dae29e30670c0e6a0e8df4746fe2988358498ae6ea96dbb8cbf9b9aaa0cb23c7ec9e2f7ab3e2c6c2c8fbf145aee300"
++      ],
++      "expect_stderr": []
++    },
++    {
++      "name": "deny_transfer_basic",
++      "argv": [
++        "hw-sign",
++        "--in",
++        "{sandbox}/u.env",
++        "--keystore",
++        "{sandbox}/ks",
++        "--password-file",
++        "{sandbox}/pw",
++        "--account",
++        "0",
++        "--chain",
++        "auralite-test-1",
++        "--human",
++        "deny",
++        "--out",
++        "{sandbox}/s.env"
++      ],
++      "files": {
++        "pw": "test password for hardware vectors\n",
++        "ent00": "0000000000000000000000000000000000000000000000000000000000000000\n",
++        "u.env": "QXVyYUxpdGUtT0ZGTElORS1WMQB7AAAAAAAAAAEPYXVyYWxpdGUtdGVzdC0xvLX792LCtriS9y2Uf_Z-V1Xd_y4AAAAAAAAAAAAcx-17pj-nIjV2-Gv_DytNR6uPPKLoAwAAAAAAAAhSAAAAAAAAQEIPAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD__________2WbNlRTjYn2en4_LWXrvM9OPjJNSoCmFRFX61xoflhf\n"
++      },
++      "setup": [
++        [
++          "new",
++          "--keystore",
++          "{sandbox}/ks",
++          "--password-file",
++          "{sandbox}/pw",
++          "--chain",
++          "auralite-test-1",
++          "--entropy-file",
++          "{sandbox}/ent00",
++          "--kdf",
++          "testing",
++          "--account",
++          "0"
++        ]
++      ],
++      "expect_exit": 65,
++      "expect_stdout": [
++        "device=auralite-hw-1",
++        "display: chain=auralite-test-1",
++        "display: kind=transfer",
++        "display: signer=aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9",
++        "display: nonce=0",
++        "display: to=aura1qrr767ax87njydtklp4l7retf4r6hreu5gx0emda",
++        "display: amount=1000",
++        "display: gas=21000",
++        "display: max_fee=1000000",
++        "display: tip=0",
++        "display: expiry=18446744073709551615"
++      ],
++      "expect_stderr": [
++        "error: hardware: denied by user"
++      ]
++    },
++    {
++      "name": "confirm_transfer_high_value",
++      "argv": [
++        "hw-sign",
++        "--in",
++        "{sandbox}/u.env",
++        "--keystore",
++        "{sandbox}/ks",
++        "--password-file",
++        "{sandbox}/pw",
++        "--account",
++        "0",
++        "--chain",
++        "auralite-test-1",
++        "--human",
++        "confirm",
++        "--out",
++        "{sandbox}/s.env"
++      ],
++      "files": {
++        "pw": "test password for hardware vectors\n",
++        "ent00": "0000000000000000000000000000000000000000000000000000000000000000\n",
++        "u.env": "QXVyYUxpdGUtT0ZGTElORS1WMQB7AAAAAAAAAAEPYXVyYWxpdGUtdGVzdC0xvLX792LCtriS9y2Uf_Z-V1Xd_y4BAAAAAAAAAAAcx-17pj-nIjV2-Gv_DytNR6uPPKIVzVsHAAAAAAhSAAAAAAAAQEIPAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD__________6MSmj98BeJarvDtAg9EvvGif6DjXM8o63Nf53p1SeWf\n"
++      },
++      "setup": [
++        [
++          "new",
++          "--keystore",
++          "{sandbox}/ks",
++          "--password-file",
++          "{sandbox}/pw",
++          "--chain",
++          "auralite-test-1",
++          "--entropy-file",
++          "{sandbox}/ent00",
++          "--kdf",
++          "testing",
++          "--account",
++          "0"
++        ]
++      ],
++      "expect_exit": 0,
++      "expect_stdout": [
++        "device=auralite-hw-1",
++        "display: chain=auralite-test-1",
++        "display: kind=transfer",
++        "display: signer=aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9",
++        "display: nonce=1",
++        "display: to=aura1qrr767ax87njydtklp4l7retf4r6hreu5gx0emda",
++        "display: amount=123456789",
++        "display: gas=21000",
++        "display: max_fee=1000000",
++        "display: tip=0",
++        "display: expiry=18446744073709551615",
++        "status=signed",
++        "sig=5374f89e64418439a5c9206802404486ee5dcfc9d20cbb3d078618efc7adcc18026f1fd0ae6be7829ac2503a6e258cd643a3101a1cee9c8029960075faa98206"
++      ],
++      "expect_stderr": []
++    },
++    {
++      "name": "deny_transfer_high_value",
++      "argv": [
++        "hw-sign",
++        "--in",
++        "{sandbox}/u.env",
++        "--keystore",
++        "{sandbox}/ks",
++        "--password-file",
++        "{sandbox}/pw",
++        "--account",
++        "0",
++        "--chain",
++        "auralite-test-1",
++        "--human",
++        "deny",
++        "--out",
++        "{sandbox}/s.env"
++      ],
++      "files": {
++        "pw": "test password for hardware vectors\n",
++        "ent00": "0000000000000000000000000000000000000000000000000000000000000000\n",
++        "u.env": "QXVyYUxpdGUtT0ZGTElORS1WMQB7AAAAAAAAAAEPYXVyYWxpdGUtdGVzdC0xvLX792LCtriS9y2Uf_Z-V1Xd_y4BAAAAAAAAAAAcx-17pj-nIjV2-Gv_DytNR6uPPKIVzVsHAAAAAAhSAAAAAAAAQEIPAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD__________6MSmj98BeJarvDtAg9EvvGif6DjXM8o63Nf53p1SeWf\n"
++      },
++      "setup": [
++        [
++          "new",
++          "--keystore",
++          "{sandbox}/ks",
++          "--password-file",
++          "{sandbox}/pw",
++          "--chain",
++          "auralite-test-1",
++          "--entropy-file",
++          "{sandbox}/ent00",
++          "--kdf",
++          "testing",
++          "--account",
++          "0"
++        ]
++      ],
++      "expect_exit": 65,
++      "expect_stdout": [
++        "device=auralite-hw-1",
++        "display: chain=auralite-test-1",
++        "display: kind=transfer",
++        "display: signer=aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9",
++        "display: nonce=1",
++        "display: to=aura1qrr767ax87njydtklp4l7retf4r6hreu5gx0emda",
++        "display: amount=123456789",
++        "display: gas=21000",
++        "display: max_fee=1000000",
++        "display: tip=0",
++        "display: expiry=18446744073709551615"
++      ],
++      "expect_stderr": [
++        "error: hardware: denied by user"
++      ]
++    },
++    {
++      "name": "blind_confirmation_rejected",
++      "argv": [
++        "hw-sign",
++        "--in",
++        "{sandbox}/u.env",
++        "--keystore",
++        "{sandbox}/ks",
++        "--password-file",
++        "{sandbox}/pw",
++        "--account",
++        "0",
++        "--chain",
++        "auralite-test-1",
++        "--human",
++        "blind",
++        "--out",
++        "{sandbox}/s.env"
++      ],
++      "files": {
++        "pw": "test password for hardware vectors\n",
++        "ent00": "0000000000000000000000000000000000000000000000000000000000000000\n",
++        "u.env": "QXVyYUxpdGUtT0ZGTElORS1WMQB7AAAAAAAAAAEPYXVyYWxpdGUtdGVzdC0xvLX792LCtriS9y2Uf_Z-V1Xd_y4AAAAAAAAAAAAcx-17pj-nIjV2-Gv_DytNR6uPPKLoAwAAAAAAAAhSAAAAAAAAQEIPAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD__________2WbNlRTjYn2en4_LWXrvM9OPjJNSoCmFRFX61xoflhf\n"
++      },
++      "setup": [
++        [
++          "new",
++          "--keystore",
++          "{sandbox}/ks",
++          "--password-file",
++          "{sandbox}/pw",
++          "--chain",
++          "auralite-test-1",
++          "--entropy-file",
++          "{sandbox}/ent00",
++          "--kdf",
++          "testing",
++          "--account",
++          "0"
++        ]
++      ],
++      "expect_exit": 65,
++      "expect_stdout": [
++        "device=auralite-hw-1"
++      ],
++      "expect_stderr": [
++        "error: hardware: blind confirmation rejected"
++      ]
++    },
++    {
++      "name": "display_recipient_substitution",
++      "argv": [
++        "hw-sign",
++        "--in",
++        "{sandbox}/u.env",
++        "--keystore",
++        "{sandbox}/ks",
++        "--password-file",
++        "{sandbox}/pw",
++        "--account",
++        "0",
++        "--chain",
++        "auralite-test-1",
++        "--human",
++        "confirm",
++        "--show-recipient",
++        "aura1qp7c92duamelyvenln277czerlys68juys07v32e",
++        "--show-amount",
++        "1000",
++        "--out",
++        "{sandbox}/s.env"
++      ],
++      "files": {
++        "pw": "test password for hardware vectors\n",
++        "ent00": "0000000000000000000000000000000000000000000000000000000000000000\n",
++        "u.env": "QXVyYUxpdGUtT0ZGTElORS1WMQB7AAAAAAAAAAEPYXVyYWxpdGUtdGVzdC0xvLX792LCtriS9y2Uf_Z-V1Xd_y4AAAAAAAAAAAAcx-17pj-nIjV2-Gv_DytNR6uPPKLoAwAAAAAAAAhSAAAAAAAAQEIPAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD__________2WbNlRTjYn2en4_LWXrvM9OPjJNSoCmFRFX61xoflhf\n"
++      },
++      "setup": [
++        [
++          "new",
++          "--keystore",
++          "{sandbox}/ks",
++          "--password-file",
++          "{sandbox}/pw",
++          "--chain",
++          "auralite-test-1",
++          "--entropy-file",
++          "{sandbox}/ent00",
++          "--kdf",
++          "testing",
++          "--account",
++          "0"
++        ]
++      ],
++      "expect_exit": 65,
++      "expect_stdout": [
++        "device=auralite-hw-1"
++      ],
++      "expect_stderr": [
++        "error: hardware: display mismatch"
++      ]
++    },
++    {
++      "name": "deny_then_retry_confirm",
++      "argv": [
++        "hw-sign",
++        "--in",
++        "{sandbox}/u.env",
++        "--keystore",
++        "{sandbox}/ks",
++        "--password-file",
++        "{sandbox}/pw",
++        "--account",
++        "0",
++        "--chain",
++        "auralite-test-1",
++        "--human",
++        "deny,confirm",
++        "--out",
++        "{sandbox}/s.env"
++      ],
++      "files": {
++        "pw": "test password for hardware vectors\n",
++        "ent00": "0000000000000000000000000000000000000000000000000000000000000000\n",
++        "u.env": "QXVyYUxpdGUtT0ZGTElORS1WMQB7AAAAAAAAAAEPYXVyYWxpdGUtdGVzdC0xvLX792LCtriS9y2Uf_Z-V1Xd_y4AAAAAAAAAAAAcx-17pj-nIjV2-Gv_DytNR6uPPKLoAwAAAAAAAAhSAAAAAAAAQEIPAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD__________2WbNlRTjYn2en4_LWXrvM9OPjJNSoCmFRFX61xoflhf\n"
++      },
++      "setup": [
++        [
++          "new",
++          "--keystore",
++          "{sandbox}/ks",
++          "--password-file",
++          "{sandbox}/pw",
++          "--chain",
++          "auralite-test-1",
++          "--entropy-file",
++          "{sandbox}/ent00",
++          "--kdf",
++          "testing",
++          "--account",
++          "0"
++        ]
++      ],
++      "expect_exit": 0,
++      "expect_stdout": [
++        "device=auralite-hw-1",
++        "display: chain=auralite-test-1",
++        "display: kind=transfer",
++        "display: signer=aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9",
++        "display: nonce=0",
++        "display: to=aura1qrr767ax87njydtklp4l7retf4r6hreu5gx0emda",
++        "display: amount=1000",
++        "display: gas=21000",
++        "display: max_fee=1000000",
++        "display: tip=0",
++        "display: expiry=18446744073709551615",
++        "display: chain=auralite-test-1",
++        "display: kind=transfer",
++        "display: signer=aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9",
++        "display: nonce=0",
++        "display: to=aura1qrr767ax87njydtklp4l7retf4r6hreu5gx0emda",
++        "display: amount=1000",
++        "display: gas=21000",
++        "display: max_fee=1000000",
++        "display: tip=0",
++        "display: expiry=18446744073709551615",
++        "status=signed",
++        "sig=692fd45733c4a9e4414c7322c1b5897169dae29e30670c0e6a0e8df4746fe2988358498ae6ea96dbb8cbf9b9aaa0cb23c7ec9e2f7ab3e2c6c2c8fbf145aee300"
++      ],
++      "expect_stderr": []
++    },
++    {
++      "name": "confirm_delegate",
++      "argv": [
++        "hw-sign",
++        "--in",
++        "{sandbox}/u.env",
++        "--keystore",
++        "{sandbox}/ks",
++        "--password-file",
++        "{sandbox}/pw",
++        "--account",
++        "0",
++        "--chain",
++        "auralite-test-1",
++        "--human",
++        "confirm",
++        "--out",
++        "{sandbox}/s.env"
++      ],
++      "files": {
++        "pw": "test password for hardware vectors\n",
++        "ent00": "0000000000000000000000000000000000000000000000000000000000000000\n",
++        "u.env": "QXVyYUxpdGUtT0ZGTElORS1WMQCcAAAAAAAAAAEPYXVyYWxpdGUtdGVzdC0xvLX792LCtriS9y2Uf_Z-V1Xd_y4CAAAAAAAAAAM9QXVyYUxpdGUtQ3J5cHRvL3dhbGxldC1zdGFrZS12MQAAx-17pj-nIjV2-Gv_DytNR6uPPKJAS0wAAAAAAAhSAAAAAAAAQEIPAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD__________85Rl8Jg2vA7gIn_iifH-IDTFxWAgDfnEAShflkeNs-N\n"
++      },
++      "setup": [
++        [
++          "new",
++          "--keystore",
++          "{sandbox}/ks",
++          "--password-file",
++          "{sandbox}/pw",
++          "--chain",
++          "auralite-test-1",
++          "--entropy-file",
++          "{sandbox}/ent00",
++          "--kdf",
++          "testing",
++          "--account",
++          "0"
++        ]
++      ],
++      "expect_exit": 0,
++      "expect_stdout": [
++        "device=auralite-hw-1",
++        "display: chain=auralite-test-1",
++        "display: kind=delegate",
++        "display: signer=aura1qz7tt7lhvtptdwyj7ukegllk0et4th0l9cd5f2m9",
++        "display: nonce=2",
++        "display: validator=aura1qrr767ax87njydtklp4l7retf4r6hreu5gx0emda",
++        "display: amount=5000000",
++        "display: gas=21000",
++        "display: max_fee=1000000",
++        "display: tip=0",
++        "display: expiry=18446744073709551615",
++        "status=signed",
++        "sig=b175b9372b24f610db536446ff7f7be5b37bc828588cc8fe4162de1f79784c255b2e03bbdd22e6df592685ef905a2484844c79f8f95e16d641b49f7b312c2001"
++      ],
++      "expect_stderr": []
++    },
++    {
++      "name": "undecodable_payload_refused",
++      "argv": [
++        "hw-sign",
++        "--in",
++        "{sandbox}/u.env",
++        "--keystore",
++        "{sandbox}/ks",
++        "--password-file",
++        "{sandbox}/pw",
++        "--account",
++        "0",
++        "--chain",
++        "auralite-test-1",
++        "--human",
++        "confirm",
++        "--out",
++        "{sandbox}/s.env"
++      ],
++      "files": {
++        "pw": "test password for hardware vectors\n",
++        "ent00": "0000000000000000000000000000000000000000000000000000000000000000\n",
++        "u.env": "QXVyYUxpdGUtT0ZGTElORS1WMQBnAAAAAAAAAAEPYXVyYWxpdGUtdGVzdC0xvLX792LCtriS9y2Uf_Z-V1Xd_y4DAAAAAAAAAAAI6AMAAAAAAAAIUgAAAAAAAEBCDwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA__________9Be1MvXgYXKGMWl74RyxYjkNt-CUdzO-XXkP4LUZti8g\n"
++      },
++      "setup": [
++        [
++          "new",
++          "--keystore",
++          "{sandbox}/ks",
++          "--password-file",
++          "{sandbox}/pw",
++          "--chain",
++          "auralite-test-1",
++          "--entropy-file",
++          "{sandbox}/ent00",
++          "--kdf",
++          "testing",
++          "--account",
++          "0"
++        ]
++      ],
++      "expect_exit": 65,
++      "expect_stdout": [
++        "device=auralite-hw-1"
++      ],
++      "expect_stderr": [
++        "error: hardware: undecodable payload"
++      ]
++    },
++    {
++      "name": "foreign_chain_refused",
++      "argv": [
++        "hw-sign",
++        "--in",
++        "{sandbox}/u.env",
++        "--keystore",
++        "{sandbox}/ks",
++        "--password-file",
++        "{sandbox}/pw",
++        "--account",
++        "0",
++        "--chain",
++        "evil-net-9",
++        "--human",
++        "confirm",
++        "--out",
++        "{sandbox}/s.env"
++      ],
++      "files": {
++        "pw": "test password for hardware vectors\n",
++        "ent00": "0000000000000000000000000000000000000000000000000000000000000000\n",
++        "u.env": "QXVyYUxpdGUtT0ZGTElORS1WMQB7AAAAAAAAAAEPYXVyYWxpdGUtdGVzdC0xvLX792LCtriS9y2Uf_Z-V1Xd_y4EAAAAAAAAAAAcx-17pj-nIjV2-Gv_DytNR6uPPKLoAwAAAAAAAAhSAAAAAAAAQEIPAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD__________-SEowHCsNogFkDvSB3A-KKK5Kvip2nlxYmc7Y1YjOT5\n"
++      },
++      "setup": [
++        [
++          "new",
++          "--keystore",
++          "{sandbox}/ks",
++          "--password-file",
++          "{sandbox}/pw",
++          "--chain",
++          "auralite-test-1",
++          "--entropy-file",
++          "{sandbox}/ent00",
++          "--kdf",
++          "testing",
++          "--account",
++          "0"
++        ]
++      ],
++      "expect_exit": 65,
++      "expect_stdout": [
++        "device=auralite-hw-1"
++      ],
++      "expect_stderr": [
++        "error: foreign chain-id: tx=auralite-test-1, wallet=evil-net-9"
++      ]
++    }
++  ]
++}
+diff --git a/crates/aura-wallet/tests/w5_hardware.rs b/crates/aura-wallet/tests/w5_hardware.rs
+new file mode 100644
+index 0000000..36a69a3
+--- /dev/null
++++ b/crates/aura-wallet/tests/w5_hardware.rs
+@@ -0,0 +1,157 @@
++//! W5 gate — 10 hardware scenarios ("human confirmed/denied") for the
++//! HID/CCID-like device protocol with on-screen confirmation
++//! (`tests/fixtures/w5_hardware_vectors.json`).
++//!
++//! Gate text (WALLET_PLAN row W5): "10 \"human confirmed/denied\" scenarios;
++//! NC: blind confirmation → red" — `blind_confirmation_rejected` is that
++//! named control.
++//!
++//! Vectors come from the independent oracle `tools/gen_w5_vectors.py`; this
++//! runner materializes each case in a fresh sandbox and asserts exit code and
++//! both output streams byte-for-byte (model: `tests/w4_multisig.rs`). The
++//! suite runs with `--features insecure-test-kdf` (setup uses `--kdf testing`).
++
++#![cfg(feature = "insecure-test-kdf")]
++
++const VECTORS: &str = include_str!("fixtures/w5_hardware_vectors.json");
++
++fn substitute(text: &str, sandbox: &str, phrases: &serde_json::Value) -> String {
++    let mut out = text.replace("{sandbox}", sandbox);
++    if let Some(map) = phrases.as_object() {
++        for (token, phrase) in map {
++            out = out.replace(&format!("{{{token}}}"), phrase.as_str().expect("phrase"));
++        }
++    }
++    out
++}
++
++fn run_argv(argv: &[String]) -> (i32, String, String) {
++    let mut out = Vec::new();
++    let mut err = Vec::new();
++    let code = aura_wallet::cli::run(argv, &mut out, &mut err);
++    (
++        code,
++        String::from_utf8(out).expect("stdout utf-8"),
++        String::from_utf8(err).expect("stderr utf-8"),
++    )
++}
++
++/// Materialize a vector case in a fresh sandbox and run its setup steps.
++fn materialize(name: &str) -> (std::path::PathBuf, serde_json::Value, serde_json::Value) {
++    let doc: serde_json::Value = serde_json::from_str(VECTORS).expect("vectors parse");
++    let phrases = doc
++        .get("phrases")
++        .cloned()
++        .unwrap_or(serde_json::Value::Null);
++    let cases = doc["cases"].as_array().expect("cases array");
++    let case = cases
++        .iter()
++        .find(|c| c["name"].as_str() == Some(name))
++        .unwrap_or_else(|| panic!("vector {name} not found"))
++        .clone();
++
++    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++    let serial = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
++    let sandbox =
++        std::env::temp_dir().join(format!("w5vec-{}-{serial}-{name}", std::process::id()));
++    let _ = std::fs::remove_dir_all(&sandbox);
++    std::fs::create_dir_all(&sandbox).expect("sandbox created");
++    let sandbox_str = sandbox.to_string_lossy().to_string();
++
++    for (rel, content) in case["files"].as_object().expect("files object") {
++        let path = sandbox.join(rel);
++        if let Some(parent) = path.parent() {
++            std::fs::create_dir_all(parent).expect("file parent");
++        }
++        std::fs::write(&path, content.as_str().expect("file content")).expect("file written");
++    }
++
++    for setup in case["setup"].as_array().expect("setup array") {
++        let argv: Vec<String> = setup
++            .as_array()
++            .expect("setup argv")
++            .iter()
++            .map(|a| substitute(a.as_str().expect("argv str"), &sandbox_str, &phrases))
++            .collect();
++        let (code, _, err) = run_argv(&argv);
++        assert_eq!(code, 0, "setup step failed: {err}");
++    }
++    (sandbox, case, phrases)
++}
++
++fn run_case(name: &str) {
++    let (sandbox, case, phrases) = materialize(name);
++    let sandbox_str = sandbox.to_string_lossy().to_string();
++    let argv: Vec<String> = case["argv"]
++        .as_array()
++        .expect("argv")
++        .iter()
++        .map(|a| substitute(a.as_str().expect("argv str"), &sandbox_str, &phrases))
++        .collect();
++    let (code, out, err) = run_argv(&argv);
++
++    let expected_exit = case["expect_exit"].as_i64().expect("expect_exit") as i32;
++    let expect_lines = |key: &str| -> String {
++        let mut text = String::new();
++        for line in case[key].as_array().expect(key) {
++            text.push_str(&substitute(
++                line.as_str().expect("line"),
++                &sandbox_str,
++                &phrases,
++            ));
++            text.push('\n');
++        }
++        text
++    };
++
++    assert_eq!(
++        code, expected_exit,
++        "vector {name}: exit mismatch\nstdout:\n{out}\nstderr:\n{err}"
++    );
++    assert_eq!(
++        out,
++        expect_lines("expect_stdout"),
++        "vector {name}: stdout mismatch"
++    );
++    assert_eq!(
++        err,
++        expect_lines("expect_stderr"),
++        "vector {name}: stderr mismatch"
++    );
++
++    let _ = std::fs::remove_dir_all(&sandbox);
++}
++
++#[test]
++fn vectors_file_has_exactly_10_unique_cases() {
++    let doc: serde_json::Value = serde_json::from_str(VECTORS).expect("vectors parse");
++    let cases = doc["cases"].as_array().expect("cases array");
++    assert_eq!(cases.len(), 10, "the W5 gate requires exactly 10 vectors");
++    let mut names: Vec<&str> = cases
++        .iter()
++        .map(|c| c["name"].as_str().expect("case name"))
++        .collect();
++    names.sort_unstable();
++    names.dedup();
++    assert_eq!(names.len(), 10, "vector names must be unique");
++}
++
++macro_rules! vec_case {
++    ($name:ident) => {
++        #[test]
++        fn $name() {
++            run_case(stringify!($name));
++        }
++    };
++}
++
++vec_case!(confirm_transfer_basic);
++vec_case!(deny_transfer_basic);
++vec_case!(confirm_transfer_high_value);
++vec_case!(deny_transfer_high_value);
++vec_case!(blind_confirmation_rejected);
++vec_case!(display_recipient_substitution);
++vec_case!(deny_then_retry_confirm);
++vec_case!(confirm_delegate);
++vec_case!(undecodable_payload_refused);
++vec_case!(foreign_chain_refused);
+diff --git a/docs/evidence/review-w1-source-drift.txt b/docs/evidence/review-w1-source-drift.txt
+index fd84a2f..8bd75e1 100644
+--- a/docs/evidence/review-w1-source-drift.txt
++++ b/docs/evidence/review-w1-source-drift.txt
+@@ -1,11 +1,11 @@
+-adc24e7c03e1a63e5d7addbda15ff40ce630367152699c5d9659cd8db65f357b af20044fda749662d63f667f3f5d024d069a8eef59156e2e8a3aa7329693f0bf CHANGELOG.md
+-c83d08301a703c9db11462aa541bc898e52548589972118465164895eed44dc7 af20044fda749662d63f667f3f5d024d069a8eef59156e2e8a3aa7329693f0bf CHANGELOG.md
++adc24e7c03e1a63e5d7addbda15ff40ce630367152699c5d9659cd8db65f357b a66da2b13c7180ffd94923257ba6d68a19c35841e997a15a4769f5367cd74d1f CHANGELOG.md
++c83d08301a703c9db11462aa541bc898e52548589972118465164895eed44dc7 a66da2b13c7180ffd94923257ba6d68a19c35841e997a15a4769f5367cd74d1f CHANGELOG.md
+ c9680cc436d806fa7fa2ce8545bd148dc9fcc9ae444973d4968a3f4f4fc069dc 1dda202ae4c195f0a0712254f05a133ffe93205f79101ea0732b6504bbb7d308 Cargo.lock
+ f0d3511cd02f3007c0a18fc5d94c8997cfa512449313776117265708a36c8553 1dda202ae4c195f0a0712254f05a133ffe93205f79101ea0732b6504bbb7d308 Cargo.lock
+ 23185f790bc4697bbd163004e2c78873755c13efba05b46260b4827cdeabdff7 2daf6ad4e47b14511cc7995525346d5a70079a563554fcf95226ed188535ea12 Cargo.toml
+ d5518138eae73219f8da0d7297af44a471dbd7135a39587a0da1587bfe3d1e70 2daf6ad4e47b14511cc7995525346d5a70079a563554fcf95226ed188535ea12 Cargo.toml
+-5fb6ce43826495321f697e138e71e87954b2fcabec1ceef70549bb49a2f38988 0e0bf277d272393ee3a20f366a656e0e83231cc95d203dcfa9036ad7d2ab6b7d Makefile
+-c5e92007c53a22253ad7d2cc779863b9592562a394d1b26ff09ea8d031991e29 0e0bf277d272393ee3a20f366a656e0e83231cc95d203dcfa9036ad7d2ab6b7d Makefile
++5fb6ce43826495321f697e138e71e87954b2fcabec1ceef70549bb49a2f38988 73b35bc1369e1920fdd10865711b6765995af1aafa246fe0db84f142e433736c Makefile
++c5e92007c53a22253ad7d2cc779863b9592562a394d1b26ff09ea8d031991e29 73b35bc1369e1920fdd10865711b6765995af1aafa246fe0db84f142e433736c Makefile
+ bcc7328bd9c464a857c4b97c8491277bf401299d3c7963f1925b075d4313feb6 f2e4a249573a5b902b3f566b3f1db1ebab12d994f1ab6ef9be2dc15df63d7e26 crates/aura-consensus/src/fork_choice.rs
+ 7e396fbb4fd1d4103f26db16796ab0b6ad9626b7ba2ea0d56cae379bde5c2d59 8ec730ce2dc2cb1bc266990f4f29133038e98e390a63be0edbb3eaa23fa48f23 crates/aura-consensus/src/governance.rs
+ bd58be73dc4e0f6da16735be1d5ed17306d16c08569d798a4af20fcf72b91d40 b2e8ddad5b281da54e9c68107b563c9125b3931fe0e8e26023c74dcf3011ccc3 crates/aura-consensus/src/slashing.rs
+@@ -29,24 +29,24 @@ af56ee625d71d47bbed5b46ef328aca257403181a6c0d647d3e7c9573d8cfcf4 0bdccfc82403c32
+ a81b7345f56e3a0a40858717eb1c2bebc1091ae324bfae87352784e9340ade82 a07cd15ad7315b55cd4f49d595837ea0e07135fdcfb963bad575624893cb94b1 crates/aura-wallet/src/baseline.rs
+ f2827e98528b1c4ba7a739f68214d960e7576fdb962ccabd9732ee307b615774 a07cd15ad7315b55cd4f49d595837ea0e07135fdcfb963bad575624893cb94b1 crates/aura-wallet/src/baseline.rs
+ 73d088b6ff0d768e8807ab78746495547b46d32b1cf013df8c7745e7aa17bb38 a5e26dc0fafefb6ab5b372dc8adca3ad915fbae2e96926c18a4f8afd4c1be3d6 crates/aura-wallet/src/bin/aura-wallet.rs
+-2528b2064ae8ba4b8cefaba404bf3f13288be1977af904e775e1ad7f4e9b206e dcb30d1056aeec7c7a0234515db953954a501e039bf397b5a300fe6fbde39ffd crates/aura-wallet/src/cli.rs
++2528b2064ae8ba4b8cefaba404bf3f13288be1977af904e775e1ad7f4e9b206e 83a3116ea98621b66be7b277427c6d54264ba61f6bfcfb7e9672d93cc8ffca8a crates/aura-wallet/src/cli.rs
+ ac4156f4cd8a1bf1a20508e58dd25ad40a1b2af5bdd4c474f77c19ad485c9df8 5e50d182e64a64f5a1d1caad204edf004d4baee0a5943503372d80f6fdfc1258 crates/aura-wallet/src/keystore.rs
+-265c95f77d5da18d1964bf9ddb99bcc97993bf13584d7be3d844bb568502f2bc 9a27b60a7a4e8801d0d3dbcf912b5b44da44dcd1455b2672354cfdfa6d894e2f crates/aura-wallet/src/lib.rs
+-dbb25499b939122b23d9ca0a29eaabc3e564f67af159c8369dc0725a8c9dd2f2 9a27b60a7a4e8801d0d3dbcf912b5b44da44dcd1455b2672354cfdfa6d894e2f crates/aura-wallet/src/lib.rs
+-ff4e8c97fef849e2c30b3b364cf65ac952516970af7e1aa65d6175b96b24e8bd 0d13089fcb497e3eed027ad284e22bc8b5d094eb3d3ad922cb055c88be489f1f crates/aura-wallet/tests/fixtures/w1_baseline.txt
++265c95f77d5da18d1964bf9ddb99bcc97993bf13584d7be3d844bb568502f2bc 23d888382d8536282350365f934bbb447e3da54e312ad15c162849489ffdf6ba crates/aura-wallet/src/lib.rs
++dbb25499b939122b23d9ca0a29eaabc3e564f67af159c8369dc0725a8c9dd2f2 23d888382d8536282350365f934bbb447e3da54e312ad15c162849489ffdf6ba crates/aura-wallet/src/lib.rs
++ff4e8c97fef849e2c30b3b364cf65ac952516970af7e1aa65d6175b96b24e8bd 528ce5925da751eebbd73b3aece16ad90915c997fe327f23f6d92667b70c821b crates/aura-wallet/tests/fixtures/w1_baseline.txt
+ 330f35631169e59afc9787bfe925ccd2e0d95f26e6c55bbceb245c0fb31e4ce4 91b39508560de4dac51f255a2e355d28c6081d26552d7c808be9506d80e29db2 crates/aura-wallet/tests/w0_key_audit.rs
+ bce9253cdf6d4a17db6f84d2d32567dc3fba7f824b7bbf9dfbe9a3c20fd10494 0e9893d2df6522e82abc1f3d5bd7d96196a57b5aa4c36f3fcca1ef1383f2173a docs/STATUS.md
+ 407ad597d3956d6b488eca8a75d4fb47df62c84e8f0e73fefe9da4a2c8b32d51 9171226639160223b5dc990af0f113cc70ffbc5650d50cec1615293ab09b6294 docs/plans/NET_PLAN.md
+-0560f899f85daa40b04516e7cac9a069b88755579a903df4d2cf81ec3d9e711c f15be47c2ed819374c28b3c3abd838fb993606357a51e5bca1ec1c47eebf7f8e docs/plans/WALLET_PLAN.md
+-9077095bef86c336fc0005d90fb84f4bb70e3842078328c0dbddc71a5a97cd60 f15be47c2ed819374c28b3c3abd838fb993606357a51e5bca1ec1c47eebf7f8e docs/plans/WALLET_PLAN.md
++0560f899f85daa40b04516e7cac9a069b88755579a903df4d2cf81ec3d9e711c bc8f78c5481121aa05c268f7042981bad53821014ab9e5d0b80aef6b85afd954 docs/plans/WALLET_PLAN.md
++9077095bef86c336fc0005d90fb84f4bb70e3842078328c0dbddc71a5a97cd60 bc8f78c5481121aa05c268f7042981bad53821014ab9e5d0b80aef6b85afd954 docs/plans/WALLET_PLAN.md
+ 122cae5dc2a19d0f8d563e6e13703ebf9b836942cce58bc0dd9dc622bdd72493 14c07e141de26526955f150bc136a5aaf59f6ae1478636a15b9574e9ef121651 docs/spec/FORMAT_INDEX.md
+ c477f915b427982ca83fcb253fa0ab850d619ca5bf4a764137f0407078af4986 26a28bcc51e2cab2702d491ee6678527448b787c19da19f934551768a44de18c fuzz/Cargo.lock
+ 6f3f2bd9f508b33896011a6e7a6dc60e93ad24e6a00445e50ceceedd1346194b e7b3e704bb1c5688159f38f66f31ba17893bad818c8876e097631ab2725abf5b fuzz/Cargo.toml
+ b4897ba4dbc33f098c27e415669e2e0bbca45933694b67aa590181041ebfdf0f e7b3e704bb1c5688159f38f66f31ba17893bad818c8876e097631ab2725abf5b fuzz/Cargo.toml
+ dca80316562fefcf24c45b40fb635412e1d4e5e09b5abe26f7d0e6b67e1e906e 53ac68024a82d40e64badd40ead1ebea5e0af8be1e56d4184a0eb0f22eab55a2 fuzz/README.md
+ 6e80f8eab5695501a3350e70bd086675cf4d1669cf370d92e98702d18c7bfe6e 7414f1e69a9690bdf93c79dc0ca32ec5cac7ca3b4f0df2d317e39c6fa95abc99 fuzz/src/lib.rs
+-1259c6bbc3bd3d53cbe0dd1d69d8d762336dc26287215d2ee35307bba90ea85c 0f5cfad9b0057c990d81beb77bfb17b3ae087a0a14c4235bcedfc764979374b4 tools/audit_closeout.py
+-7bd672503f104aa733dff03e84f57ac26ef926607657ab6a799f9d2bc14c0dc9 0f5cfad9b0057c990d81beb77bfb17b3ae087a0a14c4235bcedfc764979374b4 tools/audit_closeout.py
++1259c6bbc3bd3d53cbe0dd1d69d8d762336dc26287215d2ee35307bba90ea85c ffeca7fb867c90904ff6155aed3a40d6884cc4b9a8de2e83f3fb1da6e7a1812d tools/audit_closeout.py
++7bd672503f104aa733dff03e84f57ac26ef926607657ab6a799f9d2bc14c0dc9 ffeca7fb867c90904ff6155aed3a40d6884cc4b9a8de2e83f3fb1da6e7a1812d tools/audit_closeout.py
+ 4d7d73580e09a49f1a0a9faf668254b0ec12f891efa527db863fa3abf8cce4a1 ab356092fc59ed98bff8d3622ef74e35eb33da5f342c5b6dccf5d73aeb20763b tools/gen_w0_vectors.py
+ 303fc648659cc72d9f8cf7cf6bc71ed8c9bd5a9f9a8d923d5a1e78bcffba0b5b 5e62e17226bfc601e8775b54e7f6a025d36c1357b7206d33c18c442cb49746eb tools/nc_b10.py
+ f86dee929549c751519e1749e0976c561e47a174a129412caf8cd23680887f61 3ae536e2637862525ca6edb1eeaa927a018a529856402d60c7260e92481d0b19 tools/nc_b5.py
+diff --git a/docs/evidence/w5/README.md b/docs/evidence/w5/README.md
+new file mode 100644
+index 0000000..0e07346
+--- /dev/null
++++ b/docs/evidence/w5/README.md
+@@ -0,0 +1,19 @@
++# W5 evidence — hardware keys with on-screen confirmation (10 scenarios)
++
++Gate (WALLET_PLAN row W5): "10 \"human confirmed/denied\" scenarios; NC: blind
++confirmation -> red". All fixtures are PUBLIC TEST DATA ONLY — never use for
++funds.
++
++- `test-w5.log` — `cargo test --features insecure-test-kdf --test w5_hardware`:
++  10 scenarios plus `vectors_file_has_exactly_10_unique_cases`,
++  byte-for-byte against the independent oracle.
++- `nc.log` — `tools/nc_w5.py` mutation controls (6): each source mutation must
++  turn its named test red; compilation failure is not a valid red.
++- `inventory.txt` — the 10 cases with exit codes, the named control, the
++  cumulative NC total (656) and SHA-256 pins of fixture, generator, runner.
++- `report.md`, `gates.txt` — closeout report and gate summary.
++- `SHA256SUMS` — digests of the deliverables and evidence files.
++
++The vectors are produced by `tools/gen_w5_vectors.py` (pure Python: BLAKE3,
++Ed25519 RFC 8032, domain_message, BIP-39/SLIP-0010, bech32). Regenerate with
++`make gen-w5-vectors`; rebuild this bundle with `make evidence-w5`.
+diff --git a/docs/evidence/w5/SHA256SUMS b/docs/evidence/w5/SHA256SUMS
+new file mode 100644
+index 0000000..2da01e3
+--- /dev/null
++++ b/docs/evidence/w5/SHA256SUMS
+@@ -0,0 +1,10 @@
++2bf4a76d1b7716246f207859708e9b08ec59d0cc0aa63e3a1201a1321c8bf028  crates/aura-wallet/tests/fixtures/w5_hardware_vectors.json
++e50971b70c2efa1a2e6c89db45dc51a0e25ecccf53b1f6c7e933d8a3b47e99bd  tools/gen_w5_vectors.py
++1f548c71d58cd3657fb4a9cd4135f7d9f6f86ddce20c32458141c3188995c044  crates/aura-wallet/tests/w5_hardware.rs
++18fc9aecfbbc6cb4a9f9624a9c045a0e223d3d7f9f9ba1725d4349eea412cb68  tools/nc_w5.py
++f3ea09dc88bb75a6b0c879d11d51d875d224fc816238f9a775dcc938f565e5ed  crates/aura-wallet/src/hardware.rs
++2aea19b375d528ae49d991e977f9ecb1e42498801b0a5fd906a26c3a46d6a609  docs/evidence/w5/test-w5.log
++f443fa1ac0e50d1b75ef5da8200c83d69204e503ece84a642d587aece852bfc8  docs/evidence/w5/nc.log
++9864eee8a0e554eb07a9dbcca1ee2608bc6ad1ac71029804cbd8236604da6e58  docs/evidence/w5/inventory.txt
++be5000e9769f18e9cc75af457affa9d0d5289ffbd1525afce8162e99b32f1b00  docs/evidence/w5/gates.txt
++8e712200c6aeb5a0171c4a58630dd452ee3a2489e14de4f9fda0cae3ab273aee  docs/evidence/w5/report.md
+diff --git a/docs/evidence/w5/gates.txt b/docs/evidence/w5/gates.txt
+new file mode 100644
+index 0000000..1957997
+--- /dev/null
++++ b/docs/evidence/w5/gates.txt
+@@ -0,0 +1,4 @@
++# W5 gates
++hardware gate + 10 scenarios: PASS (11 tests: 10 scenarios + count guard)
++named control (blind_confirmation_rejected): PASS
++mutation controls: PASS (6/6)
+diff --git a/docs/evidence/w5/inventory.txt b/docs/evidence/w5/inventory.txt
+new file mode 100644
+index 0000000..c09fa1b
+--- /dev/null
++++ b/docs/evidence/w5/inventory.txt
+@@ -0,0 +1,19 @@
++# W5 inventory (generated by tools/write_w5_evidence.py)
++gate=10 "human confirmed/denied" scenarios; NC: blind confirmation -> red
++vectors=10
++named_control=blind_confirmation_rejected=present
++fixtures_sha256=2bf4a76d1b7716246f207859708e9b08ec59d0cc0aa63e3a1201a1321c8bf028
++generator_sha256=e50971b70c2efa1a2e6c89db45dc51a0e25ecccf53b1f6c7e933d8a3b47e99bd
++runner_sha256=1f548c71d58cd3657fb4a9cd4135f7d9f6f86ddce20c32458141c3188995c044
++cases:
++  confirm_transfer_basic exit=0
++  deny_transfer_basic exit=65
++  confirm_transfer_high_value exit=0
++  deny_transfer_high_value exit=65
++  blind_confirmation_rejected exit=65
++  display_recipient_substitution exit=65
++  deny_then_retry_confirm exit=0
++  confirm_delegate exit=0
++  undecodable_payload_refused exit=65
++  foreign_chain_refused exit=65
++TOTAL: 656 negative controls cumulative
+diff --git a/docs/evidence/w5/nc.log b/docs/evidence/w5/nc.log
+new file mode 100644
+index 0000000..3e967c9
+--- /dev/null
++++ b/docs/evidence/w5/nc.log
+@@ -0,0 +1,9 @@
++$ /usr/local/bin/python3 tools/nc_w5.py
++PASS NC: blind confirmation accepted -> gate red: blind_confirmation_rejected
++PASS NC: denial ignored -> gate red: deny_transfer_basic
++PASS NC: display binding dropped -> gate red: display_recipient_substitution
++PASS NC: chain check dropped -> gate red: foreign_chain_refused
++PASS NC: amount render altered -> gate red: confirm_transfer_high_value
++PASS NC: payload decode check dropped -> gate red: undecodable_payload_refused
++RESULT: 6/6 negative controls PASS
++exit=0
+diff --git a/docs/evidence/w5/report.md b/docs/evidence/w5/report.md
+new file mode 100644
+index 0000000..cc65f55
+--- /dev/null
++++ b/docs/evidence/w5/report.md
+@@ -0,0 +1,28 @@
++# W5 closeout report — hardware keys with on-screen confirmation
++
++Date: 2026-11-24. Gate (WALLET_PLAN row W5): "10 "human confirmed/denied"
++scenarios; NC: blind confirmation -> red" — **satisfied**.
++
++- **Confirmation binding**: `blind_confirmation_rejected` (the named control)
++  — a `BlindSign` request is refused (`error: hardware: blind confirmation
++  rejected`, exit 65) before any key use; mutation NC-1 (`tools/nc_w5.py`)
++  makes the device sign blind requests and requires that test to go red.
++- **Scenarios**: 10 deterministic cases from the independent oracle
++  `tools/gen_w5_vectors.py` (display derivation, transfer/delegate payloads,
++  Ed25519 RFC 8032-checked signatures under the fixed `tx` domain), asserted
++  byte-for-byte by `tests/w5_hardware.rs` (11/11 with the count guard).
++  Groups: confirm (3), deny (2), blind (1), display substitution (1), retry
++  after denial (1), undecodable payload (1), foreign chain (1).
++- **Mutation controls**: 6/6 PASS (blind acceptance, denial ignored, display
++  binding dropped, chain check dropped, amount render altered, payload decode
++  check dropped).
++- **Device model** (docs/w5-hardware-plan.md): D-W5-1 the screen is derived
++  exclusively from the transaction bytes, D-W5-2 only payloads that can be
++  fully displayed are signed (`recipient||amount` for transfer, canonical
++  stake payload for delegate/undelegate) and host previews are bound to the
++  derived display, D-W5-3 nothing signs without `Armed -> Confirm` and a
++  denial never latches, D-W5-4 signatures are ordinary AuraLite `tx` domain
++  signatures (verifiable by the W3 offline path).
++
++Receipts: `gates.txt`, `test-w5.log`, `nc.log`, `inventory.txt`, `SHA256SUMS`.
++Regenerate with `make evidence-w5`. Public test data only — never use for funds.
+diff --git a/docs/evidence/w5/test-w5.log b/docs/evidence/w5/test-w5.log
+new file mode 100644
+index 0000000..44a21bf
+--- /dev/null
++++ b/docs/evidence/w5/test-w5.log
+@@ -0,0 +1,23 @@
++$ cargo test -p aura-wallet --features insecure-test-kdf --test w5_hardware
++
++running 11 tests
++test blind_confirmation_rejected ... ok
++test confirm_delegate ... ok
++test confirm_transfer_high_value ... ok
++test confirm_transfer_basic ... ok
++test deny_then_retry_confirm ... ok
++test deny_transfer_basic ... ok
++test deny_transfer_high_value ... ok
++test display_recipient_substitution ... ok
++test foreign_chain_refused ... ok
++test undecodable_payload_refused ... ok
++test vectors_file_has_exactly_10_unique_cases ... ok
++
++test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
++
++   Compiling aura-p2p v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-p2p)
++   Compiling aura-consensus v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-consensus)
++   Compiling aura-wallet v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-wallet)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.90s
++     Running tests/w5_hardware.rs (target/debug/deps/w5_hardware-c83a641c22a3c32d)
++exit=0
+diff --git a/docs/plans/WALLET_PLAN.md b/docs/plans/WALLET_PLAN.md
+index fa58793..f81c5ca 100644
+--- a/docs/plans/WALLET_PLAN.md
++++ b/docs/plans/WALLET_PLAN.md
+@@ -28,7 +28,7 @@ procedure for generating genesis keys.
+ | ✅ **W2** | `aura-wallet` CLI | `new/import/list/balance/transfer/sign/broadcast/stake/vote` | 40 CLI vectors, including rejection of a tx with a foreign chain-id |
+ | ✅ **W3** | Offline signing | unsigned/signed tx format, QR/USB, verification on the online machine | air-gapped scenario end-to-end; NC: signature with a foreign domain → reject |
+ | ✅ **W4** | Multisig | M-of-N contract, signature collection, timeouts, member rotation | 3-of-5: 3 collected → success, 2 → reject; NC: threshold bypass → red |
+-| ⏸ **W5** | Hardware keys | HID/CCID-like device protocol, on-screen confirmation | 10 "human confirmed/denied" scenarios; NC: blind confirmation → red |
++| ✅ **W5** | Hardware keys | HID/CCID-like device protocol, on-screen confirmation | 10 "human confirmed/denied" scenarios; NC: blind confirmation → red |
+ | ⏸ **W6** | Web/browser wallet | WASM build of `aura-keys`, extension, deep links, phishing protection | signing shows the human the **real** tx fields; NC: recipient substitution in UI → red |
+ | ⏸ **W7** | Genesis ceremony | offline generation, Shamir sharing, witness logs, destruction of temporary media | O5: not one private key in the repository/CI; pubkey set matches genesis hash |
+ 
+@@ -149,6 +149,34 @@ mainnet and ⏸ Stage 2.
+   verification skipped, duplicate approvals accepted, membership dropped,
+   expiry dropped, proposal binding dropped — 6/6 PASS.
+ 
++### W5 receipt (2026-11-24)
++
++- Deliverable: `patches/0100-W5-hardware-keys.patch` (complete W5-from-P6
++  phase patch).
++- Hardware-key device protocol, HID/CCID-like (`crates/aura-wallet/src/hardware.rs`
++  + CLI `hw-sign`): `GetVersion`/`BeginSign`/`Decide`/`BlindSign` frames with
++  `Version`/`Display`/`Signed`/`Refused` responses. The device screen is
++  derived exclusively from the canonical unsigned transaction bytes
++  (D-W5-1); only payloads that can be fully displayed are signable —
++  `recipient||amount` for `transfer`, the canonical stake payload for
++  `delegate`/`undelegate` — and host previews are bound to the derived
++  display (D-W5-2); nothing signs without `Armed -> Confirm`, a `Deny` never
++  latches (D-W5-3); signatures are ordinary AuraLite `tx` domain signatures
++  (D-W5-4).
++- Named control: `blind_confirmation_rejected` — a blind signing request is
++  refused (`error: hardware: blind confirmation rejected`, exit 65) before
++  any key use; mutation control NC-1 in `tools/nc_w5.py` makes the device
++  sign blind requests and requires that test to go red.
++- Test gate: 10 "human confirmed/denied" scenarios
++  (`tests/fixtures/w5_hardware_vectors.json`) from the independent oracle
++  `tools/gen_w5_vectors.py`, asserted byte-for-byte by `tests/w5_hardware.rs`
++  (11/11 with the count guard): 3 confirm, 2 deny, blind rejection, display
++  substitution (`error: hardware: display mismatch`), retry after a denied
++  round, undecodable payload, foreign chain-id.
++- Mutation controls (`tools/nc_w5.py`, 6): blind acceptance, denial ignored,
++  display binding dropped, chain check dropped, amount render altered, payload
++  decode check dropped — 6/6 PASS.
++
+ ## Risks
+ 
+ - Phishing/address substitution in the UI — W6 + `chain_id` check + human-readable amount.
+diff --git a/docs/w5-hardware-plan.md b/docs/w5-hardware-plan.md
+new file mode 100644
+index 0000000..8771f4c
+--- /dev/null
++++ b/docs/w5-hardware-plan.md
+@@ -0,0 +1,73 @@
++# W5 hardware keys — design of record (D-W5-1..D-W5-4)
++
++**Phase:** W5 (WALLET_PLAN Stage 2). **Deliverable:** `patches/0100-W5-…`.
++**Model:** `docs/w4-multisig-plan.md` (W4). The device is a deterministic
++simulation of a HID/CCID-like secure element: no real hardware, no RNG, fixed
++frames, byte-exact vectors from the independent oracle `tools/gen_w5_vectors.py`.
++PUBLIC TEST DATA ONLY — never use for funds.
++
++## Problem
++
++A hardware key must never sign anything the human did not see on its own
++screen. The host (a possibly infected laptop) relays frames; the device screen
++is the only trustworthy display. Two failure modes dominate real incidents:
++
++1. **blind signing** — the host asks the device to sign opaque bytes without a
++   display/confirm round trip;
++2. **display substitution** — the host preview shows one recipient/amount while
++   the signed payload carries another.
++
++## Decisions
++
++- **D-W5-1 (display source).** The device screen is derived exclusively from
++  the canonical `UnsignedTx` bytes it is asked to sign — never from
++  host-supplied strings. The screen renders the nine unsigned protocol fields
++  plus the decoded intent (`to`/`amount`/`validator`).
++- **D-W5-2 (payloads that can be shown).** The device only signs payloads it
++  can fully decode: `transfer` payload is exactly
++  `recipient (20) || amount (LE u64)` (28 bytes); `delegate`/`undelegate` use
++  the canonical `AuraLite-Crypto/wallet-stake-v1` stake payload. Anything else
++  (`deploy`, `call`, truncated payloads) is refused as `undecodable payload` —
++  a device never signs bytes it cannot display. A host preview
++  (`HostClaim`) that disagrees with the derived display is refused as
++  `display mismatch` before the human is asked.
++- **D-W5-3 (confirmation binding).** Signing happens only after the human's
++  explicit `Confirm` on the derived display (`Phase::Armed -> Confirm`). Every
++  other path — `BlindSign` frames, `Decide` without a displayed round, replayed
++  frames — returns `blind confirmation rejected`. `Deny` always refuses and
++  never latches: the human can open a fresh round (retry works).
++- **D-W5-4 (signature).** The device signs `UnsignedTx::signing_bytes()` with
++  the fixed AuraLite `tx` domain (Ed25519), so a hardware-produced `Tx` is
++  indistinguishable from and verifiable by the W3 offline path
++  (`Tx::verify_signature`).
++
++## Protocol (HID/CCID-like)
++
++`HardwareDevice::exchange(DeviceCommand) -> DeviceResponse` with a fixed
++command set: `GetVersion`, `BeginSign { unsigned, claim }`,
++`Decide { confirm | deny }`, `BlindSign { body }`. Responses: `Version`,
++`Display(frame)`, `Signed(tx)`, `Refused(error)`. State machine:
++`Idle -> Armed(displayed) -> Idle` per round; `Deny` returns to `Idle`.
++
++## Gate (WALLET_PLAN row W5)
++
++`10 "human confirmed/denied" scenarios; NC: blind confirmation -> red`:
++
++| # | Scenario | Expect |
++| --- | --- | --- |
++| 1 | `confirm_transfer_basic` | exit 0, screen + `sig` pinned |
++| 2 | `deny_transfer_basic` | exit 65 `error: hardware: denied by user` |
++| 3 | `confirm_transfer_high_value` | exit 0, `amount=123456789` on screen |
++| 4 | `deny_transfer_high_value` | exit 65 denied |
++| 5 | `blind_confirmation_rejected` | exit 65 blind rejected — **named control** |
++| 6 | `display_recipient_substitution` | exit 65 `display mismatch` |
++| 7 | `deny_then_retry_confirm` | exit 0 after a denied round (retry works) |
++| 8 | `confirm_delegate` | exit 0, validator+amount on screen |
++| 9 | `undecodable_payload_refused` | exit 65 `undecodable payload` |
++| 10 | `foreign_chain_refused` | exit 65 `foreign chain-id` |
++
++Mutation controls (`tools/nc_w5.py`, 6): blind acceptance, deny ignored,
++display binding dropped, chain check dropped, amount render altered, payload
++decode check dropped — each must turn its named scenario red.
++
++Cumulative NC after W5: **656** (650 through P6 + 6).
+diff --git a/tools/audit_closeout.py b/tools/audit_closeout.py
+index 9e01095..cc17383 100644
+--- a/tools/audit_closeout.py
++++ b/tools/audit_closeout.py
+@@ -35,7 +35,7 @@ EXEC_PHASES = ["X0", "X1", "X2", "X3", "X4", "X5", "X6", "X7", "X8"]
+ NODE_PHASES = ["D0", "D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8"]             # NODE_PLAN complete
+ CONSENSUS_PHASES = ["B0", "B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9", "B10"]  # CONSENSUS_PLAN complete
+ NET_PHASES = ["N0", "N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8"]  # NET_PLAN complete
+-WALLET_PHASES = ["W0", "W1", "W2", "W3", "W4"]  # grows with each W phase
++WALLET_PHASES = ["W0", "W1", "W2", "W3", "W4", "W5"]  # grows with each W phase
+ SECURITY_PHASES = ["H0", "H1", "H2", "H3", "H4", "H5", "H6", "H7", "H8", "H9"]  # grows with each H phase
+ ECOSYSTEM_PHASES = ["E0", "E1", "E2", "E3", "E5", "E4", "E6", "E7", "E8", "E9"]  # grows with each E phase (D-E3 order: E5 before E4)
+ PERF_PHASES = ["P0", "P1", "P2", "P3", "P4", "P5", "P6"]  # grows with each P phase
+@@ -128,8 +128,9 @@ SHIPPED = CORE_PHASES + [
+     "P3",
+     "P4",
+     "P5",
++    "P6",
+ ]
+-CURRENT = "P6"  # 2026-11-24: P6 published (patch 0099); SLO publication gate green
++CURRENT = "W5"  # 2026-11-24: W5 hardware keys closed (patch 0100); P6 shipped
+ 
+ PLAN_FOR_PREFIX = {
+     "C": "CORE_PLAN.md",
+@@ -147,7 +148,7 @@ PLAN_FOR_PREFIX = {
+ }
+ 
+ NC_PER_PHASE = {f"C{i}": 6 for i in range(4, 11)}
+-NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6, "W4": 6, "H0": 6, "H1": 6, "H2": 6, "H3": 6, "H4": 6, "H5": 6, "H6": 7, "H7": 7, "H8": 7, "H9": 7, "E0": 6, "E1": 6, "E2": 6, "E3": 6, "E5": 6, "E4": 6, "E6": 6, "E7": 6, "E8": 6, "E9": 6, "P0": 6, "P1": 6, "P2": 6, "P3": 6, "P4": 6, "P5": 6, "P6": 6, "T0": 6, "T1": 6, "T2": 6, "T3": 6, "T4": 7, "T5": 7, "T6": 8, "T7": 7, "T8": 7})
++NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6, "W4": 6, "W5": 6, "H0": 6, "H1": 6, "H2": 6, "H3": 6, "H4": 6, "H5": 6, "H6": 7, "H7": 7, "H8": 7, "H9": 7, "E0": 6, "E1": 6, "E2": 6, "E3": 6, "E5": 6, "E4": 6, "E6": 6, "E7": 6, "E8": 6, "E9": 6, "P0": 6, "P1": 6, "P2": 6, "P3": 6, "P4": 6, "P5": 6, "P6": 6, "T0": 6, "T1": 6, "T2": 6, "T3": 6, "T4": 7, "T5": 7, "T6": 8, "T7": 7, "T8": 7})
+ SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)  # 339 (through W0)
+ EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + (0 if CURRENT in SHIPPED else NC_PER_PHASE[CURRENT])
+ 
+@@ -202,6 +203,7 @@ PATCH_ORDER += ["P3"]   # 0096
+ PATCH_ORDER += ["P4"]   # 0097
+ PATCH_ORDER += ["P5"]   # 0098
+ PATCH_ORDER += ["P6"]   # 0099
++PATCH_ORDER += ["W5"]   # 0100
+ PATCH_NUMBERS = {phase: index + 1 for index, phase in enumerate(PATCH_ORDER)}
+ 
+ 
+@@ -400,8 +402,12 @@ def check(strict: bool) -> tuple[list[str], list[str]]:
+                 EVIDENCE / "SHA256SUMS",
+             ]
+         else:
++            gates = EVIDENCE / lower / "gates.txt"
++            if not gates.exists() and (EVIDENCE / lower / "gates.log").exists():
++                # P6's bundle records its native gate run as gates.log.
++                gates = EVIDENCE / lower / "gates.log"
+             required = [
+-                EVIDENCE / lower / "gates.txt",
++                gates,
+                 EVIDENCE / lower / "nc.log",
+                 EVIDENCE / lower / "SHA256SUMS",
+             ]
+diff --git a/tools/gen_w5_vectors.py b/tools/gen_w5_vectors.py
+new file mode 100644
+index 0000000..2f80900
+--- /dev/null
++++ b/tools/gen_w5_vectors.py
+@@ -0,0 +1,222 @@
++#!/usr/bin/env python3
++"""W5 hardware vectors: 10 human confirmed/denied scenarios.
++
++Derives every expected byte independently of the Rust implementation and
++writes `crates/aura-wallet/tests/fixtures/w5_hardware_vectors.json`. The
++fixture pins the rendered device screen, the signature bytes and the exact
++exit/stdout/stderr of each scenario. PUBLIC TEST DATA ONLY — never use for
++funds.
++"""
++
++import json
++import sys
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(ROOT))
++sys.path.insert(0, "/home/user/aura-python-deps")
++
++from tools import gen_c4_vectors as c4  # noqa: E402
++from tools import gen_w2_vectors as g2  # noqa: E402
++from tools import gen_w3_vectors as g3  # noqa: E402
++from tools.w1_interop_reference import bech32_address  # noqa: E402
++from mnemonic import Mnemonic  # noqa: E402
++
++FIXTURE = ROOT / "crates/aura-wallet/tests/fixtures/w5_hardware_vectors.json"
++
++GATE = "10 \"human confirmed/denied\" scenarios; NC: blind confirmation -> red"
++NAMED_CONTROL = "blind_confirmation_rejected"
++DEVICE = "auralite-hw-1"
++
++CHAIN = "auralite-test-1"
++FOREIGN = "evil-net-9"
++PASSWORD = "test password for hardware vectors"
++STAKE_PREFIX = b"AuraLite-Crypto/wallet-stake-v1\x00"
++KIND_TRANSFER = 0
++KIND_DELEGATE = 3
++
++U64MAX = 2**64 - 1
++
++
++def transfer_payload(recipient_raw: bytes, amount: int) -> bytes:
++    return recipient_raw + amount.to_bytes(8, "little")
++
++
++def stake_payload(action_tag: int, validator_raw: bytes, amount: int) -> bytes:
++    return STAKE_PREFIX + bytes([action_tag]) + validator_raw + amount.to_bytes(8, "little")
++
++
++def unsigned_body(acct: dict, chain: str, nonce: int, kind: int, payload: bytes,
++                  gas: int = 21_000, max_fee: int = 1_000_000,
++                  tip: int = 0, expiry: int = U64MAX) -> bytes:
++    case = dict(chain=chain, nonce=nonce, kind=kind, payload=payload,
++                gas=gas, max_fee=max_fee, tip=tip, expiry=expiry,
++                address=acct["raw"], public_key=acct["pub"])
++    unsigned, _ = c4.encode_unsigned(case)
++    return unsigned
++
++
++def sig_hex(acct: dict, unsigned: bytes, chain: str) -> str:
++    signing_bytes = c4.SIGNING_CONTEXT + unsigned
++    digest = c4.blake3_short(c4.domain_message(chain, "tx", signing_bytes))
++    return c4.ed25519_sign(digest, acct["priv"]).hex()
++
++
++def display_lines(*, chain: str, kind: str, signer: str, nonce: int,
++                  to: str | None = None, validator: str | None = None,
++                  amount: int | None = None, gas: int = 21_000,
++                  max_fee: int = 1_000_000, tip: int = 0,
++                  expiry: int = U64MAX) -> list[str]:
++    lines = [
++        f"display: chain={chain}",
++        f"display: kind={kind}",
++        f"display: signer={signer}",
++        f"display: nonce={nonce}",
++    ]
++    if to is not None:
++        lines.append(f"display: to={to}")
++    if validator is not None:
++        lines.append(f"display: validator={validator}")
++    if amount is not None:
++        lines.append(f"display: amount={amount}")
++    lines.append(f"display: gas={gas}")
++    lines.append(f"display: max_fee={max_fee}")
++    lines.append(f"display: tip={tip}")
++    lines.append(f"display: expiry={expiry}")
++    return lines
++
++
++def build_cases() -> list[dict]:
++    phrase00 = Mnemonic("english").to_mnemonic(bytes(32))  # abandon ... art
++    a0 = g2.account(g2.seed_from_mnemonic(phrase00), 0)
++    a1 = g2.account(g2.seed_from_mnemonic(phrase00), 1)
++    a2 = g2.account(g2.seed_from_mnemonic(phrase00), 2)
++
++    if a0["addr"] != g2.KNOWN_ADDR_0:
++        raise ValueError("derived identity does not match the pinned smoke values")
++
++    pw = PASSWORD + "\n"
++    base_files = {"pw": pw, "ent00": ("00" * 32) + "\n"}
++    setup = [[
++        "new", "--keystore", "{sandbox}/ks", "--password-file", "{sandbox}/pw",
++        "--chain", CHAIN, "--entropy-file", "{sandbox}/ent00",
++        "--kdf", "testing", "--account", "0",
++    ]]
++
++    payload_basic = transfer_payload(a1["raw"], 1_000)
++    payload_high = transfer_payload(a1["raw"], 123_456_789)
++    body_basic = unsigned_body(a0, CHAIN, 0, KIND_TRANSFER, payload_basic)
++    body_high = unsigned_body(a0, CHAIN, 1, KIND_TRANSFER, payload_high)
++    body_delegate = unsigned_body(a0, CHAIN, 2, KIND_DELEGATE,
++                                  stake_payload(0, a1["raw"], 5_000_000))
++    body_legacy = unsigned_body(a0, CHAIN, 3, KIND_TRANSFER,
++                                (1_000).to_bytes(8, "little"))
++    body_foreign = unsigned_body(a0, CHAIN, 4, KIND_TRANSFER, payload_basic)
++
++    sig_basic = sig_hex(a0, body_basic, CHAIN)
++    sig_high = sig_hex(a0, body_high, CHAIN)
++    sig_delegate = sig_hex(a0, body_delegate, CHAIN)
++
++    frame_basic = display_lines(
++        chain=CHAIN, kind="transfer", signer=a0["addr"], nonce=0,
++        to=a1["addr"], amount=1_000)
++    frame_high = display_lines(
++        chain=CHAIN, kind="transfer", signer=a0["addr"], nonce=1,
++        to=a1["addr"], amount=123_456_789)
++    frame_delegate = display_lines(
++        chain=CHAIN, kind="delegate", signer=a0["addr"], nonce=2,
++        validator=a1["addr"], amount=5_000_000)
++
++    def hw_argv(body: bytes, human: str, chain: str = CHAIN,
++                extra: list[str] | None = None) -> tuple[list[str], dict[str, str]]:
++        files = dict(base_files)
++        files["u.env"] = g3.envelope(g3.KIND_UNSIGNED, body) + "\n"
++        argv = ["hw-sign", "--in", "{sandbox}/u.env",
++                "--keystore", "{sandbox}/ks", "--password-file", "{sandbox}/pw",
++                "--account", "0", "--chain", chain, "--human", human]
++        argv += (extra or [])
++        argv += ["--out", "{sandbox}/s.env"]
++        return argv, files
++
++    def ok_out(frame: list[str], sig: str) -> list[str]:
++        return [f"device={DEVICE}"] + frame + ["status=signed", f"sig={sig}"]
++
++    cases: list[dict] = []
++    A = cases.append
++
++    def add(name: str, argv: list[str], files: dict[str, str], *,
++            exit_code: int = 0, out: list[str] | None = None,
++            err: list[str] | None = None) -> None:
++        A(g2.case(name, argv, files=files, setup=setup,
++                  exit_code=exit_code, out=out, err=err))
++
++    # --- 1..2: basic transfer ------------------------------------------
++    argv, files = hw_argv(body_basic, "confirm")
++    add("confirm_transfer_basic", argv, files, out=ok_out(frame_basic, sig_basic))
++    argv, files = hw_argv(body_basic, "deny")
++    add("deny_transfer_basic", argv, files, exit_code=65,
++        out=[f"device={DEVICE}"] + frame_basic,
++        err=["error: hardware: denied by user"])
++
++    # --- 3..4: high-value transfer -------------------------------------
++    argv, files = hw_argv(body_high, "confirm")
++    add("confirm_transfer_high_value", argv, files, out=ok_out(frame_high, sig_high))
++    argv, files = hw_argv(body_high, "deny")
++    add("deny_transfer_high_value", argv, files, exit_code=65,
++        out=[f"device={DEVICE}"] + frame_high,
++        err=["error: hardware: denied by user"])
++
++    # --- 5: blind confirmation (named control) -------------------------
++    argv, files = hw_argv(body_basic, "blind")
++    add(NAMED_CONTROL, argv, files, exit_code=65,
++        out=[f"device={DEVICE}"],
++        err=["error: hardware: blind confirmation rejected"])
++
++    # --- 6: host preview substitutes the recipient ---------------------
++    argv, files = hw_argv(body_basic, "confirm",
++                          extra=["--show-recipient", a2["addr"],
++                                 "--show-amount", "1000"])
++    add("display_recipient_substitution", argv, files, exit_code=65,
++        out=[f"device={DEVICE}"],
++        err=["error: hardware: display mismatch"])
++
++    # --- 7: deny then retry with confirm -------------------------------
++    argv, files = hw_argv(body_basic, "deny,confirm")
++    add("deny_then_retry_confirm", argv, files,
++        out=[f"device={DEVICE}"] + frame_basic + frame_basic
++        + ["status=signed", f"sig={sig_basic}"])
++
++    # --- 8: delegate ----------------------------------------------------
++    argv, files = hw_argv(body_delegate, "confirm")
++    add("confirm_delegate", argv, files, out=ok_out(frame_delegate, sig_delegate))
++
++    # --- 9: undecodable payload ----------------------------------------
++    argv, files = hw_argv(body_legacy, "confirm")
++    add("undecodable_payload_refused", argv, files, exit_code=65,
++        out=[f"device={DEVICE}"],
++        err=["error: hardware: undecodable payload"])
++
++    # --- 10: foreign chain ---------------------------------------------
++    argv, files = hw_argv(body_foreign, "confirm", chain=FOREIGN)
++    add("foreign_chain_refused", argv, files, exit_code=65,
++        out=[f"device={DEVICE}"],
++        err=[f"error: foreign chain-id: tx={CHAIN}, wallet={FOREIGN}"])
++
++    if len(cases) != 10 or len({c["name"] for c in cases}) != 10:
++        raise ValueError("expected exactly 10 unique hardware scenarios")
++    return cases
++
++
++def main() -> None:
++    payload = {
++        "gate": GATE,
++        "notice": g2.NOTICE,
++        "named_control": NAMED_CONTROL,
++        "cases": build_cases(),
++    }
++    FIXTURE.write_text(json.dumps(payload, indent=2) + "\n")
++    print(f"wrote {FIXTURE.relative_to(ROOT)}: 10 cases, named control {NAMED_CONTROL}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tools/nc_w5.py b/tools/nc_w5.py
+new file mode 100644
+index 0000000..15b3157
+--- /dev/null
++++ b/tools/nc_w5.py
+@@ -0,0 +1,102 @@
++#!/usr/bin/env python3
++"""W5 focused mutation controls; restore the source exactly after each test.
++
++These controls test the tests, not the safety of the wallet. Never run while
++another process is building the same checkout. Model: tools/nc_w4.py.
++
++Control set (docs/w5-hardware-plan.md):
++  1. blind confirmation accepted (`sign_blind` signs) -> gate red
++     (the named W5 control: blind_confirmation_rejected)
++  2. `Deny` ignored (a denial signs) -> gate red
++  3. display binding dropped (host preview trusted) -> gate red
++  4. chain check dropped -> gate red
++  5. amount render altered -> gate red
++  6. payload decode check dropped -> gate red
++"""
++from pathlib import Path
++import subprocess
++import sys
++
++ROOT = Path(__file__).resolve().parents[1]
++HW = ROOT / "crates/aura-wallet/src/hardware.rs"
++
++
++def run_test(test: str) -> subprocess.CompletedProcess[str]:
++    cmd = [
++        "cargo", "test", "-p", "aura-wallet",
++        "--features", "insecure-test-kdf",
++        "--test", "w5_hardware", test, "--", "--exact",
++    ]
++    return subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, check=False)
++
++
++def control(label: str, old: str, new: str, test: str, source: Path = HW) -> bool:
++    original = source.read_text(encoding="utf-8")
++    if original.count(old) != 1:
++        print(f"FAIL {label}: mutation target not unique")
++        return False
++    try:
++        source.write_text(original.replace(old, new, 1), encoding="utf-8")
++        result = run_test(test)
++    finally:
++        source.write_text(original, encoding="utf-8")
++    # Compilation failure is NOT a valid red test.
++    ok = result.returncode != 0 and f"test {test} ... FAILED" in result.stdout
++    print(f"{'PASS' if ok else 'FAIL'} {label}: {test}")
++    if not ok:
++        print((result.stdout + result.stderr)[-2500:])
++    return ok
++
++
++def main() -> int:
++    checks: list[bool] = []
++
++    checks.append(control(
++        "NC: blind confirmation accepted -> gate red",
++        "        let _ = body;\n"
++        "        Err(HardwareError::BlindConfirmationRejected)",
++        "        self.finish_sign(\n"
++        "            &UnsignedTx::from_canonical_bytes(body)\n"
++        "                .map_err(|_| HardwareError::UndecodablePayload)?,\n"
++        "        )",
++        "blind_confirmation_rejected",
++    ))
++    checks.append(control(
++        "NC: denial ignored -> gate red",
++        "            HumanDecision::Deny => Err(HardwareError::DeniedByUser),",
++        "            HumanDecision::Deny => self.finish_sign(&unsigned),",
++        "deny_transfer_basic",
++    ))
++    checks.append(control(
++        "NC: display binding dropped -> gate red",
++        "            if !claim.matches(&frame) {",
++        "            if false {",
++        "display_recipient_substitution",
++    ))
++    checks.append(control(
++        "NC: chain check dropped -> gate red",
++        "        if unsigned.chain_id.as_str() != self.expected_chain {",
++        "        if false {",
++        "foreign_chain_refused",
++    ))
++    checks.append(control(
++        "NC: amount render altered -> gate red",
++        '            lines.push(format!("display: amount={amount}"));',
++        '            lines.push(format!("display: amount={amount} / 100"));',
++        "confirm_transfer_high_value",
++    ))
++    checks.append(control(
++        "NC: payload decode check dropped -> gate red",
++        "                if unsigned.payload.len() != 28 {",
++        "                if false {",
++        "undecodable_payload_refused",
++    ))
++
++    passed = sum(checks)
++    total = len(checks)
++    print(f"RESULT: {passed}/{total} negative controls PASS")
++    return 0 if passed == total else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/write_p6_evidence.py b/tools/write_p6_evidence.py
+index fa645b7..e72dd51 100644
+--- a/tools/write_p6_evidence.py
++++ b/tools/write_p6_evidence.py
+@@ -102,7 +102,8 @@ def main() -> int:
+     # 7. final audit: the tree must be green with this evidence in place.
+     p = subprocess.run(["python3", "tools/audit_closeout.py"], cwd=root, capture_output=True, text=True)
+     assert p.returncode == 0, p.stdout[-4000:] + p.stderr[-4000:]
+-    assert "expected NC total: 650" in p.stdout
++    # The cumulative total grows with each phase (650 at P6); pin only the label.
++    assert "expected NC total:" in p.stdout
+ 
+     print("evidence p6 written")
+     return 0
+diff --git a/tools/write_w5_evidence.py b/tools/write_w5_evidence.py
+new file mode 100644
+index 0000000..29a5021
+--- /dev/null
++++ b/tools/write_w5_evidence.py
+@@ -0,0 +1,145 @@
++#!/usr/bin/env python3
++"""Write W5 evidence (`docs/evidence/w5/`).
++
++Reproducible bundle for the W5 gate ("10 human confirmed/denied scenarios;
++NC: blind confirmation -> red"): captures the 10-scenario hardware suite,
++`tools/nc_w5.py` (the mutation controls), and inventories the pinned fixture
++against the independent generator. Model: tools/write_w4_evidence.py.
++"""
++from __future__ import annotations
++
++import hashlib
++import json
++import subprocess
++import sys
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++EVIDENCE = ROOT / "docs" / "evidence" / "w5"
++FIXTURE = ROOT / "crates/aura-wallet/tests/fixtures/w5_hardware_vectors.json"
++GENERATOR = ROOT / "tools/gen_w5_vectors.py"
++RUNNER = ROOT / "crates/aura-wallet/tests/w5_hardware.rs"
++HARDWARE = ROOT / "crates/aura-wallet/src/hardware.rs"
++NAMED = "blind_confirmation_rejected"
++TOTAL_NC = 656  # 650 through P6 + 6 W5 controls
++
++
++def sha256(path: Path) -> str:
++    return hashlib.sha256(path.read_bytes()).hexdigest()
++
++
++def run(cmd: list[str]) -> str:
++    result = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, check=False)
++    return f"$ {' '.join(cmd)}\n{result.stdout}{result.stderr}exit={result.returncode}\n"
++
++
++def main() -> int:
++    EVIDENCE.mkdir(parents=True, exist_ok=True)
++
++    test_log = run(["cargo", "test", "-p", "aura-wallet", "--features",
++                    "insecure-test-kdf", "--test", "w5_hardware"])
++    (EVIDENCE / "test-w5.log").write_text(test_log, encoding="utf-8")
++    nc_log = run([sys.executable, "tools/nc_w5.py"])
++    (EVIDENCE / "nc.log").write_text(nc_log, encoding="utf-8")
++
++    doc = json.loads(FIXTURE.read_text(encoding="utf-8"))
++    cases = doc["cases"]
++    named_found = any(
++        c["name"] == NAMED
++        and c["expect_exit"] == 65
++        and any("blind confirmation rejected" in line for line in c["expect_stderr"])
++        for c in cases
++    )
++    inv = [
++        "# W5 inventory (generated by tools/write_w5_evidence.py)",
++        f"gate={doc['gate']}",
++        f"vectors={len(cases)}",
++        f"named_control={NAMED}={'present' if named_found else 'MISSING'}",
++        f"fixtures_sha256={sha256(FIXTURE)}",
++        f"generator_sha256={sha256(GENERATOR)}",
++        f"runner_sha256={sha256(RUNNER)}",
++        "cases:",
++    ]
++    inv += [f"  {c['name']} exit={c['expect_exit']}" for c in cases]
++    inv.append(f"TOTAL: {TOTAL_NC} negative controls cumulative")
++    (EVIDENCE / "inventory.txt").write_text("\n".join(inv) + "\n", encoding="utf-8")
++
++    report = f"""# W5 closeout report — hardware keys with on-screen confirmation
++
++Date: 2026-11-24. Gate (WALLET_PLAN row W5): "10 \"human confirmed/denied\"
++scenarios; NC: blind confirmation -> red" — **satisfied**.
++
++- **Confirmation binding**: `blind_confirmation_rejected` (the named control)
++  — a `BlindSign` request is refused (`error: hardware: blind confirmation
++  rejected`, exit 65) before any key use; mutation NC-1 (`tools/nc_w5.py`)
++  makes the device sign blind requests and requires that test to go red.
++- **Scenarios**: 10 deterministic cases from the independent oracle
++  `tools/gen_w5_vectors.py` (display derivation, transfer/delegate payloads,
++  Ed25519 RFC 8032-checked signatures under the fixed `tx` domain), asserted
++  byte-for-byte by `tests/w5_hardware.rs` (11/11 with the count guard).
++  Groups: confirm (3), deny (2), blind (1), display substitution (1), retry
++  after denial (1), undecodable payload (1), foreign chain (1).
++- **Mutation controls**: 6/6 PASS (blind acceptance, denial ignored, display
++  binding dropped, chain check dropped, amount render altered, payload decode
++  check dropped).
++- **Device model** (docs/w5-hardware-plan.md): D-W5-1 the screen is derived
++  exclusively from the transaction bytes, D-W5-2 only payloads that can be
++  fully displayed are signed (`recipient||amount` for transfer, canonical
++  stake payload for delegate/undelegate) and host previews are bound to the
++  derived display, D-W5-3 nothing signs without `Armed -> Confirm` and a
++  denial never latches, D-W5-4 signatures are ordinary AuraLite `tx` domain
++  signatures (verifiable by the W3 offline path).
++
++Receipts: `gates.txt`, `test-w5.log`, `nc.log`, `inventory.txt`, `SHA256SUMS`.
++Regenerate with `make evidence-w5`. Public test data only — never use for funds.
++"""
++    (EVIDENCE / "report.md").write_text(report, encoding="utf-8")
++
++    gates = [
++        "# W5 gates",
++        "hardware gate + 10 scenarios: PASS (11 tests: 10 scenarios + count guard)"
++        if "test result: ok. 11 passed" in test_log
++        else "hardware gate + 10 scenarios: FAIL",
++        f"named control ({NAMED}): {'PASS' if named_found else 'FAIL'}",
++        "mutation controls: PASS (6/6)" if "RESULT: 6/6 negative controls PASS" in nc_log
++        else "mutation controls: FAIL",
++    ]
++    (EVIDENCE / "gates.txt").write_text("\n".join(gates) + "\n", encoding="utf-8")
++
++    sums = [
++        f"{sha256(p)}  {p.relative_to(ROOT)}"
++        for p in [FIXTURE, GENERATOR, RUNNER,
++                  ROOT / "tools/nc_w5.py", HARDWARE,
++                  EVIDENCE / "test-w5.log", EVIDENCE / "nc.log",
++                  EVIDENCE / "inventory.txt", EVIDENCE / "gates.txt",
++                  EVIDENCE / "report.md"]
++    ]
++    (EVIDENCE / "SHA256SUMS").write_text("\n".join(sums) + "\n", encoding="utf-8")
++
++    readme = f"""# W5 evidence — hardware keys with on-screen confirmation (10 scenarios)
++
++Gate (WALLET_PLAN row W5): "10 \\"human confirmed/denied\\" scenarios; NC: blind
++confirmation -> red". All fixtures are PUBLIC TEST DATA ONLY — never use for
++funds.
++
++- `test-w5.log` — `cargo test --features insecure-test-kdf --test w5_hardware`:
++  {len(cases)} scenarios plus `vectors_file_has_exactly_10_unique_cases`,
++  byte-for-byte against the independent oracle.
++- `nc.log` — `tools/nc_w5.py` mutation controls (6): each source mutation must
++  turn its named test red; compilation failure is not a valid red.
++- `inventory.txt` — the 10 cases with exit codes, the named control, the
++  cumulative NC total ({TOTAL_NC}) and SHA-256 pins of fixture, generator, runner.
++- `report.md`, `gates.txt` — closeout report and gate summary.
++- `SHA256SUMS` — digests of the deliverables and evidence files.
++
++The vectors are produced by `tools/gen_w5_vectors.py` (pure Python: BLAKE3,
++Ed25519 RFC 8032, domain_message, BIP-39/SLIP-0010, bech32). Regenerate with
++`make gen-w5-vectors`; rebuild this bundle with `make evidence-w5`.
++"""
++    (EVIDENCE / "README.md").write_text(readme, encoding="utf-8")
++    print(f"wrote {EVIDENCE.relative_to(ROOT)} ({len(cases)} vectors)")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+-- 
+2.47.3
+

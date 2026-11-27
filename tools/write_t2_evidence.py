@@ -124,20 +124,20 @@ def main():
         f.write("oracle cross-run: %s\n" % ("PASS" if oracle_ok else "FAIL"))
 
     with open(os.path.join(EVID, "report.md"), "w", encoding="utf-8") as f:
-        f.write("# T2 Report — Allocation\n\n")
-        f.write("Date: %s\n\n" % time.strftime("%Y-%m-%d"))
-        f.write("The result: **%s**\n\n" % ("ALL T2 GATES GREEN" if ok_all
-                                      else "THERE ARE RED GATES"))
-        f.write("Gate: the script reconciles genesis balances with the table; extra "
-                "coins → red.\n\n")
-        f.write("The `crates/aura-storage/src/allocation.rs` table: "
-                "validators 1 200 000, treasury 600 000 (vesting 6/24 months), "
-                "community 750 000, team 450 000 (vesting 12/36 months) = "
-                "3 000 000 ALCRY = the T1 genesis supply. The golden digest "
-                "of the table 5fe7417a…c9ea41 (Rust ↔ Python ↔ the example "
-                "`t2_allocation_example`). Vesting: linear with a cliff; "
-                "the locked part is not spendable. The scenario `sim/t2-allocation.json`, "
-                "the gate `crates/aura-storage/tests/t2_allocation.rs` "
+        f.write("# Отчёт T2 — Allocation\n\n")
+        f.write("Дата: %s\n\n" % time.strftime("%Y-%m-%d"))
+        f.write("Итог: **%s**\n\n" % ("ВСЕ ГЕЙТЫ T2 ЗЕЛЁНЫЕ" if ok_all
+                                      else "ЕСТЬ КРАСНЫЕ ГЕЙТЫ"))
+        f.write("Гейт: скрипт сверяет genesis-балансы с таблицей; лишние "
+                "монеты → красный.\n\n")
+        f.write("Таблица `crates/aura-storage/src/allocation.rs`: "
+                "validators 1 200 000, treasury 600 000 (вестинг 6/24 мес), "
+                "community 750 000, team 450 000 (вестинг 12/36 мес) = "
+                "3 000 000 ALCRY = genesis supply T1. Золотой дайджест "
+                "таблицы 5fe7417a…c9ea41 (Rust ↔ Python ↔ пример "
+                "`t2_allocation_example`). Вестинг: линейный с клиффом; "
+                "locked-часть не тратится. Сценарий `sim/t2-allocation.json`, "
+                "гейт `crates/aura-storage/tests/t2_allocation.rs` "
                 "(`campaign/t2-allocation.log`, `campaign/result.json`).\n")
         f.write("negative controls `tools/nc_t2.py` (`nc.log`, "
                 "RESULT: 6/6 negative controls PASS).\n\n")

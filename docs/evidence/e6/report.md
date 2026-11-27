@@ -1,29 +1,29 @@
-# E6 report — Stablecoin CDP
+# Отчёт E6 — Stablecoin CDP
 
-Date: 2026-11-22
+Дата: 2026-11-22
 
-The result: **ALL E6 GATES GREEN**
+Итог: **ВСЕ ГЕЙТЫ E6 ЗЕЛЁНЫЕ**
 
-Gate: **200% collateral at a −40% price move → liquidation with no bad debt**
+Гейт: **200% collateral при −40% цены → ликвидация без bad debt**
 (seized 175e18, repaid 100e18, shortfall 0, returned 25e18); property:
-the peg invariant never breaks (3 vaults, 3 liquidations, two shock fronts);
-NC: weakening the mint-ratio guard message → red. D-E3 is observed
-(after the oracle E5, the audit H8 and the AMM E4).
+peg-инвариант не рвётся (3 vault, 3 ликвидации, два ударных фронта);
+NC: ослабление guard-сообщения mint ratio → красный. D-E3 соблюдён
+(после оракула E5, аудита H8 и AMM E4).
 
-The `crates/aura-storage/src/cdp.rs` model: an over-collateralized CDP
-(MakerDAO-style): min ratio 150% (ETH-A), a 5% penalty (USDC-A/Raft),
-256-bit `mul_div`, floor rounding; mint/withdraw keep the ratio,
-liquidation takes debt·(1+penalty), the remainder goes to the owner; the peg invariant
+Модель `crates/aura-storage/src/cdp.rs`: over-collateralized CDP
+(MakerDAO-style): min ratio 150% (ETH-A), штраф 5% (USDC-A/Raft),
+256-битный `mul_div`, floor-округление; mint/withdraw держат ratio,
+ликвидация изымает debt·(1+penalty), остаток — владельцу; peg-инвариант
 `bad_debt == 0 && backed_value >= stable_supply`. 12 named messages.
-Decisions D-T1..D-T4.
+Решения D-T1..D-T4.
 
-The simulation `sim/e6-cdp.json`, the aggregate digest
-9b64b653…a499c95 (the Rust example ↔ Python `tools/e6_cdp_check.py`,
-`E6-SIM-OK` / `E6-MODEL-OK` byte-for-byte). The gate
-`crates/aura-storage/tests/e6_cdp.rs` (14 tests, metamorphic properties: split
-deposit, mint/repay round-trip, liquidation order, determinism).
-Negative controls `tools/nc_e6.py` — 6 controls (`nc.log`, RESULT:
-6/6 negative controls PASS). Sources: MakerDAO vaults/liquidation
+Симуляция `sim/e6-cdp.json`, агрегатный дайджест
+9b64b653…a499c95 (Rust-пример ↔ Python `tools/e6_cdp_check.py`,
+`E6-SIM-OK` / `E6-MODEL-OK` байт-в-байт). Гейт
+`crates/aura-storage/tests/e6_cdp.rs` (14 тестов, метаморфизмы split
+депозита, mint/repay round-trip, порядок ликвидаций, детерминизм).
+Negative controls `tools/nc_e6.py` — 6 контролей (`nc.log`, RESULT:
+6/6 negative controls PASS). Источники: MakerDAO vaults/liquidation
 (community-development.makerdao.com), chainscorelabs.com CDP engine
-architecture, a MakerDAO whitepaper explainer — see.
+architecture, MakerDAO whitepaper explainer — см.
 `docs/ecosystem/e6-cdp-report.md`.

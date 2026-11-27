@@ -1,11 +1,11 @@
-# H8 Report — external audit + bounty
+# Отчёт H8 — внешний аудит + баунти
 
-Date: 2026-11-18
+Дата: 2026-11-18
 
-The result: **ALL H8 GATES GREEN**
+Итог: **ВСЕ ГЕЙТЫ H8 ЗЕЛЁНЫЕ**
 
-Gate: 0 unfixed critical/high; NC: re-audit finds an old bug -> red.
+Гейт: 0 unfixed critical/high; NC: re-audit finds an old bug -> red.
 
-The public report `docs/audit/h8-public-audit-report.md`, the policy and bounty `SECURITY.md`; the oracle `tools/h8_reaudit.py` (`campaign/result.json`, `campaign/reaudit.log`).
+Публичный отчёт `docs/audit/h8-public-audit-report.md`, политика и баунти `SECURITY.md`; оракул `tools/h8_reaudit.py` (`campaign/result.json`, `campaign/reaudit.log`).
 negative controls `tools/nc_h8.py` (`nc.log`, RESULT: 7/7 negative controls PASS).
 

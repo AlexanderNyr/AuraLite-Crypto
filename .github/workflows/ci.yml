@@ -159,3 +159,106 @@ jobs:
 
       - name: clippy (feature on)
         run: cargo clippy -p aura-exec --features wasmtime-engine --all-targets -- -D warnings
+
+  # ---------------------------------------------------------------- O0 lanes
+  # The ten CI lanes of CONTRIBUTING.md (core, state, exec, consensus, net,
+  # node, wallet, ecosystem, security, perf), driven by the shard registry
+  # (ci/registry.txt). `aura-ci check` is the target registry check: a
+  # disabled shard that holds targets, an empty shard, a shard whose main
+  # test is not registered to it (a dead gate) or a stale entry makes this
+  # job red. Format: docs/o0-ci-plan.md (D-O0-1).
+  registry:
+    name: O0 target registry check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install pinned toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+          components: rustfmt, clippy
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-o0-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: build aura-ci
+        run: cargo build -p aura-testkit --bin aura-ci
+
+      - name: registry check (also verifies the workflow matrix)
+        run: make ci-check
+
+  # O0 — the shard lanes. Each shard runs exactly the targets registered to
+  # it (ci/registry.txt), never a hand-picked subset: that is what keeps a
+  # shard from becoming a dead gate.
+  test:
+    name: shard ${{ matrix.shard }}
+    needs: registry
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [core, state, exec, consensus, net, node, wallet, ecosystem, security, perf]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install pinned toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+          components: rustfmt, clippy
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-o0-${{ matrix.shard }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: run shard
+        run: make ci-shard SHARD=${{ matrix.shard }}
+
+  # O0 — the deterministic target-coverage report (docs/coverage.txt).
+  coverage:
+    name: O0 coverage report
+    needs: registry
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install pinned toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+          components: rustfmt, clippy
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-o0-coverage-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: write coverage report
+        run: make coverage
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: o0-coverage
+          path: docs/coverage.txt
+          if-no-files-found: error

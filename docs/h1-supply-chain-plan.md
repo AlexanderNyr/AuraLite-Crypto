@@ -5,7 +5,7 @@ Phase H1 of `docs/plans/SECURITY_PLAN.md`: "Supply chain — `cargo deny`,
 CI fails on a known vulnerable version; NC: remove deny → red".
 
 Status: in progress. Deviations from this plan are recorded here as
-amendments (standard rule: deviations — only by editing the doc).
+amendments (standard rule: отклонения — только правкой дока).
 
 ## Scope
 

@@ -110,15 +110,15 @@ def main():
         f.write("named gate: %s\n" % ("PASS" if indexer_ok else "FAIL"))
 
     with open(os.path.join(EVID, "report.md"), "w", encoding="utf-8") as f:
-        f.write("# E1 Report — chain indexer\n\n")
-        f.write("Date: %s\n\n" % time.strftime("%Y-%m-%d"))
-        f.write("The result: **%s**\n\n" % ("ALL E1 GATES GREEN" if ok_all
-                                      else "THERE ARE RED GATES"))
-        f.write("Gate: 10 000 blocks + an artificial reorg → 0 duplicates/losses; "
-                "NC: without rollback → red.\n\n")
-        f.write("The `crates/aura-storage/src/indexer.rs` code (idempotent ingest + "
-                "reorg rollback over local storage — the rejection of Postgres "
-                "is recorded in ECOSYSTEM_PLAN); the gate test "
+        f.write("# Отчёт E1 — индексер цепи\n\n")
+        f.write("Дата: %s\n\n" % time.strftime("%Y-%m-%d"))
+        f.write("Итог: **%s**\n\n" % ("ВСЕ ГЕЙТЫ E1 ЗЕЛЁНЫЕ" if ok_all
+                                      else "ЕСТЬ КРАСНЫЕ ГЕЙТЫ"))
+        f.write("Гейт: 10 000 блоков + искусственный reorg → 0 дублей/потерь; "
+                "NC: без rollback → red.\n\n")
+        f.write("Код `crates/aura-storage/src/indexer.rs` (идемпотентный ingest + "
+                "reorg rollback над локальным хранилищем — отклонение вместо Postgres "
+                "зафиксировано в ECOSYSTEM_PLAN); гейт-тест "
                 "`crates/aura-storage/tests/e1_indexer.rs` "
                 "(`campaign/indexer.log`, `campaign/result.json`).\n")
         f.write("negative controls `tools/nc_e1.py` (`nc.log`, "

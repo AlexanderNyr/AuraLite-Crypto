@@ -1,11 +1,11 @@
-# T1 Report — Issuance model
+# Отчёт T1 — Issuance model
 
-Date: 2026-11-21
+Дата: 2026-11-21
 
-The result: **ALL T1 GATES GREEN**
+Итог: **ВСЕ ГЕЙТЫ T1 ЗЕЛЁНЫЕ**
 
-Gate: a 10-year simulation — the supply matches the formula within 1 base unit.
+Гейт: 10-летняя симуляция — supply совпадает с формулой в пределах 1 базовой единицы.
 
-The `crates/aura-storage/src/issuance.rs` model: genesis 3 000 000 ALCRY, annual emission of 300 000 ALCRY with a halving every 4 years, a cap of 6 000 000 ALCRY, target stake share 6000 bps. The 10-year trajectory: 3.0M→4.95M ALCRY; the golden path digest c2a46691…c1a35 (Rust ↔ Python reference ↔ the `t1_issuance_example` example). The scenario `sim/t1-issuance.json`, the gate `crates/aura-storage/tests/t1_issuance.rs` (`campaign/t1-issuance.log`, `campaign/result.json`).
+Модель `crates/aura-storage/src/issuance.rs`: genesis 3 000 000 ALCRY, годовая эмиссия 300 000 ALCRY с халвингом каждые 4 года, потолок 6 000 000 ALCRY, целевая доля стейка 6000 bps. Траектория 10 лет: 3.0M→4.95M ALCRY; золотой дайджест пути c2a46691…c1a35 (Rust ↔ Python эталон ↔ пример `t1_issuance_example`). Сценарий `sim/t1-issuance.json`, гейт `crates/aura-storage/tests/t1_issuance.rs` (`campaign/t1-issuance.log`, `campaign/result.json`).
 negative controls `tools/nc_t1.py` (`nc.log`, RESULT: 6/6 negative controls PASS).
 

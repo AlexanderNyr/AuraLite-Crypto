@@ -128,20 +128,20 @@ def main():
         f.write("sdk examples: %s\n" % ("PASS" if examples_ok else "FAIL"))
 
     with open(os.path.join(EVID, "report.md"), "w", encoding="utf-8") as f:
-        f.write("# E3 Report — Faucet + SDK\n\n")
-        f.write("Date: %s\n\n" % time.strftime("%Y-%m-%d"))
-        f.write("The result: **%s**\n\n" % ("ALL E3 GATES GREEN" if ok_all
-                                      else "THERE ARE RED GATES"))
-        f.write("Gate: 1000 requests: 1 payout/address/day; SDK examples pass "
+        f.write("# Отчёт E3 — Faucet + SDK\n\n")
+        f.write("Дата: %s\n\n" % time.strftime("%Y-%m-%d"))
+        f.write("Итог: **%s**\n\n" % ("ВСЕ ГЕЙТЫ E3 ЗЕЛЁНЫЕ" if ok_all
+                                      else "ЕСТЬ КРАСНЫЕ ГЕЙТЫ"))
+        f.write("Гейт: 1000 requests: 1 payout/address/day; SDK examples pass "
                 "in CI.\n\n")
-        f.write("Faucet `crates/aura-storage/src/faucet.rs` (a deterministic "
-                "policy: 1 payout/address/day, testnet only) + the client "
+        f.write("Faucet `crates/aura-storage/src/faucet.rs` (детерминированная "
+                "политика: 1 выплата/адрес/день, testnet only) + клиентский "
                 "SDK `crates/aura-storage/src/sdk.rs`, `sdk/ts/`, `sdk/python/`; "
-                "gate `crates/aura-storage/tests/e3_faucet.rs` "
-                "(`campaign/e3-faucet.log`, `campaign/result.json`), the oracle "
-                "`tools/e3_faucet_check.py` (an independent Python model, "
-                "`tools/fixtures/e3_faucet_script.json`: 1000 requests → 750 "
-                "payouts, 250 rejections), the SDK examples — `tools/e3_examples_check.py` "
+                "гейт `crates/aura-storage/tests/e3_faucet.rs` "
+                "(`campaign/e3-faucet.log`, `campaign/result.json`), оракул "
+                "`tools/e3_faucet_check.py` (независимая Python-модель, "
+                "`tools/fixtures/e3_faucet_script.json`: 1000 запросов → 750 "
+                "выплат, 250 отказов), примеры SDK — `tools/e3_examples_check.py` "
                 "(`examples.log`: rust/ts/python 3/3).\n")
         f.write("negative controls `tools/nc_e3.py` (`nc.log`, "
                 "RESULT: 6/6 negative controls PASS).\n\n")

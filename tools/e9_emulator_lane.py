@@ -13,9 +13,7 @@ here:
   4. bounded node run: start listeners on free ports, wait for the RPC
      port to accept, SIGTERM -> clean exit 0 (D6 shutdown path)
 
-Every step's output lands in the evidence log (`--log PATH`, owned by
-the evidence build; plain `make emulator-lane` runs print only and
-never mutate checksummed evidence); the lane
+Every step's output lands in `docs/evidence/e9/lane.log`; the lane
 prints `E9-LANE-OK 4` when all four steps are green and exits non-zero
 otherwise. Registered in CI via `make emulator-lane` (part of
 `make test`).
@@ -36,18 +34,6 @@ import time
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 EVIDENCE = ROOT / "docs" / "evidence" / "e9"
 STEPS = 4
-
-
-def write_log(text: str) -> None:
-    """Write the lane log only when --log PATH is given (evidence build)."""
-    if "--log" not in sys.argv:
-        return
-    try:
-        out = pathlib.Path(sys.argv[sys.argv.index("--log") + 1])
-    except IndexError:
-        return
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(text, encoding="utf-8")
 
 
 def find_aurad() -> list[str]:
@@ -126,7 +112,9 @@ def main() -> int:
         if not up:
             proc.kill()
             out, err = proc.communicate(timeout=30)
-            write_log("\n".join(log) + out + err)
+            (EVIDENCE / "lane.log").write_text(
+                "\n".join(log) + out + err, encoding="utf-8"
+            )
             raise SystemExit("E9-LANE-BAD: node did not start")
         proc.send_signal(signal.SIGTERM)
         out, err = proc.communicate(timeout=60)
@@ -135,11 +123,11 @@ def main() -> int:
         log.append(out[-2000:])
         log.append(err[-2000:])
         if proc.returncode != 0:
-            write_log("\n".join(log))
+            (EVIDENCE / "lane.log").write_text("\n".join(log), encoding="utf-8")
             raise SystemExit("E9-LANE-BAD: unclean shutdown")
     ok += 1
 
-    write_log("\n".join(log) + "\n")
+    (EVIDENCE / "lane.log").write_text("\n".join(log) + "\n", encoding="utf-8")
     print(f"E9-LANE-OK {ok}")
     return 0
 

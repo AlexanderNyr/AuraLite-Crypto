@@ -1,123 +1,123 @@
-# E8 — NFT + names + DAO (phase report)
+# E8 — NFT + names + DAO (отчёт фазы)
 
-Date: 2026-11-22. Phase patch: `patches/0091-E8-NFT-DAO.patch`
-(E7 → `patches/0090-E7-Lending.patch`). Aggregate digest
+Дата: 2026-11-22. Патч фазы: `patches/0091-E8-NFT-DAO.patch`
+(E7 → `patches/0090-E7-Lending.patch`). Дайджест агрегата
 `39674d6a0813cb9beae5837025e1a8b6c00fb8ebe1bc620a06e844a5829fb313`.
 
-## DoD and what was done
+## DoD и что сделано
 
-| Requirement | Status |
+| Требование | Статус |
 |---|---|
-| ARC-721/1155 | ✅ the model `crates/aura-storage/src/nft.rs` (mint/transfer/approve/transfer_from/burn, per-id supply, operators, batch, URI) |
-| `.aura` name service | ✅ register/renew/transfer/set_target/resolve/set_primary/reverse, a 365-day term + 90-day grace |
-| on-chain identity | ✅ `set_identity`/`clear_identity`/`identity` — the meta digest is bound to a live name |
-| governance UI | ✅ `crates/aura-storage/src/dao_ui.rs`: propose/vote/finalize/execute/veto through the controller, a receipt log, a self-contained HTML page |
-| **50 standard vectors** | ✅ `tests/fixtures/e8-standards.txt` (generator `tools/gen_e8_vectors.py`), all 50 green, digest `8cb9da94…62bd3` |
-| **first DAO vote through the UI** | ✅ `run_e8_scenario`: vote №1 (voter 1, yes, 150000 ALCRY) goes through the UI, a receipt is recorded, tally `250000/75000/25000` ALCRY, proposal → executed; the HTML page is identical in Rust and Python (sha `bf1486e2…1167f`) |
+| ARC-721/1155 | ✅ модель `crates/aura-storage/src/nft.rs` (mint/transfer/approve/transfer_from/burn, per-id supply, operators, batch, URI) |
+| `.aura` name service | ✅ register/renew/transfer/set_target/resolve/set_primary/reverse, срок 365 дней + grace 90 |
+| on-chain identity | ✅ `set_identity`/`clear_identity`/`identity` — мета-дайджест привязан к живому имени |
+| governance UI | ✅ `crates/aura-storage/src/dao_ui.rs`: propose/vote/finalize/execute/veto через контроллер, журнал receipt'ов, самодостаточная HTML-страница |
+| **50 standard vectors** | ✅ `tests/fixtures/e8-standards.txt` (генератор `tools/gen_e8_vectors.py`), все 50 зелёные, дайджест `8cb9da94…62bd3` |
+| **first DAO vote through the UI** | ✅ `run_e8_scenario`: голос №1 (voter 1, yes, 150000 ALCRY) проходит через UI, receipt записан, tally `250000/75000/25000` ALCRY, proposal → executed; HTML-страница идентична в Rust и Python (sha `bf1486e2…1167f`) |
 
-## The model
+## Модель
 
-### ARC-721 (per `standards/arc721`, X5)
+### ARC-721 (по `standards/arc721`, X5)
 
-A token exists exactly when the owner slot is present —
-a burned id can be minted again. **Every transfer (by the owner or an
-approved spender) removes the approval slot** — the classic
-stale-approval bug; vector `v013` pins it (after a transfer the old
-approval is dead → `E8: not approved (dave/2)`). Mint/URI — owner-only
-of the collection (`root`).
+Токен существует ровно тогда, когда присутствует слот владельца —
+сожжённый id можно минтить заново. **Каждый перевод (владельцем или
+апрувленным спендером) удаляет слот апрува** — классический баг
+stale-approval; вектор `v013` его закрепляет (после перевода старый
+апрув мёртв → `E8: not approved (dave/2)`). Минт/URI — только владелец
+коллекции (`root`).
 
 ### ARC-1155
 
-One contract — many ids; each id has its own supply (supply 1 = NFT
-semantics, > 1 — fungible). The holder grants an operator
-(`set_operator`) the right to move any of their ids; batch transfers are
-all-or-nothing: every leg is checked before any is applied.
+Один контракт — много id; у каждого id своя эмиссия (supply 1 = NFT-
+семантика, > 1 — взаимозаменяемые). Держатель выдаёт оператору
+(`set_operator`) право двигать любые свои id; batch-переводы
+all-or-nothing: каждая «нога» проверяется до применения любой.
 
-### `.aura` names (ENS form)
+### `.aura` имена (форма ENS)
 
-The registry holds: owner, resolve target, term. Registration is for
-[`TERM_DAYS=365`] days; after expiry the name still resolves for
-[`GRACE_DAYS=90`] (anyone may renew — as in ENSv2), then
-`E8: name expired` and re-registration is allowed. Transferring a name
-clears the old owner's primary name. The identity record (meta digest)
-can be set only by the owner of a live name.
+Реестр: владелец, цель резолва (target), срок. Регистрация — на
+[`TERM_DAYS=365`] дней; после истечения имя резолвится ещё
+[`GRACE_DAYS=90`] (продлить может кто угодно — как в ENSv2), затем
+`E8: name expired` и повторная регистрация разрешена. Перевод имени
+чистит primary-имя старого владельца. Identity-запись (мета-дайджест)
+ставит только владелец живого имени.
 
 ### Governance UI
 
-`DaoUi` wraps the T6 `Governance` (threshold, 20% quorum, snapshot of
-voting power, voting period, 48-hour timelock, veto with sunset).
-**The path is UI-only**: every accepted vote yields a [`UiReceipt`] in
-the action log; `render_html()` renders the DAO page (proposal cards,
-tally, vote table) — reproduced byte-for-byte by the
-independent Python model.
+`DaoUi` оборачивает T6 `Governance` (порог, кворум 20%, снапшот
+голосующей силы, voting period, 48-часовой timelock, veto с sunset).
+**Путь только через UI**: каждый принятый голос даёт [`UiReceipt`] в
+журнале действий; `render_html()` рендерит страницу DAO (карточки
+предложений, tally, таблица голосов) — байт-в-байт воспроизводится
+независимой Python-моделью.
 
-## The gate
+## Гейт
 
-1. **50 standard vectors** — a block-format fixture (`vector=vNNN`,
-   `status=ok|err` with the exact literal `E8: …`, `read.<key>=<value>`).
-   The Rust test and the Python model run it independently and both yield
-   digest `8cb9da945b0eed8f4432d31b71d20fffb72a6317fc90204d1890bd480c062bd3`.
-   The vectors cover: mint/duplicate id/nonexistent id/transfer by a non-
-   owner/zero-address, approve→transfer_from, **stale-approval**,
-   burn→re-mint, 1155 balances/operators/revocation/batch/length-
-   mismatch/zero-amount, registration/taken name/invalid name/
-   resolve/target/transfer/primary/reverse, renew on someone else's right,
-   the expiry+grace boundaries (day 822 alive / day 823 dead / re-
-   registration), identity set/update/clear/read.
-2. **First DAO vote through the UI** — the scenario: propose(0) → **vote
-   №1 through the UI** (1/1/yes/150000·ALCRY) → three more votes → a repeat
-   vote rejected (`E8: vote already cast (1/1)`) → finalize (passed:
-   quorum 120000·ALCRY, yes 250000 > no 75000) → execute after the
-   timelock → `executed`. The steps and digest
+1. **50 standard vectors** — фикстура блок-формата (`vector=vNNN`,
+   `status=ok|err` с точным литералом `E8: …`, `read.<key>=<value>`).
+   Rust-тест и Python-модель исполняют её независимо и оба дают
+   дайджест `8cb9da945b0eed8f4432d31b71d20fffb72a6317fc90204d1890bd480c062bd3`.
+   Векторы покрывают: минт/дубль-id/несуществующий id/перевод не
+   владельцем/zero-address, approve→transfer_from, **stale-approval**,
+   burn→re-mint, 1155-балансы/операторы/revocation/batch/length-
+   mismatch/zero-amount, регистрацию/занятое имя/невалидное имя/
+   резолв/target/перевод/primary/reverse, renew на чужом праве,
+   границы expiry+grace (день 822 жив / день 823 мёртв / повторная
+   регистрация), identity set/update/clear/чтение.
+2. **First DAO vote through the UI** — сценарий: propose(0) → **голос
+   №1 через UI** (1/1/yes/150000·ALCRY) → ещё три голоса → повторный
+   голос отклонён (`E8: vote already cast (1/1)`) → finalize (passed:
+   quorum 120000·ALCRY, yes 250000 > no 75000) → execute после
+   timelock → `executed`. Шаги и дайджест
    `17fd44850375c54c9cf9826b8ed55da0faf1855da72514184c83501f07409d71`
-   are pinned in the Rust test and the Python model; the HTML page
-   (`docs/evidence/e8/governance-ui.html`) is identical on both sides.
+   закреплены в Rust-тесте и Python-модели; HTML-страница
+   (`docs/evidence/e8/governance-ui.html`) идентична с обеих сторон.
 
-## Tests and metamorphisms
+## Тесты и метаморфизмы
 
-`crates/aura-storage/tests/e8_nft.rs` — 15 tests: all 50 vectors with
-exact literals, digests, the gate scenario, the HTML page, exact
-messages for all DAO errors (below threshold, voting closed/still open,
+`crates/aura-storage/tests/e8_nft.rs` — 15 тестов: все 50 векторов с
+точными литералами, дайджесты, гейт-сценарий, HTML-страница, точные
+сообщения всех DAO-ошибок (below threshold, voting closed/still open,
 already finalized, timelock, already executed, not passed, no voting
-power, proposal not found, veto sunset), metamorphisms (batch ≡
-sequential transfers; mint-order independence; vote-order independence;
-double-run determinism), the name rules.
+power, proposal not found, veto sunset), метаморфизмы (batch ≡
+последовательные переводы; независимость от порядка минта; независимость
+от порядка голосов; детерминизм двойного прогона), правила имён.
 
 ## Negative controls
 
-`tools/nc_e8.py` — 6 mutations with named messages (each weakens exactly
-one literal, anchor count==1, after the run — restore + green):
+`tools/nc_e8.py` — 6 мутаций named messages (каждая ослабляет ровно
+один литерал, якорь count==1, после прогона — restore + зелёный):
 `bad-mint-exists`, `bad-transfer-owner`, `bad-stale-approval`
-(the not-approved message — the stale-path guard), `bad-name-taken`,
-`bad-name-owner`, `bad-ui-vote` (the gate one). **6/6 RED + GREEN.**
-Cumulative: **602 NC / 30 phases**.
+(сообщение о не-апруве — страж stale-пути), `bad-name-taken`,
+`bad-name-owner`, `bad-ui-vote` (гейтовая). **6/6 RED + GREEN.**
+Накопительно **602 NC / 30 фаз**.
 
-## Sources
+## Источники
 
-- **ERC-1155**: rareskills.io "ERC-1155 Explained" — one id with supply 1
-  = NFT, mint outside the spec; eco.com "When to Use It" —
-  `safeBatchTransferFrom`, `setApprovalForAll`, id patterns; webopedia
-  "ERC Token Standards" and metana "Guide" — comparing 20/721/1155,
-  batch gas.
+- **ERC-1155**: rareskills.io «ERC-1155 Explained» — один id с supply 1
+  = NFT, mint вне спецификации; eco.com «When to Use It» —
+  `safeBatchTransferFrom`, `setApprovalForAll`, паттерны id; webopedia
+  «ERC Token Standards» и metana «Guide» — сравнение 20/721/1155,
+  batch-газ.
 - **ENS / name service**: gate.com «ENS Comprehensive Analysis» —
-  registry/registrar/resolver, reverse resolution, annual renewal,
-  grace period; chainscorelabs.com — the registry stores owner/resolver/TTL,
-  names are NFTs (ERC-721); cryptoslate.com — a 90-day grace and
-  a subsequent auction; docs.ens.domains (ETH Registrar v2) —
-  renewal from any account, base rate with no premium.
-- **Internal**: `standards/arc721/src/lib.rs` (X5: the method table,
-  "exists = owner slot", transfers clear approvals), T6
-  `crates/aura-storage/src/governance.rs` (the proposal lifecycle).
+  registry/registrar/resolver, reverse resolution, годовое продление,
+  grace period; chainscorelabs.com — registry хранит owner/resolver/TTL,
+  имена — NFT (ERC-721); cryptoslate.com — 90-дневный grace и
+  последующий аукцион; docs.ens.domains (ETH Registrar v2) —
+  продление от любого аккаунта, base-rate без премии.
+- **Внутренние**: `standards/arc721/src/lib.rs` (X5: таблица методов,
+  «exists = owner slot», переводы чистят апрув), T6
+  `crates/aura-storage/src/governance.rs` (жизненный цикл предложения).
 
-## Phase decisions
+## Решения фазы
 
-- **D-E6**: the 50 standard vectors are a block-format fixture in
-  `tests/fixtures/e8-standards.txt` (counted by `tools/count_vectors.py`);
-  the generator `tools/gen_e8_vectors.py` writes literal expectations,
-  Rust and Python execute them independently.
-- **D-E7**: `.aura` is ENS-shaped: a 365-day term, a 90-day grace (resolve
-  stays alive; anyone may renew), re-registration after
-  expiry+grace; transferring a name clears the old owner's primary.
-- **D-E8**: the governance UI is the only voting path (DaoUi
-  wraps the T6 DAO and journals receipts); the DAO HTML page
-  is byte-identical in Rust and Python (cross-checked by sha).
+- **D-E6**: 50 стандартных векторов — фикстура блок-формата в
+  `tests/fixtures/e8-standards.txt` (считается `tools/count_vectors.py`);
+  генератор `tools/gen_e8_vectors.py` пишет литеральные ожидания,
+  Rust и Python исполняют независимо.
+- **D-E7**: `.aura` — ENS-форма: срок 365 дней, grace 90 дней (resolve
+  жив; продлить может кто угодно), повторная регистрация после
+  expiry+grace; перевод имени чистит primary старого владельца.
+- **D-E8**: governance UI — единственный путь голосования (DaoUi
+  оборачивает T6 DAO и журналит receipt'ы); HTML-страница DAO
+  байт-идентична в Rust и Python (кросс-проверка sha).

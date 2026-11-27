@@ -59,7 +59,6 @@ def main() -> int:
         "cases:",
     ]
     inv += [f"  {c['name']} exit={c['expect_exit']}" for c in cases]
-    inv.append("TOTAL: 412 negative controls")  # 406 through W1 + 6 W2 controls
     (EVIDENCE / "inventory.txt").write_text("\n".join(inv) + "\n", encoding="utf-8")
 
     gates = [

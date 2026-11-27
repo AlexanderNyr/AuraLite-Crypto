@@ -1,6 +1,6 @@
 # B0 baseline — no consensus, measured
 
-Generated (UTC): 2026-10-29T19:38:14+00:00. Every number below came out of `aura-consensus` in this
+Generated (UTC): 2026-10-29T15:26:06+00:00. Every number below came out of `aura-consensus` in this
 tree; `gates.txt` holds the raw command output, and
 `crates/aura-consensus/tests/fixtures/b1_baseline.txt` pins the same survey so it
 cannot drift silently.
@@ -30,12 +30,12 @@ cannot drift silently.
 |---|---|---|
 | `proposer` | B1 | implemented |
 | `block-signature` | B1 | implemented |
-| `qc` | B2 | implemented |
-| `finality` | B3 | implemented |
+| `qc` | B2 | placeholder |
+| `finality` | B3 | placeholder |
 | `validator-set` | B4 | placeholder |
 | `vrf-leader` | B5 | placeholder |
 
-**4 implemented, 2 placeholders, 0 missing.**
+**2 implemented, 4 placeholders, 0 missing.**
 All six consensus components are placeholders at B0: the crate has sources
 and a public `baseline` module, but declares no consensus logic.
 
@@ -43,6 +43,8 @@ and a public `baseline` module, but declares no consensus logic.
 
 | capability | phase | what it will do |
 |---|---|---|
+| `qc` | B2 | quorum certificate, 2f+1 BLS aggregation, O(1) verify |
+| `finality` | B3 | 3-chain commit, view change, timeouts, nil blocks |
 | `validator-set` | B4 | staking contract, epoch, enter/exit queue, set update |
 | `vrf-leader` | B5 | stake-weighted VRF leader election, grinding protection |
 
@@ -91,5 +93,5 @@ mistaken for a successful control.
 
 6/6 PASS; total **183** across C0–C10 + S0–S7 + X0–X8 + D0 + D1 + B0.
 
-Tests: **453** in the workspace, 56 of them in the B0 gate.
+Tests: **419** in the workspace, 22 of them in the B0 gate.
 Validators / blocks / transactions remain **0 / 0 / 0**.

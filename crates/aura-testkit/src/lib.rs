@@ -13,6 +13,12 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod ci;
+pub mod milestone;
+pub mod ops;
+pub mod release;
+pub mod testnet;
+
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::{Duration, Instant};
 

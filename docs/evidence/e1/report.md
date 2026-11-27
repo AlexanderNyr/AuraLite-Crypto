@@ -1,11 +1,11 @@
-# E1 Report — chain indexer
+# Отчёт E1 — индексер цепи
 
-Date: 2026-11-19
+Дата: 2026-11-19
 
-The result: **ALL E1 GATES GREEN**
+Итог: **ВСЕ ГЕЙТЫ E1 ЗЕЛЁНЫЕ**
 
-Gate: 10 000 blocks + an artificial reorg → 0 duplicates/losses; NC: without rollback → red.
+Гейт: 10 000 блоков + искусственный reorg → 0 дублей/потерь; NC: без rollback → red.
 
-The `crates/aura-storage/src/indexer.rs` code (idempotent ingest + reorg rollback over local storage — the rejection of Postgres is recorded in ECOSYSTEM_PLAN); the gate test `crates/aura-storage/tests/e1_indexer.rs` (`campaign/indexer.log`, `campaign/result.json`).
+Код `crates/aura-storage/src/indexer.rs` (идемпотентный ingest + reorg rollback над локальным хранилищем — отклонение вместо Postgres зафиксировано в ECOSYSTEM_PLAN); гейт-тест `crates/aura-storage/tests/e1_indexer.rs` (`campaign/indexer.log`, `campaign/result.json`).
 negative controls `tools/nc_e1.py` (`nc.log`, RESULT: 6/6 negative controls PASS).
 

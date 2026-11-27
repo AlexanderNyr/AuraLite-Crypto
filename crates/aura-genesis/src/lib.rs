@@ -27,6 +27,8 @@ mod error;
 mod json;
 mod types;
 
+pub mod ceremony;
+
 pub use error::GenesisError;
 pub use json::{from_json_file, from_json_str};
 pub use types::{

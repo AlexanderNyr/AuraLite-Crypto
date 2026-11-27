@@ -1,0 +1,439 @@
+//! O3 golden-vector runner — the closed-testnet ops receipt check.
+//!
+//! Executes every case of `fixtures/o3_testnet_ops_vectors.json` (generated
+//! by `tools/gen_o3_vectors.py`) against `aura_testkit::ops::run` and
+//! compares exit code, stdout and stderr **byte-for-byte**. Each case
+//! materializes its synthetic receipt or uptime ledger into a sandbox and
+//! runs one `aura-ops` command. The receipts and the ledger themselves are
+//! measured by `aurad-ops`; this runner checks criteria logic only.
+//!
+//! NC mapping (`tools/nc_o3.py` runs exactly these test names and expects
+//! `FAILED`): `restore_mismatch_refused` (named), `state_losses_refused`,
+//! `uptime_days_refused`, `restore_drills_refused`,
+//! `restore_root_count_refused`, `foreign_ops_line_refused`.
+
+use std::path::PathBuf;
+use std::sync::Mutex;
+
+/// The O3 golden fixture (regenerate with `tools/gen_o3_vectors.py`).
+const FIXTURE: &str = include_str!("fixtures/o3_testnet_ops_vectors.json");
+
+// --------------------------------------------------------------------------- mini JSON
+
+/// A parsed JSON value (subset sufficient for the fixture format).
+#[derive(Debug, Clone)]
+enum Json {
+    /// `null` (also used for `true`/`false`, which the fixture omits).
+    Null,
+    /// A number.
+    Num(f64),
+    /// A string.
+    Str(String),
+    /// An array.
+    Arr(Vec<Json>),
+    /// An object with insertion-ordered members.
+    Obj(Vec<(String, Json)>),
+}
+
+/// Recursive-descent parser over the fixture text.
+struct Parser<'a> {
+    /// Raw fixture bytes.
+    input: &'a [u8],
+    /// Current offset.
+    pos: usize,
+}
+
+impl<'a> Parser<'a> {
+    /// Skip ASCII whitespace.
+    fn skip_ws(&mut self) {
+        while self.pos < self.input.len()
+            && matches!(self.input[self.pos], b' ' | b'\t' | b'\n' | b'\r')
+        {
+            self.pos += 1;
+        }
+    }
+
+    /// Consume one literal token (`true`/`false`/`null`).
+    fn expect_lit(&mut self, lit: &str) {
+        assert!(
+            self.input[self.pos..].starts_with(lit.as_bytes()),
+            "bad literal"
+        );
+        self.pos += lit.len();
+    }
+
+    /// Parse one JSON value.
+    fn value(&mut self) -> Json {
+        self.skip_ws();
+        match self.input[self.pos] {
+            b'{' => self.object(),
+            b'[' => self.array(),
+            b'"' => Json::Str(self.string()),
+            b't' => {
+                self.expect_lit("true");
+                Json::Null
+            }
+            b'f' => {
+                self.expect_lit("false");
+                Json::Null
+            }
+            b'n' => {
+                self.expect_lit("null");
+                Json::Null
+            }
+            _ => self.number(),
+        }
+    }
+
+    /// Parse one JSON object.
+    fn object(&mut self) -> Json {
+        self.pos += 1; // '{'
+        let mut members = Vec::new();
+        self.skip_ws();
+        if self.input[self.pos] == b'}' {
+            self.pos += 1;
+            return Json::Obj(members);
+        }
+        loop {
+            self.skip_ws();
+            let key = self.string();
+            self.skip_ws();
+            assert_eq!(self.input[self.pos], b':', "expected ':'");
+            self.pos += 1;
+            let value = self.value();
+            members.push((key, value));
+            self.skip_ws();
+            match self.input[self.pos] {
+                b',' => self.pos += 1,
+                b'}' => {
+                    self.pos += 1;
+                    break;
+                }
+                other => panic!("expected ',' or '}}', got {other}"),
+            }
+        }
+        Json::Obj(members)
+    }
+
+    /// Parse one JSON array.
+    fn array(&mut self) -> Json {
+        self.pos += 1; // '['
+        let mut items = Vec::new();
+        self.skip_ws();
+        if self.input[self.pos] == b']' {
+            self.pos += 1;
+            return Json::Arr(items);
+        }
+        loop {
+            items.push(self.value());
+            self.skip_ws();
+            match self.input[self.pos] {
+                b',' => self.pos += 1,
+                b']' => {
+                    self.pos += 1;
+                    break;
+                }
+                other => panic!("expected ',' or ']', got {other}"),
+            }
+        }
+        Json::Arr(items)
+    }
+
+    /// Parse one JSON string.
+    fn string(&mut self) -> String {
+        assert_eq!(self.input[self.pos], b'"', "expected string");
+        self.pos += 1;
+        let mut out = String::new();
+        while self.input[self.pos] != b'"' {
+            let byte = self.input[self.pos];
+            if byte == b'\\' {
+                self.pos += 1;
+                match self.input[self.pos] {
+                    b'"' => out.push('"'),
+                    b'\\' => out.push('\\'),
+                    b'/' => out.push('/'),
+                    b'n' => out.push('\n'),
+                    b't' => out.push('\t'),
+                    b'r' => out.push('\r'),
+                    b'u' => {
+                        let mut code = 0u32;
+                        for _ in 0..4 {
+                            self.pos += 1;
+                            let digit = (self.input[self.pos] as char)
+                                .to_digit(16)
+                                .expect("bad \\u escape");
+                            code = code * 16 + digit;
+                        }
+                        out.push(char::from_u32(code).expect("bad codepoint"));
+                    }
+                    other => panic!("bad escape {other}"),
+                }
+            } else {
+                out.push(byte as char);
+            }
+            self.pos += 1;
+        }
+        self.pos += 1;
+        out
+    }
+
+    /// Parse one JSON number.
+    fn number(&mut self) -> Json {
+        let start = self.pos;
+        while self.pos < self.input.len()
+            && matches!(
+                self.input[self.pos],
+                b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E'
+            )
+        {
+            self.pos += 1;
+        }
+        let text = std::str::from_utf8(&self.input[start..self.pos]).expect("bad number");
+        Json::Num(text.parse().expect("bad number"))
+    }
+}
+
+impl Json {
+    /// Object members.
+    fn members(&self) -> &Vec<(String, Json)> {
+        match self {
+            Json::Obj(members) => members,
+            _ => panic!("expected object"),
+        }
+    }
+
+    /// Array items.
+    fn items(&self) -> &Vec<Json> {
+        match self {
+            Json::Arr(items) => items,
+            _ => panic!("expected array"),
+        }
+    }
+
+    /// String value.
+    fn str_value(&self) -> &str {
+        match self {
+            Json::Str(text) => text,
+            _ => panic!("expected string"),
+        }
+    }
+
+    /// Number value.
+    fn num_value(&self) -> f64 {
+        match self {
+            Json::Num(value) => *value,
+            _ => panic!("expected number"),
+        }
+    }
+
+    /// Member lookup by key.
+    fn get(&self, key: &str) -> &Json {
+        self.members()
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value)
+            .unwrap_or_else(|| panic!("missing key {key}"))
+    }
+
+    /// Optional member lookup by key.
+    fn find(&self, key: &str) -> Option<&Json> {
+        self.members()
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value)
+    }
+}
+
+/// Parse the whole fixture text.
+fn parse_fixture() -> Json {
+    let mut parser = Parser {
+        input: FIXTURE.as_bytes(),
+        pos: 0,
+    };
+    parser.value()
+}
+
+// --------------------------------------------------------------------------- runner
+
+/// Serializes cases: the CLI resolves relative paths against the process
+/// CWD, so cases must not run concurrently.
+static CWD_LOCK: Mutex<()> = Mutex::new(());
+
+/// Restores the process CWD on drop (also on panic unwind).
+struct CwdGuard {
+    /// The directory to restore.
+    prev: PathBuf,
+}
+
+impl CwdGuard {
+    /// Enter `dir` as the process CWD.
+    fn enter(dir: &std::path::Path) -> Self {
+        let prev = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(dir).expect("set current dir");
+        CwdGuard { prev }
+    }
+}
+
+impl Drop for CwdGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.prev);
+    }
+}
+
+/// Materialize the global and per-case `files` maps into `root`.
+fn materialize(files: &Json, root: &std::path::Path) {
+    for (name, content) in files.members() {
+        let path = root.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("fixture dirs created");
+        }
+        std::fs::write(path, content.str_value()).expect("fixture file written");
+    }
+}
+
+/// Run one fixture case end-to-end and assert exit/stdout/stderr exactly.
+fn run_case(name: &str) {
+    let fixture = parse_fixture();
+    let cases = fixture.get("cases").items();
+    let case = cases
+        .iter()
+        .find(|item| item.get("name").str_value() == name)
+        .unwrap_or_else(|| panic!("unknown case {name}"));
+
+    let sandbox = case.get("sandbox").str_value();
+    let base = std::env::temp_dir().join(format!("aura-o0-{}-{name}", std::process::id()));
+    let root = if sandbox.is_empty() {
+        base.clone()
+    } else {
+        base.join(sandbox)
+    };
+    std::fs::create_dir_all(&root).expect("sandbox created");
+    materialize(fixture.get("files"), &root);
+    if let Some(files) = case.find("files") {
+        materialize(files, &root);
+    }
+
+    let commands = case.get("argv").items();
+    let expected_exit = case.get("exit").num_value() as i32;
+    let expected_stdout = case.get("stdout").str_value().to_string();
+    let expected_stderr = case.get("stderr").str_value().to_string();
+    let last = commands.len() - 1;
+
+    let mut combined = String::new();
+    let mut final_err = String::new();
+    let mut final_code = 0;
+    {
+        let _lock = CWD_LOCK.lock().unwrap();
+        let _guard = CwdGuard::enter(&root);
+        for (index, command) in commands.iter().enumerate() {
+            let args: Vec<String> = command
+                .items()
+                .iter()
+                .map(|item| item.str_value().to_string())
+                .collect();
+            let mut out: Vec<u8> = Vec::new();
+            let mut err: Vec<u8> = Vec::new();
+            let code = aura_testkit::ops::run(&args, &mut out, &mut err);
+            let out_text = String::from_utf8(out).expect("stdout utf8");
+            let err_text = String::from_utf8(err).expect("stderr utf8");
+            if index == last {
+                combined.push_str(&out_text);
+                final_err = err_text;
+                final_code = code;
+            } else {
+                assert_eq!(
+                    code, 0,
+                    "case {name}: setup command #{index} failed\nargs: {args:?}\nstderr: {err_text}"
+                );
+                combined.push_str(&out_text);
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&base);
+    assert_eq!(
+        final_code, expected_exit,
+        "case {name}: exit mismatch\nstderr: {final_err}"
+    );
+    assert_eq!(combined, expected_stdout, "case {name}: stdout mismatch");
+    assert_eq!(final_err, expected_stderr, "case {name}: stderr mismatch");
+}
+/// The measured receipts satisfy the O3 gate (OPS_PLAN row O3).
+#[test]
+fn testnet_ops_pass() {
+    run_case("testnet_ops_pass");
+}
+
+/// `summary` prints the pinned normalized report (D-O3-1).
+#[test]
+fn testnet_ops_summary_deterministic() {
+    run_case("testnet_ops_summary_deterministic");
+}
+
+/// The named O3 control: the restore must reproduce the backed-up head
+/// byte-for-byte ("0 state losses" starts here).
+#[test]
+fn restore_mismatch_refused() {
+    run_case("restore_mismatch_refused");
+}
+
+/// A receipt with a state loss is refused.
+#[test]
+fn state_losses_refused() {
+    run_case("state_losses_refused");
+}
+
+/// A window below 7 uptime days is refused.
+#[test]
+fn uptime_days_refused() {
+    run_case("uptime_days_refused");
+}
+
+/// A window without a completed restore drill is refused.
+#[test]
+fn restore_drills_refused() {
+    run_case("restore_drills_refused");
+}
+
+/// Exactly two restore roots are required.
+#[test]
+fn restore_root_count_refused() {
+    run_case("restore_root_count_refused");
+}
+
+/// The receipt format cannot carry commands (D-O3-1).
+#[test]
+fn foreign_ops_line_refused() {
+    run_case("foreign_ops_line_refused");
+}
+
+/// The ledger rollup derives days and zero losses independently (D-O3-3).
+#[test]
+fn ledger_rollup_deterministic() {
+    run_case("ledger_rollup_deterministic");
+}
+
+/// A regressing head in the uptime ledger is a state loss (D-O3-3).
+#[test]
+fn ledger_state_loss_refused() {
+    run_case("ledger_state_loss_refused");
+}
+
+/// The fixture must hold exactly 10 unique cases.
+#[test]
+fn vectors_file_has_exactly_10_unique_cases() {
+    let fixture = parse_fixture();
+    let cases = fixture.get("cases").items();
+    assert_eq!(cases.len(), 10, "expected 10 cases");
+    let mut names: Vec<&str> = cases
+        .iter()
+        .map(|case| case.get("name").str_value())
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names.len(), 10, "case names must be unique");
+    assert_eq!(
+        fixture.get("named_control").str_value(),
+        "restore_mismatch_refused",
+        "the named O3 control must be pinned in the fixture"
+    );
+}

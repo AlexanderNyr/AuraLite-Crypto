@@ -133,17 +133,17 @@ def main():
                 % ("PASS" if campaign_ok else "FAIL"))
 
     with open(os.path.join(EVID, "report.md"), "w", encoding="utf-8") as f:
-        f.write("# H5 Report — consensus safety\n\n")
-        f.write("Date: %s\n\n" % time.strftime("%Y-%m-%d"))
-        f.write("The result: **%s**\n\n" % ("ALL H5 GATES GREEN" if ok_all
-                                      else "THERE ARE RED GATES"))
-        f.write("Gate: model finds a counterexample when 2f+1 is removed; NC documented.\n\n")
-        f.write("The campaign `%s` (`campaign/result.json`, logs in `campaign/`);\n"
+        f.write("# Отчёт H5 — consensus safety\n\n")
+        f.write("Дата: %s\n\n" % time.strftime("%Y-%m-%d"))
+        f.write("Итог: **%s**\n\n" % ("ВСЕ ГЕЙТЫ H5 ЗЕЛЁНЫЕ" if ok_all
+                                      else "ЕСТЬ КРАСНЫЕ ГЕЙТЫ"))
+        f.write("Гейт: model finds a counterexample when 2f+1 is removed; NC documented.\n\n")
+        f.write("Кампания `%s` (`campaign/result.json`, логи в `campaign/`);\n"
                 % "h5_consensus_campaign.py --schedule full")
         f.write("negative controls `%s` (`nc.log`, RESULT: 6/6 negative controls PASS).\n"
                 % "tools/nc_h5.py")
-        f.write("The TLA+ model `docs/h5/HotStuff3ChainSafetyMC.tla` (TLC, safe/`WeakenQuorum`):\n"
-                "safe — no violations; weakened — a counterexample is mandatory.\n\n")
+        f.write("TLA+ модель `docs/h5/HotStuff3ChainSafetyMC.tla` (TLC, safe/`WeakenQuorum`):\n"
+                "safe — без нарушений; weakened — контрпример обязателен.\n\n")
 
     with open(os.path.join(EVID, "inventory.txt"), "w", encoding="utf-8") as f:
         f.write("Negative controls cumulative inventory (5 phases x 6 controls):\n")

@@ -1,6 +1,6 @@
 # ECONOMICS_PLAN — tokenomics, fees, treasury, white paper
 
-**Status:** 🚧 IN PROGRESS — T0 ✅ (`patches/0078-T0-baseline.patch`); T1 ✅ (`patches/0079-T1-issuance.patch`); T2 ✅ (`patches/0080-T2-allocation.patch`); T3 ✅ (`patches/0081-T3-fees.patch`); T4 ✅ (`patches/0082-T4-staking.patch`) — **Stage 1 (T0–T4) CLOSED**; T5 ✅ (`patches/0083-T5-slashing.patch`); T6 ✅ (`patches/0084-T6-governance.patch`); T7 ✅ (`patches/0085-T7-treasury.patch`); T8 ✅ (`patches/0086-T8-whitepaper.patch`) — **ECONOMICS complete**  
+**Status:** 🚧 IN PROGRESS — T0 ✅ (`patches/0078-T0-baseline.patch`); T1 ✅ (`patches/0079-T1-issuance.patch`); T2 ✅ (`patches/0080-T2-allocation.patch`); T3 ✅ (`patches/0081-T3-fees.patch`); T4 ✅ (`patches/0082-T4-staking.patch`) — **Stage 1 (T0–T4) ЗАКРЫТ**; T5 ✅ (`patches/0083-T5-slashing.patch`); T6 ✅ (`patches/0084-T6-governance.patch`); T7 ✅ (`patches/0085-T7-treasury.patch`); T8 ✅ (`patches/0086-T8-whitepaper.patch`) — **ECONOMICS complete**  
 **Stage:** Stage 1: T0–T4. Stage 2: T5 ✅, T6 ✅, T7 ✅, T8 ✅.  
 **Deliverable:** `patches/0077-T0-...` … `patches/0085-T8-...`
 **Dependencies:** Stage 1 — CONSENSUS B4–B9, EXEC X3–X5, ECOSYSTEM E3, OPS O4.  

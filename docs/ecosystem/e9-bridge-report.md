@@ -1,120 +1,120 @@
-# E9 — Bridge + AuraLite OS (phase report)
+# E9 — Bridge + AuraLite OS (отчёт фазы)
 
-Date: 2026-11-22. Phase patch: `patches/0092-E9-Bridge.patch`.
-Aggregate digest
+Дата: 2026-11-22. Патч фазы: `patches/0092-E9-Bridge.patch`.
+Дайджест агрегата
 `4f8d9af363ab88fb7a6ce0ef6af52facb886f5e123ca0a128d1693e06d575e4f`.
 
-## DoD and criteria (D-E4)
+## DoD и критерии (D-E4)
 
-| Criterion | Status |
+| Критерий | Статус |
 |---|---|
-| **MITM forged header → reject** | ✅ `verify_commit` checks EVERY signature (no early stop): an unknown signer (attack A, id 99) → `E9: forged header signature (99)`; a bit-flipped validator signature (attack B) → `E9: forged header signature (1)`; a wholly foreign commit (attack C) and a double vote → also rejected. 3 of the 4 attacks in the gate + a scenario lane (2 attempts, `forged_rejected=2`) |
-| **OS client checks finalized checkpoint** | ✅ `OsClient` (`src/bridge.rs`) — the embedding point for AuraLite OS: `verify_checkpoint` (the commit is checked against the validator set), `accept` (only heights ≤ the finalized checkpoint → `E9: checkpoint not finalized (6)`), `check_root` |
-| **emulator lane green** | ✅ `tools/e9_emulator_lane.py` → `E9-LANE-OK 4`: `aurad --version` ✓, `aurad report --fixture` ✓, running without `--chain-id` → exit 2 ✓, a bounded node run + SIGTERM → clean shutdown ✓ (log `docs/evidence/e9/lane.log`); registered in CI (`make emulator-lane`, part of `make test`) |
-| **limits / pause (D-E4)** | ✅ a per-transaction limit of 1000 and a daily 1200 (velocity window, reset by day), guardian pause (circuit breaker), replay protection (an id is processed exactly once), the reserve invariant `locked == minted` (a withdraw cannot exceed the reserve) |
-| **separate audit (D-E4)** | ✅ pinned: the bridge does not ship to mainnet without H8 (a dedicated audit + bug bounty); SECURITY_PLAN: "A bridge bug is the most expensive: E9 is not enabled on mainnet without H8" |
+| **MITM forged header → reject** | ✅ `verify_commit` проверяет КАЖДУЮ подпись (без early-stop): неизвестный подписчик (атака A, id 99) → `E9: forged header signature (99)`; бит-флип подписи валидатора (атака B) → `E9: forged header signature (1)`; полностью чужой коммит (атака C) и дубль-голос → тоже reject. 3 из 4 атак в гейте + сценарная полоса (2 попытки, `forged_rejected=2`) |
+| **OS client checks finalized checkpoint** | ✅ `OsClient` (`src/bridge.rs`) — точка встраивания для AuraLite OS: `verify_checkpoint` (коммит сверяется с валидаторским набором), `accept` (только высоты ≤ finalized checkpoint → `E9: checkpoint not finalized (6)`), `check_root` |
+| **emulator lane green** | ✅ `tools/e9_emulator_lane.py` → `E9-LANE-OK 4`: `aurad --version` ✓, `aurad report --fixture` ✓, запуск без `--chain-id` → exit 2 ✓, bounded-запуск ноды + SIGTERM → чистое завершение ✓ (лог `docs/evidence/e9/lane.log`); зарегистрирован в CI (`make emulator-lane`, входит в `make test`) |
+| **limits / pause (D-E4)** | ✅ per-транзакционный лимит 1000 и дневной 1200 (velocity-окно, сброс по дням), guardian-pause (circuit breaker), replay-защита (id обрабатывается один раз), инвариант резерва `locked == minted` (withdraw не может превысить резерв) |
+| **отдельный аудит (D-E4)** | ✅ зафиксировано: мост не включается на mainnet без H8 (отдельный аудит + bug bounty); SECURITY_PLAN: «A bridge bug is the most expensive: E9 is not enabled on mainnet without H8» |
 
-## The `crates/aura-storage/src/bridge.rs` model
+## Модель `crates/aura-storage/src/bridge.rs`
 
-### Light client (IBC/Tendermint Core Verification form)
+### Light client (форма IBC/Tendermint Core Verification)
 
-A header is `height | parent | state root | time`; its hash is sha256 of the canonical
-form `e9h|…`. A commit is ed25519 signatures (RFC 8032, `aura_crypto`) over the header
-hash. Acceptance rules (LCV-FUNC-VALID.2):
+Заголовок: `height | parent | state root | time`; хэш — sha256 каноничной
+формы `e9h|…`. Коммит — ed25519-подписи (RFC 8032, `aura_crypto`) хэша
+заголовка. Правила принятия (LCV-FUNC-VALID.2):
 
-1. `header.height > trusted.height` (else `header not newer`);
-2. `header.parent == trusted.hash` (else `header does not chain`);
-3. every commit signature is from a **known** validator and **verifies**
-   (an unknown signer or a bad signature → `forged header signature`;
-   a double vote is forgery too); **no early stop** — a bad "extra" signature
-   is a failure, not noise (stricter than CometBFT's early abort);
-4. signature power is **strictly greater than 2/3** (`total·2/3 + 1` = 27 of 40),
-   else `commit lacks quorum (…)`.
+1. `header.height > trusted.height` (иначе `header not newer`);
+2. `header.parent == trusted.hash` (иначе `header does not chain`);
+3. каждая подпись коммита — от **известного** валидатора и **верифицируется**
+   (неизвестный подписчик или неверная подпись → `forged header signature`;
+   дубль-голос → тоже forgery); **early-stop нет** — плохая «лишняя» подпись
+   это отказ, а не шум (строже комет-ранней остановки CometBFT);
+4. мощность подписей **строго больше 2/3** (`total·2/3 + 1` = 27 из 40),
+   иначе `commit lacks quorum (…)`.
 
-Every accepted header is a **finalized checkpoint** (instant
-2/3 finality). The validator set is fixed (4 × power 10);
-rotation is a separate task on top of the same scheme (NextValidatorsHash).
+Каждый принятый заголовок — **finalized checkpoint** (мгновенная
+финальность 2/3). Набор валидаторов фиксирован (4 × power 10);
+ротация — отдельная задача поверх той же схемы (NextValidatorsHash).
 
-### Bridge protections (incident lessons)
+### Защиты моста (уроки инцидентов)
 
-- **Replay** (Nomad: replaying one valid message, $190M) —
-  `message already processed (id)`, processed exactly once.
-- **Limits** (Nomad: $190M in 150 minutes with no circuit breaker) —
-  per-tx 1000 + daily velocity 1200 (both checks with exact boundaries:
-  exactly the limit — ok, +1 wei — reject).
+- **Replay** (Nomad: повтор одного валидного сообщения $190M) —
+  `message already processed (id)`, обработка ровно один раз.
+- **Лимиты** (Nomad: $190M за 150 минут без circuit breaker) —
+  per-tx 1000 + дневной velocity 1200 (обе проверки с точными границами:
+  ровно лимит — ok, +1 wei — отказ).
 - **Pause** (zealynx/CCIP: kill switch 1-of-N guardians) —
-  `bridge is paused`, guardian pause/release.
-- **Reserve invariant** (Wormhole: mint without a deposit, $326M) —
-  `locked == minted` after every step, a withdraw beyond the reserve →
+  `bridge is paused`, guardian-пауза/снятие.
+- **Инвариант резерва** (Wormhole: mint без депозита $326M) —
+  `locked == minted` после каждого шага, withdraw сверх резерва →
   `withdraw exceeds reserve`.
-- **Root binding** (a relative of Nomad's zero-root bug) — a message is
-  proven against the specific `state root` of a finalized height
+- **Корневая привязка** (родственник zero-root бага Nomad) — сообщение
+  доказано против конкретного `state root` финализированной высоты
   (`message root mismatch`).
 
 ### AuraLite OS client
 
-`OsClient` is self-contained (sha256 + ed25519 only), a minimal
-surface for embedding into AuraLite OS: `verify_checkpoint` +
-`accept`/`check_root` against the **finalized** checkpoint. Full integration
-(hardware keystore, TLS channel) lives in the AuraLite-OS repository —
-**deviation**: the external AuraLite-OS / AuraLite-Emulator are unavailable from
-this repository; instead of the emulator there is a deterministic in-repo lane
-`tools/e9_emulator_lane.py` fulfilling the "CI run of `aurad`" contract.
+`OsClient` — self-contained (только sha256 + ed25519), минимальная
+поверхность для встраивания в AuraLite OS: `verify_checkpoint` +
+`accept`/`check_root` на **finalized** чекпоинте. Полная интеграция
+(аппаратный keystore, TLS-канал) живёт в репозитории AuraLite-OS —
+**deviation**: внешние AuraLite-OS / AuraLite-Emulator недоступны из
+этого репозитория; вместо эмулятора — детерминированный in-repo лейн
+`tools/e9_emulator_lane.py`, выполняющий контракт «CI run of `aurad`».
 
-## Gates and tests
+## Гейт и тесты
 
-`crates/aura-storage/tests/e9_bridge.rs` — 8 tests: the three DoD criteria
-(MITM ×4 attacks; OS checkpoint + forged checkpoint; the full scenario with a
-line-pinned step log), exact literals of the 6 NC targets,
-the remaining named messages, metamorphisms (signature order in a commit does not
-matter; limit boundaries; `locked == minted`; double-run determinism;
-quorum 27/40). The scenario: emulator H1–H5 (commits 0,1,2) →
-an attack lane (stale header, short quorum, 2 MITM forgeries, a fork) →
-transfers (500+400 deposit, 100 withdraw) → replay/limit/root rejections →
-pause/unpause → OS checkpoint (5 ok / 6 reject) → day 2 → a beyond-
-reserve rejection → the invariant. The steps and digest
+`crates/aura-storage/tests/e9_bridge.rs` — 8 тестов: три критерия DoD
+(MITM ×4 атаки; OS-чекпоинт + forged checkpoint; полный сценарий с
+построчно закреплённым шаговым логом), точные литералы 6 NC-целей,
+остальные named messages, метаморфизмы (порядок подписей в коммите не
+важен; границы лимитов; `locked == minted`; детерминизм двойного
+прогона; кворум 27/40). Сценарий: эмулятор H1–H5 (коммиты 0,1,2) →
+полоса атак (stale header, недобор кворума, 2 MITM-подделки, форк) →
+переводы (500+400 депозит, 100 вывод) → replay/limit/root отказы →
+pause/unpause → OS-чекпоинт (5 ok / 6 отказ) → день 2 → отказ сверх
+резерва → инвариант. Шаги и дайджест
 `039d498ba6fcd17e7640094492283a94be2c3447f8ebec89f9306eb438339580`
-are pinned in Rust and in the independent Python model
-`tools/e9_bridge_check.py` (ed25519 via `cryptography`, RFC 8032) —
-output `E9-STEPS-OK 25` / `E9-SIM-OK …` byte-for-byte.
+закреплены в Rust и в независимой Python-модели
+`tools/e9_bridge_check.py` (ed25519 через `cryptography`, RFC 8032) —
+вывод `E9-STEPS-OK 25` / `E9-SIM-OK …` байт-в-байт.
 
 ## Negative controls
 
-`tools/nc_e9.py` — 6 mutations with named messages: `bad-forged-header`,
-`bad-quorum`, `bad-chain`, **`bad-finalized` (the gate one — "OS client
+`tools/nc_e9.py` — 6 мутаций named messages: `bad-forged-header`,
+`bad-quorum`, `bad-chain`, **`bad-finalized` (гейтовая — «OS client
 checks finalized checkpoint»)**, `bad-replay`, `bad-pause`.
-**6/6 RED + GREEN.** Cumulative: **608 NC / 31 phases**.
+**6/6 RED + GREEN.** Накопительно **608 NC / 31 фаза**.
 
-## Sources
+## Источники
 
 - **Tendermint/IBC light client**: github.com/tendermint/tendermint
-  spec `verification_002_draft.md` — Core Verification: a commit carries
-  signatures of >2/3 of validators and none from outsiders; a forged
-  header from a faulty node must never persist.
+  spec `verification_002_draft.md` — Core Verification: коммит содержит
+  подписи >2/3 валидаторов и ни одной от посторонних; подделанный
+  заголовок faulty-ноды не должен сохраниться никогда.
   chainscorelabs.com «IBC Light Client Verification» — trusted
-  height/validators anchor, 2/3+ against the set hash, misbehaviour →
-  freeze. docs.tendermint.com accountability — attack scenarios (phantom
+  height/validators якорь, 2/3+ против хэша набора, misbehaviour →
+  freeze. docs.tendermint.com accountability — сценарии атак (phantom
   validators, equivocation, forged header). GitHub ipsadev/ipsa-contracts
-  — VerifyCommitLight: tallying to >2/3, rejecting "not newer than trusted",
-  rejecting a commit at a different height.
-- **Bridge incidents**: nomoslabs.io (Nomad $190M — zero-root init,
-  no rate limit/circuit breaker; Wormhole $326M — a signature-verification bug,
-  the minted↔deposited invariant), dev.to/0xrivet (5 defense layers;
-  Bybit $1.46B with no rate limit), zealynx.io checklist (pause 1-of-N,
-  volume limits, CCIP rate limiting), blockchaindose.com (replay nonce,
+  — VerifyCommitLight: таллирование до >2/3, отказ «не новее trusted»,
+  отказ коммита другой высоты.
+- **Инциденты мостов**: nomoslabs.io (Nomad $190M — zero-root init,
+  отсутствие rate limit/circuit breaker; Wormhole $326M — баг верификации
+  подписей, инвариант minted↔deposited), dev.to/0xrivet (5 слоёв защиты;
+  Bybit $1.46B без rate limit), zealynx.io checklist (pause 1-of-N,
+  volume-лимиты, CCIP rate limiting), blockchaindose.com (replay nonce,
   dynamic rate limiting + auto-pause).
-- **Internal**: `crates/aura-crypto/src/ed25519.rs` (RFC 8032,
+- **Внутренние**: `crates/aura-crypto/src/ed25519.rs` (RFC 8032,
   `sign_raw`/`verify_raw` + canonical-S guard), `crates/aura-node`
-  (`aurad`: report/fixture, SIGTERM shutdown, exit codes 0/2/64),
-  SECURITY_PLAN (D-E4, H6 bridge drill, "E9 does not ship without H8").
+  (`aurad`: report/fixture, SIGTERM-shutdown, exit-коды 0/2/64),
+  SECURITY_PLAN (D-E4, H6 bridge drill, «E9 не включается без H8»).
 
-## Phase decisions
+## Решения фазы
 
-- **D-E9**: a commit is verified in full (all signatures, duplicates = forgery,
-  no early stop) — stricter than CometBFT's early abort; an unknown
-  signer is `forged header signature`, not an ignore.
-- **D-E9b**: both velocity limits (per-tx + daily) are counted for
-  every message including withdrawals; the window resets at day change.
-- **D-E9c**: the external AuraLite-OS/AuraLite-Emulator are replaced by
-  in-repo components (OsClient + the `aurad` lane runner) — the deviation
-  is recorded; integration is tracked in their repositories.
+- **D-E9**: коммит проверяется целиком (все подписи, дубли = forgery,
+  без early-stop) — строже CometBFT-ранней остановки; неизвестный
+  подписчик = `forged header signature`, а не игнор.
+- **D-E9b**: обе velocity-лимиты (per-tx + дневной) считаются на
+  каждое сообщение включая выводы; окно сбрасывается сменой дня.
+- **D-E9c**: внешние AuraLite-OS/AuraLite-Emulator заменены
+  in-repo компонентами (OsClient + лейн-раннер `aurad`) — deviation
+  записан; интеграция отслеживается в их репозиториях.

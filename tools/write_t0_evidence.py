@@ -123,21 +123,21 @@ def main():
         f.write("oracle cross-run: %s\n" % ("PASS" if oracle_ok else "FAIL"))
 
     with open(os.path.join(EVID, "report.md"), "w", encoding="utf-8") as f:
-        f.write("# T0 Report — Economics baseline\n\n")
-        f.write("Date: %s\n\n" % time.strftime("%Y-%m-%d"))
-        f.write("The result: **%s**\n\n" % ("ALL T0 GATES GREEN" if ok_all
-                                      else "THERE ARE RED GATES"))
-        f.write("Gate: \"emission from nowhere\" in the simulation → red; no token "
-                "exists; the desired properties are described (scarcity, security, "
+        f.write("# Отчёт T0 — Economics baseline\n\n")
+        f.write("Дата: %s\n\n" % time.strftime("%Y-%m-%d"))
+        f.write("Итог: **%s**\n\n" % ("ВСЕ ГЕЙТЫ T0 ЗЕЛЁНЫЕ" if ok_all
+                                      else "ЕСТЬ КРАСНЫЕ ГЕЙТЫ"))
+        f.write("Гейт: «emission from nowhere» в симуляции → красный; токена "
+                "нет; желаемые свойства описаны (scarcity, security, "
                 "accessibility).\n\n")
-        f.write("The `crates/aura-storage/src/econ.rs` module (a deterministic "
-                "simulation: xorshift64*, seed 20261180, 1000 steps, the "
-                "cap-at-balance rule), the `sim/t0-baseline.json` scenario, the gate "
+        f.write("Модуль `crates/aura-storage/src/econ.rs` (детерминированная "
+                "симуляция: xorshift64*, сид 20261180, 1000 шагов, правило "
+                "cap-at-balance), сценарий `sim/t0-baseline.json`, гейт "
                 "`crates/aura-storage/tests/t0_economics.rs` "
                 "(`campaign/t0-economics.log`, `campaign/result.json`), "
-                "the independent oracle `tools/t0_economics_check.py` "
-                "(a Python model + cross-running the `t0_sim` example; the golden "
-                "digest aec12b64…c7a51a).\n")
+                "независимый оракул `tools/t0_economics_check.py` "
+                "(Python-модель + кросс-запуск примера `t0_sim`; золотой "
+                "дайджест aec12b64…c7a51a).\n")
         f.write("negative controls `tools/nc_t0.py` (`nc.log`, "
                 "RESULT: 6/6 negative controls PASS).\n\n")
 

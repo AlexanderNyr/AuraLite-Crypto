@@ -1,6 +1,6 @@
 # B2 baseline — QC / BLS aggregation, measured
 
-Generated (UTC): 2026-10-29T19:39:36+00:00. Every number below came out of `aura-consensus` in this
+Generated (UTC): 2026-10-29T16:20:29+00:00. Every number below came out of `aura-consensus` in this
 tree; `gates.txt` holds the raw command output, and
 `crates/aura-consensus/tests/fixtures/b2_baseline.txt` pins the same survey so it
 cannot drift silently.
@@ -30,11 +30,11 @@ cannot drift silently.
 | `proposer` | B1 | implemented |
 | `block-signature` | B1 | implemented |
 | `qc` | B2 | implemented |
-| `finality` | B3 | implemented |
+| `finality` | B3 | placeholder |
 | `validator-set` | B4 | placeholder |
 | `vrf-leader` | B5 | placeholder |
 
-**4 implemented, 2 placeholders, 0 missing.**
+**3 implemented, 3 placeholders, 0 missing.**
 proposer, block-signature, and qc measure as implemented; finality,
 validator-set, and vrf-leader measure as placeholders.
 
@@ -42,6 +42,7 @@ validator-set, and vrf-leader measure as placeholders.
 
 | capability | phase | what it will do |
 |---|---|---|
+| `finality` | B3 | 3-chain commit, view change, timeouts, nil blocks |
 | `validator-set` | B4 | staking contract, epoch, enter/exit queue, set update |
 | `vrf-leader` | B5 | stake-weighted VRF leader election, grinding protection |
 
@@ -91,5 +92,5 @@ mistaken for a successful control.
 
 6/6 PASS; total **189** across C0–C10 + S0–S7 + X0–X8 + D0 + D1 + B0–B2.
 
-Tests: **453** in the workspace, 56 of them in the B2 gate.
+Tests: **433** in the workspace, 36 of them in the B2 gate.
 Validators / blocks / transactions remain **0 / 0 / 0**.

@@ -1,6 +1,6 @@
 # B3 baseline — BFT finality, measured
 
-Generated (UTC): 2026-10-29T19:40:57+00:00. Every number below came out of `aura-consensus` in this
+Generated (UTC): 2026-10-29T16:44:43+00:00. Every number below came out of `aura-consensus` in this
 tree; `gates.txt` holds the raw command output, and
 `crates/aura-consensus/tests/fixtures/b3_baseline.txt` pins the same survey so it
 cannot drift silently.
@@ -87,5 +87,5 @@ mistaken for a successful control.
 
 6/6 PASS; total **195** across C0–C10 + S0–S7 + X0–X8 + D0 + D1 + B0–B3.
 
-Tests: **453** in the workspace, 56 of them in the B3 gate.
+Tests: **444** in the workspace, 47 of them in the B3 gate.
 Validators / blocks / transactions remain **0 / 0 / 0**.

