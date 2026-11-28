@@ -40,7 +40,7 @@ SECURITY_PHASES = ["H0", "H1", "H2", "H3", "H4", "H5", "H6", "H7", "H8", "H9"]  
 ECOSYSTEM_PHASES = ["E0", "E1", "E2", "E3", "E5", "E4", "E6", "E7", "E8", "E9"]  # grows with each E phase (D-E3 order: E5 before E4)
 PERF_PHASES = ["P0", "P1", "P2", "P3", "P4", "P5", "P6"]  # grows with each P phase
 ECONOMICS_PHASES = ["T0", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8"]  # grows with each T phase
-OPS_PHASES = ["O0", "O1", "O2", "O3"]  # grows with each O phase
+OPS_PHASES = ["O0", "O1", "O2", "O3", "O4"]  # grows with each O phase
 PHASES = CORE_PHASES + STATE_PHASES + EXEC_PHASES + NODE_PHASES + CONSENSUS_PHASES + NET_PHASES + WALLET_PHASES + SECURITY_PHASES + ECOSYSTEM_PHASES + ECONOMICS_PHASES + PERF_PHASES + OPS_PHASES
 SHIPPED = CORE_PHASES + [
     "S0",
@@ -136,8 +136,9 @@ SHIPPED = CORE_PHASES + [
     "O0",
     "O1",
     "O2",
+    "O3",
 ]
-CURRENT = "O3"  # 2026-11-25: O3 closed testnet ops closed (patch 0106); O2 shipped
+CURRENT = "O4"  # 2026-11-27: O4 public testnet (M2) closed (patch 0107); Stage 1 OPS complete; O3 shipped
 
 PLAN_FOR_PREFIX = {
     "C": "CORE_PLAN.md",
@@ -155,8 +156,8 @@ PLAN_FOR_PREFIX = {
 }
 
 NC_PER_PHASE = {f"C{i}": 6 for i in range(4, 11)}
-NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6, "W4": 6, "W5": 6, "W6": 6, "W7": 6, "H0": 6, "H1": 6, "H2": 6, "H3": 6, "H4": 6, "H5": 6, "H6": 7, "H7": 7, "H8": 7, "H9": 7, "E0": 6, "E1": 6, "E2": 6, "E3": 6, "E5": 6, "E4": 6, "E6": 6, "E7": 6, "E8": 6, "E9": 6, "P0": 6, "P1": 6, "P2": 6, "P3": 6, "P4": 6, "P5": 6, "P6": 6, "T0": 6, "T1": 6, "T2": 6, "T3": 6, "T4": 7, "T5": 7, "T6": 8, "T7": 7, "T8": 7, "O0": 6, "O1": 6, "O2": 6, "O3": 6})
-SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)  # 339 (through W0)
+NC_PER_PHASE.update({"C0": 2, "C1": 3, "C2": 4, "C3": 5, "S0": 6, "S1": 6, "S2": 6, "S3": 6, "S4": 6, "S5": 6, "S6": 6, "S7": 6, "X0": 6, "X1": 6, "X2": 7, "X3": 6, "X4": 6, "X5": 6, "X6": 6, "X7": 6, "X8": 6, "D0": 6, "D1": 6, "D2": 6, "D3": 6, "D4": 6, "D5": 6, "D6": 6, "D7": 6, "D8": 6, "B0": 6, "B1": 6, "B2": 6, "B3": 6, "B4": 6, "B5": 6, "B6": 6, "B7": 6, "B8": 6, "B9": 6, "B10": 6, "N0": 6, "N1": 6, "N2": 6, "N3": 6, "N4": 6, "N5": 6, "N6": 6, "N7": 6, "N8": 6, "W0": 6, "W1": 67, "W2": 6, "W3": 6, "W4": 6, "W5": 6, "W6": 6, "W7": 6, "H0": 6, "H1": 6, "H2": 6, "H3": 6, "H4": 6, "H5": 6, "H6": 7, "H7": 7, "H8": 7, "H9": 7, "E0": 6, "E1": 6, "E2": 6, "E3": 6, "E5": 6, "E4": 6, "E6": 6, "E7": 6, "E8": 6, "E9": 6, "P0": 6, "P1": 6, "P2": 6, "P3": 6, "P4": 6, "P5": 6, "P6": 6, "T0": 6, "T1": 6, "T2": 6, "T3": 6, "T4": 7, "T5": 7, "T6": 8, "T7": 7, "T8": 7, "O0": 6, "O1": 6, "O2": 6, "O3": 6, "O4": 7})
+SHIPPED_NC_TOTAL = sum(NC_PER_PHASE[phase] for phase in SHIPPED)  # 692 (through O3)
 EXPECTED_TOTAL_NC = SHIPPED_NC_TOTAL + (0 if CURRENT in SHIPPED else NC_PER_PHASE[CURRENT])
 
 DONE_ROW = re.compile(r"^\| ✅ \*\*([A-Z]+\d+)\*\* \|", re.M)
@@ -217,6 +218,7 @@ PATCH_ORDER += ["O0"]   # 0103
 PATCH_ORDER += ["O1"]   # 0104
 PATCH_ORDER += ["O2"]   # 0105
 PATCH_ORDER += ["O3"]   # 0106
+PATCH_ORDER += ["O4"]   # 0107
 PATCH_NUMBERS = {phase: index + 1 for index, phase in enumerate(PATCH_ORDER)}
 
 

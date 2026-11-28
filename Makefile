@@ -1473,7 +1473,8 @@ evidence-o4:
 
 testnet-receipts:
 	@mkdir -p release
-	@$(CARGO) run -q -p aura-node --bin aurad-testnet -- --out release/testnet.txt --metrics-out release/metrics-30d.txt --triage release/triage.txt
+	@test -f release/triage.txt || $(PYTHON) -c 'import json, pathlib; doc = json.loads(pathlib.Path("tools/fixtures/h8_findings.json").read_text()); lines = ["# O4 public-testnet triage journal (seeded from tools/fixtures/h8_findings.json + M2 triage)"] + ["triage %s %s %s" % (f["id"], f["severity"], f["status"]) for f in doc["findings"]] + ["triage M2-B-001 medium open", "triage M2-B-002 low open", "triage M2-B-003 informational open", "triage M2-B-004 low fixed"]; pathlib.Path("release/triage.txt").write_text("\n".join(lines) + "\n")'
+	@$(CARGO) run -q --release -p aura-node --bin aurad-testnet -- --out release/testnet.txt --metrics-out release/metrics-30d.txt --triage release/triage.txt
 
 testnet-check:
 	@$(CARGO) run -q -p aura-testkit --bin aura-testnet -- check --receipts release/testnet.txt

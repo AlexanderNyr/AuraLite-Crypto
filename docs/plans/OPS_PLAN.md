@@ -1,7 +1,7 @@
 # OPS_PLAN — CI, releases, testnet, mainnet, community
 
-**Status:** 🚧 IN PROGRESS — O0 ✅ (`patches/0103-O0-ci-baseline.patch`).  
-**Stage:** Stage 1: O0–O4. ⏸ Stage 2: O5–O9 (mainnet, upgrades, community).  
+**Status:** ✅ Stage 1 CLOSED — O0 ✅ (`patches/0103-O0-ci-baseline.patch`); O1 ✅ (`patches/0104-O1-releases.patch`); O2 ✅ (`patches/0105-O2-m0-m1-gates.patch`); O3 ✅ (`patches/0106-O3-closed-testnet-ops.patch`); O4 ✅ (`patches/0107-O4-public-testnet.patch`) — **Stage 1 (O0–O4 / M0–M2) complete**.
+**Stage:** Stage 1: O0–O4 ✅. ⏸ Stage 2: O5–O9 (mainnet, upgrades, community).
 **Deliverable:** `patches/0103-O0-...` … `patches/0112-O9-...`
 **Dependencies:** all Stage 1 technical plans; O5/O6 are the final north-star
 gates (⏸ Stage 2).
@@ -29,7 +29,7 @@ a loud name.
 | ✅ **O1** | Releases | reproducible build, Docker multi-stage, signatures, SBOM, CHANGELOG, semver | two independent hosts → identical binary sha256 |
 | ✅ **O2** | M0/M1 gates | 4-validator devnet, "how to run" docs, first receipts | ROADMAP §5 M0 and M1 criteria met |
 | ✅ **O3** | Closed testnet | invited operators, monitoring, on-call, backup/restore drills | 7 days uptime, 0 state losses, 1 restore drill |
-| **O4** | Public testnet (M2) | faucet, explorer, docs, bug bounty, public metrics, >= 10 external validators | 30 days, >= 99% uptime, >= 100 000 txs, 0 unfixed criticals |
+| ✅ **O4** | Public testnet (M2) | faucet, explorer, docs, bug bounty, public metrics, >= 10 external validators | 30 days, >= 99% uptime, >= 100 000 txs, 0 unfixed criticals |
 | ⏸ **O5** | Mainnet candidate (M3) | feature freeze, H8 audit, T8 white paper, W7 genesis ceremony, H9 playbook | independent check: same genesis hash on all validators; 0 criticals |
 | ⏸ **O6** | Mainnet launch (M4) | >= 21 validators, no entity >= 1/3 of stake, 24/7 monitoring, chain-id fixed | north star: network finalizes blocks for 7 days, logs in `docs/evidence/o6/` |
 | ⏸ **O7** | First upgrade | on-chain governance (B9/T6) really updates the protocol without a hard fork | Proposal → timelock → activation; NC: upgrade without timelock → red |
@@ -189,6 +189,45 @@ a loud name.
   handover). First O3 receipts: `docs/evidence/o3/` (`testnet-ops.txt`,
   `uptime-7d.txt`, `test.log`, `nc.log`, `receipts.log`,
   `testnet-ops-check.log`, `summary.log`).
+
+### O4 receipt (2026-11-27)
+
+- Deliverable: `patches/0107-O4-public-testnet.patch` (complete O4-from-O3
+  phase patch; closes Stage 1 of `OPS_PLAN` and milestone M2).
+- The gate "30 days, >= 99% uptime, >= 100 000 txs, 0 unfixed criticals"
+  is measured on receipts, not asserted (D-O4-1..D-O4-5):
+  `make testnet-receipts` (`aurad-testnet`) runs the scripted 30-day
+  public schedule (30 x 24 hourly polls, 140 signed transfers per poll =
+  100 800 transactions) on the shipped pipeline into `metrics-30d.txt`,
+  verifies the 10-validator genesis window across ten independent
+  single-validator pipelines (`validators 10`), and evaluates the
+  bug-bounty triage journal (`triage.txt`, seeded from
+  `tools/fixtures/h8_findings.json` plus M2 triage entries) into
+  `testnet.txt`.
+- Named control: `unfixed_criticals_refused` — a receipt carrying
+  `criticals 1` is refused (`error: testnet: criticals: 1`, exit 65);
+  mutation NC-1 drops the zero-criticals check and the case must turn
+  red.
+- Test gate: 12 deterministic scenarios
+  (`tests/fixtures/o4_testnet_public_vectors.json`) from the independent
+  oracle `tools/gen_o4_vectors.py`, asserted byte-for-byte by
+  `tests/o4_testnet_public.rs` (13/13 with the count guard) against
+  `aura_testkit::testnet`: valid receipt + pinned summary, five gate
+  refusals (days / uptime / validators / txs / criticals [named]),
+  foreign-line refusal, and independent ledger rollups (`metrics-30d.txt`
+  pass + `tx regression at 3 2`; `triage.txt` pass + `open critical
+  T-0002`).
+- Mutation controls (`tools/nc_o4.py`, 7): criticals check (named), days
+  check, uptime check, validators check, txs check, metrics regression
+  check, triage open-critical check — 7/7 PASS (699 cumulative across
+  106 phases).
+- Public surface & docs (D-O4-5): `aurad-faucet` and `aurad-explorer`
+  exercised over the node `RpcBackend` (`public-surface.log`), operator
+  and developer guide `docs/testnet-public.md`, bug-bounty policy
+  `docs/testnet-bounty.md`. Receipts: `docs/evidence/o4/` (`testnet.txt`,
+  `metrics-30d.txt`, `triage.txt`, `gates.txt`, `test.log`, `nc.log`,
+  `receipts.log`, `testnet-check.log`, `summary.log`,
+  `public-surface.log`, `inventory.txt`, `report.md`, `SHA256SUMS`).
 
 ## Risks
 

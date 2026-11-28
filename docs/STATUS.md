@@ -1,14 +1,12 @@
 # Implementation status — AuraLite-Crypto
 
 > Updated **in the same patch** as the phase's code (rule D9).
-> Snapshot date: **2026-11-08**, tree: "W1 closed — crypto keystore,
-> W1-FORMAT-v1 frozen; W0–W1 ✅, W2–W4 open". See [`CLOSEOUT_AUDIT.md`](CLOSEOUT_AUDIT.md) (CORE),
-> `docs/evidence/s7/report.md` (S7), `docs/evidence/x0/report.md` (X0),
-> `docs/evidence/x1/report.md` (X1), `docs/evidence/x2/report.md` (X2),
-> `docs/evidence/x3/report.md` (X3), `docs/evidence/x4/report.md` (X4),
-> `docs/evidence/x5/report.md` (X5), `docs/evidence/x6/report.md` (X6) and
-> `docs/evidence/x7/report.md` (X7), `docs/evidence/x8/report.md` (X8) and
-> `docs/evidence/d0/report.md` (D0).
+> Snapshot date: **2026-11-27**, tree: **"O4 closed — Stage 1 (M0–M2) complete
+> across all 12 plans; 106 phases closed, 699 negative controls; W5–W7, H8–H9,
+> E4–E9, T5–T8, P4–P6 also delivered in-repo; X9 and O5–O9 deferred to Stage 2
+> mainnet decision"**. See [`CLOSEOUT_AUDIT.md`](CLOSEOUT_AUDIT.md) (CORE),
+> `docs/evidence/o2/report.md` (M0/M1), `docs/evidence/o3/report.md` (O3) and
+> `docs/evidence/o4/report.md` (O4 / M2).
 
 ## Locked decisions (2026-10-25)
 
@@ -74,19 +72,30 @@ Ed25519 block signature — 2 implemented, 4 placeholders in `aura-consensus`.
 W0 ✅ (`patches/0058-W0-wallet-baseline.patch`) and **W1 ✅**
 (`patches/0059-W1-crypto-keystore.patch`, W1-FORMAT-v1 frozen, testnet-only;
 the independent external security review is deferred to the Stage-2 audit by
-owner decision 2026-11-08). ⏸ X9 (EVM lane), W2–W7 and E/T/H/P/O remain open
-or out of scope for now.
+owner decision 2026-11-08).
+**Ledger continued (updated 2026-11-27):** W2–W4 ✅ (`patches/0060-…` …
+`patches/0062-…`), H0–H9 ✅ (`patches/0063-…` … `patches/0073-…`, with `0065`
+supply-chain scan-scope fix) — **SECURITY_PLAN is COMPLETE**; E0–E3 ✅
+(`patches/0074-…` … `patches/0077-…`), T0–T8 ✅ (`patches/0078-…` …
+`patches/0086-…`) — **ECONOMICS_PLAN is COMPLETE**; E5, E4, E6–E9 ✅
+(`patches/0087-…` … `patches/0092-…`) — **ECOSYSTEM_PLAN is COMPLETE**; P0–P6 ✅
+(`patches/0093-…` … `patches/0099-…`) — **PERF_PLAN is COMPLETE**; W5–W7 ✅
+(`patches/0100-…` … `patches/0102-…`) — **WALLET_PLAN is COMPLETE**; and O0–O4 ✅
+(`patches/0103-…` … `patches/0107-…`) — **OPS_PLAN Stage 1 (M0, M1, M2) is
+COMPLETE** (**106 phases, 699 negative controls**). ⏸ X9 (optional EVM lane) and
+O5–O9 (organizational mainnet candidate, launch, governance upgrade and support)
+remain deferred to Stage 2 by separate decision.
 
 ## Maturity level
 
 | Level | Definition | Now |
 |---|---|---|
 | L0 | Docs/plan, no code | ✅ done at C0 |
-| L1 | Core libraries + test rig, no network | ✅ **we are here** (CORE C0–C10 + STATE S0–S7 + EXEC X0–X4; B/N/D phases still open) |
-| L2 | Devnet: 4 validators in one process/host | ❌ |
-| L3 | Public testnet with external validators | ❌ (Stage 1 target) |
-| L4 | Mainnet candidate: audit, freeze, white paper | ⏸ Stage 2 |
-| L5 | Mainnet + live application ecosystem | ⏸ Stage 2 |
+| L1 | Core libraries + test rig, no network | ✅ done (CORE C0–C10 + STATE S0–S7 + EXEC X0–X8) |
+| L2 | Devnet: 4 validators in one process/host | ✅ done at D7 / O2 (M0 + M1 receipts) |
+| L3 | Public testnet with external validators | ✅ **we are here** — Stage 1 delivered at O4 (M2 receipts: 30d schedule, 100 800 txs, 10-validator genesis window, faucet + explorer + bounty triage) |
+| L4 | Mainnet candidate: audit, freeze, white paper | ⏸ Stage 2 (`O5`; technical prerequisites H8, T8, W7, H9 landed in-repo) |
+| L5 | Mainnet + live application ecosystem | ⏸ Stage 2 (`O6–O9`) |
 
 L3 is the ceiling of **Stage 1**. L4–L5 belong to ⏸ Stage 2 (decision Q5).
 

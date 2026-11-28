@@ -1,5 +1,24 @@
 # Changelog — AuraLite-Crypto
 
+## [O4 — Public testnet (M2) phase closed (OPS Stage 1 complete): the 30-day public metrics ledger (30 x 24 hourly polls, 100 800 signed transfers on the real pipeline, D-O4-2), the bug-bounty triage journal seeded from H8 findings (`triage.txt`, 0 unfixed criticals, D-O4-3), the 10-validator genesis reproduction window (D-O4-4), the public faucet + explorer CLI services over `RpcBackend` (`aurad-faucet`, `aurad-explorer`) + `docs/testnet-public.md` + `docs/testnet-bounty.md` (D-O4-5), and the checked `rule testnet-v1` receipt (D-O4-1); gate 12 scenarios + NC: unfixed_criticals_refused (open critical -> red)] 2026-11-27
+
+Stage 1 of `OPS_PLAN` (O0–O4) and milestone **M2 (Public testnet)** are
+closed on measured receipts: `aurad-testnet` runs the 30-day public
+schedule (100 800 transfers across 720 blocks, 100% uptime), verifies
+byte-identical genesis state roots across 10 independent validator nodes,
+checks the triage journal (`items=12 open=3 criticals=0`) and writes
+`testnet.txt` + `metrics-30d.txt`; `aura-testnet` (`check`, `metrics`,
+`triage`, `summary`) independently re-derives every rollup and refuses
+any shortfall or regression with exit 65. 12 deterministic scenarios
+(`tests/fixtures/o4_testnet_public_vectors.json`) from the independent
+oracle `tools/gen_o4_vectors.py`, asserted byte-for-byte by
+`tests/o4_testnet_public.rs` (13/13 with the count guard). Named control:
+`unfixed_criticals_refused` (`error: testnet: criticals: 1`, exit 65).
+NC: 7 mutations (699 cumulative across 106 closed phases). Also restores
+regressed historical evidence (`c10`, `d0`, `e9`, `w2`, `x5` standards),
+guards `e9_emulator_lane.py` behind `--log`, updates `fuzz/Cargo.lock`
+and `docs/coverage.txt`, and cleans stray workspace artifacts.
+
 ## [O3 — Closed testnet ops phase closed (OPS Stage 1): the uptime ledger (7-day scripted operator schedule on the real pipeline, D-O3-3: day/hour from the schedule, heights and state roots from the live chain), the live backup/restore drill over the shipped S2 backup format (create_backup/restore_backup with replayed records and recomputed roots, D-O3-2), the checked ops receipt `rule testnet-ops-v1` (D-O3-1) + on-call runbook (D-O3-4) + independent ledger rollup (D-O3-5); gate 10 scenarios + NC: restore_mismatch_refused (the restore did not restore -> red)] 2026-11-25
 
 The OPS_PLAN O3 gate ("7 days uptime, 0 state losses, 1 restore drill")

@@ -50,8 +50,8 @@ revised without rewriting the other plans.
 
 | Stage | Composition | Status |
 |---|---|---|
-| **Stage 1 — ACTIVE** | C0–C10, S0–S7, X0–X8, B0–B10, N0–N8, D0–D8, W0–W4, E0–E3, T0–T4, H0–H7, P0–P3, O0–O4 → milestones **M0, M1, M2** | current focus |
-| **Stage 2 — ⏸ DEFERRED** | X9, W5–W7, E4–E9, T5–T8, H8–H9, P4–P6, O5–O9 → milestones **M3, M4, M5** | plans retained, start by separate decision |
+| **Stage 1 — COMPLETE** | C0–C10 ✅, S0–S7 ✅, X0–X8 ✅, B0–B10 ✅, N0–N8 ✅, D0–D8 ✅, W0–W4 ✅, E0–E3 ✅, T0–T4 ✅, H0–H7 ✅, P0–P3 ✅, O0–O4 ✅ → milestones **M0, M1, M2** | ✅ delivered (2026-11-27) |
+| **Stage 2 — IN PROGRESS / ⏸ DEFERRED** | Delivered in-repo: W5–W7 ✅, E4–E9 ✅, T5–T8 ✅, H8–H9 ✅, P4–P6 ✅; deferred by separate decision: X9 (EVM), O5–O9 (mainnet launch & upgrades) → milestones **M3, M4, M5** | technical tracks landed; mainnet O5–O9 deferred |
 
 The north star remains the long-term goal; Stage 1 delivers a real, measurable
 network with third-party validators, Stage 2 delivers the public economy and
